@@ -1,18 +1,24 @@
 /**
  * predicateDsl — a tiny human-friendly query language for the AskBar.
  *
- * Power users type filter expressions directly in the search box;
- * the parser turns them into a tree of predicates that ANDs into the
- * draft. The stringifier rebuilds the same text from a predicate so
- * the box and the chip strip stay in sync: toggle a chip → box text
- * updates; type a token → chip lights up.
+ * Power users type filter expressions directly in Code mode; the parser
+ * turns them into a tree of predicates that the Visual builder renders
+ * as nested condition rows. The stringifier rebuilds the same text from
+ * a predicate so Code mode and Visual mode stay in sync.
  *
- * Supported tokens (loose, whitespace-separated; AND is optional):
+ * Supported grammar (lower precedence first):
+ *
+ *   expr   := orExpr
+ *   orExpr := andExpr ('OR' andExpr)*
+ *   andExpr:= notExpr (('AND' | implicit-whitespace) notExpr)*
+ *   notExpr:= ('NOT' | '!') notExpr | atom
+ *   atom   := '(' expr ')' | predicateToken
+ *
+ * Predicate tokens (one each):
  *
  *   bareword                       → text contains "bareword" in name
  *   "quoted phrase"                → text contains "quoted phrase" in name
  *   name CONTAINS "foo"            → text contains "foo" in name
- *   name CONTAINS foo              → text contains "foo" in name
  *   qname:foo  / qualifiedName:foo → text contains "foo" in qualifiedName
  *   description:foo / desc:foo     → text contains "foo" in description
  *   type:dataset                   → entityType IN [dataset]
@@ -28,152 +34,140 @@
  *   rowCount=42  / rowCount:42     → property rowCount eq 42
  *   rowCount != 0                  → property rowCount neq 0
  *   noUpstream / noUpstreamLineage → isRoot edgeClass=lineage
- *   noDownstream / noDownstreamLineage → isLeaf edgeClass=lineage
+ *   noDownstream                   → isLeaf edgeClass=lineage
  *   noLineage                      → isOrphan edgeClass=lineage
  *
- * Conjunctions: ``AND``, ``&&``, ``,``, or plain whitespace.
- * OR / NOT / paths: NOT supported here — open the Advanced builder.
+ * Examples:
  *
- * The parser is intentionally lenient: tokens it can't recognise fall
- * back to a substring text match against name. That means a user can
- * always type a plain word and get a sensible search — the DSL only
- * "activates" when they reach for specific operators.
+ *   customer AND tag:PII           → AND(text(customer), tag(PII))
+ *   t2 AND (account OR opp)        → AND(t2, OR(account, opp))
+ *   t2 AND (account OR opp) OR NOT T1
+ *     → OR(AND(t2, OR(account, opp)), NOT(T1))
+ *   NOT tag:PII AND type:dataset   → AND(NOT(tag(PII)), type(dataset))
+ *
+ * Whitespace acts as implicit AND between predicates that aren't
+ * separated by an explicit operator. Quoted strings, prefixed tokens,
+ * and parenthesised sub-expressions are atomic.
+ *
+ * The parser is intentionally lenient — unknown bareword tokens fall
+ * back to a substring text match against ``name``. That means a user
+ * can always type a plain word and get a sensible search.
  */
-import type { Predicate, TextTarget, PropertyOp, EdgeClass } from '@/types/search'
+import type {
+    Predicate,
+    GroupPredicate,
+    TextTarget,
+    PropertyOp,
+    EdgeClass,
+} from '@/types/search'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
 
 // ---------------------------------------------------------------------------
-// PARSE
+// Public API
 // ---------------------------------------------------------------------------
 
 export interface ParseResult {
-    /** Conjunction of the parsed conditions. Null when the input was
-     *  effectively empty after trimming. */
+    /** The parsed predicate tree, or ``null`` for empty input. */
     predicate: Predicate | null
-    /** Tokens the parser recognised, in order. Useful for UI feedback. */
+    /** Number of structured leaves recognised (for the parse-feedback chip). */
     recognized: string[]
-    /** Raw fragments that fell through as substring text search. */
+    /** Bareword fallback runs (for the parse-feedback chip). */
     fallbackText: string[]
+    /** Hard parse error message (parens unbalanced, dangling operator, etc.). */
+    error?: string
 }
 
 
 export function parsePredicate(input: string): ParseResult {
-    const conditions: Predicate[] = []
+    const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
-
-    // Lex into tokens (respects quoted strings) so we can match against
-    // structured patterns one token at a time.
-    const tokens = lex(input)
-    let i = 0
-    while (i < tokens.length) {
-        const tok = tokens[i]
-
-        // Conjunctions are no-ops — implicit AND already.
-        if (isConjunctionToken(tok)) { i += 1; continue }
-
-        // 1) Boolean-shaped tokens (no params).
-        const boolPred = matchBooleanToken(tok)
-        if (boolPred) {
-            conditions.push(boolPred)
-            recognized.push(tok)
-            i += 1; continue
-        }
-
-        // 2) `name CONTAINS "value"` / `name CONTAINS value`
-        const containsRes = matchContainsExpression(tokens, i)
-        if (containsRes) {
-            conditions.push(containsRes.predicate)
-            recognized.push(containsRes.tokens.join(' '))
-            i += containsRes.consumed; continue
-        }
-
-        // 3) `type IN ( a, b )`  → multi-value
-        const inRes = matchInExpression(tokens, i)
-        if (inRes) {
-            conditions.push(inRes.predicate)
-            recognized.push(inRes.tokens.join(' '))
-            i += inRes.consumed; continue
-        }
-
-        // 4) `key OP value` (op = one of = != < <= > >=)
-        const opRes = matchOpExpression(tokens, i)
-        if (opRes) {
-            conditions.push(opRes.predicate)
-            recognized.push(opRes.tokens.join(' '))
-            i += opRes.consumed; continue
-        }
-
-        // 5) `prefix:value`  (type:, tag:, layer:, hasProperty:, has:, qname:, desc:, key:)
-        const prefixed = matchPrefixedToken(tok)
-        if (prefixed) {
-            conditions.push(prefixed)
-            recognized.push(tok)
-            i += 1; continue
-        }
-
-        // 6) Fallback — accumulate unrecognised tokens; they'll combine
-        //    into a SINGLE substring text predicate so a multi-word
-        //    casual search like ``customer orders`` reads as one phrase,
-        //    not two competing predicates that the chip composer would
-        //    upsert-collapse to whichever came last.
-        const txt = stripQuotes(tok).trim()
-        if (txt) fallbackText.push(txt)
-        i += 1
-    }
-
-    if (fallbackText.length > 0) {
-        conditions.push(makeTextPredicate('name', fallbackText.join(' ')))
-    }
-
-    if (conditions.length === 0) {
+    if (tokens.length === 0) {
         return { predicate: null, recognized, fallbackText }
     }
-    if (conditions.length === 1) {
-        return { predicate: conditions[0], recognized, fallbackText }
-    }
-    return {
-        predicate: { kind: 'group', op: 'and', children: conditions },
-        recognized,
-        fallbackText,
+    const p = new Parser(tokens, recognized, fallbackText)
+    try {
+        const pred = p.parseExpr()
+        if (p.pos < tokens.length) {
+            return {
+                predicate: pred,
+                recognized,
+                fallbackText,
+                error: `Unexpected token at end: ${tokens[p.pos]}`,
+            }
+        }
+        return { predicate: simplify(pred), recognized, fallbackText }
+    } catch (err) {
+        return {
+            predicate: null,
+            recognized,
+            fallbackText,
+            error: err instanceof Error ? err.message : String(err),
+        }
     }
 }
 
 
 // ---------------------------------------------------------------------------
-// STRINGIFY
+// Stringify
 // ---------------------------------------------------------------------------
 
 /**
- * Round-trip a predicate back to DSL text. Always emits the canonical
- * form (so e.g. ``customer`` → after a run becomes ``name CONTAINS
- * "customer"``). Non-AND roots (OR / NOT) emit a placeholder the user
- * sees, but can't edit by typing — they'll need Advanced.
+ * Round-trip a predicate back to DSL text. Emits canonical operator
+ * precedence: only inserts parentheses when needed (a child group has
+ * looser precedence than its parent, or is a NOT).
  */
 export function stringifyPredicate(p: Predicate | null): string {
     if (!p) return ''
-    if (p.kind === 'group' && p.op === 'and') {
-        return p.children.map(stringifyOne).filter(Boolean).join(' AND ')
-    }
-    return stringifyOne(p)
+    return formatExpr(p, /*parentPrec*/ 0)
 }
 
 
-function stringifyOne(c: Predicate): string {
+/**
+ * Precedence levels (higher = tighter binding):
+ *   0 — top-level (no parens needed)
+ *   1 — OR
+ *   2 — AND
+ *   3 — NOT / atomic
+ */
+function precedenceOf(p: Predicate): number {
+    if (p.kind !== 'group') return 3
+    const op = p.op ?? 'and'
+    if (op === 'or') return 1
+    if (op === 'and') return 2
+    if (op === 'not') return 3
+    return 2
+}
+
+
+function formatExpr(p: Predicate, parentPrec: number): string {
+    if (p.kind !== 'group') return formatAtom(p)
+    const op = p.op ?? 'and'
+    if (op === 'not') {
+        const inner = p.children[0]
+        if (!inner) return 'NOT ()'
+        const innerText = formatExpr(inner, /*parentPrec*/ 3)
+        return `NOT ${innerText}`
+    }
+    if (!p.children.length) return ''
+    const myPrec = precedenceOf(p)
+    const sep = op === 'or' ? ' OR ' : ' AND '
+    const parts = p.children.map((c) => formatExpr(c, myPrec))
+    const joined = parts.filter(Boolean).join(sep)
+    return myPrec < parentPrec ? `(${joined})` : joined
+}
+
+
+function formatAtom(c: Predicate): string {
     switch (c.kind) {
         case 'text': {
             const target: TextTarget = (c.target ?? 'name') as TextTarget
-            // Bareword shortcut: a substring search against `name`
-            // round-trips as the raw word(s) — so typing ``customer``
-            // stays as ``customer`` in the box, not ``name CONTAINS
-            // "customer"``. Only escalate to the verbose form when the
-            // value has characters that would be re-parsed as syntax
-            // (whitespace handled by quoting; operators by escaping).
+            // Bareword shortcut: substring/name/case-insensitive → raw word
             if (target === 'name'
-                && c.match === 'substring'
+                && (c.match ?? 'substring') === 'substring'
                 && !c.caseSensitive
             ) {
                 if (!needsQuotes(c.value)) return c.value
@@ -193,8 +187,6 @@ function stringifyOne(c: Predicate): string {
             return `${verb} (${c.values.join(', ')})`
         }
         case 'tag': {
-            // Stringify both `has` and `hasAny` as `tag:` for brevity.
-            // `hasAll` becomes `tag ALL` for distinguishability.
             const op = c.op
             if (op === 'hasAll') return `tag ALL (${c.values.join(', ')})`
             if (op === 'notHas') return `tag NOT IN (${c.values.join(', ')})`
@@ -212,20 +204,11 @@ function stringifyOne(c: Predicate): string {
             const val = formatScalar(c.value)
             return `${c.key} ${opStr} ${val}`
         }
-        case 'isRoot': return 'noUpstream'
-        case 'isLeaf': return 'noDownstream'
-        case 'isOrphan': return 'noLineage'
-        case 'hasIncoming': return 'hasUpstream'
-        case 'hasOutgoing': return 'hasDownstream'
-        case 'group': {
-            const op = (c.op ?? 'and').toUpperCase()
-            if (op === 'AND') {
-                return c.children.map(stringifyOne).filter(Boolean).join(' AND ')
-            }
-            // OR / NOT groups don't round-trip yet — flag them so the
-            // user knows the DSL doesn't fully express their query.
-            return `[${op} group · open Advanced to edit]`
-        }
+        case 'isRoot':       return 'noUpstream'
+        case 'isLeaf':       return 'noDownstream'
+        case 'isOrphan':     return 'noLineage'
+        case 'hasIncoming':  return 'hasUpstream'
+        case 'hasOutgoing':  return 'hasDownstream'
         default:
             return `[${(c as { kind?: string }).kind ?? 'unknown'}]`
     }
@@ -236,53 +219,101 @@ function stringifyOne(c: Predicate): string {
 // Lexer
 // ---------------------------------------------------------------------------
 
-/**
- * Split the input into tokens. Whitespace separates; quoted strings
- * preserve their interior (and keep the quotes so the parser knows
- * "this was quoted"). Operators ``=`` ``!=`` ``<`` ``>`` ``<=`` ``>=``
- * become their own tokens whether or not they're space-separated.
- */
-function lex(input: string): string[] {
-    const out: string[] = []
+const enum TokenKind {
+    Word = 'word',           // bareword, prefixed token, identifier
+    Quoted = 'quoted',       // "value" or 'value' — value stripped of quotes
+    Op = 'op',               // = != < <= > >= one-token
+    LParen = 'lparen',
+    RParen = 'rparen',
+    Comma = 'comma',
+    AndKw = 'and',
+    OrKw = 'or',
+    NotKw = 'not',
+}
+
+interface Token {
+    kind: TokenKind
+    text: string  // canonical text (no quotes for Quoted)
+    raw: string   // original source for diagnostics
+}
+
+
+function lex(input: string): Token[] {
+    const out: Token[] = []
     let i = 0
     while (i < input.length) {
         const ch = input[i]
         if (/\s/.test(ch)) { i += 1; continue }
-        // Quoted string
         if (ch === '"' || ch === "'") {
             const close = input.indexOf(ch, i + 1)
             if (close === -1) {
-                out.push(input.slice(i))
-                break
+                out.push({ kind: TokenKind.Quoted, text: input.slice(i + 1), raw: input.slice(i) })
+                i = input.length
+                continue
             }
-            out.push(input.slice(i, close + 1))
+            out.push({
+                kind: TokenKind.Quoted,
+                text: input.slice(i + 1, close),
+                raw: input.slice(i, close + 1),
+            })
             i = close + 1
+            continue
+        }
+        if (ch === '(' || ch === ')' || ch === ',') {
+            out.push({
+                kind: ch === '(' ? TokenKind.LParen
+                    : ch === ')' ? TokenKind.RParen
+                        : TokenKind.Comma,
+                text: ch,
+                raw: ch,
+            })
+            i += 1
             continue
         }
         // 2-char operators
         if ((ch === '!' || ch === '<' || ch === '>' || ch === '=') && input[i + 1] === '=') {
-            out.push(input.slice(i, i + 2))
+            const t = input.slice(i, i + 2)
+            out.push({ kind: TokenKind.Op, text: t, raw: t })
             i += 2
             continue
         }
-        // Single-char operators
-        if (ch === '=' || ch === '<' || ch === '>' || ch === '(' || ch === ')' || ch === ',') {
-            out.push(ch)
+        if (ch === '=' || ch === '<' || ch === '>') {
+            out.push({ kind: TokenKind.Op, text: ch, raw: ch })
             i += 1
             continue
         }
-        // Bareword — read until whitespace, operator, or quote
+        // Standalone NOT-bang
+        if (ch === '!') {
+            out.push({ kind: TokenKind.NotKw, text: '!', raw: '!' })
+            i += 1
+            continue
+        }
+        // Bareword — read until whitespace, operator, paren, comma, or quote
         let j = i
         while (j < input.length) {
             const c = input[j]
             if (/\s/.test(c)) break
             if (c === '"' || c === "'") break
-            if (c === '=' || c === '<' || c === '>' || c === '(' || c === ')' || c === ',') break
-            if ((c === '!' || c === '<' || c === '>' || c === '=') && input[j + 1] === '=') break
+            if (c === '(' || c === ')' || c === ',' || c === '!') break
+            if (c === '=' || c === '<' || c === '>') break
             j += 1
         }
         if (j > i) {
-            out.push(input.slice(i, j))
+            const word = input.slice(i, j)
+            const up = word.toUpperCase()
+            // Bare keywords are reserved only when they stand alone —
+            // ``AND`` ``OR`` ``NOT``. Anything containing a colon, dot,
+            // or other operator-y char is treated as a token even if
+            // the prefix matches.
+            if ((up === 'AND' || up === '&&') && !word.includes(':')) {
+                out.push({ kind: TokenKind.AndKw, text: 'AND', raw: word })
+            } else if (up === 'OR' && !word.includes(':')) {
+                out.push({ kind: TokenKind.OrKw, text: 'OR', raw: word })
+            } else if (up === 'NOT' && !word.includes(':')) {
+                out.push({ kind: TokenKind.NotKw, text: 'NOT', raw: word })
+            } else {
+                out.push({ kind: TokenKind.Word, text: word, raw: word })
+            }
             i = j
         } else {
             i += 1
@@ -293,17 +324,246 @@ function lex(input: string): string[] {
 
 
 // ---------------------------------------------------------------------------
-// Token matchers
+// Recursive-descent parser
+//
+//   expr   := orExpr
+//   orExpr := andExpr ('OR' andExpr)*
+//   andExpr:= notExpr (('AND' | implicit) notExpr)*
+//   notExpr:= ('NOT' | '!') notExpr | atom
+//   atom   := '(' expr ')' | tokenPredicate
 // ---------------------------------------------------------------------------
 
-function isConjunctionToken(t: string): boolean {
-    const u = t.toUpperCase()
-    return u === 'AND' || u === '&&' || u === ','
+class Parser {
+    pos = 0
+    constructor(
+        readonly tokens: Token[],
+        readonly recognized: string[],
+        readonly fallbackText: string[],
+    ) {}
+
+    peek(): Token | null {
+        return this.tokens[this.pos] ?? null
+    }
+
+    consume(): Token {
+        return this.tokens[this.pos++]
+    }
+
+    parseExpr(): Predicate {
+        return this.parseOr()
+    }
+
+    parseOr(): Predicate {
+        const left = this.parseAnd()
+        const parts: Predicate[] = [left]
+        while (this.peek()?.kind === TokenKind.OrKw) {
+            this.consume()  // OR
+            parts.push(this.parseAnd())
+        }
+        if (parts.length === 1) return parts[0]
+        return { kind: 'group', op: 'or', children: parts }
+    }
+
+    parseAnd(): Predicate {
+        const left = this.parseNot()
+        const parts: Predicate[] = [left]
+        while (true) {
+            const t = this.peek()
+            if (!t) break
+            // Explicit AND advances the cursor.
+            if (t.kind === TokenKind.AndKw) {
+                this.consume()
+            } else if (
+                // Implicit AND: ANY atom-starting token that isn't a binary
+                // operator. NOT and '(' and any atom-token start a new
+                // factor and bind tighter than OR.
+                t.kind === TokenKind.OrKw
+                || t.kind === TokenKind.RParen
+            ) {
+                break
+            }
+            // Don't double-consume AND for the implicit case — we just
+            // proceed to parse another factor.
+            const next = this.tryParseNot()
+            if (next == null) break
+            parts.push(next)
+        }
+        if (parts.length === 1) return parts[0]
+        return { kind: 'group', op: 'and', children: parts }
+    }
+
+    parseNot(): Predicate {
+        const t = this.peek()
+        if (t?.kind === TokenKind.NotKw) {
+            this.consume()
+            const inner = this.parseNot()
+            return { kind: 'group', op: 'not', children: [inner] }
+        }
+        return this.parseAtom()
+    }
+
+    /** Try-parse: returns null if no atom is at the current position
+     *  (used by the implicit-AND loop to know when to stop). */
+    tryParseNot(): Predicate | null {
+        const t = this.peek()
+        if (!t) return null
+        if (t.kind === TokenKind.RParen) return null
+        if (t.kind === TokenKind.OrKw) return null
+        if (t.kind === TokenKind.AndKw) {
+            this.consume()
+            return this.parseNot()
+        }
+        return this.parseNot()
+    }
+
+    parseAtom(): Predicate {
+        const t = this.peek()
+        if (!t) throw new Error('Unexpected end of input')
+        if (t.kind === TokenKind.LParen) {
+            this.consume()
+            const inner = this.parseExpr()
+            const closing = this.peek()
+            if (!closing || closing.kind !== TokenKind.RParen) {
+                throw new Error('Missing closing parenthesis')
+            }
+            this.consume()
+            return inner
+        }
+        // Predicate token — may consume up to 3 tokens (e.g. `name CONTAINS x`).
+        return this.parsePredicateToken()
+    }
+
+    parsePredicateToken(): Predicate {
+        const t = this.consume()
+
+        // 1) boolean-shaped bareword (noUpstream, etc.)
+        if (t.kind === TokenKind.Word) {
+            const bool = matchBooleanToken(t.text)
+            if (bool) {
+                this.recognized.push(t.text)
+                return bool
+            }
+        }
+
+        // 2) `lhs CONTAINS rhs` — three tokens
+        if (t.kind === TokenKind.Word) {
+            const containsT = this.peek()
+            if (containsT?.kind === TokenKind.Word && containsT.text.toUpperCase() === 'CONTAINS') {
+                const target = lhsToTextTarget(t.text)
+                if (target) {
+                    this.consume()  // CONTAINS
+                    const rhs = this.consume()
+                    const value = (rhs.kind === TokenKind.Quoted ? rhs.text : rhs.text).trim()
+                    if (value) {
+                        this.recognized.push(`${t.text} CONTAINS ${rhs.raw}`)
+                        return makeTextPredicate(target, value)
+                    }
+                }
+            }
+        }
+
+        // 3) `type [NOT] IN ( a, b, c )`
+        if (t.kind === TokenKind.Word) {
+            const inResult = this.tryConsumeInExpression(t.text)
+            if (inResult) {
+                this.recognized.push(inResult.label)
+                return inResult.predicate
+            }
+        }
+
+        // 4) `key OP value` (eq / neq / lt / lte / gt / gte)
+        if (t.kind === TokenKind.Word) {
+            const opT = this.peek()
+            if (opT?.kind === TokenKind.Op) {
+                const propOp = OP_MAP[opT.text]
+                if (propOp) {
+                    this.consume()  // op
+                    const valT = this.consume()
+                    const rawValue = valT.kind === TokenKind.Quoted ? valT.text : valT.text
+                    this.recognized.push(`${t.text} ${opT.text} ${valT.raw}`)
+                    // `layer = "X"` is a layer predicate
+                    if (t.text.toLowerCase() === 'layer' && propOp === 'eq') {
+                        return { kind: 'layer', layerAssignment: rawValue }
+                    }
+                    return {
+                        kind: 'property',
+                        key: t.text,
+                        op: propOp,
+                        value: coerceScalar(rawValue, valT.kind === TokenKind.Quoted),
+                    }
+                }
+            }
+        }
+
+        // 5) `prefix:value` (single token containing a colon)
+        if (t.kind === TokenKind.Word && t.text.includes(':')) {
+            const prefixed = matchPrefixedToken(t.text)
+            if (prefixed) {
+                this.recognized.push(t.text)
+                return prefixed
+            }
+        }
+
+        // 6) Bareword / quoted → substring text predicate against name
+        const value = (t.kind === TokenKind.Quoted ? t.text : t.text).trim()
+        if (!value) {
+            // Operator-only token with no atom — fail.
+            throw new Error(`Unexpected token: ${t.raw}`)
+        }
+        this.fallbackText.push(value)
+        return makeTextPredicate('name', value)
+    }
+
+    tryConsumeInExpression(lhs: string): {
+        predicate: Predicate; label: string
+    } | null {
+        const checkpoint = this.pos
+        let cursor = checkpoint
+        let negated = false
+        if (this.tokens[cursor]?.kind === TokenKind.NotKw) {
+            negated = true
+            cursor += 1
+        }
+        if (this.tokens[cursor]?.kind !== TokenKind.Word) return null
+        if (this.tokens[cursor].text.toUpperCase() !== 'IN') return null
+        cursor += 1
+        if (this.tokens[cursor]?.kind !== TokenKind.LParen) return null
+        cursor += 1
+        const values: string[] = []
+        while (cursor < this.tokens.length && this.tokens[cursor].kind !== TokenKind.RParen) {
+            const inner = this.tokens[cursor]
+            if (inner.kind === TokenKind.Comma) { cursor += 1; continue }
+            if (inner.kind !== TokenKind.Word && inner.kind !== TokenKind.Quoted) return null
+            values.push(inner.text)
+            cursor += 1
+        }
+        if (this.tokens[cursor]?.kind !== TokenKind.RParen) return null
+        cursor += 1
+        const fieldName = lhs.toLowerCase()
+        let predicate: Predicate | null = null
+        if (fieldName === 'type' || fieldName === 'entitytype') {
+            predicate = { kind: 'entityType', op: negated ? 'notIn' : 'in', values }
+        } else if (fieldName === 'tag' || fieldName === 'tags') {
+            predicate = { kind: 'tag', op: negated ? 'notHas' : 'hasAny', values }
+        } else {
+            return null
+        }
+        const consumed = this.tokens.slice(checkpoint, cursor).map((t) => t.raw).join(' ')
+        this.pos = cursor
+        return {
+            predicate,
+            label: `${lhs} ${consumed}`,
+        }
+    }
 }
 
 
-function matchBooleanToken(t: string): Predicate | null {
-    const norm = t.toLowerCase().replace(/[_-]/g, '')
+// ---------------------------------------------------------------------------
+// Predicate builders + helpers
+// ---------------------------------------------------------------------------
+
+function matchBooleanToken(text: string): Predicate | null {
+    const norm = text.toLowerCase().replace(/[_-]/g, '')
     if (norm === 'noupstream' || norm === 'noupstreamlineage') {
         return { kind: 'isRoot', edgeClass: DEFAULT_EDGE_CLASS }
     }
@@ -323,118 +583,6 @@ function matchBooleanToken(t: string): Predicate | null {
 }
 
 
-/** Matches `name CONTAINS "value"` or `name CONTAINS value`. */
-function matchContainsExpression(tokens: string[], start: number): {
-    predicate: Predicate; consumed: number; tokens: string[]
-} | null {
-    if (start + 2 >= tokens.length) return null
-    const lhs = tokens[start]
-    const op = tokens[start + 1]
-    const rhs = tokens[start + 2]
-    if (op.toUpperCase() !== 'CONTAINS') return null
-    const target = lhsToTextTarget(lhs)
-    if (!target) return null
-    const value = stripQuotes(rhs).trim()
-    if (!value) return null
-    return {
-        predicate: makeTextPredicate(target, value),
-        consumed: 3,
-        tokens: [lhs, op, rhs],
-    }
-}
-
-
-/** Matches `type IN (a, b)` / `type NOT IN (a, b)`. */
-function matchInExpression(tokens: string[], start: number): {
-    predicate: Predicate; consumed: number; tokens: string[]
-} | null {
-    const lhs = tokens[start]
-    let cursor = start + 1
-    let negated = false
-    if (tokens[cursor]?.toUpperCase() === 'NOT') { negated = true; cursor += 1 }
-    if (tokens[cursor]?.toUpperCase() !== 'IN') return null
-    cursor += 1
-    if (tokens[cursor] !== '(') return null
-    cursor += 1
-    const values: string[] = []
-    while (cursor < tokens.length && tokens[cursor] !== ')') {
-        if (tokens[cursor] === ',') { cursor += 1; continue }
-        values.push(stripQuotes(tokens[cursor]))
-        cursor += 1
-    }
-    if (tokens[cursor] !== ')') return null
-    cursor += 1
-
-    const fieldName = lhs.toLowerCase()
-    if (fieldName === 'type' || fieldName === 'entitytype') {
-        return {
-            predicate: {
-                kind: 'entityType',
-                op: negated ? 'notIn' : 'in',
-                values,
-            },
-            consumed: cursor - start,
-            tokens: tokens.slice(start, cursor),
-        }
-    }
-    if (fieldName === 'tag' || fieldName === 'tags') {
-        return {
-            predicate: {
-                kind: 'tag',
-                op: negated ? 'notHas' : 'hasAny',
-                values,
-            },
-            consumed: cursor - start,
-            tokens: tokens.slice(start, cursor),
-        }
-    }
-    return null
-}
-
-
-/** Matches `key OP value` where OP is one of = != < <= > >=. */
-function matchOpExpression(tokens: string[], start: number): {
-    predicate: Predicate; consumed: number; tokens: string[]
-} | null {
-    if (start + 2 >= tokens.length) return null
-    const lhs = tokens[start]
-    const op = tokens[start + 1]
-    const rhs = tokens[start + 2]
-    const opMap: Record<string, PropertyOp> = {
-        '=': 'eq', '!=': 'neq',
-        '<': 'lt', '<=': 'lte',
-        '>': 'gt', '>=': 'gte',
-    }
-    const propOp = opMap[op]
-    if (!propOp) return null
-
-    // `layer = "Source"` is a layer predicate (specialised on `layer`
-    // key) — easier to compose with the chip strip if we emit a
-    // LayerPredicate instead of a property=value.
-    if (lhs.toLowerCase() === 'layer' && propOp === 'eq') {
-        const value = stripQuotes(rhs)
-        return {
-            predicate: { kind: 'layer', layerAssignment: value },
-            consumed: 3,
-            tokens: [lhs, op, rhs],
-        }
-    }
-
-    const value = coerceScalar(rhs)
-    return {
-        predicate: {
-            kind: 'property',
-            key: lhs,
-            op: propOp,
-            value,
-        },
-        consumed: 3,
-        tokens: [lhs, op, rhs],
-    }
-}
-
-
-/** Matches `prefix:value` (single token containing a colon). */
 function matchPrefixedToken(token: string): Predicate | null {
     const idx = token.indexOf(':')
     if (idx <= 0) return null
@@ -469,15 +617,11 @@ function matchPrefixedToken(token: string): Predicate | null {
                 kind: 'property',
                 key: prefix,
                 op: 'eq',
-                value: coerceScalar(value),
+                value: coerceScalar(value, /*wasQuoted*/ false),
             }
     }
 }
 
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function makeTextPredicate(target: TextTarget, value: string): Predicate {
     return {
@@ -515,18 +659,18 @@ function splitCsv(s: string): string[] {
 
 
 function needsQuotes(s: string): boolean {
-    return /\s|[",()]/.test(s)
+    return /\s|[",()!]/.test(s)
 }
 
 
-function coerceScalar(s: string): unknown {
-    const trimmed = stripQuotes(s).trim()
+function coerceScalar(value: string, wasQuoted: boolean): unknown {
+    const trimmed = value.trim()
     if (trimmed === '') return ''
+    if (wasQuoted) return trimmed
     if (trimmed === 'true') return true
     if (trimmed === 'false') return false
     if (trimmed === 'null') return null
-    // Numeric coercion only when the source wasn't quoted.
-    if (s[0] !== '"' && s[0] !== "'" && /^-?\d+(\.\d+)?$/.test(trimmed)) {
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
         const n = Number(trimmed)
         if (!Number.isNaN(n)) return n
     }
@@ -552,4 +696,44 @@ const PROP_OP_STR: Record<PropertyOp, string> = {
     startsWith: 'STARTS WITH',
     endsWith: 'ENDS WITH',
     between: 'BETWEEN',
+}
+
+
+const OP_MAP: Record<string, PropertyOp> = {
+    '=':  'eq',  '!=': 'neq',
+    '<':  'lt',  '<=': 'lte',
+    '>':  'gt',  '>=': 'gte',
+}
+
+
+// ---------------------------------------------------------------------------
+// Tree simplification
+// ---------------------------------------------------------------------------
+
+/**
+ * Flatten nested same-op groups (``AND(A, AND(B, C))`` → ``AND(A, B, C)``)
+ * and unwrap single-child non-NOT groups. NOT groups stay wrapping their
+ * one child so the negation is unambiguous downstream.
+ */
+function simplify(p: Predicate): Predicate {
+    if (p.kind !== 'group') return p
+    const op = p.op ?? 'and'
+    const children: Predicate[] = []
+    for (const child of p.children) {
+        const simplified = simplify(child)
+        if (simplified.kind === 'group'
+            && (simplified.op ?? 'and') === op
+            && op !== 'not'
+        ) {
+            for (const grand of simplified.children) children.push(grand)
+        } else {
+            children.push(simplified)
+        }
+    }
+    if (op === 'not') {
+        // NOT keeps its wrapper exactly.
+        return { kind: 'group', op: 'not', children }
+    }
+    if (children.length === 1) return children[0]
+    return { kind: 'group', op, children } satisfies GroupPredicate
 }

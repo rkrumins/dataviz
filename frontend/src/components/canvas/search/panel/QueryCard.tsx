@@ -72,6 +72,7 @@ import { useDiscovery } from '../builder/useDiscovery'
 import { AddFilterPalette } from './AddFilterPalette'
 import { ConditionRow, isRowIncomplete } from './ConditionRow'
 import type { LayerOption } from './layerOptions'
+import { NestedGroupCard } from './NestedGroupCard'
 import {
     appendCondition,
     removeConditionAt,
@@ -400,24 +401,37 @@ export const QueryCard: FC<QueryCardProps> = ({
                                                 disabled={isRunning}
                                             />
                                         )}
-                                        <ConditionRow
-                                            value={cond}
-                                            discovery={{
-                                                allKeys: discovery.allKeys,
-                                                keysByEntityType: discovery.keysByEntityType,
-                                                tagValues: discovery.tagValues,
-                                                getValueSamples: discovery.getValueSamples,
-                                            }}
-                                            knownEntityTypes={knownEntityTypes}
-                                            activeEntityTypes={activeEntityTypes}
-                                            discoveredLayers={discoveredLayers}
-                                            isRunning={isRunning}
-                                            autoFocus={cond.kind === freshKind}
-                                            onChange={(next) => handleRowChange(i, next)}
-                                            onRemove={() => handleRowRemove(i)}
-                                            onOpenAdvanced={onOpenAdvanced}
-                                            onSubmit={dispatchRun}
-                                        />
+                                        {cond.kind === 'group' ? (
+                                            <NestedGroupCard
+                                                group={cond}
+                                                onChange={(next) => {
+                                                    if (next === null) handleRowRemove(i)
+                                                    else handleRowChange(i, next)
+                                                }}
+                                                onRemove={() => handleRowRemove(i)}
+                                                onOpenAdvanced={onOpenAdvanced}
+                                                disabled={isRunning}
+                                            />
+                                        ) : (
+                                            <ConditionRow
+                                                value={cond}
+                                                discovery={{
+                                                    allKeys: discovery.allKeys,
+                                                    keysByEntityType: discovery.keysByEntityType,
+                                                    tagValues: discovery.tagValues,
+                                                    getValueSamples: discovery.getValueSamples,
+                                                }}
+                                                knownEntityTypes={knownEntityTypes}
+                                                activeEntityTypes={activeEntityTypes}
+                                                discoveredLayers={discoveredLayers}
+                                                isRunning={isRunning}
+                                                autoFocus={cond.kind === freshKind}
+                                                onChange={(next) => handleRowChange(i, next)}
+                                                onRemove={() => handleRowRemove(i)}
+                                                onOpenAdvanced={onOpenAdvanced}
+                                                onSubmit={dispatchRun}
+                                            />
+                                        )}
                                     </motion.div>
                                 ))}
                             </AnimatePresence>
@@ -593,7 +607,7 @@ function CodeMode({
                 disabled={isRunning}
                 spellCheck={false}
                 rows={4}
-                placeholder='customer AND tag:PII AND noUpstream'
+                placeholder='t2 AND (account OR opp) OR NOT T1'
                 className={cn(
                     'w-full px-3 py-2 rounded-lg resize-none',
                     'bg-canvas-base/60 border border-glass-border',
@@ -605,19 +619,84 @@ function CodeMode({
                 recognized={parsed.recognized.length}
                 fallback={parsed.fallbackText.length}
                 isEmpty={!parsed.predicate}
+                error={parsed.error}
             />
+            <CodeModeCheatsheet />
             <div className="text-[10.5px] text-ink-muted/70 px-1">
                 <kbd className="px-1 rounded bg-glass/40 text-ink-muted">⌘↵</kbd> or blur to apply ·{' '}
-                paste any DSL fragment to set the whole query at once
+                use <span className="font-mono text-ink">AND</span> /{' '}
+                <span className="font-mono text-ink">OR</span> /{' '}
+                <span className="font-mono text-ink">NOT</span> with parentheses
             </div>
         </div>
     )
 }
 
 
+function CodeModeCheatsheet() {
+    const [open, setOpen] = useState(false)
+    return (
+        <div className={cn(
+            'rounded-md border border-glass-border/50',
+            'bg-canvas-base/40 overflow-hidden',
+        )}>
+            <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                className={cn(
+                    'w-full flex items-center justify-between gap-2',
+                    'px-2.5 py-1.5 text-[10.5px] text-ink-muted',
+                    'hover:bg-canvas-base/70 transition-colors',
+                )}
+            >
+                <span className="inline-flex items-center gap-1.5">
+                    <Code2 className="w-3 h-3" /> Cheat-sheet
+                </span>
+                <ArrowRight className={cn('w-3 h-3 transition-transform', open && 'rotate-90')} />
+            </button>
+            {open && (
+                <div className="px-3 py-2 text-[10.5px] text-ink-muted/95 leading-relaxed">
+                    <div className="font-mono whitespace-pre-wrap">
+{`t2                       text in name contains "t2"
+"customer orders"        quoted phrase
+name CONTAINS foo        text in name
+qname:foo                in qualifiedName
+description:foo          in description
+type:dataset             entityType IN [dataset]
+type IN (dataset, schemaField)
+tag:PII                  tag hasAny [PII]
+tag:PII,GDPR             tag hasAny [PII, GDPR]
+layer:Source             layer = "Source"
+rowCount > 1000          property gt 1000
+rowCount != 0
+hasProperty:owner        node has property "owner"
+noUpstream / noDownstream / noLineage
+hasUpstream / hasDownstream
+
+Combine with: AND, OR, NOT, parentheses, !
+
+  t2 AND (account OR opp) OR NOT T1
+  NOT tag:PII AND type:dataset
+  (rowCount > 0) AND noUpstream`}
+                    </div>
+                </div>
+            )}
+        </div>
+    )
+}
+
+
 function ParseFeedback({
-    recognized, fallback, isEmpty,
-}: { recognized: number; fallback: number; isEmpty: boolean }) {
+    recognized, fallback, isEmpty, error,
+}: { recognized: number; fallback: number; isEmpty: boolean; error?: string }) {
+    if (error) {
+        return (
+            <div className="flex items-start gap-1.5 px-1 text-[10.5px] text-rose-300">
+                <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
+                <span className="leading-snug">{error}</span>
+            </div>
+        )
+    }
     if (isEmpty) {
         return (
             <div className="flex items-center gap-1.5 px-1 text-[10.5px] text-ink-muted/70">
