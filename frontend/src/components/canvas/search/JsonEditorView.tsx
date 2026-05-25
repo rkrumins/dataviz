@@ -19,7 +19,16 @@ import { lintGutter, linter, type Diagnostic } from '@codemirror/lint'
 import { EditorState } from '@codemirror/state'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete'
+import {
+    type Completion,
+    type CompletionContext,
+    type CompletionResult,
+    autocompletion,
+    closeBrackets,
+    closeBracketsKeymap,
+    completionKeymap,
+    snippetCompletion,
+} from '@codemirror/autocomplete'
 import { motion } from 'framer-motion'
 import { AlertCircle, ArrowLeft, CheckCircle2, Code2, Loader2, Play } from 'lucide-react'
 import { type FC, useEffect, useMemo, useRef, useState } from 'react'
@@ -75,6 +84,35 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
     const [issues, setIssues] = useState<ReadonlyArray<{ path: string; message: string }>>([])
     const [lastAppliedRevision, setLastAppliedRevision] = useState(draftRevision)
 
+    // ─── Predicate-kind snippet library ────────────────────────────
+    //
+    // Typing a kind name (``path``, ``property``, ``tag``, …) in the
+    // editor surfaces a snippet that expands to the stub for that
+    // predicate with required fields placed as tab stops. Lets a user
+    // build a query from scratch in the JSON view by tabbing through
+    // placeholders, without needing to remember the exact field
+    // layout each predicate kind expects. The completion source only
+    // fires when the cursor is on a fresh word (not inside an
+    // existing string / value) so it doesn't spam suggestions while
+    // the user is editing a literal.
+    const snippetSource = useMemo(() => {
+        return (ctx: CompletionContext): CompletionResult | null => {
+            const word = ctx.matchBefore(/[a-zA-Z]+/)
+            if (!word) return null
+            // Inside a string literal (a property key or value), skip —
+            // the JSON extension's own completions handle it.
+            const head = ctx.state.doc.sliceString(0, ctx.pos)
+            const lastQuote = head.lastIndexOf('"')
+            const lastClose = head.lastIndexOf('}')
+            if (lastQuote > lastClose) return null
+            return {
+                from: word.from,
+                options: PREDICATE_KIND_SNIPPETS,
+                validFor: /^[a-zA-Z]*$/,
+            }
+        }
+    }, [])
+
     // ─── Schema-driven linter ──────────────────────────────────────
     //
     // Returns Ajv-validation diagnostics on the current text. Runs on
@@ -120,7 +158,7 @@ export const JsonEditorView: FC<JsonEditorViewProps> = ({ onRun, isRunning }) =>
                 indentOnInput(),
                 bracketMatching(),
                 closeBrackets(),
-                autocompletion(),
+                autocompletion({ override: [snippetSource] }),
                 lintGutter(),
                 linter(jsonParseLinter()),
                 schemaLinter,
@@ -407,3 +445,98 @@ function Footer({
 // Marker import — keeps `ArrowLeft` available in the existing import list
 // without removing it (the legacy callsite signature retains `onBack`).
 void ArrowLeft
+
+
+// ---------------------------------------------------------------------------
+// Predicate-kind snippet library (W2.6)
+//
+// One snippet per predicate kind the SearchQuery schema accepts. Tab
+// stops (``${1:...}``) land on the fields the user is most likely to
+// fill in first; the snippet expander auto-jumps to the next stop on
+// each Tab. Reduces "what fields does PathPredicate take again?" to
+// a typed kind name + Tab.
+//
+// The list is kept in sync with the SearchQuery JSON Schema's
+// discriminator values manually. A schema-derived auto-generator
+// would be cleaner but adds build complexity; with 19 predicate
+// kinds churning rarely, the manual list is the right tradeoff.
+// ---------------------------------------------------------------------------
+
+const PREDICATE_KIND_SNIPPETS: readonly Completion[] = [
+    snippetCompletion(
+        '{\n  "kind": "text",\n  "value": "${1:customers}",\n  "target": "${2:any}",\n  "match": "${3:substring}"\n}',
+        { label: 'text', detail: 'TextPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "property",\n  "key": "${1:rowCount}",\n  "op": "${2:gt}",\n  "value": ${3:1000}\n}',
+        { label: 'property', detail: 'PropertyPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "hasProperty",\n  "key": "${1:owner}"\n}',
+        { label: 'hasProperty', detail: 'HasPropertyPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "tag",\n  "op": "${1:hasAny}",\n  "values": ["${2:PII}"]\n}',
+        { label: 'tag', detail: 'TagPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "entityType",\n  "op": "${1:in}",\n  "values": ["${2:dataset}"]\n}',
+        { label: 'entityType', detail: 'EntityTypePredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "layer",\n  "layerAssignment": "${1:Source}"\n}',
+        { label: 'layer', detail: 'LayerPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "descendantOf",\n  "urns": ["${1:urn:li:domain:customers}"],\n  "maxDepth": ${2:12}\n}',
+        { label: 'descendantOf', detail: 'DescendantOfPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "withinHops",\n  "urns": ["${1:urn:li:dataset:orders}"],\n  "hops": ${2:2},\n  "direction": "${3:both}"\n}',
+        { label: 'withinHops', detail: 'WithinHopsPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "degree",\n  "direction": "${1:in}",\n  "op": "${2:gte}",\n  "value": ${3:1},\n  "edgeClass": "lineage"\n}',
+        { label: 'degree', detail: 'DegreePredicate' },
+    ),
+    snippetCompletion(
+        '{ "kind": "isOrphan", "edgeClass": "lineage" }',
+        { label: 'isOrphan', detail: 'IsOrphanPredicate' },
+    ),
+    snippetCompletion(
+        '{ "kind": "isLeaf", "edgeClass": "lineage" }',
+        { label: 'isLeaf', detail: 'IsLeafPredicate' },
+    ),
+    snippetCompletion(
+        '{ "kind": "isRoot", "edgeClass": "lineage" }',
+        { label: 'isRoot', detail: 'IsRootPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "hasIncoming",\n  "edgeClass": "lineage"\n}',
+        { label: 'hasIncoming', detail: 'HasIncomingPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "hasOutgoing",\n  "edgeClass": "lineage"\n}',
+        { label: 'hasOutgoing', detail: 'HasOutgoingPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "path",\n  "sourceUrns": ["${1:urn:li:dataset:src}"],\n  "targetUrns": ["${2:urn:li:dataset:tgt}"],\n  "maxHops": ${3:4},\n  "edgeClass": "lineage",\n  "direction": "outgoing"\n}',
+        { label: 'path', detail: 'PathPredicate' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "group",\n  "op": "${1:and}",\n  "children": [\n    ${2}\n  ]\n}',
+        { label: 'group', detail: 'GroupPredicate (AND/OR/NOT)' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "edgeProperty",\n  "key": "${1:confidence}",\n  "op": "${2:gte}",\n  "value": ${3:0.8}\n}',
+        { label: 'edgeProperty', detail: 'EdgePropertyPredicate (path / withinHops only)' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "edgeHasProperty",\n  "key": "${1:confidence}"\n}',
+        { label: 'edgeHasProperty', detail: 'EdgeHasPropertyPredicate (path / withinHops only)' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "edgeGroup",\n  "op": "${1:and}",\n  "children": [\n    ${2}\n  ]\n}',
+        { label: 'edgeGroup', detail: 'EdgeGroupPredicate (path / withinHops only)' },
+    ),
+]
