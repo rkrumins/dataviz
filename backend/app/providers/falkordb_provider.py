@@ -11,6 +11,11 @@ import time
 from collections import defaultdict, deque
 from typing import Awaitable, Callable, List, Optional, Dict, Any, Set, Tuple
 
+from backend.app.jobs.metrics import (
+    increment as _metric_increment,
+    observe as _metric_observe,
+)
+
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats,
@@ -557,6 +562,34 @@ class FalkorDBProvider(GraphDataProvider):
             s["urn_label_hits"], total_label, label_hr,
             s["urn_ancestor_hits"], total_anc, anc_hr,
             s["bloom_negatives"], bloom_total, bloom_skip,
+        )
+        # Emit cache counters once per job so Prometheus / dashboards
+        # can graph hit-rate trend over time instead of needing
+        # operators to grep INFO logs. Counts are absolute (per-job);
+        # divide hits / (hits + misses) on the dashboard side.
+        _metric_increment(
+            "aggregation_label_cache_hits_total",
+            value=s["urn_label_hits"], graph=self._graph_name,
+        )
+        _metric_increment(
+            "aggregation_label_cache_misses_total",
+            value=s["urn_label_misses"], graph=self._graph_name,
+        )
+        _metric_increment(
+            "aggregation_ancestor_cache_hits_total",
+            value=s["urn_ancestor_hits"], graph=self._graph_name,
+        )
+        _metric_increment(
+            "aggregation_ancestor_cache_misses_total",
+            value=s["urn_ancestor_misses"], graph=self._graph_name,
+        )
+        _metric_increment(
+            "aggregation_bloom_negatives_total",
+            value=s["bloom_negatives"], graph=self._graph_name,
+        )
+        _metric_increment(
+            "aggregation_bloom_positives_total",
+            value=s["bloom_positives"], graph=self._graph_name,
         )
         self._job_scratch = None
 
@@ -3345,6 +3378,10 @@ class FalkorDBProvider(GraphDataProvider):
                         self._graph_name, current, new_size,
                     )
                     self._aggregation_sub_batch_size = new_size
+                    _metric_increment(
+                        "aggregation_aimd_shrink_total",
+                        graph=self._graph_name,
+                    )
                 self._aggregation_sub_batch_under_target_run = 0
             elif t_merge_elapsed < self._MERGE_SUB_BATCH_TARGET_LOW_S:
                 self._aggregation_sub_batch_under_target_run += 1
@@ -3366,6 +3403,10 @@ class FalkorDBProvider(GraphDataProvider):
                     )
                     self._aggregation_sub_batch_size = new_size
                     self._aggregation_sub_batch_under_target_run = 0
+                    _metric_increment(
+                        "aggregation_aimd_grow_total",
+                        graph=self._graph_name,
+                    )
             else:
                 # In the steady-state band; reset growth counter so growth
                 # only triggers after a run of clearly-under-target calls.
@@ -4094,6 +4135,10 @@ class FalkorDBProvider(GraphDataProvider):
                 only_if_digest_changed=True,
             )
             t_phase_a0 = (time.monotonic() - t_phase_a0_start) * 1000
+            _metric_observe(
+                "aggregation_phase_duration_ms", t_phase_a0,
+                phase="A0", graph=self._graph_name,
+            )
             if stamped:
                 logger.info(
                     "bulk_rebuild phase A0 (ancestor precompute): "
@@ -4114,6 +4159,10 @@ class FalkorDBProvider(GraphDataProvider):
         deleted = await self._wipe_aggregated_edges(should_cancel=should_cancel)
         await self._purge_aggregated_idempotency_namespace()
         t_phase_a = (time.monotonic() - t_phase_a_start) * 1000
+        _metric_observe(
+            "aggregation_phase_duration_ms", t_phase_a,
+            phase="A", graph=self._graph_name,
+        )
         logger.info(
             "bulk_rebuild phase A (wipe): %d AGGREGATED edges deleted in %.1fms",
             deleted, t_phase_a,
@@ -4302,6 +4351,16 @@ class FalkorDBProvider(GraphDataProvider):
                 break
 
         t_phase_b = (time.monotonic() - t_phase_b_start) * 1000
+        _metric_observe(
+            "aggregation_phase_duration_ms", t_phase_b,
+            phase="B", graph=self._graph_name,
+        )
+        # Peak pair-data size — actionable gauge for the memory ceiling
+        # discussion in Gap B. Emitted once per job at end of Phase B.
+        _metric_observe(
+            "aggregation_pair_data_peak_size", float(len(pair_data)),
+            graph=self._graph_name,
+        )
         logger.info(
             "bulk_rebuild phase B (scan): %d lineage edges, %d unique pairs "
             "in %.1fms",
@@ -4349,6 +4408,10 @@ class FalkorDBProvider(GraphDataProvider):
         distinct_labels = {l for l in urn_label_map.values() if l}
         await self._ensure_label_urn_indexes(distinct_labels)
         t_phase_c = (time.monotonic() - t_phase_c_start) * 1000
+        _metric_observe(
+            "aggregation_phase_duration_ms", t_phase_c,
+            phase="C", graph=self._graph_name,
+        )
         logger.info(
             "bulk_rebuild phase C (labels): %d distinct labels indexed in %.1fms",
             len(distinct_labels), t_phase_c,
@@ -4409,6 +4472,10 @@ class FalkorDBProvider(GraphDataProvider):
             should_cancel=should_cancel,
         )
         t_phase_d = (time.monotonic() - t_phase_d_start) * 1000
+        _metric_observe(
+            "aggregation_phase_duration_ms", t_phase_d,
+            phase="D", graph=self._graph_name,
+        )
         rate = (created * 1000.0 / max(t_phase_d, 1.0))
         logger.info(
             "bulk_rebuild phase D (CREATE): %d AGGREGATED edges in %.1fms "
@@ -4423,6 +4490,10 @@ class FalkorDBProvider(GraphDataProvider):
             pair_data, should_cancel=should_cancel,
         )
         t_phase_e = (time.monotonic() - t_phase_e_start) * 1000
+        _metric_observe(
+            "aggregation_phase_duration_ms", t_phase_e,
+            phase="E", graph=self._graph_name,
+        )
         logger.info(
             "bulk_rebuild phase E (idempotency): %.1fms",
             t_phase_e,
