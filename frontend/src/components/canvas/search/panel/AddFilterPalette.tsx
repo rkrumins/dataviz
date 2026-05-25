@@ -35,10 +35,31 @@
  * The parent (QueryCard) decides how to integrate them.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { Plus, Search, Sparkles } from 'lucide-react'
+import {
+    AlignLeft,
+    ArrowDownToLine,
+    ArrowUpFromLine,
+    Boxes,
+    CircleOff,
+    CornerDownRight,
+    CornerLeftUp,
+    Equal,
+    Flag,
+    GitBranch,
+    Hash,
+    Layers,
+    Parentheses,
+    Plus,
+    Radar,
+    Route,
+    Search,
+    Sparkles,
+    Tag,
+    Type,
+    type LucideIcon,
+} from 'lucide-react'
 import {
     type FC,
-    type ReactNode,
     useCallback,
     useEffect,
     useLayoutEffect,
@@ -56,6 +77,41 @@ import { topLevelConditions } from './predicateComposition'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
+
+
+/**
+ * Per-category icon accents. The Add Filter palette previously
+ * rendered every entry with the same lineage-purple ASCII glyph,
+ * which made the categories visually indistinguishable. Tying each
+ * category to a curated accent gives the palette a typed taxonomy
+ * the user reads at a glance — text rows pulse cyan, structure
+ * emerald, governance amber, lineage rose, and so on — matching the
+ * "premium / modern" UX bar of the template picker.
+ */
+type IconTone = 'text' | 'structure' | 'governance' | 'lineage' | 'group'
+
+const ICON_TONES: Record<IconTone, { container: string; icon: string }> = {
+    text: {
+        container: 'bg-sky-500/[0.10] border-sky-500/25 dark:bg-sky-500/[0.14]',
+        icon: 'text-sky-600 dark:text-sky-400',
+    },
+    structure: {
+        container: 'bg-emerald-500/[0.10] border-emerald-500/25 dark:bg-emerald-500/[0.14]',
+        icon: 'text-emerald-600 dark:text-emerald-400',
+    },
+    governance: {
+        container: 'bg-amber-500/[0.10] border-amber-500/30 dark:bg-amber-500/[0.14]',
+        icon: 'text-amber-700 dark:text-amber-300',
+    },
+    lineage: {
+        container: 'bg-rose-500/[0.10] border-rose-500/25 dark:bg-rose-500/[0.14]',
+        icon: 'text-rose-600 dark:text-rose-400',
+    },
+    group: {
+        container: 'bg-violet-500/[0.10] border-violet-500/25 dark:bg-violet-500/[0.14]',
+        icon: 'text-violet-600 dark:text-violet-400',
+    },
+}
 
 
 export interface AddFilterPaletteProps {
@@ -90,9 +146,16 @@ export interface AddFilterPaletteProps {
 }
 
 
+/** Per-entry visual identity. ``icon`` is a Lucide component so the
+ *  palette reads as part of the same icon language the canvas + the
+ *  templates use — not ASCII chars in a circle (the previous look
+ *  felt placeholder). ``tone`` keys into ICON_TONES below to give
+ *  each category a distinct accent (text → cyan, structure →
+ *  emerald, etc.) instead of every row being the same lineage purple. */
 interface PaletteEntry {
     id: string
-    icon: ReactNode
+    icon: LucideIcon
+    tone?: IconTone
     label: string
     description?: string
     count?: number
@@ -199,7 +262,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'text-name',
-                    icon: '⌕', label: 'Name contains…',
+                    icon: Type, tone: 'text',
+                    label: 'Name contains…',
                     description: 'Substring match against the display name',
                     action: 'emit',
                     build: () => ({
@@ -209,7 +273,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'text-qname',
-                    icon: '⌕', label: 'Qualified name contains…',
+                    icon: Hash, tone: 'text',
+                    label: 'Qualified name contains…',
                     description: 'Match against the fully-qualified name',
                     action: 'emit',
                     build: () => ({
@@ -219,7 +284,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'text-desc',
-                    icon: '⌕', label: 'Description contains…',
+                    icon: AlignLeft, tone: 'text',
+                    label: 'Description contains…',
                     description: 'Match against the entity description',
                     action: 'emit',
                     build: () => ({
@@ -234,7 +300,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'entity-type',
-                    icon: '◇', label: 'Entity type is…',
+                    icon: Boxes, tone: 'structure',
+                    label: 'Entity type is…',
                     description: 'Restrict to specific node types',
                     count: counts.entityTypes,
                     samples: samples?.entityTypes,
@@ -245,7 +312,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'layer',
-                    icon: '⌬', label: 'Layer is…',
+                    icon: Layers, tone: 'structure',
+                    label: 'Layer is…',
                     description: 'Filter by pipeline layer',
                     count: counts.layers,
                     samples: samples?.layers,
@@ -261,7 +329,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'tag',
-                    icon: '#', label: 'Tag is…',
+                    icon: Tag, tone: 'governance',
+                    label: 'Tag is…',
                     description: 'Has one or more of the chosen tags',
                     count: counts.tags,
                     samples: samples?.tags,
@@ -272,7 +341,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'has-property',
-                    icon: '⚑', label: 'Has property…',
+                    icon: Flag, tone: 'governance',
+                    label: 'Has property…',
                     description: 'A given metadata key is set on the node',
                     count: counts.propertyKeys,
                     samples: samples?.propertyKeys,
@@ -283,7 +353,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'property',
-                    icon: '⊜', label: 'Property compares to…',
+                    icon: Equal, tone: 'governance',
+                    label: 'Property compares to…',
                     description: 'Filter by property = / ≠ / > / < value',
                     count: counts.propertyKeys,
                     samples: samples?.propertyKeys,
@@ -299,7 +370,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'no-upstream',
-                    icon: '↑', label: 'No upstream lineage',
+                    icon: CornerLeftUp, tone: 'lineage',
+                    label: 'No upstream lineage',
                     description: 'Nodes with no incoming lineage edges',
                     action: 'emit',
                     build: () => ({
@@ -308,7 +380,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'no-downstream',
-                    icon: '↓', label: 'No downstream lineage',
+                    icon: CornerDownRight, tone: 'lineage',
+                    label: 'No downstream lineage',
                     description: 'Nodes with no outgoing lineage edges',
                     action: 'emit',
                     build: () => ({
@@ -317,7 +390,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'no-lineage',
-                    icon: '⊘', label: 'No lineage edges',
+                    icon: CircleOff, tone: 'lineage',
+                    label: 'No lineage edges',
                     description: 'Disconnected nodes (no upstream and no downstream)',
                     action: 'emit',
                     build: () => ({
@@ -326,7 +400,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'has-upstream',
-                    icon: '⇣', label: 'Has upstream lineage',
+                    icon: ArrowDownToLine, tone: 'lineage',
+                    label: 'Has upstream lineage',
                     action: 'emit',
                     build: () => ({
                         kind: 'hasIncoming', edgeClass: DEFAULT_EDGE_CLASS,
@@ -334,7 +409,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'has-downstream',
-                    icon: '⇡', label: 'Has downstream lineage',
+                    icon: ArrowUpFromLine, tone: 'lineage',
+                    label: 'Has downstream lineage',
                     action: 'emit',
                     build: () => ({
                         kind: 'hasOutgoing', edgeClass: DEFAULT_EDGE_CLASS,
@@ -347,25 +423,29 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'path',
-                    icon: '⤇', label: 'Path from A to B',
+                    icon: Route, tone: 'group',
+                    label: 'Path from A to B',
                     description: 'Lineage paths between two URNs — opens Advanced',
                     action: 'advanced',
                 },
                 {
                     id: 'within-hops',
-                    icon: '⇿', label: 'Within N hops of…',
+                    icon: Radar, tone: 'group',
+                    label: 'Within N hops of…',
                     description: 'N-hop neighbourhood of an anchor URN — opens Advanced',
                     action: 'advanced',
                 },
                 {
                     id: 'subtree',
-                    icon: '⌂', label: 'Inside subtree…',
+                    icon: GitBranch, tone: 'group',
+                    label: 'Inside subtree…',
                     description: 'Limit to descendants of one or more URNs — opens Advanced',
                     action: 'advanced',
                 },
                 {
                     id: 'or-not',
-                    icon: '⊕', label: 'OR / NOT group',
+                    icon: Parentheses, tone: 'group',
+                    label: 'OR / NOT group',
                     description: 'Compose with OR or NOT — opens Advanced',
                     action: 'advanced',
                 },
@@ -548,25 +628,32 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                                 )}>
                                     {cat.label}
                                 </div>
-                                {cat.entries.map((entry) => (
+                                {cat.entries.map((entry) => {
+                                    const tone = ICON_TONES[entry.tone ?? 'group']
+                                    const IconComponent = entry.icon
+                                    return (
                                     <button
                                         key={entry.id}
                                         type="button"
                                         onClick={() => handleEntry(entry)}
                                         className={cn(
-                                            'w-full flex items-start gap-3 px-4 py-2.5',
+                                            'group/row w-full flex items-start gap-3 px-4 py-2.5',
                                             'text-left transition-colors',
                                             'hover:bg-accent-lineage/[0.08]',
                                             'focus:outline-none focus:bg-accent-lineage/[0.10]',
                                         )}
                                     >
                                         <span className={cn(
-                                            'shrink-0 w-7 h-7 rounded-lg',
+                                            'shrink-0 w-8 h-8 rounded-lg border',
                                             'flex items-center justify-center',
-                                            'text-[16px] leading-none text-accent-lineage',
-                                            'bg-accent-lineage/[0.10] border border-accent-lineage/20',
+                                            'shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]',
+                                            'transition-transform group-hover/row:scale-[1.04]',
+                                            tone.container,
                                         )}>
-                                            {entry.icon}
+                                            <IconComponent
+                                                className={cn('w-4 h-4', tone.icon)}
+                                                strokeWidth={2.2}
+                                            />
                                         </span>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-baseline gap-2">
@@ -589,7 +676,8 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                                             )}
                                         </div>
                                     </button>
-                                ))}
+                                    )
+                                })}
                             </div>
                         ))
                     )}
