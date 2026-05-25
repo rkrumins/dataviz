@@ -21,6 +21,7 @@ import pytest_asyncio
 
 from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
+    _compute_searchable_text,
     _node_from_props,
     _split_user_properties,
 )
@@ -145,22 +146,30 @@ class TestNodeFromProps:
         }, "schemaField")
         assert node.properties == {"logicalType": "STRING", "rowCount": 1000}
 
-    def test_legacy_blob_parsed(self):
-        # Pre-refactor shape: user props live in a JSON-stringified blob.
+    def test_legacy_blob_is_no_longer_hydrated(self):
+        """W1.3 (greenfield cleanup): the pre-refactor JSON blob on
+        ``n.properties`` is no longer parsed by the read path. Pre-
+        refactor nodes lose those properties until backfilled via
+        ``backend/scripts/migrate_native_properties.py``. A one-time
+        warning surfaces so operators notice."""
         node = _node_from_props({
             "urn": "urn:x", "displayName": "X",
             "properties": json.dumps({"logicalType": "STRING", "rowCount": 1000}),
         }, "schemaField")
-        assert node.properties == {"logicalType": "STRING", "rowCount": 1000}
+        # The legacy-blob keys are NOT visible on the read path.
+        assert node.properties == {}
 
-    def test_native_overrides_legacy_blob_on_conflict(self):
-        # Mid-migration: a node may carry both. Native is newer, so it wins.
+    def test_native_properties_unaffected_by_legacy_blob(self):
+        """Mid-migration nodes carry both — native fields are returned;
+        the blob is ignored (no merge, no override needed)."""
         node = _node_from_props({
             "urn": "urn:x", "displayName": "X",
             "logicalType": "STRING_NEW",
             "properties": json.dumps({"logicalType": "STRING_OLD"}),
         }, "schemaField")
         assert node.properties["logicalType"] == "STRING_NEW"
+        # Blob keys not in native stay invisible.
+        assert "rowCount" not in node.properties
 
     def test_residual_blob_merged(self):
         # Non-scalar user values live in propertiesRaw.
@@ -233,6 +242,67 @@ def _falkordb_available() -> bool:
         return has_graph
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Pure unit tests — _compute_searchable_text (W1.3)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeSearchableText:
+    """``searchableText`` is the denormalised column ``target='any'``
+    text search hits. It joins displayName + qualifiedName +
+    description + every string-valued user property, lowercased.
+    Bounded by ``DEEP_SEARCH_SEARCHABLE_TEXT_CAP`` so a node with
+    very large string properties cannot bloat storage."""
+
+    def test_includes_property_values(self):
+        text = _compute_searchable_text(
+            "Orders", "warehouse.public.orders", "Customer order events",
+            {"sourceSystem": "snowflake", "owner": "data-platform"},
+        )
+        # All four sources collapsed + lowercased.
+        assert "orders" in text
+        assert "warehouse.public.orders" in text
+        assert "customer order events" in text
+        assert "snowflake" in text
+        assert "data-platform" in text
+
+    def test_skips_non_string_property_values(self):
+        text = _compute_searchable_text(
+            "X", None, None,
+            {"rowCount": 1_000_000, "active": True, "name": "Orders"},
+        )
+        # Only the string property contributes.
+        assert "orders" in text
+        assert "1000000" not in text
+        assert "true" not in text
+
+    def test_empty_inputs_return_empty(self):
+        assert _compute_searchable_text(None, None, None, None) == ""
+        assert _compute_searchable_text("", "", "", {}) == ""
+
+    def test_truncates_at_word_boundary_below_cap(self, monkeypatch):
+        """When the result exceeds the cap, the helper trims to the
+        last word boundary so the tail never ends mid-token (a
+        partial token would defeat ``CONTAINS '<word>'`` substring
+        search downstream)."""
+        from backend.app.services.deep_search import get_deep_search_settings
+        monkeypatch.setenv("DEEP_SEARCH_SEARCHABLE_TEXT_CAP", "20")
+        get_deep_search_settings.cache_clear()
+
+        text = _compute_searchable_text(
+            "First word boundary", None, None,
+            {"extra": "rest of the string that should be dropped"},
+        )
+        assert len(text) <= 20
+        # Last char must be neither mid-token nor a trailing space.
+        assert not text.endswith(" ")
+        # Verify the trim happened at a space, not mid-word.
+        full = "First word boundary rest of the string that should be dropped".lower()
+        # The result should be a prefix of the full string up to a space.
+        assert full.startswith(text)
+        assert text == "" or full[len(text)] == " "
 
 
 skip_if_no_falkordb = pytest.mark.skipif(

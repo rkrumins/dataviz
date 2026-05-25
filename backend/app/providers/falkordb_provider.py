@@ -49,8 +49,15 @@ def _compute_searchable_text(
 ) -> str:
     """Build a lowercased, space-joined searchable string for n.searchableText.
 
-    Includes displayName, qualifiedName, description, and every string-valued
-    user property value. Capped at 4096 characters to bound storage.
+    Includes displayName, qualifiedName, description, and every
+    string-valued user property value. Capped at
+    ``DeepSearchSettings.searchable_text_cap_bytes`` (env
+    ``DEEP_SEARCH_SEARCHABLE_TEXT_CAP``, default 8192) so a node with
+    very large string properties can't bloat the denormalised field.
+
+    Truncated at a word boundary when the cap fires so the tail
+    doesn't end mid-token (a partial token would defeat
+    ``CONTAINS '<word>'`` substring search).
     """
     parts: List[str] = []
     if display_name:
@@ -64,7 +71,18 @@ def _compute_searchable_text(
             if isinstance(value, str):
                 parts.append(value)
     result = " ".join(parts).lower()
-    return result[:4096]
+    # Lazy import to avoid pulling settings into module import time
+    # (this helper is hot — called on every write).
+    from backend.app.services.deep_search import get_deep_search_settings
+    cap = get_deep_search_settings().searchable_text_cap_bytes
+    if len(result) <= cap:
+        return result
+    # Trim at the last word boundary <= cap so we never end mid-word.
+    truncated = result[:cap]
+    last_space = truncated.rfind(" ")
+    if last_space > 0:
+        truncated = truncated[:last_space]
+    return truncated
 
 
 # Reserved node-key set — fields the provider writes directly onto a FalkorDB
@@ -83,9 +101,16 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "urn", "entityType", "displayName", "qualifiedName", "description",
     "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
     "level", "levelDigest",
-    "properties",      # legacy blob — read transitionally, never written
+    "properties",      # legacy blob — read path no longer hydrates from it
     "propertiesRaw",   # native escape hatch for non-scalar property values
 })
+
+
+# One-time warning latch (W1.3): logged once per provider boot when we
+# encounter a pre-refactor node that still carries the ``n.properties``
+# JSON blob. The read path no longer hydrates from the blob — operators
+# run the backfill migration to surface those properties as native fields.
+_logged_legacy_blob: bool = False
 
 
 def _split_user_properties(
@@ -138,40 +163,46 @@ def _split_user_properties(
 def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
 
-    Reconstructs the user `properties` dict from three layers, in increasing
-    priority (later wins):
+    Reconstructs the user `properties` dict from two layers, in
+    increasing priority (later wins):
 
-      1. Legacy JSON blob in `props['properties']` — pre-refactor nodes.
-         Parsed and merged first; stripped on next write.
-      2. Non-reserved native keys on the node — written by the post-refactor
-         ingest path. These are the source of truth for any node that has
-         been touched since the refactor.
-      3. JSON-stringified residual in `props['propertiesRaw']` — non-scalar
-         values that couldn't be written natively. Layered on top of native
-         because residual keys are disjoint from native keys by construction
-         (the write-side split assigns each user key to exactly one bucket).
+      1. Non-reserved native keys on the node — written by the
+         post-refactor ingest path. The source of truth.
+      2. JSON-stringified residual in `props['propertiesRaw']` —
+         non-scalar values that couldn't be written natively (nested
+         dicts, lists of dicts). Layered on top of native because
+         residual keys are disjoint from native keys by construction.
 
-    Nodes mid-migration (legacy blob present AND some native writes since)
-    end up with native winning over blob, which is correct because native
-    was written more recently.
+    The pre-refactor ``n.properties`` legacy JSON blob is no longer
+    consulted (W1.3 / greenfield cleanup). Nodes that still carry
+    that blob will lose those properties on read until the next
+    write hydrates them as native fields — operators run
+    ``backend/scripts/migrate_native_properties.py`` to backfill.
+    A one-time WARNING surfaces if such a node is observed so the
+    operator knows to run the migration.
     """
     if not props or "urn" not in props:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
 
+    if "properties" in props:
+        # Pre-refactor node still carries the legacy blob. Flag it once
+        # per provider boot so operators can run the backfill. The
+        # warning is bounded by ``_logged_legacy_blob`` (module-level
+        # set) so we don't spam the logs in production.
+        global _logged_legacy_blob
+        if not _logged_legacy_blob:
+            logger.warning(
+                "deep_search: node urn=%s still carries the pre-refactor "
+                "n.properties JSON blob; run "
+                "backend/scripts/migrate_native_properties.py to backfill. "
+                "These properties are NOT visible to advanced search "
+                "until migrated.",
+                props.get("urn"),
+            )
+            _logged_legacy_blob = True
+
     user_props: Dict[str, Any] = {}
-
-    legacy_blob = props.get("properties")
-    if isinstance(legacy_blob, str) and legacy_blob:
-        try:
-            blob_dict = json.loads(legacy_blob)
-            if isinstance(blob_dict, dict):
-                user_props.update(blob_dict)
-        except (json.JSONDecodeError, TypeError):
-            pass
-    elif isinstance(legacy_blob, dict):
-        user_props.update(legacy_blob)
-
     for k, v in props.items():
         if k in _RESERVED_NODE_KEYS:
             continue
