@@ -8,13 +8,18 @@
  */
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useNavigate } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
     X, Pencil, Copy, Trash2, Star, Globe2, Building2,
-    User, Calendar, Tag, Layers as LayersIcon, Download,
+    User, Calendar, Tag, Layers as LayersIcon, Download, ArrowUpRight,
 } from 'lucide-react'
 import type { ContextModel } from '@/services/contextModelService'
 import { useTemplateUsage } from '@/hooks/useTemplates'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { useCountUp } from '@/components/canvas/trace/useCountUp'
 import { cn } from '@/lib/utils'
 
 interface TemplateDetailDrawerProps {
@@ -48,7 +53,7 @@ export function TemplateDetailDrawer({
                         exit={{ x: '100%' }}
                         transition={{ type: 'spring', damping: 30, stiffness: 320 }}
                         onClick={(e) => e.stopPropagation()}
-                        className="w-full max-w-md h-full bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
+                        className="w-full max-w-lg h-full bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
                     >
                         <DrawerContent
                             template={template}
@@ -84,6 +89,10 @@ function DrawerContent({
     const accent = template.accentColor ?? '#6366f1'
     const icon = template.icon ?? 'LayoutTemplate'
     const isGlobal = template.workspaceId == null
+    const animatedCount = useCountUp(template.instantiationCount)
+    const navigate = useNavigate()
+    const workspaces = useWorkspacesStore((s) => s.workspaces)
+    const workspaceNameById = new Map(workspaces.map((w) => [w.id, w.name]))
 
     return (
         <>
@@ -152,7 +161,7 @@ function DrawerContent({
                     <MetaItem
                         icon={Star}
                         label="Used"
-                        value={`${template.instantiationCount} time${template.instantiationCount === 1 ? '' : 's'}`}
+                        value={`${animatedCount} time${animatedCount === 1 ? '' : 's'}`}
                     />
                     <MetaItem
                         icon={Calendar}
@@ -185,8 +194,10 @@ function DrawerContent({
                 {/* About */}
                 {template.aboutMarkdown && (
                     <Section title="About">
-                        <div className="text-sm text-ink-secondary leading-relaxed whitespace-pre-wrap">
-                            {template.aboutMarkdown}
+                        <div className="prose-template text-sm text-ink-secondary leading-relaxed">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {template.aboutMarkdown}
+                            </ReactMarkdown>
                         </div>
                     </Section>
                 )}
@@ -219,16 +230,96 @@ function DrawerContent({
                 {!usageLoading && usage && Object.keys(usage.instancesByWorkspace).length > 0 && (
                     <Section icon={Building2} title="Live instances by workspace">
                         <div className="space-y-1">
-                            {Object.entries(usage.instancesByWorkspace).map(([wsId, count]) => (
-                                <div key={wsId} className="flex items-center justify-between px-2 py-1 rounded bg-canvas">
-                                    <span className="text-xs font-mono text-ink-secondary truncate">{wsId}</span>
-                                    <span className="text-xs font-medium text-ink">{count}</span>
-                                </div>
-                            ))}
+                            {Object.entries(usage.instancesByWorkspace).map(([wsId, count]) => {
+                                const name = workspaceNameById.get(wsId)
+                                return (
+                                    <button
+                                        key={wsId}
+                                        type="button"
+                                        onClick={() => navigate(`/workspaces/${wsId}`)}
+                                        className="w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded bg-canvas hover:bg-accent-lineage/5 transition-colors group/row text-left"
+                                    >
+                                        <span className="flex items-center gap-1.5 min-w-0">
+                                            <span className="text-xs font-medium text-ink truncate">
+                                                {name ?? wsId}
+                                            </span>
+                                            <ArrowUpRight className="w-3 h-3 text-ink-muted opacity-0 group-hover/row:opacity-100 transition-opacity" />
+                                        </span>
+                                        <span className="text-xs font-medium text-ink-muted shrink-0">{count}</span>
+                                    </button>
+                                )
+                            })}
                         </div>
                     </Section>
                 )}
             </div>
+
+            <style>{`
+                .prose-template h1,
+                .prose-template h2,
+                .prose-template h3 {
+                    font-weight: 600;
+                    color: var(--ink, currentColor);
+                    margin: 0.75em 0 0.35em;
+                    line-height: 1.3;
+                }
+                .prose-template h1 { font-size: 1.05rem; }
+                .prose-template h2 { font-size: 0.95rem; }
+                .prose-template h3 { font-size: 0.875rem; }
+                .prose-template p { margin: 0.5em 0; }
+                .prose-template ul,
+                .prose-template ol {
+                    padding-left: 1.25em;
+                    margin: 0.5em 0;
+                }
+                .prose-template ul { list-style: disc; }
+                .prose-template ol { list-style: decimal; }
+                .prose-template li { margin: 0.2em 0; }
+                .prose-template code {
+                    padding: 1px 4px;
+                    font-size: 0.85em;
+                    border-radius: 4px;
+                    background: rgba(99, 102, 241, 0.08);
+                    color: rgb(99, 102, 241);
+                    font-family: ui-monospace, monospace;
+                }
+                .prose-template pre {
+                    padding: 0.75em;
+                    border-radius: 8px;
+                    background: rgba(0, 0, 0, 0.04);
+                    overflow-x: auto;
+                    margin: 0.5em 0;
+                }
+                .prose-template pre code {
+                    padding: 0;
+                    background: transparent;
+                    color: var(--ink, currentColor);
+                }
+                .prose-template strong { font-weight: 600; color: var(--ink, currentColor); }
+                .prose-template em { font-style: italic; }
+                .prose-template a {
+                    color: rgb(99, 102, 241);
+                    text-decoration: underline;
+                    text-underline-offset: 2px;
+                }
+                .prose-template blockquote {
+                    border-left: 2px solid rgba(99, 102, 241, 0.4);
+                    padding-left: 0.75em;
+                    margin: 0.5em 0;
+                    color: var(--ink-muted, currentColor);
+                }
+                .prose-template table {
+                    border-collapse: collapse;
+                    margin: 0.5em 0;
+                    font-size: 0.8125rem;
+                }
+                .prose-template th,
+                .prose-template td {
+                    border: 1px solid var(--glass-border, rgba(0,0,0,0.08));
+                    padding: 4px 8px;
+                    text-align: left;
+                }
+            `}</style>
         </>
     )
 }

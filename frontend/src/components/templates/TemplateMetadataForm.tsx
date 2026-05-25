@@ -8,6 +8,7 @@
 import { Sparkles, User, FileText, Tag } from 'lucide-react'
 import { IconPicker } from './IconPicker'
 import { ColorPicker } from './ColorPicker'
+import { TagInput } from './TagInput'
 import type { ContextModelCreateRequest } from '@/services/contextModelService'
 
 export interface TemplateMetadataValue {
@@ -46,9 +47,11 @@ interface TemplateMetadataFormProps {
     value: TemplateMetadataValue
     onChange: (next: TemplateMetadataValue) => void
     nameError?: string | null
+    /** Tag suggestions from the gallery — feed the autocomplete datalist. */
+    tagSuggestions?: string[]
 }
 
-export function TemplateMetadataForm({ value, onChange, nameError }: TemplateMetadataFormProps) {
+export function TemplateMetadataForm({ value, onChange, nameError, tagSuggestions }: TemplateMetadataFormProps) {
     const setField = <K extends keyof TemplateMetadataValue>(key: K, val: TemplateMetadataValue[K]) =>
         onChange({ ...value, [key]: val })
 
@@ -111,16 +114,12 @@ export function TemplateMetadataForm({ value, onChange, nameError }: TemplateMet
                         {CATEGORY_SUGGESTIONS.map(c => <option key={c} value={c} />)}
                     </datalist>
                 </Field>
-                <Field label="Tags" hint="Comma-separated. Used by filters in the gallery.">
-                    <input
-                        type="text"
-                        value={value.tags.join(', ')}
-                        onChange={(e) => setField(
-                            'tags',
-                            e.target.value.split(',').map(s => s.trim()).filter(Boolean),
-                        )}
+                <Field label="Tags" hint="Press Enter or comma to add. Backspace removes the last.">
+                    <TagInput
+                        value={value.tags}
+                        onChange={(tags) => setField('tags', tags)}
+                        suggestions={tagSuggestions}
                         placeholder="etl, lineage, warehouse"
-                        className="input"
                     />
                 </Field>
             </Section>

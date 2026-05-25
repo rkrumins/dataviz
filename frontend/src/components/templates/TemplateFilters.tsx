@@ -4,6 +4,7 @@
  * Pure controlled component. Parent owns the URL-synced state via
  * useSearchParams; this component just emits change events.
  */
+import { forwardRef } from 'react'
 import { Search, Globe2, Building2, Layers as LayersIcon, ArrowUpDown } from 'lucide-react'
 import type { TemplateListFilter } from '@/services/contextModelService'
 import { cn } from '@/lib/utils'
@@ -22,13 +23,13 @@ const SORT_OPTIONS: { value: NonNullable<TemplateListFilter['sort']>; label: str
     { value: 'name', label: 'A → Z' },
 ]
 
-export function TemplateFilters({
+export const TemplateFilters = forwardRef<HTMLInputElement, TemplateFiltersProps>(function TemplateFilters({
     filter,
     onChange,
     categories,
     tags,
     isWorkspaceContext,
-}: TemplateFiltersProps) {
+}, searchInputRef) {
     const scope = filter.scope ?? 'all'
 
     return (
@@ -37,6 +38,7 @@ export function TemplateFilters({
             <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted pointer-events-none" />
                 <input
+                    ref={searchInputRef}
                     type="text"
                     value={filter.search ?? ''}
                     onChange={(e) => onChange({ ...filter, search: e.target.value || undefined })}
@@ -147,7 +149,7 @@ export function TemplateFilters({
             )}
         </div>
     )
-}
+})
 
 function ScopeButton({
     active, onClick, icon: Icon, label, disabled,

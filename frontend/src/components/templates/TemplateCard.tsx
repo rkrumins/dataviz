@@ -12,6 +12,8 @@ import {
 } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HighlightedText } from '@/components/ui/HighlightedText'
+import { useCountUp } from '@/components/canvas/trace/useCountUp'
 import type { ContextModel } from '@/services/contextModelService'
 import { cn } from '@/lib/utils'
 
@@ -22,16 +24,22 @@ interface TemplateCardProps {
     onMenuAction: (action: TemplateCardAction, template: ContextModel) => void
     onOpen: (template: ContextModel) => void
     delayMs?: number
+    /** Active search query — bolds matched substrings in name + description. */
+    searchQuery?: string
 }
 
 const DEFAULT_ACCENT = '#6366f1'
 const DEFAULT_ICON = 'LayoutTemplate'
 
-export function TemplateCard({ template, onMenuAction, onOpen, delayMs = 0 }: TemplateCardProps) {
+export function TemplateCard({
+    template, onMenuAction, onOpen, delayMs = 0, searchQuery,
+}: TemplateCardProps) {
     const accent = template.accentColor || DEFAULT_ACCENT
     const icon = template.icon || DEFAULT_ICON
     const isGlobal = template.workspaceId == null
     const layerCount = template.layersConfig?.length ?? 0
+    const animatedCount = useCountUp(template.instantiationCount)
+    const hasSearch = !!searchQuery?.trim()
 
     const [menuOpen, setMenuOpen] = useState(false)
     const menuRef = useRef<HTMLDivElement>(null)
@@ -50,20 +58,31 @@ export function TemplateCard({ template, onMenuAction, onOpen, delayMs = 0 }: Te
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.22, delay: delayMs / 1000 }}
-            className="group relative glass-panel rounded-2xl border border-glass-border hover:border-current/40 transition-all hover:-translate-y-0.5 hover:shadow-xl overflow-hidden"
-            style={{ ['--card-accent' as string]: accent }}
+            className="group relative glass-panel rounded-2xl border border-glass-border hover:border-current/40 transition-all hover:-translate-y-0.5 overflow-hidden"
+            style={{
+                ['--card-accent' as string]: accent,
+                ['--card-shadow' as string]: `${accent}33`,
+            }}
         >
+            {/* Top accent bar */}
+            <div
+                className="h-1 w-full"
+                style={{ backgroundColor: accent }}
+                aria-hidden
+            />
+
             {/* Accent gradient wash on hover */}
             <div
                 className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
                 style={{
-                    background: `linear-gradient(135deg, ${accent}08, transparent 60%)`,
+                    background: `linear-gradient(135deg, ${accent}10, transparent 60%)`,
+                    boxShadow: `inset 0 0 0 1px ${accent}30`,
                 }}
             />
 
             {/* Pin badge */}
             {template.isPinned && (
-                <div className="absolute top-2 right-10 z-10">
+                <div className="absolute top-3 right-10 z-10">
                     <div
                         className="w-6 h-6 rounded-full flex items-center justify-center"
                         style={{ backgroundColor: `${accent}20`, color: accent }}
@@ -75,7 +94,7 @@ export function TemplateCard({ template, onMenuAction, onOpen, delayMs = 0 }: Te
             )}
 
             {/* Menu */}
-            <div ref={menuRef} className="absolute top-2 right-2 z-10">
+            <div ref={menuRef} className="absolute top-3 right-2 z-10">
                 <button
                     onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o) }}
                     className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink transition-colors"
@@ -108,10 +127,18 @@ export function TemplateCard({ template, onMenuAction, onOpen, delayMs = 0 }: Te
                     </div>
                     <div className="min-w-0 flex-1 pr-6">
                         <div className="flex items-center gap-1.5 mb-0.5">
-                            <h3 className="font-semibold text-sm text-ink truncate">{template.name}</h3>
+                            <h3 className="font-semibold text-sm text-ink truncate">
+                                {hasSearch
+                                    ? <HighlightedText text={template.name} query={searchQuery!} />
+                                    : template.name}
+                            </h3>
                         </div>
                         <p className="text-xs text-ink-muted line-clamp-2 leading-snug">
-                            {template.description || 'No description'}
+                            {template.description
+                                ? (hasSearch
+                                    ? <HighlightedText text={template.description} query={searchQuery!} />
+                                    : template.description)
+                                : 'No description'}
                         </p>
                     </div>
                 </div>
@@ -145,7 +172,7 @@ export function TemplateCard({ template, onMenuAction, onOpen, delayMs = 0 }: Te
                             title={`Used ${template.instantiationCount} times`}
                         >
                             <Star className="w-3 h-3" />
-                            {template.instantiationCount}
+                            <span className="tabular-nums">{animatedCount}</span>
                         </span>
                     </div>
                     <div
@@ -155,6 +182,9 @@ export function TemplateCard({ template, onMenuAction, onOpen, delayMs = 0 }: Te
                                 ? 'bg-blue-500/10 text-blue-500'
                                 : 'bg-emerald-500/10 text-emerald-500',
                         )}
+                        title={isGlobal
+                            ? 'Available across every workspace'
+                            : 'Scoped to the active workspace'}
                     >
                         {isGlobal ? <Globe2 className="w-2.5 h-2.5" /> : <Building2 className="w-2.5 h-2.5" />}
                         {isGlobal ? 'Global' : 'Workspace'}

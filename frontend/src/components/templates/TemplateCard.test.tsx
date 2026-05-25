@@ -103,4 +103,19 @@ describe('TemplateCard', () => {
         render(<TemplateCard template={tpl} onMenuAction={vi.fn()} onOpen={vi.fn()} />)
         expect(screen.getByText('+2')).toBeInTheDocument()
     })
+
+    it('wraps matched substring in a <mark> when searchQuery is provided', () => {
+        const tpl = makeTemplate({ name: 'Lakehouse Pipeline' })
+        const { container } = render(
+            <TemplateCard
+                template={tpl}
+                onMenuAction={vi.fn()}
+                onOpen={vi.fn()}
+                searchQuery="lake"
+            />
+        )
+        const mark = container.querySelector('mark')
+        expect(mark).not.toBeNull()
+        expect(mark?.textContent?.toLowerCase()).toBe('lake')
+    })
 })

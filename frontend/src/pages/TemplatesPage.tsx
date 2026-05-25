@@ -2,16 +2,18 @@
  * TemplatesPage — gallery + CRUD for ContextViewCanvas templates.
  *
  * URL-synced filter state (`?scope=`, `?search=`, `?sort=`, `?category=`,
- * `?tag=`) so deep links land on the same view a teammate shared.
+ * `?tag=`) so deep links land on the same view a teammate shared. Three
+ * additional one-shot params (`?focus=`, `?new=`, `?import=`) let the
+ * CommandPalette deep-link into the detail drawer, wizard, or importer.
  *
  * Composition:
  *   - Sticky header with title + "New template" menu
- *   - Two-column body: filters (left) + gallery (right)
+ *   - Two-column body: filters (left) + featured hero + gallery (right)
  *   - Drawer for template detail; portal-mounted dialogs for create / edit
- *     / duplicate / delete / import flows.
+ *     / duplicate / delete / import / pick-canvas flows.
  */
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     LayoutTemplate, Plus, ChevronDown, Sparkles, Wand2, Copy, Upload,
@@ -21,11 +23,15 @@ import { useToast } from '@/components/ui/toast'
 import { useTemplatesList } from '@/hooks/useTemplates'
 import type { ContextModel, TemplateListFilter } from '@/services/contextModelService'
 import { TemplateCard, type TemplateCardAction } from '@/components/templates/TemplateCard'
+import { FeaturedTemplateCard } from '@/components/templates/FeaturedTemplateCard'
+import { pickFeaturedTemplate } from '@/components/templates/pickFeaturedTemplate'
 import { TemplateFilters } from '@/components/templates/TemplateFilters'
 import { TemplateDetailDrawer } from '@/components/templates/TemplateDetailDrawer'
 import { DeleteTemplateDialog } from '@/components/templates/dialogs/DeleteTemplateDialog'
 import { DuplicateTemplateDialog } from '@/components/templates/dialogs/DuplicateTemplateDialog'
 import { ImportTemplateDialog } from '@/components/templates/dialogs/ImportTemplateDialog'
+import { PickCanvasDialog } from '@/components/templates/dialogs/PickCanvasDialog'
+import { PickTemplateDialog } from '@/components/templates/dialogs/PickTemplateDialog'
 import { TemplateWizard } from '@/components/templates/wizard/TemplateWizard'
 import { cn } from '@/lib/utils'
 
@@ -60,6 +66,7 @@ function filterToUrl(filter: TemplateListFilter): Record<string, string> {
 
 export function TemplatesPage() {
     const [searchParams, setSearchParams] = useSearchParams()
+    const navigate = useNavigate()
     const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
     const { showToast } = useToast()
 
@@ -73,8 +80,12 @@ export function TemplatesPage() {
     )
 
     const updateFilter = useCallback((next: TemplateListFilter) => {
-        setSearchParams(filterToUrl(next), { replace: true })
-    }, [setSearchParams])
+        // Preserve one-shot params (`focus`, `new`, `import`) when filter changes
+        const carry: Record<string, string> = {}
+        const focus = searchParams.get('focus')
+        if (focus) carry.focus = focus
+        setSearchParams({ ...filterToUrl(next), ...carry }, { replace: true })
+    }, [setSearchParams, searchParams])
 
     const { data: templates = [], isLoading, isError, refetch } = useTemplatesList(filter)
 
@@ -91,6 +102,12 @@ export function TemplatesPage() {
         }
     }, [templates])
 
+    const featured = useMemo(() => pickFeaturedTemplate(templates), [templates])
+    const rest = useMemo(
+        () => (featured ? templates.filter((t) => t.id !== featured.id) : templates),
+        [templates, featured],
+    )
+
     // ── Dialog/drawer state ────────────────────────────────────────
     const [detail, setDetail] = useState<ContextModel | null>(null)
     const [editing, setEditing] = useState<ContextModel | null>(null)
@@ -98,8 +115,11 @@ export function TemplatesPage() {
     const [duplicating, setDuplicating] = useState<ContextModel | null>(null)
     const [deleting, setDeleting] = useState<ContextModel | null>(null)
     const [importing, setImporting] = useState(false)
+    const [pickingCanvas, setPickingCanvas] = useState(false)
+    const [pickingTemplate, setPickingTemplate] = useState(false)
     const [createMenuOpen, setCreateMenuOpen] = useState(false)
     const createMenuRef = useRef<HTMLDivElement>(null)
+    const searchInputRef = useRef<HTMLInputElement | null>(null)
 
     useEffect(() => {
         if (!createMenuOpen) return
@@ -109,6 +129,58 @@ export function TemplatesPage() {
         document.addEventListener('mousedown', onClick)
         return () => document.removeEventListener('mousedown', onClick)
     }, [createMenuOpen])
+
+    // ── One-shot URL params: focus / new / import ──────────────────
+    useEffect(() => {
+        const focusId = searchParams.get('focus')
+        if (focusId && templates.length > 0) {
+            const target = templates.find((t) => t.id === focusId)
+            if (target) {
+                setDetail(target)
+                const next = new URLSearchParams(searchParams)
+                next.delete('focus')
+                setSearchParams(next, { replace: true })
+            }
+        }
+    }, [searchParams, templates, setSearchParams])
+
+    useEffect(() => {
+        if (searchParams.get('new') === '1') {
+            setEditing(null)
+            setWizardOpen(true)
+            const next = new URLSearchParams(searchParams)
+            next.delete('new')
+            setSearchParams(next, { replace: true })
+        }
+    }, [searchParams, setSearchParams])
+
+    useEffect(() => {
+        if (searchParams.get('import') === '1') {
+            setImporting(true)
+            const next = new URLSearchParams(searchParams)
+            next.delete('import')
+            setSearchParams(next, { replace: true })
+        }
+    }, [searchParams, setSearchParams])
+
+    // ── Keyboard shortcuts (page-scoped) ───────────────────────────
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            const target = e.target as HTMLElement | null
+            const tag = target?.tagName?.toLowerCase()
+            if (tag === 'input' || tag === 'textarea' || target?.isContentEditable) return
+            if (e.metaKey || e.ctrlKey || e.altKey) return
+            if (e.key === 'n' || e.key === 'N') {
+                e.preventDefault()
+                setCreateMenuOpen(true)
+            } else if (e.key === '/') {
+                e.preventDefault()
+                searchInputRef.current?.focus()
+            }
+        }
+        window.addEventListener('keydown', handler)
+        return () => window.removeEventListener('keydown', handler)
+    }, [])
 
     const handleExport = useCallback((template: ContextModel) => {
         const payload = {
@@ -153,8 +225,13 @@ export function TemplatesPage() {
         setCreateMenuOpen(false)
     }
 
-    const openSaveAsTemplateFromActiveCanvas = () => {
-        showToast('info', 'Open a canvas and use "Save as template" to capture its current state.')
+    const openPickCanvas = () => {
+        setPickingCanvas(true)
+        setCreateMenuOpen(false)
+    }
+
+    const openPickTemplate = () => {
+        setPickingTemplate(true)
         setCreateMenuOpen(false)
     }
 
@@ -195,17 +272,14 @@ export function TemplatesPage() {
                                 <CreateMenuItem
                                     icon={Sparkles}
                                     label="Save current canvas"
-                                    description="Capture the canvas you're working on"
-                                    onClick={openSaveAsTemplateFromActiveCanvas}
+                                    description="Capture an existing canvas as a template"
+                                    onClick={openPickCanvas}
                                 />
                                 <CreateMenuItem
                                     icon={Copy}
                                     label="Duplicate an existing template"
-                                    description="Pick a template from the gallery"
-                                    onClick={() => {
-                                        showToast('info', 'Click the kebab menu on any template card and choose "Duplicate".')
-                                        setCreateMenuOpen(false)
-                                    }}
+                                    description="Pick a template to clone and tweak"
+                                    onClick={openPickTemplate}
                                 />
                                 <CreateMenuItem
                                     icon={Upload}
@@ -228,6 +302,7 @@ export function TemplatesPage() {
                 <aside className="lg:sticky lg:top-[101px] lg:self-start">
                     <div className="glass-panel rounded-xl border border-glass-border p-4">
                         <TemplateFilters
+                            ref={searchInputRef}
                             filter={filter}
                             onChange={updateFilter}
                             categories={categories}
@@ -238,7 +313,7 @@ export function TemplatesPage() {
                 </aside>
 
                 {/* Gallery */}
-                <section>
+                <section className="space-y-5">
                     {isLoading ? (
                         <SkeletonGrid />
                     ) : isError ? (
@@ -246,19 +321,28 @@ export function TemplatesPage() {
                     ) : templates.length === 0 ? (
                         <EmptyState onCreate={openCreateWizard} onImport={() => setImporting(true)} />
                     ) : (
-                        <AnimatePresence mode="popLayout">
-                            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-                                {templates.map((t, i) => (
-                                    <TemplateCard
-                                        key={t.id}
-                                        template={t}
-                                        delayMs={Math.min(i, 8) * 30}
-                                        onMenuAction={handleCardAction}
-                                        onOpen={(template) => setDetail(template)}
-                                    />
-                                ))}
-                            </div>
-                        </AnimatePresence>
+                        <>
+                            {featured && (
+                                <FeaturedTemplateCard
+                                    template={featured}
+                                    onOpen={(t) => setDetail(t)}
+                                />
+                            )}
+                            <AnimatePresence mode="popLayout">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                                    {rest.map((t, i) => (
+                                        <TemplateCard
+                                            key={t.id}
+                                            template={t}
+                                            delayMs={Math.min(i, 8) * 30}
+                                            searchQuery={filter.search}
+                                            onMenuAction={handleCardAction}
+                                            onOpen={(template) => setDetail(template)}
+                                        />
+                                    ))}
+                                </div>
+                            </AnimatePresence>
+                        </>
                     )}
                 </section>
             </div>
@@ -297,6 +381,26 @@ export function TemplatesPage() {
                 onClose={() => setImporting(false)}
                 activeWorkspaceId={activeWorkspaceId}
             />
+            <PickCanvasDialog
+                isOpen={pickingCanvas}
+                onClose={() => setPickingCanvas(false)}
+                onPick={(workspaceId, model) => {
+                    setPickingCanvas(false)
+                    // Navigate to the canvas; the canvas page renders SaveAsTemplateDialog
+                    // off its own header button, so we just show a hint that the user
+                    // can click it. (Cross-page state hand-off via query param `?saveTpl=1`
+                    // would require canvas-page wiring beyond this PR's scope.)
+                    navigate(`/workspaces/${workspaceId}?contextModel=${model.id}&saveTpl=1`)
+                }}
+            />
+            <PickTemplateDialog
+                isOpen={pickingTemplate}
+                onClose={() => setPickingTemplate(false)}
+                onPick={(template) => {
+                    setPickingTemplate(false)
+                    setDuplicating(template)
+                }}
+            />
         </div>
     )
 }
@@ -328,31 +432,68 @@ function CreateMenuItem({
 
 function SkeletonGrid() {
     return (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-            {Array.from({ length: 6 }).map((_, i) => (
-                <div
-                    key={i}
-                    className="glass-panel rounded-2xl border border-glass-border p-5 animate-pulse"
-                >
-                    <div className="flex items-start gap-3 mb-3">
-                        <div className="w-11 h-11 rounded-xl bg-black/5 dark:bg-white/5" />
-                        <div className="flex-1 space-y-1.5">
-                            <div className="h-3.5 w-3/4 rounded bg-black/5 dark:bg-white/5" />
-                            <div className="h-3 w-full rounded bg-black/5 dark:bg-white/5" />
-                            <div className="h-3 w-1/2 rounded bg-black/5 dark:bg-white/5" />
-                        </div>
-                    </div>
-                    <div className="flex gap-1.5 mb-3">
-                        <div className="h-4 w-12 rounded bg-black/5 dark:bg-white/5" />
-                        <div className="h-4 w-10 rounded bg-black/5 dark:bg-white/5" />
-                    </div>
-                    <div className="h-px bg-glass-border my-3" />
-                    <div className="flex justify-between">
-                        <div className="h-3 w-20 rounded bg-black/5 dark:bg-white/5" />
-                        <div className="h-4 w-14 rounded-full bg-black/5 dark:bg-white/5" />
+        <div className="space-y-5">
+            {/* Hero skeleton */}
+            <div className="relative rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                <div className="h-1 w-full bg-black/5 dark:bg-white/5" />
+                <div className="p-6 flex items-center gap-5">
+                    <div className="w-20 h-20 rounded-2xl bg-black/5 dark:bg-white/5" />
+                    <div className="flex-1 space-y-2">
+                        <div className="h-3 w-24 rounded bg-black/5 dark:bg-white/5" />
+                        <div className="h-5 w-1/2 rounded bg-black/5 dark:bg-white/5" />
+                        <div className="h-3 w-4/5 rounded bg-black/5 dark:bg-white/5" />
                     </div>
                 </div>
-            ))}
+                <div className="ghost-shimmer-overlay" />
+            </div>
+            {/* Card grid skeleton */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                {Array.from({ length: 6 }).map((_, i) => (
+                    <div
+                        key={i}
+                        className="relative glass-panel rounded-2xl border border-glass-border overflow-hidden"
+                        style={{ ['--ghost-delay' as string]: `${i * 120}ms` }}
+                    >
+                        <div className="h-1 w-full bg-black/5 dark:bg-white/5" />
+                        <div className="p-5">
+                            <div className="flex items-start gap-3 mb-3">
+                                <div className="w-11 h-11 rounded-xl bg-black/5 dark:bg-white/5" />
+                                <div className="flex-1 space-y-1.5">
+                                    <div className="h-3.5 w-3/4 rounded bg-black/5 dark:bg-white/5" />
+                                    <div className="h-3 w-full rounded bg-black/5 dark:bg-white/5" />
+                                    <div className="h-3 w-1/2 rounded bg-black/5 dark:bg-white/5" />
+                                </div>
+                            </div>
+                            <div className="flex gap-1.5 mb-3">
+                                <div className="h-4 w-12 rounded bg-black/5 dark:bg-white/5" />
+                                <div className="h-4 w-10 rounded bg-black/5 dark:bg-white/5" />
+                            </div>
+                            <div className="h-px bg-glass-border my-3" />
+                            <div className="flex justify-between">
+                                <div className="h-3 w-20 rounded bg-black/5 dark:bg-white/5" />
+                                <div className="h-4 w-14 rounded-full bg-black/5 dark:bg-white/5" />
+                            </div>
+                        </div>
+                        <div className="ghost-shimmer-overlay" />
+                    </div>
+                ))}
+            </div>
+            <style>{`
+                .ghost-shimmer-overlay {
+                    position: absolute;
+                    inset: 0;
+                    pointer-events: none;
+                    background: linear-gradient(
+                        90deg,
+                        transparent 0%,
+                        rgba(255, 255, 255, 0.10) 50%,
+                        transparent 100%
+                    );
+                    transform: translateX(-100%);
+                    animation: ghostShimmerSweep 1.8s ease-in-out infinite;
+                    animation-delay: var(--ghost-delay, 0ms);
+                }
+            `}</style>
         </div>
     )
 }
