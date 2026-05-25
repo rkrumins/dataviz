@@ -28,6 +28,9 @@ _RETENTION_TICK_SECS = int(os.getenv("AGGREGATION_RETENTION_TICK_SECS", "3600"))
 # 0/negative value is treated as "disabled" rather than "delete
 # everything" to avoid foot-guns.
 _RETENTION_DAYS = int(os.getenv("AGGREGATION_JOBS_RETENTION_DAYS", "30"))
+# Consistency verifier cadence. Default 24h aligns with the
+# operational guidance documented in verifier.py. <= 0 disables.
+_VERIFIER_TICK_SECS = int(os.getenv("AGGREGATION_VERIFIER_TICK_SECS", "86400"))
 
 
 class AggregationScheduler:
@@ -44,6 +47,9 @@ class AggregationScheduler:
         # "never run this process lifetime"; the first tick will fire
         # it. Subsequent ticks honour ``_RETENTION_TICK_SECS``.
         self._last_retention_at: Optional[datetime] = None
+        # Last wall-clock time the consistency verifier ran. Same
+        # debounce pattern as retention but on the verifier cadence.
+        self._last_verifier_at: Optional[datetime] = None
 
     async def start(self) -> None:
         """Called on application startup. Runs forever, checking schedules."""
@@ -154,6 +160,11 @@ class AggregationScheduler:
         # the watchdog commit above.
         await self._maybe_run_retention()
 
+        # Consistency verifier — runs on an even coarser cadence. The
+        # safety net for the documented skip-path eventual-consistency
+        # window. Failures emit metrics + log but never auto-rebuild.
+        await self._maybe_run_consistency_verifier()
+
     async def _maybe_run_retention(self) -> None:
         """Delete `aggregation_jobs` rows older than the configured
         retention window, while preserving the most recent completed
@@ -220,4 +231,53 @@ class AggregationScheduler:
         except Exception as exc:
             logger.warning(
                 "Retention task failed (will retry next tick): %s", exc,
+            )
+
+    async def _maybe_run_consistency_verifier(self) -> None:
+        """Run AggregationConsistencyVerifier against every ready data
+        source on the configured cadence. Failures are alerts only —
+        operators decide whether to issue a force-rebuild.
+
+        Disabled when AGGREGATION_VERIFIER_TICK_SECS <= 0. The verifier
+        itself has hard per-data-source and per-edge timeouts so a
+        runaway query can't stall the scheduler loop.
+        """
+        if _VERIFIER_TICK_SECS <= 0:
+            return
+        now = datetime.now(tz=timezone.utc)
+        if (
+            self._last_verifier_at is not None
+            and (now - self._last_verifier_at).total_seconds() < _VERIFIER_TICK_SECS
+        ):
+            return
+        self._last_verifier_at = now
+
+        from .verifier import verify_all_ready_data_sources
+
+        try:
+            results = await verify_all_ready_data_sources(
+                session_factory=self._session_factory,
+                registry=self._registry,
+            )
+            total_failed = sum(r.failed for r in results)
+            total_sampled = sum(r.sampled for r in results)
+            failed_ds = [r.data_source_id for r in results if r.failed > 0]
+            if failed_ds:
+                logger.warning(
+                    "Consistency verifier completed across %d data sources: "
+                    "%d/%d edges failed verification across %d data sources "
+                    "(%s). Consider force_rebuild on affected sources.",
+                    len(results), total_failed, total_sampled,
+                    len(failed_ds), failed_ds[:10],
+                )
+            else:
+                logger.info(
+                    "Consistency verifier completed across %d data sources: "
+                    "%d edges verified, 0 failures.",
+                    len(results), total_sampled,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Consistency verifier run failed (will retry next tick): %s",
+                exc,
             )
