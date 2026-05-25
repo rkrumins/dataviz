@@ -1,12 +1,18 @@
 /**
- * predicateComposition — pure helpers for the AskBar's composable
- * filter-chip model.
+ * predicateComposition — pure helpers for the QueryCard's composable
+ * filter-row model.
  *
- * Mental model: the draft predicate is ALWAYS an AND group at the root,
- * with at most one condition of each "kind" as a child. Clicking a chip
- * upserts the corresponding condition; clicking the chip's × removes
- * it. OR / NOT composition lives in the Advanced builder — chips stay
- * AND-only so the active query reads top-to-bottom as a single filter.
+ * Mental model: the draft predicate is normalised to a group at the
+ * root (default AND), with children rendered as ConditionRow cards in
+ * insertion order. Adding a filter APPENDS to the children; editing a
+ * row REPLACES the child at that row's index. The user can have any
+ * number of same-kind predicates (e.g. two TextPredicates: name
+ * contains "t2" AND name contains "opp").
+ *
+ * Boolean-chip kinds (isOrphan / isLeaf / isRoot) are still treated as
+ * toggles for a single-instance UX — toggling adds-or-removes the
+ * unique-by-kind instance — so the user doesn't accidentally add two
+ * "No upstream" rows.
  *
  * The store's draftPredicate remains the source of truth: every helper
  * returns a new Predicate tree (or null), and the caller pipes it
@@ -18,11 +24,9 @@ import type { Predicate, EdgeClass } from '@/types/search'
 
 
 /**
- * Each composable chip maps to one of these kinds. Singletons in the
- * draft — adding the same kind twice REPLACES the prior condition.
- * Kinds that take parameters (entityType, tag, layer, property) are
- * still singletons here; multi-value cases are expressed inside the
- * single predicate (e.g. ``entityType in [dataset, schemaField]``).
+ * Kinds that semantically behave like a toggle in the UI: at most one
+ * instance ever exists in the root group, and clicking the chip again
+ * removes it. Other kinds (text, property, tag, etc.) can repeat.
  */
 export type ChipConditionKind =
     | 'text'
@@ -36,6 +40,15 @@ export type ChipConditionKind =
     | 'isRoot'
 
 
+export type RootGroupOp = 'and' | 'or'
+
+
+/** Toggle-style kinds that must stay unique in the root group. */
+const TOGGLE_KINDS: ReadonlySet<string> = new Set([
+    'isOrphan', 'isLeaf', 'isRoot',
+])
+
+
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
 
@@ -44,33 +57,32 @@ const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 // ---------------------------------------------------------------------------
 
 /**
- * Coerce any draft into an AND-rooted group. Null becomes an empty
+ * Coerce any draft into an AND/OR-rooted group. Null becomes an empty
  * AND group; a single leaf becomes a one-child AND group; an existing
- * AND group passes through. OR / NOT roots (only built by the
- * Advanced builder) are wrapped in a one-child AND group so chip
- * composition continues to work — they appear as a single "composite"
- * condition the user can't toggle off via chips (they'd have to open
- * Advanced to edit).
+ * AND/OR group passes through (preserving its op). NOT roots are
+ * wrapped in a one-child AND group — top-level NOT is rare and the
+ * chip strip doesn't compose against it.
  */
-function ensureAndRoot(draft: Predicate | null): {
-    kind: 'group'; op: 'and'; children: Predicate[]
+function ensureRootGroup(draft: Predicate | null): {
+    kind: 'group'; op: RootGroupOp; children: Predicate[]
 } {
     if (!draft) return { kind: 'group', op: 'and', children: [] }
-    if (draft.kind === 'group' && draft.op === 'and') {
-        return { kind: 'group', op: 'and', children: [...draft.children] }
+    if (draft.kind === 'group' && (draft.op === 'and' || draft.op === 'or')) {
+        return { kind: 'group', op: draft.op, children: [...draft.children] }
     }
     return { kind: 'group', op: 'and', children: [draft] }
 }
 
 
 /**
- * Reverse of ``ensureAndRoot``: collapse a single-child AND back to
- * its child, and an empty AND back to ``null``. Keeps the on-the-wire
- * predicate as small as possible so the explain/result diagnostics
- * don't show a redundant outer group.
+ * Reverse of ``ensureRootGroup``: collapse a single-child group back to
+ * its child, and an empty group back to ``null``. Preserves the
+ * group's op for >1 child cases. Keeps the on-the-wire predicate as
+ * small as possible so the explain/result diagnostics don't show a
+ * redundant outer group.
  */
 function collapseRoot(root: {
-    kind: 'group'; op: 'and'; children: Predicate[]
+    kind: 'group'; op: RootGroupOp; children: Predicate[]
 }): Predicate | null {
     if (root.children.length === 0) return null
     if (root.children.length === 1) return root.children[0]
@@ -82,19 +94,29 @@ function collapseRoot(root: {
 // Inspection
 // ---------------------------------------------------------------------------
 
-/** Top-level children of the AND root, in insertion order. */
+/** Top-level children of the root group, in insertion order. */
 export function topLevelConditions(draft: Predicate | null): Predicate[] {
     if (!draft) return []
-    if (draft.kind === 'group' && draft.op === 'and') return draft.children
+    if (draft.kind === 'group' && (draft.op === 'and' || draft.op === 'or')) {
+        return draft.children
+    }
     return [draft]
 }
 
-/** True when a chip of the given kind is currently active in the draft. */
+/** Root operator (defaults to 'and' when there's no explicit group). */
+export function rootGroupOp(draft: Predicate | null): RootGroupOp {
+    if (draft && draft.kind === 'group' && (draft.op === 'and' || draft.op === 'or')) {
+        return draft.op
+    }
+    return 'and'
+}
+
+/** True when any condition of the given kind exists in the root group. */
 export function isChipActive(draft: Predicate | null, kind: ChipConditionKind): boolean {
     return topLevelConditions(draft).some((c) => c.kind === kind)
 }
 
-/** Look up the current value of a chip's condition (null if not active). */
+/** Look up the first condition of the given kind (null if not active). */
 export function findChipCondition(
     draft: Predicate | null,
     kind: ChipConditionKind,
@@ -104,21 +126,28 @@ export function findChipCondition(
 
 
 // ---------------------------------------------------------------------------
-// Upsert / remove
+// Mutation
 // ---------------------------------------------------------------------------
 
 /**
- * Insert or replace the condition with the given kind. Returns the new
- * predicate tree (or the same identity if no change).
+ * Append a new condition to the root group. For toggle-style kinds
+ * (isOrphan / isLeaf / isRoot), behaves like ``upsertCondition`` — the
+ * same kind can't appear twice. For every other kind, the new condition
+ * is appended; duplicates are allowed (two TextPredicates, etc.).
  */
-export function upsertCondition(
+export function appendCondition(
     draft: Predicate | null,
     next: Predicate,
 ): Predicate {
-    const root = ensureAndRoot(draft)
-    const idx = root.children.findIndex((c) => c.kind === next.kind)
-    if (idx >= 0) {
-        root.children[idx] = next
+    const root = ensureRootGroup(draft)
+    const nextKind = next.kind ?? ''
+    if (TOGGLE_KINDS.has(nextKind)) {
+        const idx = root.children.findIndex((c) => c.kind === nextKind)
+        if (idx >= 0) {
+            root.children[idx] = next
+        } else {
+            root.children.push(next)
+        }
     } else {
         root.children.push(next)
     }
@@ -126,15 +155,65 @@ export function upsertCondition(
 }
 
 /**
+ * Replace the child at ``index`` with the supplied predicate. Used by
+ * row-level edits — the row already knows its index.
+ *
+ * If the index is out of bounds, falls back to ``appendCondition``.
+ */
+export function replaceConditionAt(
+    draft: Predicate | null,
+    index: number,
+    next: Predicate,
+): Predicate {
+    const root = ensureRootGroup(draft)
+    if (index < 0 || index >= root.children.length) {
+        return appendCondition(draft, next)
+    }
+    root.children[index] = next
+    return collapseRoot(root) ?? next
+}
+
+/**
+ * Remove the child at ``index`` from the root group. Returns the new
+ * tree or ``null`` if the group empties.
+ */
+export function removeConditionAt(
+    draft: Predicate | null,
+    index: number,
+): Predicate | null {
+    if (!draft) return null
+    const root = ensureRootGroup(draft)
+    if (index < 0 || index >= root.children.length) return draft
+    root.children.splice(index, 1)
+    return collapseRoot(root)
+}
+
+/**
+ * Switch the root group's op between ``and`` / ``or``. No-op when the
+ * draft has zero or one top-level condition (the op only matters with
+ * 2+ children).
+ */
+export function setRootGroupOp(
+    draft: Predicate | null,
+    op: RootGroupOp,
+): Predicate | null {
+    const root = ensureRootGroup(draft)
+    if (root.children.length < 2) return draft
+    root.op = op
+    return collapseRoot(root)
+}
+
+/**
  * Remove the first top-level condition of the given kind. Returns the
- * new predicate tree, or ``null`` if removal empties the AND group.
+ * new predicate tree, or ``null`` if removal empties the group. Kept
+ * for chip-style toggles — see ``toggleConditionKind``.
  */
 export function removeConditionKind(
     draft: Predicate | null,
     kind: ChipConditionKind,
 ): Predicate | null {
     if (!draft) return null
-    const root = ensureAndRoot(draft)
+    const root = ensureRootGroup(draft)
     const idx = root.children.findIndex((c) => c.kind === kind)
     if (idx < 0) return draft
     root.children.splice(idx, 1)
@@ -152,10 +231,23 @@ export function toggleConditionKind(
     if (isChipActive(draft, kind)) {
         return removeConditionKind(draft, kind)
     }
-    return upsertCondition(draft, {
+    return appendCondition(draft, {
         kind,
         edgeClass: DEFAULT_EDGE_CLASS,
     } as Predicate)
+}
+
+/**
+ * @deprecated Replaced by ``appendCondition`` + ``replaceConditionAt``.
+ * Old call sites that overwrote any same-kind predicate with the new
+ * one — see git blame for the rationale. Kept as a thin wrapper for
+ * external callers in case any remain.
+ */
+export function upsertCondition(
+    draft: Predicate | null,
+    next: Predicate,
+): Predicate {
+    return appendCondition(draft, next)
 }
 
 

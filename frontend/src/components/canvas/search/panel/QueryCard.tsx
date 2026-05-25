@@ -71,9 +71,15 @@ import { useDiscovery } from '../builder/useDiscovery'
 
 import { AddFilterPalette } from './AddFilterPalette'
 import { ConditionRow, isRowIncomplete } from './ConditionRow'
+import type { LayerOption } from './layerOptions'
 import {
+    appendCondition,
+    removeConditionAt,
+    replaceConditionAt,
+    rootGroupOp,
+    setRootGroupOp,
     topLevelConditions,
-    upsertCondition,
+    type RootGroupOp,
 } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 
@@ -137,7 +143,7 @@ export const QueryCard: FC<QueryCardProps> = ({
     // from the active view's reference-layout config first, then fall
     // back to any 'layer' / 'layerAssignment' values discovered from
     // entity property samples (for views without an explicit layer set).
-    const discoveredLayers = useViewLayerNames(discovery.getValueSamples)
+    const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
 
     const [mode, setMode] = useState<ViewMode>('visual')
     // Identifies the most recently inserted condition kind so the
@@ -197,21 +203,22 @@ export const QueryCard: FC<QueryCardProps> = ({
     }, [conditions])
 
     const handleRowChange = useCallback((index: number, next: Predicate) => {
-        const cur = conditions
-        // Same-kind replace: upsertCondition handles by kind so editing
-        // an existing row never duplicates it.
-        const updated = [...cur]
-        updated[index] = next
-        seedDraftPredicate(toAndRoot(updated))
-    }, [conditions, seedDraftPredicate])
+        // Index-based replace preserves the root group op (AND vs OR)
+        // and tolerates duplicate kinds — two TextPredicates with
+        // different values, etc.
+        const updated = replaceConditionAt(draftPredicate, index, next)
+        seedDraftPredicate(updated)
+    }, [draftPredicate, seedDraftPredicate])
 
     const handleRowRemove = useCallback((index: number) => {
-        const updated = conditions.filter((_, i) => i !== index)
-        commitDraft(updated.length === 0 ? null : toAndRoot(updated))
-    }, [conditions, commitDraft])
+        const updated = removeConditionAt(draftPredicate, index)
+        commitDraft(updated)
+    }, [draftPredicate, commitDraft])
 
     const handleAddOne = useCallback((p: Predicate) => {
-        const next = upsertCondition(draftPredicate, p)
+        // Append, not replace: the user can now add multiple same-kind
+        // predicates (e.g. two TextPredicates for "t2" AND "opp").
+        const next = appendCondition(draftPredicate, p)
         commitDraft(next)
         setFreshKind(p.kind ?? null)
         // Clear shortly so future edits don't keep stealing focus.
@@ -220,7 +227,7 @@ export const QueryCard: FC<QueryCardProps> = ({
 
     const handleAddMany = useCallback((preds: Predicate[]) => {
         let next = draftPredicate
-        for (const p of preds) next = upsertCondition(next, p)
+        for (const p of preds) next = appendCondition(next, p)
         commitDraft(next)
         // Focus the last inserted kind so the user is on the last row
         // of a paste.
@@ -230,6 +237,13 @@ export const QueryCard: FC<QueryCardProps> = ({
             setTimeout(() => setFreshKind(null), 150)
         }
     }, [draftPredicate, commitDraft])
+
+    const handleRootOpChange = useCallback((op: RootGroupOp) => {
+        const next = setRootGroupOp(draftPredicate, op)
+        commitDraft(next)
+    }, [draftPredicate, commitDraft])
+
+    const currentRootOp = rootGroupOp(draftPredicate)
 
     const handleClearAll = useCallback(() => {
         commitDraft(null)
@@ -363,6 +377,13 @@ export const QueryCard: FC<QueryCardProps> = ({
                         />
                     ) : (
                         <>
+                            {conditions.length >= 2 && (
+                                <MatchOpHeader
+                                    op={currentRootOp}
+                                    onChange={handleRootOpChange}
+                                    disabled={isRunning}
+                                />
+                            )}
                             <AnimatePresence initial={false}>
                                 {conditions.map((cond, i) => (
                                     <motion.div
@@ -372,6 +393,13 @@ export const QueryCard: FC<QueryCardProps> = ({
                                         exit={{ opacity: 0, y: -4 }}
                                         transition={{ duration: 0.12 }}
                                     >
+                                        {i > 0 && (
+                                            <RowJoiner
+                                                op={currentRootOp}
+                                                onChange={handleRootOpChange}
+                                                disabled={isRunning}
+                                            />
+                                        )}
                                         <ConditionRow
                                             value={cond}
                                             discovery={{
@@ -388,6 +416,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                             onChange={(next) => handleRowChange(i, next)}
                                             onRemove={() => handleRowRemove(i)}
                                             onOpenAdvanced={onOpenAdvanced}
+                                            onSubmit={dispatchRun}
                                         />
                                     </motion.div>
                                 ))}
@@ -412,7 +441,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                         entityTypes: knownEntityTypes.slice(0, 8),
                                         tags: discovery.tagValues.slice(0, 8),
                                         propertyKeys: discovery.allKeys.slice(0, 8),
-                                        layers: discoveredLayers.slice(0, 8),
+                                        layers: discoveredLayers.slice(0, 8).map((o) => o.label),
                                     }}
                                     onAdd={handleAddOne}
                                     onAddMany={handleAddMany}
@@ -649,7 +678,7 @@ function PremiumEmptyHero({
     onUseCodeMode: () => void
     discoveredEntityTypes: string[]
     discoveredTags: string[]
-    discoveredLayers: string[]
+    discoveredLayers: LayerOption[]
     discoveryLoading: boolean
     discoveryError: Error | null
     propertyKeyCount: number
@@ -751,12 +780,12 @@ function PremiumEmptyHero({
         examples.push({
             icon: Layers,
             accent: 'text-emerald-300',
-            title: `Browse the ${layer} layer`,
+            title: `Browse the ${layer.label} layer`,
             description:
-                `Everything this view assigns to the ${layer} layer — useful for ` +
+                `Everything this view assigns to the ${layer.label} layer — useful for ` +
                 'understanding the shape of one stage of your pipeline.',
-            chips: [`layer: ${layer}`],
-            predicate: { kind: 'layer', layerAssignment: layer },
+            chips: [`layer: ${layer.label}`],
+            predicate: { kind: 'layer', layerAssignment: layer.value },
         })
     }
 
@@ -1301,6 +1330,120 @@ function buildRunnablePredicate(
 }
 
 
+/**
+ * Header rendered above the conditions list whenever 2+ filters exist.
+ * Surfaces the root group operator (ALL = AND, ANY = OR) as a paired
+ * pill toggle. Without this the user had no idea how their filters
+ * combined — the DSL has always supported both ops, the UI just
+ * hid it.
+ */
+function MatchOpHeader({
+    op, onChange, disabled,
+}: {
+    op: RootGroupOp
+    onChange: (next: RootGroupOp) => void
+    disabled?: boolean
+}) {
+    return (
+        <div className={cn(
+            'flex items-center gap-2.5 mb-1 px-1',
+            'text-[10.5px] font-semibold uppercase tracking-[0.12em]',
+            'text-ink-muted',
+        )}>
+            <span>Match</span>
+            <div className={cn(
+                'inline-flex rounded-full border border-glass-border/70 p-0.5',
+                'bg-canvas-base/40 backdrop-blur-sm',
+            )}>
+                <MatchOpPill
+                    active={op === 'and'}
+                    onClick={() => !disabled && op !== 'and' && onChange('and')}
+                    label="ALL"
+                    sublabel="and"
+                    disabled={disabled}
+                />
+                <MatchOpPill
+                    active={op === 'or'}
+                    onClick={() => !disabled && op !== 'or' && onChange('or')}
+                    label="ANY"
+                    sublabel="or"
+                    disabled={disabled}
+                />
+            </div>
+            <span className="text-ink-muted/60">of the filters below</span>
+        </div>
+    )
+}
+
+
+function MatchOpPill({
+    active, onClick, label, sublabel, disabled,
+}: {
+    active: boolean
+    onClick: () => void
+    label: string
+    sublabel: string
+    disabled?: boolean
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            disabled={disabled}
+            className={cn(
+                'inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full',
+                'text-[11px] font-semibold transition-colors',
+                active
+                    ? 'bg-accent-lineage/20 text-accent-lineage shadow-sm'
+                    : 'text-ink-muted hover:text-ink',
+                disabled && 'opacity-50 cursor-not-allowed',
+            )}
+        >
+            <span>{label}</span>
+            <span className="text-[9px] uppercase tracking-wider opacity-60">{sublabel}</span>
+        </button>
+    )
+}
+
+
+/**
+ * Connector rendered between condition rows showing the active op
+ * (AND/OR). Clickable — clicking flips the root group op so the user
+ * doesn't have to scroll back to the header.
+ */
+function RowJoiner({
+    op, onChange, disabled,
+}: {
+    op: RootGroupOp
+    onChange: (next: RootGroupOp) => void
+    disabled?: boolean
+}) {
+    const next: RootGroupOp = op === 'and' ? 'or' : 'and'
+    return (
+        <div className="flex items-center justify-center py-1 -my-1">
+            <button
+                type="button"
+                onClick={() => !disabled && onChange(next)}
+                disabled={disabled}
+                title={`Switch to ${next.toUpperCase()}`}
+                className={cn(
+                    'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full',
+                    'text-[10px] font-semibold uppercase tracking-wider',
+                    'border border-glass-border/40 bg-canvas-base/40',
+                    op === 'and'
+                        ? 'text-accent-lineage/85'
+                        : 'text-amber-300/90',
+                    'hover:bg-canvas-base/70 hover:border-glass-border/70 transition-colors',
+                    disabled && 'opacity-50 cursor-not-allowed',
+                )}
+            >
+                {op === 'and' ? 'AND' : 'OR'}
+            </button>
+        </div>
+    )
+}
+
+
 function ToggleBtn({
     active, onClick, children,
 }: {
@@ -1361,12 +1504,6 @@ function DiscoveryTelemetry({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function toAndRoot(children: Predicate[]): Predicate {
-    if (children.length === 1) return children[0]
-    return { kind: 'group', op: 'and', children }
-}
-
-
 function useEntityTypeNames(): string[] {
     const schema = useSchemaStore((s) => s.schema)
     if (!schema?.entityTypes) return []
@@ -1375,30 +1512,48 @@ function useEntityTypeNames(): string[] {
 
 
 /**
- * Source layer ids from the active view's reference-layout config
- * (the SILVER/GOLD/REPORTING columns the canvas renders). Falls back
- * to property-value samples for 'layer' / 'layerAssignment' so views
- * without an explicit layer config still surface something.
+ * Resolve layer options for the active view.
+ *
+ * Strategy:
+ *   1. Sample DB-stored ``layer`` / ``layerAssignment`` property values
+ *      (these are exactly what the BE will compare against). For each,
+ *      enrich the label from the view config when possible.
+ *   2. If discovery returns nothing, fall back to the view's reference-
+ *      layout config — using ``layer.id`` as value (typical assignment
+ *      writer) and ``layer.name`` as label.
+ *
+ * This handles both common conventions:
+ *   - DB stores layer IDs → label is enriched from view config
+ *   - DB stores layer names → label IS the value (visibly the same)
  */
-function useViewLayerNames(
+function useViewLayerOptions(
     getValueSamples: (key: string) => unknown[],
-): string[] {
+): LayerOption[] {
     const activeView = useActiveView()
-    return useMemo<string[]>(() => {
-        const seen = new Set<string>()
+    return useMemo<LayerOption[]>(() => {
         const viewLayers = activeView?.layout?.referenceLayout?.layers ?? []
-        for (const layer of viewLayers) {
-            if (layer.id) seen.add(layer.id)
+        const labelOf = new Map<string, string>()
+        for (const l of viewLayers) {
+            if (l.id) labelOf.set(l.id, l.name || l.id)
+            if (l.name) labelOf.set(l.name, l.name)
         }
-        if (seen.size === 0) {
-            // Fallback: sample property values for 'layer' /
-            // 'layerAssignment' across the data source.
-            for (const key of ['layer', 'layerAssignment']) {
-                for (const v of getValueSamples(key)) {
-                    if (typeof v === 'string' && v) seen.add(v)
-                }
+
+        const discovered = new Set<string>()
+        for (const key of ['layer', 'layerAssignment']) {
+            for (const v of getValueSamples(key)) {
+                if (typeof v === 'string' && v) discovered.add(v)
             }
         }
-        return Array.from(seen).sort()
+
+        if (discovered.size > 0) {
+            return Array.from(discovered)
+                .sort()
+                .map((value) => ({ value, label: labelOf.get(value) ?? value }))
+        }
+
+        return viewLayers
+            .filter((l) => !!l.id)
+            .map((l) => ({ value: l.id, label: l.name || l.id }))
+            .sort((a, b) => a.label.localeCompare(b.label))
     }, [activeView, getValueSamples])
 }

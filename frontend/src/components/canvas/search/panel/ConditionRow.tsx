@@ -43,6 +43,7 @@ import type {
 import { UnifiedPicker } from '../builder/editors/UnifiedPicker'
 
 import { OperatorMenu } from './OperatorMenu'
+import type { LayerOption } from './layerOptions'
 
 
 export interface ConditionRowProps {
@@ -55,25 +56,28 @@ export interface ConditionRowProps {
     }
     knownEntityTypes: string[]
     activeEntityTypes: string[]
-    discoveredLayers: string[]
+    discoveredLayers: LayerOption[]
     isRunning: boolean
     autoFocus?: boolean
     onChange: (next: Predicate) => void
     onRemove: () => void
     onOpenAdvanced: () => void
+    /** Pressing Enter inside a scalar value field fires this. The
+     *  panel wires it to the same dispatch the Run button uses. */
+    onSubmit?: () => void
 }
 
 
 export const ConditionRow: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
-    isRunning, autoFocus, onChange, onRemove, onOpenAdvanced,
+    isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
 }) => {
     const meta = getKindMeta(value.kind)
     const incomplete = isIncomplete(value)
     const editor = renderEditor({
         value, onChange, discovery, knownEntityTypes,
         activeEntityTypes, discoveredLayers, isRunning,
-        autoFocus: autoFocus ?? false,
+        autoFocus: autoFocus ?? false, onSubmit,
         onOpenAdvanced,
     })
 
@@ -136,10 +140,14 @@ interface EditorCtx {
     discovery: ConditionRowProps['discovery']
     knownEntityTypes: string[]
     activeEntityTypes: string[]
-    discoveredLayers: string[]
+    discoveredLayers: LayerOption[]
     isRunning: boolean
     autoFocus: boolean
     onOpenAdvanced: () => void
+    /** Fires when the user presses Enter inside a scalar editor —
+     *  signals "run this query now." Optional; rows that don't have
+     *  an Enter-able input ignore it. */
+    onSubmit?: () => void
 }
 
 
@@ -241,7 +249,7 @@ function parseWildcardPattern(raw: string): {
 
 
 function TextEditor({
-    value, onChange, autoFocus,
+    value, onChange, autoFocus, onSubmit,
 }: Omit<EditorCtx, 'value'> & { value: TextPredicate }) {
     const target = (value.target ?? 'name') as TextTarget
     const storedMatch = (value.match ?? 'substring') as TextMatchMode
@@ -315,6 +323,12 @@ function TextEditor({
                     type="text"
                     value={inputValue}
                     onChange={(e) => handleInputChange(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && onSubmit) {
+                            e.preventDefault()
+                            onSubmit()
+                        }
+                    }}
                     placeholder={placeholder}
                     autoFocus={autoFocus}
                     className={cn(inputClass, uiMode === 'wildcard' && 'font-mono')}
@@ -414,7 +428,7 @@ function LayerEditor({
             <UnifiedPicker
                 value={value.layerAssignment}
                 onChange={(next) => onChange({ ...value, layerAssignment: next })}
-                options={discoveredLayers.map((l) => ({ value: l }))}
+                options={discoveredLayers}
                 placeholder="pick a layer…"
                 emptyHint={
                     'No layers configured on this view. (Layers are defined in the '
@@ -482,7 +496,7 @@ const PROPERTY_OP_OPTIONS: { value: PropertyOp; label: string }[] = [
 
 
 function PropertyEditor({
-    value, onChange, discovery, activeEntityTypes, autoFocus,
+    value, onChange, discovery, activeEntityTypes, autoFocus, onSubmit,
 }: Omit<EditorCtx, 'value'> & { value: PropertyPredicate }) {
     const keys = pickKeyOptions(discovery, activeEntityTypes)
     const op: PropertyOp = value.op ?? 'eq'
@@ -529,6 +543,12 @@ function PropertyEditor({
                         type="text"
                         value={value.value == null ? '' : String(value.value)}
                         onChange={(e) => onChange({ ...value, value: coerceValue(e.target.value) })}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' && onSubmit) {
+                                e.preventDefault()
+                                onSubmit()
+                            }
+                        }}
                         placeholder="type a value…"
                         className={inputClass}
                     />
