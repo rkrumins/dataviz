@@ -127,12 +127,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const togglePinTarget = useCanvasStore((s) => s.togglePinTarget)
   const clearPinTargets = useCanvasStore((s) => s.clearPinTargets)
 
+  const pinPathDirection = useCanvasStore((s) => s.pinPathDirection)
   const pinPath = usePinnedLineagePath({
     edges,
     isContainmentEdge,
     focusUrn: trace.focusId,
     pinnedUrns: pinnedTargetUrns,
     containmentParent: parentMap,
+    direction: pinPathDirection,
   })
 
   // Hop distance from focus for the chip "{N}h" badge + tooltip.
@@ -140,6 +142,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     edges,
     isContainmentEdge,
     focusUrn: trace.focusId,
+    skip: pinnedTargetUrns.length === 0,
   })
 
   // Pins are scoped to the active trace's focus — drop them whenever the

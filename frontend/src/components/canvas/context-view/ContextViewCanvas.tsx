@@ -944,12 +944,14 @@ export function ContextViewCanvas({
     }
   }, [trace.focusId, clearPinTargets, setPinHintDismissed])
 
+  const pinPathDirection = useCanvasStore((s) => s.pinPathDirection)
   const pinPath = usePinnedLineagePath({
     edges,
     isContainmentEdge,
     focusUrn: trace.focusId,
     pinnedUrns: pinnedTargetUrns,
     containmentParent: parentMap,
+    direction: pinPathDirection,
   })
 
   const pinKeptUrns = useMemo(() => {
@@ -980,6 +982,7 @@ export function ContextViewCanvas({
     edges,
     isContainmentEdge,
     focusUrn: trace.focusId,
+    skip: pinnedTargetUrns.length === 0,
   })
 
   // Trace filter — when a trace is active, hides everything outside the trace

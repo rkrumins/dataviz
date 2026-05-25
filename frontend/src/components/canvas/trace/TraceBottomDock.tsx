@@ -533,6 +533,8 @@ function PinDockStrip({
 export function PinOptionsPopover({ onClose }: { onClose: () => void }) {
   const pinPathStyle = useCanvasStore((s) => s.pinPathStyle)
   const setPinPathStyle = useCanvasStore((s) => s.setPinPathStyle)
+  const pinPathDirection = useCanvasStore((s) => s.pinPathDirection)
+  const setPinPathDirection = useCanvasStore((s) => s.setPinPathDirection)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -541,15 +543,40 @@ export function PinOptionsPopover({ onClose }: { onClose: () => void }) {
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [onClose])
+  const directionOptions: Array<{ value: 'both' | 'downstream' | 'upstream'; label: string; title: string }> = [
+    { value: 'both', label: 'All paths', title: 'Keep every route between focus and pin, in either direction' },
+    { value: 'downstream', label: 'Down', title: 'Keep only paths leaving the focus (pin downstream of focus)' },
+    { value: 'upstream', label: 'Up', title: 'Keep only paths arriving at the focus (pin upstream of focus)' },
+  ]
   return (
     <div
       ref={ref}
       role="dialog"
       aria-label="Path highlight options"
-      className="absolute bottom-full right-0 mb-2 w-60 p-3 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl z-50 text-xs"
+      className="absolute bottom-full right-0 mb-2 w-64 p-3 rounded-lg border border-glass-border bg-canvas-elevated shadow-xl z-50 text-xs"
     >
       <div className="font-medium text-ink mb-2">Path highlight</div>
       <div className="space-y-2">
+        <div>
+          <div className="text-2xs text-ink-muted mb-1">Direction</div>
+          <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-md p-0.5">
+            {directionOptions.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setPinPathDirection(opt.value)}
+                title={opt.title}
+                className={cn(
+                  'flex-1 px-2 py-1 rounded-md text-2xs font-medium transition-all',
+                  pinPathDirection === opt.value
+                    ? 'bg-amber-500 text-white shadow-sm'
+                    : 'text-ink-muted hover:bg-black/5 dark:hover:bg-white/10'
+                )}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div>
           <div className="text-2xs text-ink-muted mb-1">Intensity</div>
           <div className="flex items-center bg-black/5 dark:bg-white/5 rounded-md p-0.5">

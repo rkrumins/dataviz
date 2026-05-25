@@ -142,6 +142,14 @@ interface CanvasState {
   pinPathStyle: { intensity: 'subtle' | 'bold'; pulse: boolean; flow: boolean }
   setPinPathStyle: (partial: Partial<{ intensity: 'subtle' | 'bold'; pulse: boolean; flow: boolean }>) => void
 
+  // Pin Lineage — orientation filter for the isolated path. 'both' is the
+  // default and keeps every route between focus and pin in either direction;
+  // 'downstream' restricts to focus→pin; 'upstream' restricts to pin→focus.
+  // Changing this re-runs `usePinnedLineagePath`; the chip's red ring tracks
+  // direction-aware unreachability automatically.
+  pinPathDirection: 'both' | 'downstream' | 'upstream'
+  setPinPathDirection: (direction: 'both' | 'downstream' | 'upstream') => void
+
   // Pin Lineage — discoverability hint. Set true when the user dismisses
   // the empty-state pin tip in the dock; reset to false on each new trace
   // focus so the hint re-surfaces for the next exploration.
@@ -387,6 +395,9 @@ export const useCanvasStore = create<CanvasState>()(
         pinPathStyle: { ...state.pinPathStyle, ...partial },
       })),
 
+      pinPathDirection: 'both',
+      setPinPathDirection: (pinPathDirection) => set({ pinPathDirection }),
+
       pinHintDismissed: false,
       setPinHintDismissed: (pinHintDismissed) => set({ pinHintDismissed }),
 
@@ -489,4 +500,12 @@ export const useIsLoading = () => useCanvasStore((s) => s.isLoading)
 export const useCanvasVersion = () => useCanvasStore((s) => s._version)
 export const usePinnedTargetUrns = () => useCanvasStore((s) => s.pinnedTargetUrns)
 export const usePinDisplayMode = () => useCanvasStore((s) => s.pinDisplayMode)
+// Per-field pinPathStyle selectors — narrow subscriptions so an edge
+// renderer that only cares about `intensity` doesn't re-render when the
+// user toggles `pulse`. Matters at edge-count scale (hundreds of
+// LineageEdge instances mount in a typical trace).
+export const usePinPathIntensity = () => useCanvasStore((s) => s.pinPathStyle.intensity)
+export const usePinPathPulse = () => useCanvasStore((s) => s.pinPathStyle.pulse)
+export const usePinPathFlow = () => useCanvasStore((s) => s.pinPathStyle.flow)
+export const usePinPathDirection = () => useCanvasStore((s) => s.pinPathDirection)
 

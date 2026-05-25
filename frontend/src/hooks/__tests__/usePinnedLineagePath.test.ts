@@ -157,4 +157,48 @@ describe('computePinnedPath', () => {
     expect(r.pathNodeUrns.has('ROOT')).toBe(false)
     expect(r.keepForLayoutUrns.has('ROOT')).toBe(true)
   })
+
+  // Direction filter — two pins, one upstream and one downstream of the
+  // focus. With 'both', both routes survive; with 'downstream' only the
+  // downstream route, and the upstream pin becomes unreachable; with
+  // 'upstream' the mirror happens.
+  describe('direction filter', () => {
+    const setup = () => ({
+      // U → A is upstream of focus A; A → D is downstream.
+      edges: [e('U', 'A'), e('A', 'D')],
+      focusUrn: 'A' as string | null,
+      pinnedUrns: ['U', 'D'],
+      containmentParent: noParents,
+    })
+
+    it("'downstream' drops the upstream pin's contribution", () => {
+      const r = computePinnedPath({ ...setup(), direction: 'downstream' })
+      // Downstream-only path: focus A → pinned D. Upstream pin U is forced
+      // into the node set so the chip stays visible, but it's flagged
+      // unreachable in this direction and contributes no edges.
+      expect(r.pathNodeUrns.has('A')).toBe(true)
+      expect(r.pathNodeUrns.has('D')).toBe(true)
+      expect(r.pathEdgeIds.has('A->D')).toBe(true)
+      expect(r.pathEdgeIds.has('U->A')).toBe(false)
+      expect(r.unreachablePinUrns.has('U')).toBe(true)
+      expect(r.unreachablePinUrns.has('D')).toBe(false)
+    })
+
+    it("'upstream' drops the downstream pin's contribution", () => {
+      const r = computePinnedPath({ ...setup(), direction: 'upstream' })
+      expect(r.pathNodeUrns.has('A')).toBe(true)
+      expect(r.pathNodeUrns.has('U')).toBe(true)
+      expect(r.pathEdgeIds.has('U->A')).toBe(true)
+      expect(r.pathEdgeIds.has('A->D')).toBe(false)
+      expect(r.unreachablePinUrns.has('D')).toBe(true)
+      expect(r.unreachablePinUrns.has('U')).toBe(false)
+    })
+
+    it("'both' (default) keeps both orientations and marks neither unreachable", () => {
+      const r = computePinnedPath({ ...setup(), direction: 'both' })
+      expect(r.pathEdgeIds.has('U->A')).toBe(true)
+      expect(r.pathEdgeIds.has('A->D')).toBe(true)
+      expect(r.unreachablePinUrns.size).toBe(0)
+    })
+  })
 })

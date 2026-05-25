@@ -1,9 +1,10 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { ArrowRight, X, Layers3, MousePointerClick } from 'lucide-react'
+import { ArrowRight, X, Layers3, MousePointerClick, Pin } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import type { DrilldownKey } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
+import { useCanvasStore, usePinnedTargetUrns } from '@/store/canvas'
 
 export interface TraceDockDrilldownListProps {
   drilldowns: Map<DrilldownKey, TraceV2Result>
@@ -42,6 +43,9 @@ export function TraceDockDrilldownList({
   onCollapse,
 }: TraceDockDrilldownListProps) {
   const entries = Array.from(drilldowns.entries())
+  const pinnedTargetUrns = usePinnedTargetUrns()
+  const togglePinTarget = useCanvasStore((s) => s.togglePinTarget)
+  const pinnedSet = new Set(pinnedTargetUrns)
 
   if (entries.length === 0) {
     return (
@@ -121,6 +125,7 @@ export function TraceDockDrilldownList({
             const sourceName = displayMap.get(parsed.sourceUrn)?.name ?? parsed.sourceUrn
             const targetName = displayMap.get(parsed.targetUrn)?.name ?? parsed.targetUrn
             const edgeCount = v2.edges?.length ?? 0
+            const isTargetPinned = pinnedSet.has(parsed.targetUrn)
             return (
               <motion.div
                 key={key}
@@ -157,6 +162,13 @@ export function TraceDockDrilldownList({
                   <span className="text-ink truncate font-semibold tracking-tight" title={targetName}>
                     {targetName}
                   </span>
+                  {isTargetPinned && (
+                    <Pin
+                      className="w-3 h-3 shrink-0 text-amber-500"
+                      strokeWidth={2.4}
+                      aria-label="Pinned"
+                    />
+                  )}
                 </div>
 
                 <span
@@ -170,6 +182,28 @@ export function TraceDockDrilldownList({
                   </span>
                   <span className="text-[10px] uppercase tracking-wider text-ink-muted">edges</span>
                 </span>
+
+                <button
+                  type="button"
+                  onClick={() => togglePinTarget(parsed.targetUrn)}
+                  title={isTargetPinned ? `Unpin ${targetName}` : `Pin ${targetName} to the lineage path`}
+                  aria-label={isTargetPinned ? `Unpin ${targetName}` : `Pin ${targetName}`}
+                  aria-pressed={isTargetPinned}
+                  className={cn(
+                    'shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg',
+                    'border transition-all duration-150',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40',
+                    isTargetPinned
+                      ? 'bg-amber-500 border-amber-500 text-white opacity-100'
+                      : cn(
+                          'bg-white/[0.06] border-white/[0.15] text-ink-muted',
+                          'hover:bg-amber-500 hover:text-white hover:border-amber-500',
+                          'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+                        ),
+                  )}
+                >
+                  <Pin className="w-3.5 h-3.5" strokeWidth={2.4} />
+                </button>
 
                 <button
                   type="button"

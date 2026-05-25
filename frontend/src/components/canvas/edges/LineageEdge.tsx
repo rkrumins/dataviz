@@ -9,7 +9,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
-import { useCanvasStore } from '@/store/canvas'
+import { usePinPathIntensity, usePinPathPulse, usePinPathFlow } from '@/store/canvas'
 
 interface LineageEdgeData {
   confidence?: number
@@ -52,7 +52,9 @@ export const LineageEdge = memo(function LineageEdge({
   const isTraced = data?.isTraced ?? false
   const isDimmed = data?.isDimmed ?? false
   const isOnPinPath = data?.isOnPinPath ?? false
-  const pinPathStyle = useCanvasStore((s) => s.pinPathStyle)
+  const pinIntensity = usePinPathIntensity()
+  const pinPulse = usePinPathPulse()
+  const pinFlow = usePinPathFlow()
 
   // Get highlighting state from store
   const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
@@ -225,9 +227,9 @@ export const LineageEdge = memo(function LineageEdge({
           d={edgePath}
           fill="none"
           stroke="#fbbf24"
-          strokeWidth={(isTraced ? 2 : 1.5) + (pinPathStyle.intensity === 'subtle' ? 2 : 3)}
-          strokeOpacity={pinPathStyle.intensity === 'subtle' ? 0.18 : 0.32}
-          className={pinPathStyle.pulse ? 'animate-pulse-soft' : undefined}
+          strokeWidth={(isTraced ? 2 : 1.5) + (pinIntensity === 'subtle' ? 2 : 3)}
+          strokeOpacity={pinIntensity === 'subtle' ? 0.18 : 0.32}
+          className={pinPulse ? 'animate-pulse-soft' : undefined}
           style={{
             filter: 'blur(2.5px)',
           }}
@@ -275,15 +277,15 @@ export const LineageEdge = memo(function LineageEdge({
 
       {/* Animated Flow Layer — on interaction, or always-on for edges on
           the pinned path when the user has flow enabled in pinPathStyle. */}
-      {animated && !isDimmed && (selected || isHighlighted || isTraced || (isOnPinPath && pinPathStyle.flow)) && (
+      {animated && !isDimmed && (selected || isHighlighted || isTraced || (isOnPinPath && pinFlow)) && (
         <path
           d={edgePath}
           fill="none"
           stroke={isOnPinPath ? '#f59e0b' : `url(#flow-pattern-${id})`}
           strokeWidth={isTraced ? 2.5 : 2}
           strokeOpacity={0.5}
-          strokeDasharray={isOnPinPath && pinPathStyle.flow ? '6 6' : undefined}
-          className={isOnPinPath && pinPathStyle.flow ? 'animate-flow' : undefined}
+          strokeDasharray={isOnPinPath && pinFlow ? '6 6' : undefined}
+          className={isOnPinPath && pinFlow ? 'animate-flow' : undefined}
           style={{
             pointerEvents: 'none',
           }}
