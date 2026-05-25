@@ -716,6 +716,8 @@ export const TEMPLATES: SearchTemplate[] = [
             'domain. Drives the ownership-gap report.',
         icon: 'UserX',
         section: 'governance',
+        featured: true,
+        chipLabel: 'No owner',
         inputs: [
             {
                 name: 'ownerKey',
@@ -762,6 +764,8 @@ export const TEMPLATES: SearchTemplate[] = [
             'by domain so you can see which areas have incomplete lineage.',
         icon: 'Unplug',
         section: 'lineage',
+        featured: true,
+        chipLabel: 'Lineage gaps',
         inputs: [],
         build: () => ({
             predicate: {
@@ -933,6 +937,8 @@ export const TEMPLATES: SearchTemplate[] = [
             'disconnected data.',
         icon: 'Disc',
         section: 'discovery',
+        featured: true,
+        chipLabel: 'Orphans by layer',
         inputs: [],
         build: () => ({
             predicate: {

@@ -56,6 +56,7 @@ import { QueryCard } from './panel/QueryCard'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { ScopeStrip } from './panel/ScopeStrip'
+import { TemplatePicker } from './TemplatePicker'
 import {
     defaultInputs,
     featuredTemplates,
@@ -489,7 +490,7 @@ function ResultsHeader({
 // Templates strip (shown when 📋 toggled OR on the empty state)
 // =============================================================================
 
-type StripTab = 'starts' | 'recent'
+type StripTab = 'starts' | 'all' | 'recent'
 
 function TemplatesStrip({
     onSeed, onDismiss, activeDraft,
@@ -530,6 +531,12 @@ function TemplatesStrip({
                         Quick starts
                     </StripTabBtn>
                     <StripTabBtn
+                        active={tab === 'all'}
+                        onClick={() => setTab('all')}
+                    >
+                        Browse all
+                    </StripTabBtn>
+                    <StripTabBtn
                         active={tab === 'recent'}
                         onClick={() => setTab('recent')}
                     >
@@ -549,7 +556,7 @@ function TemplatesStrip({
                     Hide
                 </button>
             </div>
-            {tab === 'starts' ? (
+            {tab === 'starts' && (
                 <>
                     <div className="flex flex-wrap gap-1.5">
                         {featured.map((t) => (
@@ -578,7 +585,13 @@ function TemplatesStrip({
                             : 'Picking a template fills the Query card with editable rows.'}
                     </div>
                 </>
-            ) : (
+            )}
+            {tab === 'all' && (
+                <div className="max-h-[60vh] overflow-y-auto custom-scrollbar -mx-1 px-1">
+                    <TemplatePicker onPick={onSeed} />
+                </div>
+            )}
+            {tab === 'recent' && (
                 <RecentStripList
                     recentQueries={recentQueries}
                     onLoad={onLoadRecent}

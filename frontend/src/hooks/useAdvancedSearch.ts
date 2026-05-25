@@ -432,6 +432,7 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             label: 'Custom query',
             description: 'Built from the predicate editor.',
             icon: 'Wand2',
+            section: 'find',
             inputs: [],
             build: () => ({
                 predicate,

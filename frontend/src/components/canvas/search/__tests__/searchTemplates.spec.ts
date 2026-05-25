@@ -79,7 +79,7 @@ describe('TEMPLATES — every entry produces a valid SearchQuery', () => {
             // SearchQuery ``$defs/Predicate`` ref — it throws on schema
             // violations. Round-trip via encode/decode catches any
             // canonicalisation drift.
-            const encoded = encodePredicate(query.predicate, schema)
+            const encoded = encodePredicate(query.predicate)
             const decoded = decodePredicate(encoded, schema)
             expect(decoded).toEqual(query.predicate)
         },
