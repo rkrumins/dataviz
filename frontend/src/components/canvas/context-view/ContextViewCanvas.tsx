@@ -1954,6 +1954,7 @@ export function ContextViewCanvas({
               traceResult={trace.result}
               highlightedEdges={pinDimHighlightEdges}
               isHighlightActive={pinDimHighlightActive}
+              pinPathEdgeIds={pinPath.pathEdgeIds}
               resolveEdgeColor={resolveEdgeColor}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}

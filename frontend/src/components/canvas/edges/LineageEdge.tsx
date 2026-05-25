@@ -18,6 +18,8 @@ interface LineageEdgeData {
   // Trace flags for consistent highlighting
   isTraced?: boolean
   isDimmed?: boolean
+  // Pin Lineage — edge lies on a pinned focus↔pin sub-lineage path
+  isOnPinPath?: boolean
   [key: string]: unknown
 }
 
@@ -48,6 +50,7 @@ export const LineageEdge = memo(function LineageEdge({
   const edgeType = data?.edgeType || 'produces'
   const isTraced = data?.isTraced ?? false
   const isDimmed = data?.isDimmed ?? false
+  const isOnPinPath = data?.isOnPinPath ?? false
 
   // Get highlighting state from store
   const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
@@ -211,6 +214,22 @@ export const LineageEdge = memo(function LineageEdge({
         />
       )}
 
+      {/* Pin-path glow layer — amber, layered on top of trace glow so
+          edges on the user's pinned route read as "the route" even when
+          they're also part of the broader trace. */}
+      {isOnPinPath && !isDimmed && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke="#fbbf24"
+          strokeWidth={(isTraced ? 2 : 1.5) + 3}
+          strokeOpacity={0.28}
+          style={{
+            filter: 'blur(2.5px)',
+          }}
+        />
+      )}
+
       {/* Main edge path */}
       <BaseEdge
         id={id}
@@ -219,20 +238,32 @@ export const LineageEdge = memo(function LineageEdge({
         style={{
           stroke: isDimmed
             ? '#9ca3af'
-            : isTraced
-              ? '#c084fc'
-              : isHighlighted
-                ? `url(#${highlightGradientId})`
-                : `url(#${gradientId})`,
-          strokeWidth: isDimmed ? 0.75 : selected ? 2 : isTraced ? 2 : (isHighlighted && highlightMode === 'bold' ? 2.5 : 1.5),
+            : isOnPinPath && !isTraced
+              ? '#f59e0b'
+              : isTraced
+                ? '#c084fc'
+                : isHighlighted
+                  ? `url(#${highlightGradientId})`
+                  : `url(#${gradientId})`,
+          strokeWidth: isDimmed
+            ? 0.75
+            : selected
+              ? 2
+              : isOnPinPath
+                ? 2
+                : isTraced
+                  ? 2
+                  : (isHighlighted && highlightMode === 'bold' ? 2.5 : 1.5),
           strokeOpacity: isDimmed ? 0.15 : 0.85,
           filter: isDimmed
             ? 'grayscale(1)'
-            : isTraced
-              ? 'drop-shadow(0 0 2px #c084fc40)'
-              : selected
-                ? `drop-shadow(0 0 3px ${edgeColor}40)`
-                : undefined,
+            : isOnPinPath && !isTraced
+              ? 'drop-shadow(0 0 3px rgba(245,158,11,0.5))'
+              : isTraced
+                ? 'drop-shadow(0 0 2px #c084fc40)'
+                : selected
+                  ? `drop-shadow(0 0 3px ${edgeColor}40)`
+                  : undefined,
           transition: 'stroke-width 0.15s, filter 0.15s, stroke-opacity 0.15s',
           ...highlightStyles,
         }}

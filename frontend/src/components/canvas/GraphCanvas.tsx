@@ -905,6 +905,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             edgeType: edge.data?.edgeType ?? edge.data?.relationship ?? '',
             confidence: edge.data?.confidence ?? 1,
             isTraced: trace.isTracing && trace.result?.traceEdges?.has(edge.id),
+            isOnPinPath: pinPath.active && pinPath.pathEdgeIds.has(edge.id),
             isProjected,
             isAggregated,
             edgeCount: (edge.data as any)?.edgeCount,

@@ -35,6 +35,7 @@ export function LineageFlowOverlay({
   traceResult = null,
   highlightedEdges,
   isHighlightActive = false,
+  pinPathEdgeIds,
   resolveEdgeColor,
   onEdgeDoubleClick,
   showDirection = true,
@@ -62,6 +63,9 @@ export function LineageFlowOverlay({
   traceResult?: any | null,
   highlightedEdges?: Set<string>,
   isHighlightActive?: boolean,
+  /** Pin Lineage — edge ids on the focus↔pin sub-lineage. Edges in this
+   *  set get an amber halo + amber core stroke regardless of mode. */
+  pinPathEdgeIds?: Set<string>,
   resolveEdgeColor?: (edgeType: string) => string,
   /** Double-click handler — used for AGGREGATED-edge drill-down. */
   onEdgeDoubleClick?: (edgeId: string) => void,
@@ -935,9 +939,11 @@ export function LineageFlowOverlay({
           const coreOpacity = isHighlighted ? Math.min(0.95, edgeOpacity * 1.2) : edgeOpacity
 
           const isExpanding = expandingEdgeIds?.has(edge.id) ?? false
+          const isOnPinPath = pinPathEdgeIds?.has(edge.id) ?? false
           const edgeClasses = [
             edge.isTraceEdge ? 'nx-edge-trace' : null,
             isExpanding ? 'nx-edge-expanding' : null,
+            isOnPinPath ? 'nx-edge-pin-path' : null,
           ].filter(Boolean).join(' ') || undefined
           return (
             <g
@@ -1002,21 +1008,46 @@ export function LineageFlowOverlay({
                 />
               )}
 
+              {/* PIN-PATH GLOW — amber halo for edges on the user's pinned
+                  sub-lineage. Layered after the hover/staged halos so the
+                  route reads as the dominant visual when both apply. */}
+              {isOnPinPath && (
+                <path
+                  d={pathD}
+                  style={{
+                    stroke: '#fbbf24',
+                    strokeWidth: dynamicStrokeWidth + 3,
+                    fill: 'none',
+                    strokeOpacity: 0.32,
+                    strokeLinecap: 'round',
+                    filter: 'blur(2.5px)',
+                  }}
+                  className="pointer-events-none"
+                />
+              )}
+
               {/* CORE LINE — stroke uses the per-edge gradient so direction
                   is encoded in the line itself (faded at source, full at
                   target). strokeOpacity is intentionally 1 when the gradient
                   carries opacity in its stops; a fixed opacity is used when
                   the solid-color fallback runs. Reverse-flow edges use the
-                  same styling as forward — only their path geometry differs. */}
+                  same styling as forward — only their path geometry differs.
+                  Pin-path edges override the gradient with a solid amber
+                  stroke so the route reads even in Dim mode. */}
               <path
                 d={pathD}
                 style={{
-                  stroke: isPremiumLook ? `url(#${gradId})` : color,
-                  strokeWidth: dynamicStrokeWidth,
+                  stroke: isOnPinPath
+                    ? '#f59e0b'
+                    : isPremiumLook
+                      ? `url(#${gradId})`
+                      : color,
+                  strokeWidth: isOnPinPath ? dynamicStrokeWidth + 0.5 : dynamicStrokeWidth,
                   fill: 'none',
-                  strokeOpacity: isPremiumLook ? 1 : coreOpacity,
+                  strokeOpacity: isOnPinPath ? 1 : isPremiumLook ? 1 : coreOpacity,
                   strokeDasharray: isGhost ? '6 4' : 'none',
                   strokeLinecap: 'round',
+                  filter: isOnPinPath ? 'drop-shadow(0 0 3px rgba(245,158,11,0.5))' : undefined,
                   transition: 'stroke-width 0.2s ease',
                 }}
                 markerEnd={showDirection ? `url(#arrow-${color.replace(/[^a-zA-Z0-9]/g, '')})` : undefined}

@@ -26,6 +26,8 @@ interface AggregatedEdgeData {
   // Trace flags for consistent highlighting
   isTraced?: boolean
   isDimmed?: boolean
+  // Pin Lineage — edge lies on a pinned focus↔pin sub-lineage path
+  isOnPinPath?: boolean
   [key: string]: unknown
 }
 
@@ -47,6 +49,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
   const sourceCount = data?.sourceEdgeCount ?? 1
   const isTraced = data?.isTraced ?? false
   const isDimmed = data?.isDimmed ?? false
+  const isOnPinPath = data?.isOnPinPath ?? false
 
   // Calculate path
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -86,17 +89,43 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         />
       )}
 
+      {/* Pin-path glow — amber, layered above trace so pinned routes pop. */}
+      {isOnPinPath && !isDimmed && (
+        <path
+          d={edgePath}
+          fill="none"
+          stroke="#fbbf24"
+          strokeWidth={(isTraced ? 2 : 1.5) + 3}
+          strokeOpacity={0.28}
+          style={{
+            filter: 'blur(2.5px)',
+          }}
+        />
+      )}
+
       {/* Edge Path */}
       <BaseEdge
         id={id}
         path={edgePath}
         style={{
           ...(style as React.CSSProperties),
-          stroke: isDimmed ? '#9ca3af' : isTraced ? traceColor : edgeColor,
-          strokeWidth: isDimmed ? 0.75 : isTraced ? 2 : selected ? 2 : 1.5,
+          stroke: isDimmed
+            ? '#9ca3af'
+            : isOnPinPath && !isTraced
+              ? '#f59e0b'
+              : isTraced
+                ? traceColor
+                : edgeColor,
+          strokeWidth: isDimmed ? 0.75 : isOnPinPath ? 2 : isTraced ? 2 : selected ? 2 : 1.5,
           strokeDasharray: '6 4',
           opacity: isDimmed ? 0.15 : isHovered ? 0.9 : 0.6,
-          filter: isTraced && !isDimmed ? `drop-shadow(0 0 2px ${traceColor}40)` : undefined,
+          filter: isDimmed
+            ? undefined
+            : isOnPinPath && !isTraced
+              ? 'drop-shadow(0 0 3px rgba(245,158,11,0.5))'
+              : isTraced
+                ? `drop-shadow(0 0 2px ${traceColor}40)`
+                : undefined,
         }}
         interactionWidth={20}
         className="transition-all duration-200"
