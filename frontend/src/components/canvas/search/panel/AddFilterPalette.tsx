@@ -66,6 +66,19 @@ export interface AddFilterPaletteProps {
         propertyKeys: number
         layers: number
     }
+    /** Discovery samples surfaced inline under each entry as small
+     *  preview chips ("Try: rowCount, owner, layerAssignment…").
+     *  Turns the count chip from a bare number into actionable
+     *  guidance — the user sees WHAT they can filter on, not just
+     *  "11 keys exist". Each list is already ordered by discovery
+     *  frequency (most-used first) so the first 3-4 chips are the
+     *  highest-signal previews. */
+    samples?: {
+        entityTypes?: ReadonlyArray<string>
+        tags?: ReadonlyArray<string>
+        propertyKeys?: ReadonlyArray<string>
+        layers?: ReadonlyArray<string>
+    }
     /** Emit one new predicate to add (and run). The QueryCard will
      *  splice it into the AND group via ``upsertCondition``. */
     onAdd: (predicate: Predicate) => void
@@ -83,6 +96,9 @@ interface PaletteEntry {
     label: string
     description?: string
     count?: number
+    /** Sample values rendered as small chips below the description.
+     *  Up to ~4 are surfaced; the rest fold into a "+N more" chip. */
+    samples?: ReadonlyArray<string>
     /** Either emit a predicate (most rows) or trigger Advanced (paths/groups). */
     action: 'emit' | 'advanced'
     build?: () => Predicate
@@ -90,7 +106,7 @@ interface PaletteEntry {
 
 
 export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
-    counts, onAdd, onAddMany, onOpenAdvanced, disabled,
+    counts, samples, onAdd, onAddMany, onOpenAdvanced, disabled,
 }) => {
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
@@ -111,11 +127,31 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
         const update = () => {
             const r = buttonRef.current?.getBoundingClientRect()
             if (!r) return
-            const popoverW = 320
+            // Anchor under the QueryCard content area so the popover
+            // fills the full panel width instead of looking squashed
+            // at a hardcoded 320px. We walk up from the trigger to
+            // the nearest panel-content container (sentinel attr set
+            // by QueryCard); fall back to the button's positioned
+            // parent when the sentinel isn't found (e.g. when the
+            // palette mounts in a non-panel context). Clamp to
+            // [320, 640] so it never collapses on a thin sidebar and
+            // never grows wider than usable form-row width.
+            const sentinel = buttonRef.current?.closest<HTMLElement>(
+                '[data-search-panel-content]',
+            )
+            const containerRect = sentinel?.getBoundingClientRect()
+            const popoverW = Math.max(
+                320,
+                Math.min(640, containerRect?.width ?? 320),
+            )
             const viewportW = window.innerWidth
-            // Anchor to the bottom-left of the button; clamp so we don't
-            // overflow the right edge of the viewport.
-            const left = Math.min(r.left, viewportW - popoverW - 8)
+            // Anchor to the LEFT edge of the panel container so the
+            // popover starts where the form rows start (visually
+            // consistent), not under the small "Add filter" button.
+            const left = Math.min(
+                containerRect?.left ?? r.left,
+                viewportW - popoverW - 8,
+            )
             setCoords({ top: r.bottom + 4, left, width: popoverW })
         }
         update()
@@ -201,6 +237,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     icon: '◇', label: 'Entity type is…',
                     description: 'Restrict to specific node types',
                     count: counts.entityTypes,
+                    samples: samples?.entityTypes,
                     action: 'emit',
                     build: () => ({
                         kind: 'entityType', op: 'in', values: [],
@@ -211,6 +248,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     icon: '⌬', label: 'Layer is…',
                     description: 'Filter by pipeline layer',
                     count: counts.layers,
+                    samples: samples?.layers,
                     action: 'emit',
                     build: () => ({
                         kind: 'layer', layerAssignment: '',
@@ -226,6 +264,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     icon: '#', label: 'Tag is…',
                     description: 'Has one or more of the chosen tags',
                     count: counts.tags,
+                    samples: samples?.tags,
                     action: 'emit',
                     build: () => ({
                         kind: 'tag', op: 'hasAny', values: [],
@@ -236,6 +275,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     icon: '⚑', label: 'Has property…',
                     description: 'A given metadata key is set on the node',
                     count: counts.propertyKeys,
+                    samples: samples?.propertyKeys,
                     action: 'emit',
                     build: () => ({
                         kind: 'hasProperty', key: '', negate: false,
@@ -246,6 +286,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     icon: '⊜', label: 'Property compares to…',
                     description: 'Filter by property = / ≠ / > / < value',
                     count: counts.propertyKeys,
+                    samples: samples?.propertyKeys,
                     action: 'emit',
                     build: () => ({
                         kind: 'property', key: '', op: 'eq', value: '',
@@ -499,6 +540,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                                                     {entry.description}
                                                 </div>
                                             )}
+                                            {entry.samples && entry.samples.length > 0 && (
+                                                <SampleChips samples={entry.samples} />
+                                            )}
                                         </div>
                                     </button>
                                 ))}
@@ -532,6 +576,56 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             {typeof document !== 'undefined' && popover
                 ? createPortal(popover, document.body)
                 : null}
+        </div>
+    )
+}
+
+
+/**
+ * Sample-value preview chips rendered under category entries
+ * (Entity type, Layer, Tag, Has property, Property compares to).
+ *
+ * Discovery sources order their values by frequency, so the first
+ * few entries are the highest-signal preview — exactly what a user
+ * needs to recognise "oh, the graph has ``layerAssignment`` and
+ * ``rowCount`` props" without having to click into the field.
+ * Chips past the visible cap fold into a ``+N more`` chip so the
+ * row stays one-line-tall on narrow viewports.
+ */
+function SampleChips({ samples }: { samples: ReadonlyArray<string> }) {
+    const VISIBLE_CAP = 4
+    const visible = samples.slice(0, VISIBLE_CAP)
+    const remainder = samples.length - visible.length
+    return (
+        <div className="mt-1 flex flex-wrap items-center gap-1">
+            {visible.map((s) => (
+                <span
+                    key={s}
+                    title={s}
+                    className={cn(
+                        'inline-flex items-center px-1.5 py-[1px] rounded',
+                        'text-[10px] leading-tight font-mono',
+                        'text-accent-lineage/85',
+                        'bg-accent-lineage/[0.08]',
+                        'border border-accent-lineage/15',
+                        'max-w-[14ch] truncate',
+                    )}
+                >
+                    {s}
+                </span>
+            ))}
+            {remainder > 0 && (
+                <span
+                    className={cn(
+                        'inline-flex items-center px-1.5 py-[1px] rounded',
+                        'text-[10px] leading-tight font-mono tabular-nums',
+                        'text-ink-muted/70 bg-black/[0.04] dark:bg-white/[0.04]',
+                        'border border-black/[0.06] dark:border-white/[0.06]',
+                    )}
+                >
+                    +{remainder}
+                </span>
+            )}
         </div>
     )
 }

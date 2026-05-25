@@ -140,59 +140,130 @@ export function ContextViewHeader({
               · Quick    = name/type match across visible nodes
               · Advanced = predicate-tree search across the entire
                           graph at any depth (lineage / containment /
-                          tag / property / paths / aggregations). */}
+                          tag / property / paths / aggregations).
+            Visual treatment (premium uplift):
+              · Glass-morphism backdrop with gradient
+              · Focus state lifts shadow + accent ring (not just border)
+              · Eye-pill scope indicator AND a kbd hint when idle
+              · Subtle inner ring on hover for "this is interactive" */}
         <div className="justify-self-center w-full max-w-md">
           <div className="relative group">
-            <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted/60 group-focus-within:text-accent-lineage transition-colors pointer-events-none" />
+            {/* Accent halo on focus — soft glow behind the input that
+                lifts it off the header gradient. Pure decoration; sits
+                behind the input via negative inset. */}
+            <div
+              aria-hidden
+              className={cn(
+                "absolute -inset-px rounded-[14px] pointer-events-none",
+                "bg-gradient-to-r from-accent-lineage/0 via-accent-lineage/0 to-purple-500/0",
+                "group-focus-within:from-accent-lineage/20 group-focus-within:via-accent-lineage/10 group-focus-within:to-purple-500/15",
+                "group-focus-within:blur-[8px]",
+                "transition-all duration-300",
+              )}
+            />
+            <LucideIcons.Search
+              className={cn(
+                "absolute left-3.5 top-1/2 -translate-y-1/2 w-[15px] h-[15px] pointer-events-none",
+                "text-ink-muted/55 group-focus-within:text-accent-lineage",
+                "group-hover:text-ink-muted/80",
+                "transition-colors duration-200",
+              )}
+              strokeWidth={2.2}
+            />
             <input
               ref={searchInputRef}
               type="text"
-              placeholder="Search visible entities..."
+              placeholder="Search visible entities…"
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
               aria-label="Search visible entities by name or type"
-              className="w-full pl-9 pr-24 py-2 rounded-xl bg-black/[0.04] dark:bg-white/[0.04] border border-black/[0.10] dark:border-white/[0.08] text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:border-accent-lineage/40 focus:bg-black/[0.05] dark:focus:bg-white/[0.06] transition-all"
+              className={cn(
+                "relative w-full pl-10 pr-28 py-2.5 rounded-[13px]",
+                "text-[13.5px] text-ink placeholder:text-ink-muted/45",
+                // Layered fill: subtle gradient + glass border so the
+                // field reads like a deliberate component, not a
+                // default text input.
+                "bg-gradient-to-b from-black/[0.03] to-black/[0.05]",
+                "dark:from-white/[0.04] dark:to-white/[0.025]",
+                "border border-black/[0.08] dark:border-white/[0.08]",
+                "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+                // Hover: brighten the inner ring.
+                "hover:border-black/[0.14] dark:hover:border-white/[0.14]",
+                // Focus: accent ring + lift shadow. Not a system blue
+                // outline.
+                "focus:outline-none",
+                "focus:border-accent-lineage/55 focus:ring-2 focus:ring-accent-lineage/20",
+                "focus:shadow-[0_4px_18px_-6px_rgba(99,102,241,0.35)]",
+                "focus:bg-gradient-to-b focus:from-black/[0.045] focus:to-black/[0.06]",
+                "dark:focus:from-white/[0.06] dark:focus:to-white/[0.045]",
+                "transition-all duration-200",
+              )}
             />
-            {/* Scope chip (right side of input, inside the field). On
-                focus or with query, becomes a Cmd-K hint; otherwise
-                shows the "Visible" pill so the user understands the
-                default scope at a glance. */}
-            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {/* Right-side decoration cluster. Idle: ⌘K hint + Visible
+                scope pill. Typed: clear (X) button. The clear button
+                takes priority because it's the active affordance. */}
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
               {searchQuery ? (
                 <button
                   onClick={() => onSearchChange('')}
                   aria-label="Clear search"
-                  className="p-1 rounded-lg hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted hover:text-ink transition-all"
+                  className={cn(
+                    "p-1 rounded-md transition-all",
+                    "text-ink-muted/70 hover:text-ink",
+                    "hover:bg-black/[0.06] dark:hover:bg-white/[0.08]",
+                  )}
                 >
-                  <LucideIcons.X className="w-3.5 h-3.5" />
+                  <LucideIcons.X className="w-3.5 h-3.5" strokeWidth={2.4} />
                 </button>
               ) : (
-                <span
-                  title="Quick search scans the entities currently visible on this canvas. Use Advanced Search to scan the entire graph."
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-ink-muted/80 bg-black/[0.04] dark:bg-white/[0.06] border border-black/[0.06] dark:border-white/[0.06]"
-                >
-                  <LucideIcons.Eye className="w-2.5 h-2.5" />
-                  Visible
-                </span>
+                <>
+                  {/* Visible-scope chip — anchored to the field's right
+                      edge so the user can't miss the "this only
+                      searches what's on the canvas" message. Premium
+                      treatment: gradient backdrop + subtle inner
+                      shadow + accent eye icon. */}
+                  <span
+                    title="Quick search scans the entities currently visible on this canvas. Use Advanced Search to scan the entire graph."
+                    className={cn(
+                      "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md",
+                      "text-[10px] font-semibold uppercase tracking-wider",
+                      "text-ink-muted/70",
+                      "bg-gradient-to-b from-black/[0.04] to-black/[0.06]",
+                      "dark:from-white/[0.05] dark:to-white/[0.03]",
+                      "border border-black/[0.06] dark:border-white/[0.06]",
+                      "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+                    )}
+                  >
+                    <LucideIcons.Eye className="w-2.5 h-2.5" strokeWidth={2.4} />
+                    Visible
+                  </span>
+                </>
               )}
             </div>
           </div>
           {/* Inline helper / escalation row — always visible so users
               learn the boundary between quick and advanced search.
               Compresses to icon-only on narrower viewports via the
-              hidden md:inline classes.
-              When the user already typed something, the escalation
-              link seeds the Advanced panel with that text so they
-              don't retype. */}
+              hidden md:inline classes. When the user already typed
+              something, the escalation link seeds the Advanced panel
+              with that text so they don't retype. */}
           {onOpenAdvancedSearch && (
-            <div className="mt-1 px-1 flex items-center justify-between gap-2 text-[10.5px] leading-none">
-              <span className="text-ink-muted/70 truncate">
-                <LucideIcons.Layers className="inline-block w-2.5 h-2.5 mr-1 -mt-0.5 opacity-70" />
+            <div className="mt-1.5 px-1 flex items-center justify-between gap-2 text-[10.5px] leading-none">
+              <span className="text-ink-muted/65 truncate">
+                <LucideIcons.Layers
+                  className="inline-block w-2.5 h-2.5 mr-1 -mt-0.5 opacity-70"
+                  strokeWidth={2.2}
+                />
                 <span className="hidden md:inline">Searching visible entities only. </span>
                 <span className="md:hidden">Visible only. </span>
                 <button
                   onClick={() => onOpenAdvancedSearch(searchQuery.trim() || undefined)}
-                  className="font-semibold text-accent-lineage hover:underline transition-colors"
+                  className={cn(
+                    "font-semibold text-accent-lineage",
+                    "hover:text-accent-lineage hover:underline",
+                    "underline-offset-[3px] decoration-accent-lineage/40 hover:decoration-accent-lineage/80",
+                    "transition-colors",
+                  )}
                 >
                   {searchQuery.trim()
                     ? `Search "${searchQuery.trim()}" across entire graph →`

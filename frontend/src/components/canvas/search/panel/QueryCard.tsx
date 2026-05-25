@@ -265,10 +265,13 @@ export const QueryCard: FC<QueryCardProps> = ({
     const showHeader = !isEmptyVisual
 
     return (
-        <div className={cn(
-            'rounded-2xl border border-glass-border bg-canvas-base/30',
-            'flex flex-col',
-        )}>
+        <div
+            data-search-panel-content
+            className={cn(
+                'rounded-2xl border border-glass-border bg-canvas-base/30',
+                'flex flex-col',
+            )}
+        >
             {/* Header — hidden in the empty-visual hero state */}
             {showHeader && (
                 <div className={cn(
@@ -397,6 +400,19 @@ export const QueryCard: FC<QueryCardProps> = ({
                                         tags: discovery.tagValues.length,
                                         propertyKeys: discovery.allKeys.length,
                                         layers: discoveredLayers.length,
+                                    }}
+                                    samples={{
+                                        // Discovery already orders these
+                                        // by frequency; pass the head so
+                                        // the palette previews the
+                                        // highest-signal candidates first
+                                        // (the SampleChips component
+                                        // additionally caps at 4 visible
+                                        // + a "+N" overflow chip).
+                                        entityTypes: knownEntityTypes.slice(0, 8),
+                                        tags: discovery.tagValues.slice(0, 8),
+                                        propertyKeys: discovery.allKeys.slice(0, 8),
+                                        layers: discoveredLayers.slice(0, 8),
                                     }}
                                     onAdd={handleAddOne}
                                     onAddMany={handleAddMany}
