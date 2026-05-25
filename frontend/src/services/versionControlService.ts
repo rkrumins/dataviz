@@ -268,6 +268,45 @@ export async function history(
   )
 }
 
+/**
+ * V1-6 functional pull: re-anchor the caller's working set against
+ * the current branch HEAD.
+ *
+ * Returns `rebased` (staged ops that re-anchor cleanly), `dropped`
+ * (delete/delete coincidences removed automatically), and
+ * `conflicts` (per-entity conflicts the user must resolve). On
+ * conflict the staged op stays in the working set with its original
+ * `base_content_hash` so the conflict resolver can show ours/theirs
+ * and let the user pick a resolution without losing work.
+ */
+export interface PullConflict {
+  object_kind: 'node' | 'edge'
+  object_id: string
+  conflict_class: 'edit_edit' | 'edit_delete' | 'delete_edit' | 'add_add'
+  base_content_hash: string | null
+  current_content_hash: string | null
+  staged_change_type: string
+}
+
+export interface PullResult {
+  previous_base: string | null
+  new_base: string | null
+  rebased: number
+  dropped: number
+  conflicts: PullConflict[]
+}
+
+export async function pullWorkingSet(
+  wsId: string,
+  graphId: string,
+  branch: string,
+): Promise<PullResult> {
+  return authFetch<PullResult>(
+    `${base(wsId)}/${graphId}/branches/${encodeURIComponent(branch)}/working-set/pull`,
+    { method: 'POST' },
+  )
+}
+
 export async function createBranch(
   wsId: string,
   graphId: string,

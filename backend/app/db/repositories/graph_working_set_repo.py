@@ -251,6 +251,139 @@ async def to_ordered_ops(
     ]
 
 
+async def rebase_against_snapshot(
+    session: AsyncSession,
+    *,
+    working_set: GraphWorkingSetORM,
+    new_base_commit_id: str | None,
+    snapshot,
+) -> dict[str, Any]:
+    """V1-6 pull: re-anchor a working set against a fresher branch HEAD.
+
+    Walks every staged change in the working set. For each:
+
+    * **clean** — the object's current ``content_hash`` at the new
+      HEAD matches the staged ``base_content_hash`` (or both sides
+      agree the object doesn't exist). The staged op still applies
+      cleanly; update its ``base_content_hash`` to the new value (or
+      leave NULL for adds). The op stays in the working set.
+    * **dropped** — both sides deleted the same object; the staged
+      delete is now a no-op and is removed from the working set.
+    * **conflict** — the staged change cannot be auto-applied.
+      Categories mirror the merge-engine conflict shape:
+      ``edit_edit`` (both modified), ``edit_delete`` (we edited,
+      remote deleted), ``delete_edit`` (we deleted, remote edited),
+      ``add_add`` (both created independently). The staged op is
+      LEFT IN PLACE with its original ``base_content_hash`` so the UI
+      can render the conflict and let the user resolve.
+
+    After processing, the working set's ``base_commit_id`` advances
+    to ``new_base_commit_id`` and ``ws_change_version`` bumps so
+    other tabs notice. Conflicts are returned to the caller; the
+    endpoint serializes them in the response shape the frontend
+    pull-dialog consumes.
+    """
+    from backend.app.services.graph_versioning.manifest import partition_for
+
+    previous_base = working_set.base_commit_id
+    rows = await list_changes(session, working_set_id=working_set.id)
+    if not rows:
+        working_set.base_commit_id = new_base_commit_id
+        working_set.ws_change_version += 1
+        working_set.updated_at = _now()
+        return {
+            "previous_base": previous_base,
+            "new_base": new_base_commit_id,
+            "rebased": 0,
+            "dropped": 0,
+            "conflicts": [],
+        }
+
+    rebased = 0
+    dropped = 0
+    conflicts: list[dict[str, Any]] = []
+
+    for row in rows:
+        partition_idx = partition_for(row.object_id, snapshot.partition_count)
+        partition = snapshot.partitions.get(partition_idx) if snapshot else None
+        entry = (
+            partition.entries.get(row.object_id) if partition is not None else None
+        )
+        current_hash = entry[1] if entry else None
+        staged_base = row.base_content_hash
+        is_create = row.change_type.startswith("add_")
+        is_delete = row.change_type.startswith("delete_")
+
+        # Decide.
+        if current_hash is None:
+            if is_create:
+                # Object didn't exist on either side at staging; still
+                # doesn't exist at new HEAD → clean rebase.
+                rebased += 1
+                continue
+            if is_delete:
+                # We deleted, remote also no longer has it → drop.
+                await session.delete(row)
+                dropped += 1
+                continue
+            # update on a now-deleted object → conflict.
+            conflicts.append({
+                "object_kind": row.object_kind,
+                "object_id": row.object_id,
+                "conflict_class": "edit_delete",
+                "base_content_hash": staged_base,
+                "current_content_hash": None,
+                "staged_change_type": row.change_type,
+            })
+            continue
+
+        if is_create:
+            # Object exists at new HEAD but we wanted to create it →
+            # add/add collision.
+            conflicts.append({
+                "object_kind": row.object_kind,
+                "object_id": row.object_id,
+                "conflict_class": "add_add",
+                "base_content_hash": staged_base,
+                "current_content_hash": current_hash,
+                "staged_change_type": row.change_type,
+            })
+            continue
+
+        # update or delete: compare staged base with current.
+        if staged_base == current_hash:
+            # Clean: our op still applies on top of the current state.
+            rebased += 1
+            continue
+
+        # Mismatch — surface as conflict; keep the staged op + its
+        # original base_content_hash so the user can resolve.
+        if is_delete:
+            klass = "delete_edit"
+        else:
+            klass = "edit_edit"
+        conflicts.append({
+            "object_kind": row.object_kind,
+            "object_id": row.object_id,
+            "conflict_class": klass,
+            "base_content_hash": staged_base,
+            "current_content_hash": current_hash,
+            "staged_change_type": row.change_type,
+        })
+
+    working_set.base_commit_id = new_base_commit_id
+    working_set.ws_change_version += 1
+    working_set.updated_at = _now()
+
+    return {
+        "previous_base": previous_base,
+        "new_base": new_base_commit_id,
+        "rebased": rebased,
+        "dropped": dropped,
+        "conflicts": conflicts,
+    }
+
+
 __all__ = [
     "get_or_open",
     "stage_changes",
@@ -258,4 +391,5 @@ __all__ = [
     "discard_all",
     "to_ordered_ops",
     "coalesce_decision",
+    "rebase_against_snapshot",
 ]

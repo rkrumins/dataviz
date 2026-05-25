@@ -43,6 +43,25 @@ export type SyncState =
   | 'conflict'
   | 'error'
 
+/**
+ * One per-entity conflict surfaced by `/working-set/pull`. Mirrors the
+ * server-side `PullConflict` shape — the staged op is left in the
+ * working set with its original `base_content_hash` so the user can
+ * pick a resolution without losing work.
+ */
+export interface PendingConflict {
+  objectKind: 'node' | 'edge'
+  objectId: string
+  conflictClass:
+    | 'edit_edit'
+    | 'edit_delete'
+    | 'delete_edit'
+    | 'add_add'
+  baseContentHash: string | null
+  currentContentHash: string | null
+  stagedChangeType: string
+}
+
 export interface GraphEditorState {
   graphId: string | null
   branch: string
@@ -62,6 +81,9 @@ export interface GraphEditorState {
    * SSE event from another tab of this user. Null if no such signal
    * has been observed yet. */
   remoteWsVersion: number | null
+  /** Per-entity conflicts from the most recent `/working-set/pull`.
+   * Cleared after the user resolves and re-commits, or on `reset`. */
+  pendingConflicts: PendingConflict[]
 
   init: (graphId: string, branch: string, baseCommitId: string | null) => void
   applyOp: (
@@ -87,6 +109,21 @@ export interface GraphEditorState {
   /** Commit succeeded: clear ops, advance base, back to clean. */
   clearAfterCommit: (newCommitId: string) => void
   setSyncState: (s: SyncState) => void
+  /** V1-6: apply the result of `pullWorkingSet`. Advances baseCommitId
+   * to the new HEAD and stores per-entity conflicts (if any) so the
+   * UI can render the resolver. Sets syncState to `conflict` when
+   * conflicts exist, `clean` when the working set is empty after
+   * pull, or `dirty` otherwise. */
+  applyPullResult: (result: {
+    new_base: string | null
+    rebased: number
+    dropped: number
+    conflicts: PendingConflict[]
+  }) => void
+  /** Drop one entry from `pendingConflicts` once the user resolves
+   * it. The actual staged op update / re-stage is handled by the
+   * caller (it depends on which resolution the user picked). */
+  dismissConflict: (objectKind: 'node' | 'edge', objectId: string) => void
   summary: () => Record<EditorChangeType, number>
   reset: () => void
 }
@@ -108,6 +145,7 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
   conflictHead: null,
   remoteHead: null,
   remoteWsVersion: null,
+  pendingConflicts: [],
 
   init: (graphId, branch, baseCommitId) =>
     set({
@@ -121,6 +159,7 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
       conflictHead: null,
       remoteHead: null,
       remoteWsVersion: null,
+      pendingConflicts: [],
     }),
 
   applyOp: (input) => {
@@ -248,9 +287,50 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
       conflictHead: null,
       remoteHead: null,
       remoteWsVersion: null,
+      pendingConflicts: [],
     }),
 
   setSyncState: (s) => set({ syncState: s }),
+
+  applyPullResult: (result) => {
+    const s = get()
+    const hasConflicts = result.conflicts.length > 0
+    let nextSync: SyncState
+    if (hasConflicts) {
+      nextSync = 'conflict'
+    } else if (s.ops.length > 0) {
+      nextSync = 'dirty'
+    } else {
+      nextSync = 'clean'
+    }
+    set({
+      baseCommitId: result.new_base,
+      pendingConflicts: result.conflicts,
+      syncState: nextSync,
+      // We've now reconciled against the server's head — clear the
+      // "remote_advanced" markers so the UI shows clean / dirty /
+      // conflict (depending on the result), not "updates available".
+      conflictHead: null,
+      remoteHead: null,
+    })
+  },
+
+  dismissConflict: (objectKind, objectId) => {
+    const remaining = get().pendingConflicts.filter(
+      (c) => !(c.objectKind === objectKind && c.objectId === objectId),
+    )
+    set({
+      pendingConflicts: remaining,
+      // If the user worked through every conflict, fall back to dirty
+      // (their ops are still pending commit) or clean.
+      syncState:
+        remaining.length > 0
+          ? 'conflict'
+          : get().ops.length > 0
+            ? 'dirty'
+            : 'clean',
+    })
+  },
 
   summary: () => {
     const acc = {
@@ -273,5 +353,6 @@ export const useGraphEditorStore = create<GraphEditorState>((set, get) => ({
       conflictHead: null,
       remoteHead: null,
       remoteWsVersion: null,
+      pendingConflicts: [],
     }),
 }))

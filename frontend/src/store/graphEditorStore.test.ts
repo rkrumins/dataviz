@@ -200,4 +200,136 @@ describe('graphEditorStore', () => {
       expect(S().remoteWsVersion).toBeNull()
     })
   })
+
+  describe('V1-6 pull / applyPullResult', () => {
+    it('clean pull (no conflicts, no ops) → state stays clean and base advances', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyPullResult({
+        new_base: 'gcmt_new',
+        rebased: 0, dropped: 0, conflicts: [],
+      })
+      expect(S().baseCommitId).toBe('gcmt_new')
+      expect(S().syncState).toBe('clean')
+      expect(S().pendingConflicts).toEqual([])
+    })
+
+    it('pull with conflicts → syncState becomes conflict, list populated', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyPullResult({
+        new_base: 'gcmt_new',
+        rebased: 0, dropped: 0,
+        conflicts: [
+          {
+            objectKind: 'node', objectId: 'urn:n1',
+            conflictClass: 'edit_edit',
+            baseContentHash: 'h_BASE',
+            currentContentHash: 'h_NEW',
+            stagedChangeType: 'update_node',
+          },
+        ],
+      })
+      expect(S().syncState).toBe('conflict')
+      expect(S().pendingConflicts).toHaveLength(1)
+      expect(S().pendingConflicts[0].objectId).toBe('urn:n1')
+    })
+
+    it('pull clears remoteHead and conflictHead markers', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().onRefMoved('gcmt_remote')  // sets conflictHead + remoteHead
+      S().applyPullResult({
+        new_base: 'gcmt_remote',
+        rebased: 0, dropped: 0, conflicts: [],
+      })
+      expect(S().conflictHead).toBeNull()
+      expect(S().remoteHead).toBeNull()
+    })
+
+    it('pull with conflicts AND ops still goes to conflict (ops take backseat)', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyOp(addNode('urn:a'))
+      expect(S().syncState).toBe('dirty')
+      S().applyPullResult({
+        new_base: 'gcmt_new',
+        rebased: 1, dropped: 0,
+        conflicts: [
+          {
+            objectKind: 'node', objectId: 'urn:b',
+            conflictClass: 'edit_edit',
+            baseContentHash: 'h0',
+            currentContentHash: 'h1',
+            stagedChangeType: 'update_node',
+          },
+        ],
+      })
+      expect(S().syncState).toBe('conflict')
+      // The pre-pull ops are still in the working set.
+      expect(S().ops).toHaveLength(1)
+    })
+
+    it('dismissConflict removes one entry; last one returns to dirty/clean', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyPullResult({
+        new_base: 'gcmt_new',
+        rebased: 0, dropped: 0,
+        conflicts: [
+          {
+            objectKind: 'node', objectId: 'urn:n1',
+            conflictClass: 'edit_edit',
+            baseContentHash: 'h0', currentContentHash: 'h1',
+            stagedChangeType: 'update_node',
+          },
+          {
+            objectKind: 'edge', objectId: 'urn:e1',
+            conflictClass: 'delete_edit',
+            baseContentHash: 'h2', currentContentHash: 'h3',
+            stagedChangeType: 'delete_edge',
+          },
+        ],
+      })
+      S().dismissConflict('node', 'urn:n1')
+      expect(S().pendingConflicts).toHaveLength(1)
+      expect(S().pendingConflicts[0].objectId).toBe('urn:e1')
+      expect(S().syncState).toBe('conflict')
+      S().dismissConflict('edge', 'urn:e1')
+      expect(S().pendingConflicts).toEqual([])
+      // No ops + no conflicts → clean.
+      expect(S().syncState).toBe('clean')
+    })
+
+    it('reset and init both clear pendingConflicts', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyPullResult({
+        new_base: 'gcmt_new', rebased: 0, dropped: 0,
+        conflicts: [
+          {
+            objectKind: 'node', objectId: 'urn:n1',
+            conflictClass: 'add_add',
+            baseContentHash: null, currentContentHash: 'h',
+            stagedChangeType: 'add_node',
+          },
+        ],
+      })
+      S().reset()
+      expect(S().pendingConflicts).toEqual([])
+      S().init('g1', 'main', 'gcmt_old')
+      expect(S().pendingConflicts).toEqual([])
+    })
+
+    it('clearAfterCommit clears any leftover pendingConflicts', () => {
+      S().init('g1', 'main', 'gcmt_old')
+      S().applyPullResult({
+        new_base: 'gcmt_new', rebased: 0, dropped: 0,
+        conflicts: [
+          {
+            objectKind: 'node', objectId: 'urn:n1',
+            conflictClass: 'edit_edit',
+            baseContentHash: 'a', currentContentHash: 'b',
+            stagedChangeType: 'update_node',
+          },
+        ],
+      })
+      S().clearAfterCommit('gcmt_after')
+      expect(S().pendingConflicts).toEqual([])
+    })
+  })
 })

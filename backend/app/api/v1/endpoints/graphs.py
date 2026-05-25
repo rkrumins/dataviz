@@ -378,6 +378,86 @@ async def discard_working_set(
     await ws_repo.discard_all(session, working_set=wset)
 
 
+@router.post(
+    "/{ws_id}/graphs/{graph_id}/branches/{branch}/working-set/pull"
+)
+async def pull_working_set(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    branch: str = Path(...),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    user=Depends(get_optional_user),
+    _=Depends(requires("workspace:graph:edit", workspace="ws_id")),
+):
+    """V1-6 functional pull: rebase the caller's working set against
+    the current branch HEAD and surface any per-entity conflicts.
+
+    Response shape:
+    ```
+    {
+      "previous_base": "gcmt_OLD" | null,
+      "new_base":      "gcmt_NEW" | null,
+      "rebased":       <int>,   # staged ops that re-anchor cleanly
+      "dropped":       <int>,   # delete/delete coincidences removed
+      "conflicts": [
+        {
+          "object_kind": "node" | "edge",
+          "object_id":   "...",
+          "conflict_class": "edit_edit" | "edit_delete" |
+                            "delete_edit" | "add_add",
+          "base_content_hash":    "..." | null,
+          "current_content_hash": "..." | null,
+          "staged_change_type":   "update_node" | ...
+        }, ...
+      ]
+    }
+    ```
+
+    Behavior contract:
+    * Clean rebases stay in the working set with refreshed
+      ``base_content_hash`` so a subsequent commit succeeds.
+    * delete/delete coincidences silently drop from the working set.
+    * Every other mismatch surfaces in ``conflicts`` with the staged
+      op LEFT IN PLACE (original ``base_content_hash``) so the
+      frontend can render the conflict and offer ours/theirs
+      resolution without losing the user's work.
+    * After pull, the working set's ``base_commit_id`` advances to
+      the current branch HEAD; a subsequent ``POST /commits`` still
+      enforces the head-CAS so a race with another concurrent
+      commit returns ``409 ref_moved`` and the user pulls again.
+    """
+    try:
+        graph = await graph_repo.get_graph(session, graph_id)
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(404, detail={"code": "not_found"})
+
+    ref = await graph_repo.get_branch_ref(
+        session, graph_id=graph_id, branch=branch
+    )
+
+    wset = await ws_repo.get_or_open(
+        session,
+        graph_id=graph_id,
+        branch=branch,
+        user_id=_uid(user),
+        base_commit_id=ref.commit_id,
+    )
+
+    # Load the current HEAD's snapshot — the manifest carries every
+    # (key -> content_hash) we need to compare against staged ops.
+    new_snapshot = await graph_repo.load_snapshot(
+        session, graph_id=graph_id, commit_id=ref.commit_id,
+    )
+
+    result = await ws_repo.rebase_against_snapshot(
+        session,
+        working_set=wset,
+        new_base_commit_id=ref.commit_id,
+        snapshot=new_snapshot,
+    )
+    return result
+
+
 # ── commit / history / branches ────────────────────────────────────
 
 @router.post("/{ws_id}/graphs/{graph_id}/branches/{branch}/commits")
