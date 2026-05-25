@@ -325,12 +325,36 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             // BE skips the containment clamp entirely and returns
             // results from outside the view — the "Legacy_Archive
             // leaking in" bug).
-            const canvasRootUrns = computeViewRootUrns(
+            const allCanvasRootUrns = computeViewRootUrns(
                 canvas.nodes,
                 canvas.edges,
                 schema?.containmentEdgeTypes ?? [],
                 schema?.rootEntityTypes ?? [],
             )
+
+            // Client-side safety net: cap matches the BE default
+            // (DEEP_SEARCH_SCOPE_ROOT_URNS_CAP=256). If the view has
+            // more top-level containers than this, we truncate
+            // client-side rather than letting the BE 422. The diagnostic
+            // surfaces the truncation so the user sees they're not
+            // searching the full set.
+            const SAFE_ROOT_URN_CAP = 256
+            const wasTruncated = allCanvasRootUrns.length > SAFE_ROOT_URN_CAP
+            const canvasRootUrns = wasTruncated
+                ? allCanvasRootUrns.slice(0, SAFE_ROOT_URN_CAP)
+                : allCanvasRootUrns
+            if (wasTruncated) {
+                // One-shot console warning (production hardening — the
+                // diagnostic in ZeroResultsDiagnostic is the primary
+                // user-facing channel; the console line helps support).
+                // eslint-disable-next-line no-console
+                console.warn(
+                    `[advancedSearch] view has ${allCanvasRootUrns.length} `
+                    + `top-level containers; truncating to ${SAFE_ROOT_URN_CAP}. `
+                    + 'Switch to "Entire data source" or raise '
+                    + 'DEEP_SEARCH_SCOPE_ROOT_URNS_CAP to reach the rest.',
+                )
+            }
 
             // Precedence for scope.rootUrns:
             //   1. Drill frame (highest priority — user drilled into

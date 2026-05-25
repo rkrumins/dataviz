@@ -1795,3 +1795,74 @@ class TestHydrateAncestorsBatched:
 
         # Should return cleanly without touching the provider.
         await _hydrate_ancestors(_UnusedProvider(), [])
+
+
+class TestScopeRootUrnsCap:
+    """Verify the env-tunable cap on ``SearchScope.root_urns``.
+
+    Default is 256; was previously a hardcoded ``max_length=64``. The
+    cap is now enforced by a Pydantic ``model_validator`` that reads
+    ``DeepSearchSettings.scope_root_urns_cap`` at validation time.
+    """
+
+    def _clear_settings_cache(self):
+        from backend.app.services.deep_search.settings import (
+            get_deep_search_settings,
+        )
+        get_deep_search_settings.cache_clear()
+
+    def test_default_cap_is_256(self, monkeypatch):
+        """At the default 256, exactly 256 URNs validates."""
+        monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
+        self._clear_settings_cache()
+        from backend.common.models.search import SearchScope
+        urns = [f"urn:c{i}" for i in range(256)]
+        scope = SearchScope(viewId="v1", rootUrns=urns)
+        assert len(scope.root_urns) == 256
+
+    def test_default_cap_rejects_257(self, monkeypatch):
+        """One over the default cap raises with the cap value in the msg."""
+        monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
+        self._clear_settings_cache()
+        from backend.common.models.search import SearchScope
+        from pydantic import ValidationError as PydanticValidationError
+        urns = [f"urn:c{i}" for i in range(257)]
+        with pytest.raises(PydanticValidationError, match="256"):
+            SearchScope(viewId="v1", rootUrns=urns)
+
+    def test_env_override_raises_cap(self, monkeypatch):
+        """DEEP_SEARCH_SCOPE_ROOT_URNS_CAP=500 lets 500 URNs through."""
+        monkeypatch.setenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", "500")
+        self._clear_settings_cache()
+        from backend.common.models.search import SearchScope
+        urns = [f"urn:c{i}" for i in range(500)]
+        scope = SearchScope(viewId="v1", rootUrns=urns)
+        assert len(scope.root_urns) == 500
+
+    def test_env_override_lowers_cap(self, monkeypatch):
+        """A view with a lower deploy-time cap rejects above-cap requests."""
+        monkeypatch.setenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", "10")
+        self._clear_settings_cache()
+        from backend.common.models.search import SearchScope
+        from pydantic import ValidationError as PydanticValidationError
+        # 10 still passes.
+        SearchScope(viewId="v1", rootUrns=[f"urn:{i}" for i in range(10)])
+        # 11 fails with the lower cap in the message.
+        with pytest.raises(PydanticValidationError, match="10"):
+            SearchScope(viewId="v1", rootUrns=[f"urn:{i}" for i in range(11)])
+
+    def test_twenty_roots_works(self, monkeypatch):
+        """The user-reported scale (20 layers / containers) validates."""
+        monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
+        self._clear_settings_cache()
+        from backend.common.models.search import SearchScope
+        urns = [f"urn:layer{i}" for i in range(20)]
+        scope = SearchScope(viewId="v1", rootUrns=urns)
+        assert len(scope.root_urns) == 20
+
+    def test_empty_root_urns_accepted(self, monkeypatch):
+        """Empty / None root URNs are not subject to the cap (no narrowing)."""
+        self._clear_settings_cache()
+        from backend.common.models.search import SearchScope
+        SearchScope(viewId="v1")  # None
+        SearchScope(viewId="v1", rootUrns=[])  # empty list

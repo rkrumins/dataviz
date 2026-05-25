@@ -33,7 +33,7 @@ Design notes
 """
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .graph import GraphNode
 
@@ -550,11 +550,15 @@ class SearchScope(_Base):
         ),
     )
     root_urns: Optional[List[str]] = Field(
-        None, alias="rootUrns", max_length=64,
+        None, alias="rootUrns",
         description=(
             "Optional narrowing hint. Each URN must be a descendant of "
             "(or equal to) one of the view's allowed roots; URNs that "
-            "fail validation are dropped server-side."
+            "fail validation are dropped server-side. Capped at "
+            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 256). The "
+            "cap exists to bound the Cypher IN-list size + containment "
+            "expansion fanout on multi-domain views with many top-level "
+            "containers."
         ),
     )
     max_depth: Optional[int] = Field(
@@ -569,6 +573,33 @@ class SearchScope(_Base):
         ),
     )
     layer_assignment: Optional[str] = Field(None, alias="layerAssignment")
+
+    @model_validator(mode="after")
+    def _enforce_root_urns_cap(self) -> "SearchScope":
+        """Enforce ``DeepSearchSettings.scope_root_urns_cap`` at the
+        model layer so the cap is env-tunable (the static
+        ``Field(max_length=...)`` constraint can't read settings at
+        class-definition time).
+
+        Lazy-import the settings to avoid the circular dependency
+        between ``common.models`` and ``app.services``.
+        """
+        if self.root_urns is None or not self.root_urns:
+            return self
+        from backend.app.services.deep_search.settings import (
+            get_deep_search_settings,
+        )
+        cap = get_deep_search_settings().scope_root_urns_cap
+        if len(self.root_urns) > cap:
+            raise ValueError(
+                f"scope.rootUrns has {len(self.root_urns)} entries, "
+                f"exceeding the cap of {cap}. Either narrow the view "
+                f"to fewer top-level containers, raise "
+                f"DEEP_SEARCH_SCOPE_ROOT_URNS_CAP, or use "
+                f"scope_mode='data_source' to bypass the per-root "
+                f"containment expansion."
+            )
+        return self
 
 
 SortKey = Literal[

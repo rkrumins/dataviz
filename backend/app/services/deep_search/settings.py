@@ -40,6 +40,13 @@ class DeepSearchSettings:
     # --- Aggregation / pagination ---
     sub_aggregation_parent_cap: int
     scope_pre_filter_threshold: int
+    # Maximum number of root URNs allowed on ``SearchScope.root_urns``.
+    # The FE passes the canvas's top-level container URNs as a
+    # narrowing hint for "All nodes in this view" mode; a deeply
+    # multi-domain pipeline view can have many top-level containers.
+    # Default 256 comfortably covers realistic deployments while
+    # bounding the Cypher IN-list size + containment expansion fanout.
+    scope_root_urns_cap: int
 
     # --- Storage ---
     searchable_text_cap_bytes: int
@@ -80,6 +87,9 @@ class DeepSearchSettings:
             ),
             scope_pre_filter_threshold=_read_int(
                 "DEEP_SEARCH_SCOPE_PRE_FILTER_THRESHOLD", 8,
+            ),
+            scope_root_urns_cap=_read_int(
+                "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", 256,
             ),
             searchable_text_cap_bytes=_read_int(
                 "DEEP_SEARCH_SEARCHABLE_TEXT_CAP", 8192,

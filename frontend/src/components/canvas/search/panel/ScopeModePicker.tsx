@@ -48,7 +48,8 @@ const MODES: Record<ScopeMode, ModeMeta> = {
     view: {
         label: 'All nodes in this view',
         sub: 'Expands into collapsed folders too. Slower; useful when you '
-            + 'know a match lives in a sub-tree you haven’t opened yet.',
+            + 'know a match lives in a sub-tree you haven’t opened yet. '
+            + 'Up to 256 top-level containers per query.',
         icon: LayersIcon,
         tone: 'text-emerald-300',
         badge: 'slower',
