@@ -8,7 +8,6 @@ import {
   ChevronUp,
   Clock,
   X,
-  Workflow,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { UseUnifiedTraceResult } from '@/hooks/useUnifiedTrace'
@@ -16,6 +15,7 @@ import { DEFAULT_TRACE_DEPTH } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useCountUp } from './useCountUp'
 import { TraceRecentPopover } from './TraceRecentPopover'
+import { TraceModeIndicator, deriveTraceMode } from './TraceModeIndicator'
 
 export interface TraceDockTitleBarProps {
   trace: UseUnifiedTraceResult
@@ -148,35 +148,13 @@ export function TraceDockTitleBar({
     >
       <span className="sr-only" aria-live="polite" aria-atomic="true">{liveMsg}</span>
 
-      {/* Section identity — solid accent badge for high-contrast readability */}
-      <div className="relative flex items-center gap-2.5 shrink-0">
-        <div
-          className={cn(
-            'relative w-10 h-10 rounded-xl flex items-center justify-center shrink-0',
-            'bg-gradient-to-br from-accent-lineage to-purple-600',
-            'border border-accent-lineage/60',
-            'shadow-lg shadow-accent-lineage/30',
-          )}
-        >
-          <Workflow className="w-5 h-5 text-white drop-shadow-[0_0_4px_rgba(168,85,247,0.6)]" strokeWidth={2.4} aria-hidden />
-          {/* Pulsing live indicator — anchored to the badge bottom-right */}
-          <span
-            className="absolute -bottom-0.5 -right-0.5 inline-flex w-2.5 h-2.5"
-            aria-hidden="true"
-          >
-            <span className="absolute inset-0 rounded-full bg-accent-lineage/60 animate-ping motion-reduce:animate-none" />
-            <span className="relative w-2.5 h-2.5 rounded-full bg-accent-lineage border-2 border-canvas-elevated" />
-          </span>
-        </div>
-        <div className="flex flex-col leading-tight">
-          <span className="text-[11px] font-bold text-ink uppercase tracking-[0.18em]">
-            {trace.isLoading ? 'Tracing…' : 'Active Trace'}
-          </span>
-          <span className="text-[10px] text-ink-muted tracking-wide">
-            {trace.isLoading ? 'computing lineage' : 'live lineage view'}
-          </span>
-        </div>
-      </div>
+      {/* Section identity — mode-coloured indicator that names the active trace
+          (Root Cause / Impact / Full Lineage), mirroring the EntityDrawer's
+          trace action vocabulary so the canvas state matches the entry point. */}
+      <TraceModeIndicator
+        mode={deriveTraceMode(trace.showUpstream, trace.showDownstream)}
+        isLoading={trace.isLoading}
+      />
 
       {/* Vertical hairline divider — matches ContextViewHeader idiom */}
       <span
