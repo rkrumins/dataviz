@@ -109,7 +109,44 @@ def _count_and_validate(query: SearchQuery) -> int:
             f"predicate has {leaves} leaves (max {max_leaves})"
         )
     _reject_unbounded_text_any(query)
+    _reject_unsupported_sub_aggregation(query)
     return leaves
+
+
+def _reject_unsupported_sub_aggregation(query: SearchQuery) -> None:
+    """Reject requests that ask for sub-aggregation cascade until the
+    executor implements it (W1.2 follow-up).
+
+    The model accepts ``AggregationSpec.sub_aggregation`` and the
+    response shape carries ``SearchAggregateBucket.sub_buckets``, but
+    the executor today does not populate ``sub_buckets`` — silently
+    dropping the sub-spec produces a partial response that looks
+    successful. Better to fail loudly with a clear remediation
+    message until the batched-Cypher implementation lands.
+
+    Also enforces "one level only" — three-level cascade is out of
+    scope per the contract (search.py docs).
+    """
+    aggs = query.options.aggregations or []
+    for i, spec in enumerate(aggs):
+        if spec.sub_aggregation is None:
+            continue
+        # Three-level cascade is permanently rejected by contract.
+        if spec.sub_aggregation.sub_aggregation is not None:
+            raise ValidationError(
+                f"aggregations[{i}].sub_aggregation has its own "
+                f"sub_aggregation — three-level cascade is not supported. "
+                f"Drill in by re-issuing a scoped request instead."
+            )
+        # Two-level cascade is accepted by the contract but executor
+        # work is pending — surface as an explicit error rather than
+        # silently dropping the sub-spec.
+        raise ValidationError(
+            f"aggregations[{i}].sub_aggregation is not yet executed by "
+            f"this provider. Re-issue the request scoped to a single "
+            f"parent bucket to drill in. (Sub-aggregation cascade is "
+            f"tracked as a follow-up to W1.2.)"
+        )
 
 
 def _is_unbounded_text_any(predicate) -> bool:

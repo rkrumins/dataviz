@@ -276,6 +276,44 @@ class TestServiceValidator:
         )
         _count_and_validate(q)
 
+    def test_sub_aggregation_rejected_until_executor_lands(self):
+        """W1.2: sub_aggregation is accepted by the contract but the
+        executor does not yet populate ``sub_buckets``. Rather than
+        silently drop the sub-spec, the service rejects so callers
+        get a clear "drill via re-issue" remediation."""
+        spec = AggregationSpec(
+            by="ancestorType",
+            ancestor_entity_types=["domain"],
+            sub_aggregation=AggregationSpec(by="entityType"),
+        )
+        q = SearchQuery(
+            predicate=EntityTypePredicate(op="in", values=["dataset"]),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(aggregations=[spec]),
+        )
+        with pytest.raises(ValidationError, match="sub_aggregation is not yet"):
+            _count_and_validate(q)
+
+    def test_three_level_sub_aggregation_cascade_rejected(self):
+        """Three-level cascade is permanently rejected by contract.
+        Even when the executor lands the two-level batched path,
+        three levels stay out of scope (drill via re-issue)."""
+        spec = AggregationSpec(
+            by="ancestorType",
+            ancestor_entity_types=["domain"],
+            sub_aggregation=AggregationSpec(
+                by="entityType",
+                sub_aggregation=AggregationSpec(by="property", property_key="logicalType"),
+            ),
+        )
+        q = SearchQuery(
+            predicate=EntityTypePredicate(op="in", values=["dataset"]),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(aggregations=[spec]),
+        )
+        with pytest.raises(ValidationError, match="three-level cascade"):
+            _count_and_validate(q)
+
 
 # ---------------------------------------------------------------------------
 # Predicate compiler — WHERE fragment + parameter binding
