@@ -88,6 +88,7 @@ import {
     type RootGroupOp,
 } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
+import { buildRunnablePredicate } from './runnablePredicate'
 
 
 export interface QueryCardProps {
@@ -1423,19 +1424,6 @@ function useRunMode(): [RunMode, (next: RunMode) => void] {
  * and Run button to detect "the draft hasn't changed since the last
  * dispatch" (no need to re-fire).
  */
-function buildRunnablePredicate(
-    draft: Predicate | null,
-): { predicate: Predicate; hash: string } | null {
-    if (!draft) return null
-    const conditions = topLevelConditions(draft).filter(
-        (c) => !isRowIncomplete(c),
-    )
-    if (conditions.length === 0) return null
-    const predicate: Predicate = conditions.length === 1
-        ? conditions[0]
-        : { kind: 'group', op: 'and', children: conditions }
-    return { predicate, hash: JSON.stringify(predicate) }
-}
 
 
 /**
