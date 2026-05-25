@@ -69,6 +69,13 @@ class AggregationTriggerRequest(BaseModel):
         alias="maxRetries",
         description="Max retry attempts on transient failures; 0 \u2264 value \u2264 10.",
     )
+    # When True, the worker's _maybe_skip_unchanged short-circuit is
+    # bypassed even when the graph + ontology fingerprint matches a
+    # prior completed run. Lets non-UI callers (CLI, automation,
+    # external schedulers) force a full rebuild while preserving
+    # ``trigger_source`` for audit (UI triggers already bypass via
+    # ``trigger_source='manual'``).
+    force_rebuild: bool = Field(False, alias="forceRebuild")
 
     @field_validator("timeout_secs")
     @classmethod
@@ -127,6 +134,10 @@ class InternalTriggerRequest(BaseModel):
         alias="maxRetries",
         description="Max retry attempts on transient failures; 0 \u2264 value \u2264 10.",
     )
+    # Mirror of ``AggregationTriggerRequest.force_rebuild``: when True,
+    # the worker's skip-unchanged short-circuit is bypassed for this
+    # job. Threaded through the viz-service \u2192 Control Plane proxy.
+    force_rebuild: bool = Field(False, alias="forceRebuild")
 
     @field_validator("timeout_secs")
     @classmethod

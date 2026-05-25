@@ -108,6 +108,12 @@ async def init_aggregation_db() -> None:
                 # a "Reused" badge. NULL on legacy rows = treat as False.
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS last_run_was_skipped BOOLEAN DEFAULT FALSE",
+                # 2026-05-25 — per-job override that forces a real
+                # rebuild even when the fingerprint matches. Lets
+                # non-UI callers force a rebuild while preserving the
+                # original ``trigger_source`` for audit.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS force_rebuild BOOLEAN DEFAULT FALSE",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

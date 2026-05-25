@@ -97,6 +97,14 @@ class AggregationJobORM(Base):
     # edges in <1s. NULL on legacy rows; treat NULL as False.
     last_run_was_skipped = Column(Boolean, nullable=True, default=False)
 
+    # When True the worker's _maybe_skip_unchanged short-circuit is
+    # bypassed for this specific job regardless of trigger_source.
+    # Set at trigger time from the request body so non-UI callers
+    # (CLI, automation, external schedulers) can force a real
+    # rebuild while preserving the original trigger_source for
+    # audit. NULL on legacy rows; treat NULL as False.
+    force_rebuild = Column(Boolean, nullable=True, default=False)
+
     # ── Idempotency ─────────────────────────────────────────────────
     idempotency_key = Column(Text, nullable=True)
 

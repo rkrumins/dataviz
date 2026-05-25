@@ -256,6 +256,9 @@ async def test_skip_bypassed_when_kill_switch_disabled(monkeypatch):
 # ── Ontology-fingerprint null handling ───────────────────────────────────
 
 
+# ── Ontology-fingerprint null handling ───────────────────────────────────
+
+
 @pytest.mark.asyncio
 async def test_skip_applies_when_ontology_fingerprint_missing_on_either_side():
     """Pre-ontology-fingerprint rows have NULL. Skip should still apply
@@ -283,3 +286,79 @@ async def test_skip_applies_when_ontology_fingerprint_missing_on_either_side():
         session, job_set, fingerprint_before=job_set.graph_fingerprint_before,
     )
     assert result is not None, "missing prior ontology fingerprint should not block skip"
+
+
+# ── Force-rebuild override (P1-4) ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_force_rebuild_bypasses_skip_even_with_matching_fingerprints():
+    """Per-job force_rebuild=True always rebuilds, even with matching
+    fingerprints + a routine trigger source. Lets non-UI callers force
+    a rebuild while preserving trigger_source for audit."""
+    worker = _make_worker()
+    prior = _make_prior()
+    session = _FakeSession(prior_jobs=[prior])
+    job = _make_job()
+    job.force_rebuild = True  # non-default
+
+    result = await worker._maybe_skip_unchanged(
+        session, job, fingerprint_before=job.graph_fingerprint_before,
+    )
+
+    assert result is None, "force_rebuild must bypass the skip"
+
+
+@pytest.mark.asyncio
+async def test_force_rebuild_default_false_allows_skip():
+    """Default force_rebuild=False (or NULL on legacy rows) doesn't
+    interfere with the existing skip semantics."""
+    worker = _make_worker()
+    prior = _make_prior()
+    session = _FakeSession(prior_jobs=[prior])
+    job = _make_job()
+    job.force_rebuild = False
+
+    result = await worker._maybe_skip_unchanged(
+        session, job, fingerprint_before=job.graph_fingerprint_before,
+    )
+
+    assert result is not None, "skip should still apply when force_rebuild is False"
+
+
+@pytest.mark.asyncio
+async def test_force_rebuild_null_treated_as_false():
+    """Legacy rows pre-date the column → force_rebuild is None. Skip
+    must still apply (NULL is not truthy)."""
+    worker = _make_worker()
+    prior = _make_prior()
+    session = _FakeSession(prior_jobs=[prior])
+    job = _make_job()
+    job.force_rebuild = None  # legacy row
+
+    result = await worker._maybe_skip_unchanged(
+        session, job, fingerprint_before=job.graph_fingerprint_before,
+    )
+
+    assert result is not None, "NULL force_rebuild must be treated as False"
+
+
+# ── Schema validation ────────────────────────────────────────────────────
+
+
+def test_trigger_request_accepts_force_rebuild_camelcase():
+    """The field deserialises from both snake_case and camelCase."""
+    from backend.app.services.aggregation.schemas import AggregationTriggerRequest
+
+    req_camel = AggregationTriggerRequest(forceRebuild=True)
+    req_snake = AggregationTriggerRequest(force_rebuild=True)
+    assert req_camel.force_rebuild is True
+    assert req_snake.force_rebuild is True
+
+
+def test_trigger_request_force_rebuild_default_false():
+    """Backward compat: callers that don't pass the flag get False."""
+    from backend.app.services.aggregation.schemas import AggregationTriggerRequest
+
+    req = AggregationTriggerRequest()
+    assert req.force_rebuild is False

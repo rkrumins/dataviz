@@ -218,6 +218,9 @@ class AggregationService:
                 # Per-job overrides: when None, the worker / ORM defaults
                 # apply (timeout_secs → _JOB_TIMEOUT_SECS env, max_retries → 3).
                 timeout_secs=request.timeout_secs,
+                # Force-rebuild override: bypasses worker._maybe_skip_unchanged
+                # even when fingerprints match. Default False from the schema.
+                force_rebuild=bool(getattr(request, "force_rebuild", False)),
                 created_at=_now(),
             )
             # Only set max_retries when caller supplied one, so the ORM

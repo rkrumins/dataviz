@@ -570,6 +570,12 @@ class AggregationWorker:
         flag = os.getenv("AGGREGATION_SKIP_UNCHANGED_ENABLED", "true")
         if str(flag).strip().lower() not in ("1", "true", "yes", "on"):
             return None
+        # Per-job override: lets non-UI callers (CLI, automation,
+        # external schedulers) force a real rebuild while preserving
+        # ``trigger_source`` for audit. Treat NULL as False for
+        # legacy rows that pre-date the column.
+        if getattr(job, "force_rebuild", False):
+            return None
         if job.trigger_source in ("manual", "drift", "purge"):
             return None
         if not fingerprint_before:
