@@ -449,12 +449,13 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingSearchSeed: null,
-    // Default to 'view' (All nodes in this view): matches the user's
-    // mental model of "search everything in my current view including
-    // collapsed folders." 'visible' (only currently-rendered nodes)
-    // is available via the ScopeModePicker for the user who wants
-    // strictly what's on-screen.
-    scopeMode: 'view',
+    // Default to 'visible' — matches "search what I can see" mental
+    // model, includes unassigned / orphan nodes the canvas surfaces,
+    // and uses a single-clause WHERE filter that's hard to get wrong.
+    // 'view' (collapsed-folder expansion via containment) is
+    // available on demand for power users who want to reach into
+    // sub-trees they haven't opened yet.
+    scopeMode: 'visible',
     selectionParent: null,
     selectedIndices: [],
 

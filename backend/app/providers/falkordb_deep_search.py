@@ -985,8 +985,16 @@ def _build_scope_continuation(
     if not ctypes:
         return "", {}
     rel = "|".join(_sanitize_label(t) for t in ctypes)
+    # ``*0..D`` (not ``*1..D``) so the root URNs themselves count as
+    # in-scope matches. With ``*1..D`` a node that IS a root (e.g. a
+    # top-level container the user sees on the canvas like "Sales")
+    # is dropped because there's no 1+ hop path from itself to
+    # itself — the candidate scan finds it, the scope continuation
+    # silently discards it, and the user sees no result. This made
+    # "View" mode strictly more restrictive than "Visible" mode for
+    # the very roots that define the view.
     fragment = (
-        f"MATCH (root)-[:{rel}*1..{int(max_depth)}]->(n) "
+        f"MATCH (root)-[:{rel}*0..{int(max_depth)}]->(n) "
         f"WHERE root.urn IN $_rootUrns "
         f"WITH DISTINCT n"
     )

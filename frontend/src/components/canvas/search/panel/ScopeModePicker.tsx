@@ -32,28 +32,49 @@ interface ModeMeta {
     sub: string
     icon: typeof Eye
     tone: string
+    /** Soft badge shown next to the label in the dropdown. */
+    badge?: 'recommended' | 'slower' | 'power-user'
 }
 
 
 const MODES: Record<ScopeMode, ModeMeta> = {
     visible: {
         label: 'Visible nodes',
-        sub: 'only what’s on the canvas right now',
+        sub: 'Only what’s on the canvas right now — fast and predictable.',
         icon: Eye,
         tone: 'text-accent-lineage',
+        badge: 'recommended',
     },
     view: {
         label: 'All nodes in this view',
-        sub: 'including collapsed folders inside the view',
+        sub: 'Expands into collapsed folders too. Slower; useful when you '
+            + 'know a match lives in a sub-tree you haven’t opened yet.',
         icon: LayersIcon,
         tone: 'text-emerald-300',
+        badge: 'slower',
     },
     data_source: {
         label: 'Entire data source',
-        sub: 'crosses this view’s boundary — power-user mode',
+        sub: 'Crosses this view’s boundary. Results may include nodes '
+            + 'that are not in this view.',
         icon: Globe2,
         tone: 'text-amber-300',
+        badge: 'power-user',
     },
+}
+
+
+const BADGE_STYLES: Record<NonNullable<ModeMeta['badge']>, string> = {
+    'recommended': 'bg-accent-lineage/15 text-accent-lineage',
+    'slower': 'bg-emerald-500/15 text-emerald-300',
+    'power-user': 'bg-amber-500/15 text-amber-300',
+}
+
+
+const BADGE_LABEL: Record<NonNullable<ModeMeta['badge']>, string> = {
+    'recommended': 'Recommended',
+    'slower': 'Slower',
+    'power-user': 'Power-user',
 }
 
 
@@ -177,8 +198,17 @@ export function ScopeModePicker() {
                                             )}>
                                                 {m.label}
                                             </span>
+                                            {m.badge && (
+                                                <span className={cn(
+                                                    'inline-flex items-center gap-0.5 px-1.5 py-0 rounded',
+                                                    'text-[9px] font-semibold uppercase tracking-wider',
+                                                    BADGE_STYLES[m.badge],
+                                                )}>
+                                                    {BADGE_LABEL[m.badge]}
+                                                </span>
+                                            )}
                                             {active && (
-                                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-semibold uppercase tracking-wider bg-accent-lineage/15 text-accent-lineage">
+                                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-semibold uppercase tracking-wider bg-canvas-base/60 text-ink-muted">
                                                     Active
                                                 </span>
                                             )}

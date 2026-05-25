@@ -961,18 +961,23 @@ class TestCandidateCypher:
         assert " AND true" not in cypher
 
     def test_with_scope_continuation(self):
+        # ``*0..D`` (not ``*1..D``) — the root URNs themselves count
+        # as in-scope matches. Previously ``*1..D`` silently excluded
+        # any node that IS a root, which made "View" scope mode
+        # strictly more restrictive than "Visible" mode for top-level
+        # containers the user can see on the canvas.
         cypher = _build_candidate_cypher(
             where_fragment="n.x = $p0",
             entity_types_param=False,
             scope_continuation=(
-                "MATCH (root)-[:CONTAINS*1..12]->(n) "
+                "MATCH (root)-[:CONTAINS*0..12]->(n) "
                 "WHERE root.urn IN $_rootUrns WITH DISTINCT n"
             ),
             candidate_cap=CANDIDATE_CAP,
         )
         assert cypher.endswith(
             f"WITH n LIMIT {CANDIDATE_CAP} "
-            f"MATCH (root)-[:CONTAINS*1..12]->(n) "
+            f"MATCH (root)-[:CONTAINS*0..12]->(n) "
             f"WHERE root.urn IN $_rootUrns WITH DISTINCT n"
         )
 
