@@ -31,13 +31,19 @@ export interface UseRevealNodeDeps {
     setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
     /** Hydrate a parent node's children. Throws on network failure. */
     loadChildren: (nodeId: string) => Promise<void>
+    /** Optional: after the hit is selected (or after we fall back to the
+     *  deepest reachable ancestor), bring that node into the viewport.
+     *  Receives the canvas-node id (== URN for the ContextView layout).
+     *  Implementations typically rAF-poll the DOM because the row may
+     *  not have re-rendered yet after the spine expansion. */
+    scrollIntoView?: (nodeId: string) => void
 }
 
 /** The reveal callback signature consumed by SearchMapPanel and friends. */
 export type RevealNode = (urn: string, ancestorPath: AncestorRef[]) => Promise<void>
 
 
-export function useRevealNode({ setExpandedNodes, loadChildren }: UseRevealNodeDeps): RevealNode {
+export function useRevealNode({ setExpandedNodes, loadChildren, scrollIntoView }: UseRevealNodeDeps): RevealNode {
     const selectNode = useCanvasStore((s) => s.selectNode)
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]) => {
@@ -96,6 +102,7 @@ export function useRevealNode({ setExpandedNodes, loadChildren }: UseRevealNodeD
                     setExpandedNodes((prev) => new Set([...prev, parentNode.id]))
                 }
             }
+            scrollIntoView?.(hitNode.id)
             return
         }
 
@@ -108,8 +115,9 @@ export function useRevealNode({ setExpandedNodes, loadChildren }: UseRevealNodeD
             )
             if (ancNode) {
                 selectNode(ancNode.id)
+                scrollIntoView?.(ancNode.id)
                 break
             }
         }
-    }, [setExpandedNodes, loadChildren, selectNode])
+    }, [setExpandedNodes, loadChildren, selectNode, scrollIntoView])
 }
