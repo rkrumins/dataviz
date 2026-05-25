@@ -178,7 +178,7 @@ export function ContextViewHeader({
               onChange={(e) => onSearchChange(e.target.value)}
               aria-label="Search visible entities by name or type"
               className={cn(
-                "relative w-full pl-10 pr-28 py-2.5 rounded-[13px]",
+                "relative w-full pl-10 pr-32 py-2.5 rounded-[13px]",
                 "text-[13.5px] text-ink placeholder:text-ink-muted/45",
                 // Layered fill: subtle gradient + glass border so the
                 // field reads like a deliberate component, not a
@@ -199,11 +199,16 @@ export function ContextViewHeader({
                 "transition-all duration-200",
               )}
             />
-            {/* Right-side decoration cluster. Idle: ⌘K hint + Visible
-                scope pill. Typed: clear (X) button. The clear button
-                takes priority because it's the active affordance. */}
-            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
-              {searchQuery ? (
+            {/* Right-side affordance cluster.
+                Idle: a sparkles button that opens Advanced Search
+                (scans the entire graph at any depth) + a separator
+                + a passive "Visible" scope label so the user
+                understands the default quick-search scope.
+                Typed: a clear (X) button on the left of the
+                advanced trigger so the user can wipe and retry
+                without losing the escalation affordance. */}
+            <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+              {searchQuery && (
                 <button
                   onClick={() => onSearchChange('')}
                   aria-label="Clear search"
@@ -215,29 +220,46 @@ export function ContextViewHeader({
                 >
                   <LucideIcons.X className="w-3.5 h-3.5" strokeWidth={2.4} />
                 </button>
-              ) : (
-                <>
-                  {/* Visible-scope chip — anchored to the field's right
-                      edge so the user can't miss the "this only
-                      searches what's on the canvas" message. Premium
-                      treatment: gradient backdrop + subtle inner
-                      shadow + accent eye icon. */}
-                  <span
-                    title="Quick search scans the entities currently visible on this canvas. Use Advanced Search to scan the entire graph."
-                    className={cn(
-                      "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md",
-                      "text-[10px] font-semibold uppercase tracking-wider",
-                      "text-ink-muted/70",
-                      "bg-gradient-to-b from-black/[0.04] to-black/[0.06]",
-                      "dark:from-white/[0.05] dark:to-white/[0.03]",
-                      "border border-black/[0.06] dark:border-white/[0.06]",
-                      "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
-                    )}
-                  >
-                    <LucideIcons.Eye className="w-2.5 h-2.5" strokeWidth={2.4} />
-                    Visible
-                  </span>
-                </>
+              )}
+              {!searchQuery && (
+                <span
+                  title="Quick search scans the entities currently visible on this canvas."
+                  className={cn(
+                    "hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md",
+                    "text-[10px] font-semibold uppercase tracking-wider",
+                    "text-ink-muted/70",
+                    "bg-gradient-to-b from-black/[0.04] to-black/[0.06]",
+                    "dark:from-white/[0.05] dark:to-white/[0.03]",
+                    "border border-black/[0.06] dark:border-white/[0.06]",
+                    "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+                  )}
+                >
+                  <LucideIcons.Eye className="w-2.5 h-2.5" strokeWidth={2.4} />
+                  Visible
+                </span>
+              )}
+              {onOpenAdvancedSearch && (
+                <button
+                  onClick={() => onOpenAdvancedSearch(searchQuery.trim() || undefined)}
+                  aria-label={searchQuery.trim()
+                    ? `Search "${searchQuery.trim()}" across the entire graph with Advanced Search`
+                    : 'Open Advanced Search — scan the entire graph'}
+                  title={searchQuery.trim()
+                    ? `Search "${searchQuery.trim()}" across the entire graph`
+                    : 'Open Advanced Search · scan the entire graph at any depth'}
+                  className={cn(
+                    'inline-flex items-center justify-center w-7 h-7 rounded-lg',
+                    'transition-all duration-200',
+                    'text-accent-lineage',
+                    'bg-gradient-to-br from-accent-lineage/15 to-purple-500/10',
+                    'border border-accent-lineage/30',
+                    'hover:from-accent-lineage/25 hover:to-purple-500/20',
+                    'hover:border-accent-lineage/55 hover:shadow-md hover:shadow-accent-lineage/20',
+                    'active:scale-95',
+                  )}
+                >
+                  <LucideIcons.Sparkles className="w-3.5 h-3.5" strokeWidth={2.4} />
+                </button>
               )}
             </div>
           </div>

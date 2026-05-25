@@ -455,20 +455,54 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     'flex flex-col overflow-hidden',
                 )}
             >
-                {/* Search / DSL paste input */}
-                <div className="flex items-center gap-1.5 px-2.5 py-2 border-b border-glass-border/60">
-                    <Search className="w-3.5 h-3.5 text-ink-muted shrink-0" />
-                    <input
-                        ref={inputRef}
-                        type="text"
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Filter — or paste DSL like tag:PII noUpstream"
-                        className={cn(
-                            'flex-1 bg-transparent text-[12px] text-ink',
-                            'placeholder:text-ink-muted/60 focus:outline-none',
-                        )}
-                    />
+                {/* Search / DSL paste input — visual style aligned
+                    with the ContextViewHeader's premium "Search
+                    visible entities…" input so both inputs read as
+                    the same control family. Layered gradient fill +
+                    accent focus ring + slightly larger 13.5px text. */}
+                <div className="relative px-3 pt-3 pb-2 border-b border-glass-border/60">
+                    <div className="relative group">
+                        {/* Soft accent halo on focus */}
+                        <div
+                            aria-hidden
+                            className={cn(
+                                "absolute -inset-px rounded-[12px] pointer-events-none",
+                                "bg-gradient-to-r from-accent-lineage/0 via-accent-lineage/0 to-purple-500/0",
+                                "group-focus-within:from-accent-lineage/20 group-focus-within:via-accent-lineage/10 group-focus-within:to-purple-500/15",
+                                "group-focus-within:blur-[8px]",
+                                "transition-all duration-300",
+                            )}
+                        />
+                        <Search
+                            className={cn(
+                                "absolute left-3.5 top-1/2 -translate-y-1/2 w-[15px] h-[15px] pointer-events-none",
+                                "text-ink-muted/55 group-focus-within:text-accent-lineage",
+                                "group-hover:text-ink-muted/80",
+                                "transition-colors duration-200",
+                            )}
+                            strokeWidth={2.2}
+                        />
+                        <input
+                            ref={inputRef}
+                            type="text"
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            placeholder="Filter — or paste DSL like tag:PII noUpstream"
+                            className={cn(
+                                "relative w-full pl-10 pr-3 py-2.5 rounded-[11px]",
+                                "text-[13.5px] text-ink placeholder:text-ink-muted/45",
+                                "bg-gradient-to-b from-black/[0.03] to-black/[0.05]",
+                                "dark:from-white/[0.04] dark:to-white/[0.025]",
+                                "border border-black/[0.08] dark:border-white/[0.08]",
+                                "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+                                "hover:border-black/[0.14] dark:hover:border-white/[0.14]",
+                                "focus:outline-none",
+                                "focus:border-accent-lineage/55 focus:ring-2 focus:ring-accent-lineage/20",
+                                "focus:shadow-[0_4px_18px_-6px_rgba(99,102,241,0.35)]",
+                                "transition-all duration-200",
+                            )}
+                        />
+                    </div>
                 </div>
 
                 {/* DSL paste preview */}
@@ -495,18 +529,22 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     </button>
                 )}
 
-                {/* Categories */}
-                <div className="max-h-[28rem] overflow-y-auto custom-scrollbar py-1">
+                {/* Categories.
+                    Sized up from the cramped 12/10.5px reading the
+                    user flagged. With the popover now 380-640px
+                    wide (W2 UX uplift) there's room for legible
+                    text + a more generous row rhythm. */}
+                <div className="max-h-[32rem] overflow-y-auto custom-scrollbar py-1.5">
                     {filteredCategories.length === 0 ? (
-                        <div className="px-3 py-4 text-[11px] text-ink-muted/80 italic">
-                            No filters match "{query}".
+                        <div className="px-4 py-5 text-[12.5px] text-ink-muted/80 italic">
+                            No filters match &ldquo;{query}&rdquo;.
                         </div>
                     ) : (
                         filteredCategories.map((cat) => (
-                            <div key={cat.label} className="mb-1">
+                            <div key={cat.label} className="mb-1.5">
                                 <div className={cn(
-                                    'px-3 pt-2 pb-1 text-[9.5px] font-mono uppercase',
-                                    'tracking-[0.16em] text-ink-muted/60',
+                                    'px-4 pt-2.5 pb-1.5 text-[10.5px] font-mono uppercase',
+                                    'tracking-[0.18em] text-ink-muted/65 font-semibold',
                                 )}>
                                     {cat.label}
                                 </div>
@@ -516,27 +554,33 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                                         type="button"
                                         onClick={() => handleEntry(entry)}
                                         className={cn(
-                                            'w-full flex items-start gap-2 px-3 py-1.5',
+                                            'w-full flex items-start gap-3 px-4 py-2.5',
                                             'text-left transition-colors',
-                                            'hover:bg-glass/40',
+                                            'hover:bg-accent-lineage/[0.08]',
+                                            'focus:outline-none focus:bg-accent-lineage/[0.10]',
                                         )}
                                     >
-                                        <span className="text-[14px] text-accent-lineage leading-none mt-0.5 w-4 shrink-0 text-center">
+                                        <span className={cn(
+                                            'shrink-0 w-7 h-7 rounded-lg',
+                                            'flex items-center justify-center',
+                                            'text-[16px] leading-none text-accent-lineage',
+                                            'bg-accent-lineage/[0.10] border border-accent-lineage/20',
+                                        )}>
                                             {entry.icon}
                                         </span>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-baseline gap-2">
-                                                <span className="text-[12px] text-ink font-medium">
+                                                <span className="text-[13.5px] text-ink font-semibold">
                                                     {entry.label}
                                                 </span>
                                                 {typeof entry.count === 'number' && (
-                                                    <span className="text-[10px] text-ink-muted tabular-nums">
+                                                    <span className="text-[11px] text-ink-muted/80 tabular-nums">
                                                         ({entry.count.toLocaleString()})
                                                     </span>
                                                 )}
                                             </div>
                                             {entry.description && (
-                                                <div className="text-[10.5px] text-ink-muted/80 leading-snug">
+                                                <div className="text-[12px] text-ink-muted/85 leading-snug mt-0.5">
                                                     {entry.description}
                                                 </div>
                                             )}
@@ -593,22 +637,22 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
  * row stays one-line-tall on narrow viewports.
  */
 function SampleChips({ samples }: { samples: ReadonlyArray<string> }) {
-    const VISIBLE_CAP = 4
+    const VISIBLE_CAP = 5
     const visible = samples.slice(0, VISIBLE_CAP)
     const remainder = samples.length - visible.length
     return (
-        <div className="mt-1 flex flex-wrap items-center gap-1">
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {visible.map((s) => (
                 <span
                     key={s}
                     title={s}
                     className={cn(
-                        'inline-flex items-center px-1.5 py-[1px] rounded',
-                        'text-[10px] leading-tight font-mono',
-                        'text-accent-lineage/85',
-                        'bg-accent-lineage/[0.08]',
-                        'border border-accent-lineage/15',
-                        'max-w-[14ch] truncate',
+                        'inline-flex items-center px-2 py-0.5 rounded-md',
+                        'text-[11px] leading-tight font-mono',
+                        'text-accent-lineage/90',
+                        'bg-accent-lineage/[0.10]',
+                        'border border-accent-lineage/20',
+                        'max-w-[18ch] truncate',
                     )}
                 >
                     {s}
@@ -617,10 +661,10 @@ function SampleChips({ samples }: { samples: ReadonlyArray<string> }) {
             {remainder > 0 && (
                 <span
                     className={cn(
-                        'inline-flex items-center px-1.5 py-[1px] rounded',
-                        'text-[10px] leading-tight font-mono tabular-nums',
-                        'text-ink-muted/70 bg-black/[0.04] dark:bg-white/[0.04]',
-                        'border border-black/[0.06] dark:border-white/[0.06]',
+                        'inline-flex items-center px-2 py-0.5 rounded-md',
+                        'text-[11px] leading-tight font-mono tabular-nums font-semibold',
+                        'text-ink-muted/80 bg-black/[0.04] dark:bg-white/[0.05]',
+                        'border border-black/[0.06] dark:border-white/[0.08]',
                     )}
                 >
                     +{remainder}
