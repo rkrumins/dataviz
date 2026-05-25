@@ -116,48 +116,40 @@ export function parsePredicate(input: string): ParseResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Round-trip a predicate back to DSL text. Emits canonical operator
- * precedence: only inserts parentheses when needed (a child group has
- * looser precedence than its parent, or is a NOT).
+ * Round-trip a predicate back to DSL text.
+ *
+ * Grouping rule: any AND/OR group that is nested inside another group
+ * is wrapped in parentheses, regardless of whether Cypher's
+ * precedence rules would let us drop them. The user typed those
+ * parens for a reason (clarity over mixed AND/OR), so we keep them in
+ * the round-trip. NOT groups stay bare (``NOT x``) because the
+ * standard prefix form is unambiguous on its own.
  */
 export function stringifyPredicate(p: Predicate | null): string {
     if (!p) return ''
-    return formatExpr(p, /*parentPrec*/ 0)
+    return formatExpr(p, /*isTopLevel*/ true)
 }
 
 
-/**
- * Precedence levels (higher = tighter binding):
- *   0 — top-level (no parens needed)
- *   1 — OR
- *   2 — AND
- *   3 — NOT / atomic
- */
-function precedenceOf(p: Predicate): number {
-    if (p.kind !== 'group') return 3
-    const op = p.op ?? 'and'
-    if (op === 'or') return 1
-    if (op === 'and') return 2
-    if (op === 'not') return 3
-    return 2
-}
-
-
-function formatExpr(p: Predicate, parentPrec: number): string {
+function formatExpr(p: Predicate, isTopLevel: boolean): string {
     if (p.kind !== 'group') return formatAtom(p)
     const op = p.op ?? 'and'
     if (op === 'not') {
         const inner = p.children[0]
         if (!inner) return 'NOT ()'
-        const innerText = formatExpr(inner, /*parentPrec*/ 3)
-        return `NOT ${innerText}`
+        // The inner expression is no longer at top level; it may need
+        // its own parens if it's a multi-child group.
+        return `NOT ${formatExpr(inner, /*isTopLevel*/ false)}`
     }
     if (!p.children.length) return ''
-    const myPrec = precedenceOf(p)
     const sep = op === 'or' ? ' OR ' : ' AND '
-    const parts = p.children.map((c) => formatExpr(c, myPrec))
+    const parts = p.children.map((c) => formatExpr(c, /*isTopLevel*/ false))
     const joined = parts.filter(Boolean).join(sep)
-    return myPrec < parentPrec ? `(${joined})` : joined
+    // Top-level group has no enclosing group, so no outer parens.
+    // Nested groups are always wrapped — even when Cypher precedence
+    // would technically let us drop the parens — so the round-trip
+    // mirrors what the user typed.
+    return isTopLevel ? joined : `(${joined})`
 }
 
 

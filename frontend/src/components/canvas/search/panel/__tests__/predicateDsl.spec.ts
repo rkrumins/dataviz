@@ -74,6 +74,47 @@ describe('predicateDsl — boolean grammar', () => {
 })
 
 
+describe('predicateDsl — stringify preserves visual grouping', () => {
+    // Regression: the original stringifier dropped parens around child
+    // groups whenever Cypher precedence allowed it. So a user who
+    // typed `(t2 AND (account OR opp)) OR (T1 AND contacts)` saw it
+    // collapse to `t2 AND (account OR opp) OR T1 AND contacts` after
+    // Code → Visual → Code. Same semantics, but the visual grouping
+    // was lost. We now always wrap nested AND/OR groups in parens.
+    it('preserves AND-group parens inside an OR root', () => {
+        const original = '(t2 AND (account OR opp)) OR (T1 AND contacts)'
+        const parsed = parsePredicate(original).predicate
+        expect(stringifyPredicate(parsed)).toBe(original)
+    })
+
+    it('preserves OR-group parens inside an AND root', () => {
+        const original = 't2 AND (account OR opp)'
+        const parsed = parsePredicate(original).predicate
+        expect(stringifyPredicate(parsed)).toBe(original)
+    })
+
+    it('flat AND/OR has no outer parens', () => {
+        expect(stringifyPredicate(parsePredicate('a AND b').predicate)).toBe('a AND b')
+        expect(stringifyPredicate(parsePredicate('a OR b').predicate)).toBe('a OR b')
+    })
+
+    it('NOT keeps its prefix form, wraps inner group', () => {
+        // NOT(leaf) → bare prefix
+        expect(stringifyPredicate(parsePredicate('NOT t1').predicate)).toBe('NOT t1')
+        // NOT(group) → prefix + wrapped group
+        expect(stringifyPredicate(parsePredicate('NOT (a OR b)').predicate))
+            .toBe('NOT (a OR b)')
+    })
+
+    it('full user example round-trips with parens preserved', () => {
+        const original = '(t2 AND (account OR employees)) OR NOT (T1 OR SILVER)'
+        const parsed = parsePredicate(original).predicate
+        // Stringifier output is unambiguous and matches user intent
+        expect(stringifyPredicate(parsed)).toBe(original)
+    })
+})
+
+
 function leaf(value: string): Predicate {
     return {
         kind: 'text', value, target: 'name',
