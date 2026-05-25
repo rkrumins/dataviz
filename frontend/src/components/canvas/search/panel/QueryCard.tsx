@@ -410,7 +410,17 @@ export const QueryCard: FC<QueryCardProps> = ({
                                                 }}
                                                 onRemove={() => handleRowRemove(i)}
                                                 onOpenAdvanced={onOpenAdvanced}
+                                                onSubmit={dispatchRun}
                                                 disabled={isRunning}
+                                                discovery={{
+                                                    allKeys: discovery.allKeys,
+                                                    keysByEntityType: discovery.keysByEntityType,
+                                                    tagValues: discovery.tagValues,
+                                                    getValueSamples: discovery.getValueSamples,
+                                                }}
+                                                knownEntityTypes={knownEntityTypes}
+                                                activeEntityTypes={activeEntityTypes}
+                                                discoveredLayers={discoveredLayers}
                                             />
                                         ) : (
                                             <ConditionRow
