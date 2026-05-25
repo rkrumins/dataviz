@@ -328,15 +328,20 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     }),
                 },
                 {
-                    id: 'layer',
+                    id: 'root-in-view',
                     icon: Layers, tone: 'structure',
-                    label: 'Layer is…',
-                    description: 'Filter by pipeline layer',
+                    label: 'Root in view is…',
+                    description:
+                        'Restrict to entities under one of the view\'s '
+                        + 'top-level containers (e.g. SILVER, GOLD, '
+                        + 'INTERMEDIATE_T1). Replaces the old "Layer" '
+                        + 'filter — these are the same containers you '
+                        + 'see at the top of the canvas tree.',
                     count: counts.layers,
                     samples: samples?.layers,
                     action: 'emit',
                     build: () => ({
-                        kind: 'layer', layerAssignment: '',
+                        kind: 'descendantOf', urns: [],
                     }),
                 },
             ],

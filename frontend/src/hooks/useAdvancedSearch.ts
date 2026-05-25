@@ -25,6 +25,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
+import { useSchemaStore } from '@/store/schema'
 import { DEFAULT_DRAFT_OPTIONS, useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
 import type {
     AncestorRef,
@@ -40,6 +41,7 @@ import {
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
+import { computeViewRootUrns } from '@/components/canvas/search/panel/useCanvasViewRoots'
 
 
 /**
@@ -299,26 +301,65 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 ? scopeStack[scopeStack.length - 1]
                 : null
             const scopeMode = useSearchStore.getState().scopeMode
+
+            // Read live canvas + schema state at call time so we don't
+            // capture stale closures.
+            const canvas = useCanvasStore.getState()
+            const schema = useSchemaStore.getState().schema
+
             // Collect the visible URN set straight from the canvas
             // store. Always attach when mode='visible' so the backend
-            // doesn't have to guess. The BE quietly falls back to
-            // view-scope if the list is empty (e.g. canvas hasn't
-            // hydrated yet).
+            // doesn't have to guess.
             const visibleUrns = scopeMode === 'visible'
                 ? Array.from(new Set(
-                    useCanvasStore.getState().nodes
+                    canvas.nodes
                         .map((n) => n.id ?? n.data?.urn)
                         .filter((u): u is string => typeof u === 'string' && u.length > 0),
                 ))
                 : undefined
+
+            // Compute the canvas's "view roots" — the top-level
+            // containers that define the view's boundary. Used as the
+            // scope.rootUrns hint when the user is in 'view' mode and
+            // the view's persisted rootUrns are empty (otherwise the
+            // BE skips the containment clamp entirely and returns
+            // results from outside the view — the "Legacy_Archive
+            // leaking in" bug).
+            const canvasRootUrns = computeViewRootUrns(
+                canvas.nodes,
+                canvas.edges,
+                schema?.containmentEdgeTypes ?? [],
+                schema?.rootEntityTypes ?? [],
+            )
+
+            // Precedence for scope.rootUrns:
+            //   1. Drill frame (highest priority — user drilled into
+            //      a specific bucket; honour their selection).
+            //   2. Raw.scope.rootUrns (caller-supplied — e.g. a
+            //      template that targets a specific URN).
+            //   3. Canvas view roots (the "in this view" boundary).
+            //
+            // Only attaches roots when scope_mode is 'view' or 'visible'
+            // — 'data_source' explicitly opts out of any clamp.
+            const explicitRoots = (raw.scope as { rootUrns?: string[] } | undefined)?.rootUrns
+            let rootUrns: string[] | undefined
+            if (drillFrame && drillFrame.urn) {
+                rootUrns = [drillFrame.urn]
+            } else if (explicitRoots && explicitRoots.length > 0) {
+                rootUrns = explicitRoots
+            } else if (
+                scopeMode !== 'data_source'
+                && canvasRootUrns.length > 0
+            ) {
+                rootUrns = canvasRootUrns
+            }
+
             const scope: SearchScope = {
                 ...(raw.scope ?? {}),
                 viewId,
                 scopeMode,
                 ...(visibleUrns ? { visibleUrns } : {}),
-                ...(drillFrame && drillFrame.urn
-                    ? { rootUrns: [drillFrame.urn] }
-                    : {}),
+                ...(rootUrns ? { rootUrns } : {}),
             }
             // Defensive normalisation: the backend's predicate compiler
             // currently mishandles bare top-level leaf predicates

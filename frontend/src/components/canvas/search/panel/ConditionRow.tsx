@@ -27,6 +27,7 @@ import { type FC, type ReactNode, useEffect, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type {
+    DescendantOfPredicate,
     EntityTypePredicate,
     GroupPredicate,
     HasPropertyPredicate,
@@ -50,6 +51,7 @@ import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
+import { useCanvasViewRoots } from './useCanvasViewRoots'
 
 
 export interface ConditionRowProps {
@@ -206,7 +208,15 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'tag':
             return <TagEditor {...ctx} value={value as TagPredicate} />
         case 'layer':
+            // Legacy LayerPredicate — kept for backward compatibility
+            // with saved queries / JSON pastes that still emit it.
+            // New queries use ``descendantOf`` instead (Root in view).
             return <LayerEditor {...ctx} value={value as LayerPredicate} />
+        case 'descendantOf':
+            // "Root in view is…" — replaces the old Layer filter.
+            // Lists the canvas's view roots (SILVER, INTERMEDIATE_T1,
+            // …) by display name and emits a DescendantOfPredicate.
+            return <RootInViewEditor {...ctx} value={value as DescendantOfPredicate} />
         case 'hasProperty':
             return <HasPropertyEditor {...ctx} value={value as HasPropertyPredicate} />
         case 'property':
@@ -219,7 +229,6 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             // Boolean rows: the header label + description already
             // says everything. No editor body needed.
             return null
-        case 'descendantOf':
         case 'withinHops':
         case 'path':
             return <OpenAdvancedHint onOpen={ctx.onOpenAdvanced} />
@@ -478,6 +487,46 @@ function LayerEditor({
                 emptyHint={
                     'No layers configured on this view. (Layers are defined in the '
                     + 'view\'s reference layout — open the view editor to add them.)'
+                }
+                autoFocus={autoFocus}
+                portal
+            />
+        </Field>
+    )
+}
+
+
+/**
+ * RootInViewEditor — the new "Root in view is…" filter that replaces
+ * the old Layer filter. Lists the canvas's top-level container nodes
+ * (the same ones the user sees at the top of the canvas tree) and
+ * emits a DescendantOfPredicate so matches are constrained to the
+ * chosen sub-tree(s).
+ *
+ * Multi-select: pick one or more roots to scope the search to their
+ * union (e.g. "everything under SILVER OR GOLD").
+ *
+ * Empty hint covers the case where the canvas hasn't hydrated yet.
+ */
+function RootInViewEditor({
+    value, onChange, autoFocus,
+}: Omit<EditorCtx, 'value'> & { value: DescendantOfPredicate }) {
+    const roots = useCanvasViewRoots()
+    return (
+        <Field label="Root nodes">
+            <UnifiedPicker
+                multiple
+                value={value.urns}
+                onChange={(next) => onChange({ ...value, urns: next })}
+                options={roots.map((r) => ({
+                    value: r.urn,
+                    label: r.displayName,
+                    description: r.entityType,
+                }))}
+                placeholder="pick one or more roots from this view…"
+                emptyHint={
+                    'No top-level nodes in this view yet. Open the view '
+                    + 'or wait for the canvas to load.'
                 }
                 autoFocus={autoFocus}
                 portal
@@ -776,8 +825,10 @@ function getKindMeta(kind: Predicate['kind']): KindMeta {
             description: 'Match nodes by their assigned tags.',
         }
         case 'layer': return {
-            icon: '⌬', label: 'Layer',
-            description: 'Filter by the view\'s reference-layout layer assignment.',
+            icon: '⌬', label: 'Layer (legacy)',
+            description:
+                'Legacy layer-assignment filter. New queries should use '
+                + '"Root in view" instead — same intent, more reliable matching.',
         }
         case 'hasProperty': return {
             icon: '⚑', label: 'Property is set',
@@ -808,8 +859,11 @@ function getKindMeta(kind: Predicate['kind']): KindMeta {
             description: 'At least one outgoing lineage edge.',
         }
         case 'descendantOf': return {
-            icon: '⌂', label: 'Inside subtree',
-            description: 'Limit to descendants of one or more parent URNs.',
+            icon: '⌂', label: 'Root in view is…',
+            description:
+                'Restrict to entities under one of the view\'s top-level '
+                + 'containers (the same roots you see at the top of the '
+                + 'canvas tree).',
         }
         case 'withinHops': return {
             icon: '⇿', label: 'Within N hops',

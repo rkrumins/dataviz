@@ -85,6 +85,15 @@ export function ScopeModePicker() {
         setScopeMode(mode)
     }
 
+    // Tone classes (matches the active mode) — applied to the trigger
+    // border + soft tonal background so the picker reads as a
+    // first-class control, not a footnote.
+    const triggerTone = scopeMode === 'visible'
+        ? 'border-accent-lineage/40 bg-accent-lineage/[0.06]'
+        : scopeMode === 'view'
+            ? 'border-emerald-500/40 bg-emerald-500/[0.06]'
+            : 'border-amber-500/45 bg-amber-500/[0.08]'
+
     return (
         <>
             <div ref={containerRef} className="relative inline-flex">
@@ -92,29 +101,45 @@ export function ScopeModePicker() {
                     type="button"
                     onClick={() => setOpen((v) => !v)}
                     className={cn(
-                        'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md',
-                        'text-[10.5px] font-medium leading-none',
-                        'border border-glass-border/60 bg-canvas-base/40',
-                        'hover:bg-canvas-base/70 hover:border-glass-border transition-colors',
-                        meta.tone,
+                        'inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg',
+                        'text-[11.5px] font-semibold leading-tight',
+                        'border transition-all',
+                        triggerTone,
+                        'hover:brightness-110',
                     )}
                     title="Choose where the search runs"
                     aria-expanded={open}
                 >
-                    <ActiveIcon className="w-3 h-3" strokeWidth={2.2} />
-                    <span className="text-ink-muted leading-none">Scope:</span>
-                    <span className="leading-none">{meta.label}</span>
+                    <ActiveIcon className={cn('w-3.5 h-3.5', meta.tone)} strokeWidth={2.2} />
+                    <span className="flex flex-col items-start leading-tight">
+                        <span className="text-[9px] uppercase tracking-[0.12em] text-ink-muted/80 font-medium">
+                            Search scope
+                        </span>
+                        <span className={cn('text-[12px]', meta.tone)}>
+                            {meta.label}
+                        </span>
+                    </span>
                     <ChevronDown
-                        className={cn('w-3 h-3 text-ink-muted/80 transition-transform', open && 'rotate-180')}
+                        className={cn(
+                            'w-3.5 h-3.5 text-ink-muted/85 transition-transform shrink-0',
+                            open && 'rotate-180',
+                        )}
                         strokeWidth={2.2}
                     />
                 </button>
                 {open && (
                     <div
                         className={cn(
-                            'absolute left-0 top-full mt-1 z-30 w-72',
-                            'rounded-lg border border-glass-border bg-canvas-elevated/95',
-                            'backdrop-blur-md shadow-xl shadow-black/30 py-1',
+                            'absolute left-0 top-full mt-1.5 z-40 w-80',
+                            // Solid background (no transparency) — matches the
+                            // shadcn dropdown pattern used elsewhere in the
+                            // panel. Previously bg-canvas-elevated/95 +
+                            // backdrop-blur let underlying canvas + flow
+                            // animations bleed through and made the menu
+                            // unreadable when expanded.
+                            'rounded-xl border border-glass-border',
+                            'bg-canvas-elevated shadow-2xl shadow-black/50',
+                            'ring-1 ring-white/5 py-1',
                         )}
                         role="listbox"
                     >
@@ -128,20 +153,37 @@ export function ScopeModePicker() {
                                     type="button"
                                     onClick={() => handlePick(mode)}
                                     className={cn(
-                                        'w-full text-left flex items-start gap-2.5 px-3 py-2',
+                                        'w-full text-left flex items-start gap-2.5 px-3 py-2.5',
                                         'transition-colors',
                                         active
-                                            ? 'bg-accent-lineage/10 text-ink'
-                                            : 'text-ink/90 hover:bg-glass/30',
+                                            ? 'bg-accent-lineage/12'
+                                            : 'hover:bg-glass/40',
                                     )}
                                 >
-                                    <Icon className={cn('w-3.5 h-3.5 mt-0.5 shrink-0', m.tone)} strokeWidth={2.2} />
+                                    <span className={cn(
+                                        'shrink-0 mt-0.5 inline-flex items-center justify-center',
+                                        'w-6 h-6 rounded-md',
+                                        active
+                                            ? 'bg-accent-lineage/15'
+                                            : 'bg-canvas-base/60',
+                                    )}>
+                                        <Icon className={cn('w-3.5 h-3.5', m.tone)} strokeWidth={2.2} />
+                                    </span>
                                     <div className="flex flex-col min-w-0">
-                                        <span className="text-[12px] font-medium leading-tight">
-                                            {m.label}
-                                            {active && <span className="ml-1.5 text-accent-lineage">✓</span>}
+                                        <span className="inline-flex items-center gap-1.5">
+                                            <span className={cn(
+                                                'text-[12.5px] font-semibold leading-tight',
+                                                active ? 'text-ink' : 'text-ink/95',
+                                            )}>
+                                                {m.label}
+                                            </span>
+                                            {active && (
+                                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[9px] font-semibold uppercase tracking-wider bg-accent-lineage/15 text-accent-lineage">
+                                                    Active
+                                                </span>
+                                            )}
                                         </span>
-                                        <span className="text-[10.5px] text-ink-muted/80 leading-snug">
+                                        <span className="text-[11px] text-ink-muted/85 leading-snug mt-0.5">
                                             {m.sub}
                                         </span>
                                     </div>

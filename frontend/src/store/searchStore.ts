@@ -449,7 +449,12 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingSearchSeed: null,
-    scopeMode: 'visible',
+    // Default to 'view' (All nodes in this view): matches the user's
+    // mental model of "search everything in my current view including
+    // collapsed folders." 'visible' (only currently-rendered nodes)
+    // is available via the ScopeModePicker for the user who wants
+    // strictly what's on-screen.
+    scopeMode: 'view',
     selectionParent: null,
     selectedIndices: [],
 
