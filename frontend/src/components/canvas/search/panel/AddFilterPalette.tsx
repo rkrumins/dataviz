@@ -37,12 +37,11 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     AlignLeft,
-    ArrowDownToLine,
-    ArrowUpFromLine,
     Boxes,
     Equal,
     Flag,
     GitBranch,
+    GitMerge,
     Hash,
     KeyRound,
     Layers,
@@ -52,6 +51,7 @@ import {
     Radar,
     Route,
     Search,
+    Share2,
     Sparkles,
     Tag,
     Type,
@@ -88,7 +88,13 @@ const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
  * emerald, governance amber, lineage rose, and so on — matching the
  * "premium / modern" UX bar of the template picker.
  */
-type IconTone = 'text' | 'structure' | 'governance' | 'lineage' | 'group'
+type IconTone =
+    | 'text'
+    | 'structure'
+    | 'governance'
+    | 'lineage-missing'   // negative — "no X" rows
+    | 'lineage-present'   // positive — "has X" rows
+    | 'group'
 
 const ICON_TONES: Record<IconTone, { container: string; icon: string }> = {
     text: {
@@ -103,9 +109,20 @@ const ICON_TONES: Record<IconTone, { container: string; icon: string }> = {
         container: 'bg-amber-500/[0.10] border-amber-500/30 dark:bg-amber-500/[0.14]',
         icon: 'text-amber-700 dark:text-amber-300',
     },
-    lineage: {
+    // Negative lineage signal (no upstream / no downstream / orphan).
+    // Rose reads as "warning / gap" so a user scanning the palette
+    // doesn't confuse "no upstream" (these are sources) with
+    // "has upstream" (these are sinks).
+    'lineage-missing': {
         container: 'bg-rose-500/[0.10] border-rose-500/25 dark:bg-rose-500/[0.14]',
         icon: 'text-rose-600 dark:text-rose-400',
+    },
+    // Positive lineage signal (has upstream / has downstream).
+    // Teal sits between the structure-emerald and the text-sky so
+    // it reads as connected-data without clashing with either.
+    'lineage-present': {
+        container: 'bg-teal-500/[0.10] border-teal-500/25 dark:bg-teal-500/[0.14]',
+        icon: 'text-teal-600 dark:text-teal-400',
     },
     group: {
         container: 'bg-violet-500/[0.10] border-violet-500/25 dark:bg-violet-500/[0.14]',
@@ -370,7 +387,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
             entries: [
                 {
                     id: 'no-upstream',
-                    icon: Milestone, tone: 'lineage',
+                    icon: Milestone, tone: 'lineage-missing',
                     label: 'No upstream lineage',
                     description: 'Source nodes — nothing feeds them',
                     action: 'emit',
@@ -380,7 +397,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'no-downstream',
-                    icon: Flag, tone: 'lineage',
+                    icon: Flag, tone: 'lineage-missing',
                     label: 'No downstream lineage',
                     description: 'Terminal nodes — nothing reads from them',
                     action: 'emit',
@@ -390,7 +407,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'no-lineage',
-                    icon: Unplug, tone: 'lineage',
+                    icon: Unplug, tone: 'lineage-missing',
                     label: 'No lineage edges',
                     description: 'Disconnected nodes — no upstream AND no downstream',
                     action: 'emit',
@@ -400,8 +417,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'has-upstream',
-                    icon: ArrowDownToLine, tone: 'lineage',
+                    icon: GitMerge, tone: 'lineage-present',
                     label: 'Has upstream lineage',
+                    description: 'Nodes fed by at least one source',
                     action: 'emit',
                     build: () => ({
                         kind: 'hasIncoming', edgeClass: DEFAULT_EDGE_CLASS,
@@ -409,8 +427,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 },
                 {
                     id: 'has-downstream',
-                    icon: ArrowUpFromLine, tone: 'lineage',
+                    icon: Share2, tone: 'lineage-present',
                     label: 'Has downstream lineage',
+                    description: 'Nodes that feed at least one consumer',
                     action: 'emit',
                     build: () => ({
                         kind: 'hasOutgoing', edgeClass: DEFAULT_EDGE_CLASS,
