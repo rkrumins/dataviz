@@ -1182,6 +1182,7 @@ class AggregationService:
             max_retries=job.max_retries,
             timeout_secs=job.timeout_secs,
             projection_mode=job.projection_mode,
+            last_run_was_skipped=getattr(job, "last_run_was_skipped", None),
         )
 
 

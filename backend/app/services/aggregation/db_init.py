@@ -102,6 +102,12 @@ async def init_aggregation_db() -> None:
                 f"CREATE INDEX IF NOT EXISTS ix_agg_jobs_ds_status_completed_desc "
                 f"ON {SCHEMA_NAME}.aggregation_jobs "
                 f"(data_source_id, status, completed_at DESC)",
+                # 2026-05-25 — flag indicating the job short-circuited
+                # via the skip-unchanged path (worker._maybe_skip_unchanged).
+                # Surfaced in AggregationJobResponse so the UI can render
+                # a "Reused" badge. NULL on legacy rows = treat as False.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS last_run_was_skipped BOOLEAN DEFAULT FALSE",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

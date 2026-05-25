@@ -111,6 +111,14 @@ const JobCard = memo(function JobCard({ job }: { job: AggregationJobResponse }) 
                     <span className={cn("text-xs font-semibold", statusColor)}>
                         {statusText}
                     </span>
+                    {job.status === 'completed' && job.lastRunWasSkipped && (
+                        <span
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20"
+                            title="Graph fingerprint matched the prior completed run — no rebuild needed."
+                        >
+                            Reused
+                        </span>
+                    )}
                     <span className="text-[10px] text-ink-muted/80 font-mono hidden sm:inline-block ml-1">
                         {job.id.slice(-8)}
                     </span>

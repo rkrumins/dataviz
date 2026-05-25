@@ -291,10 +291,12 @@ class AggregationWorker:
                     )
 
                 # Success
+                was_skipped = bool(result.get("skipped_unchanged", False))
                 job.status = "completed"
                 job.progress = 100
                 job.completed_at = _now()
                 job.created_edges = result.get("aggregated_edges_affected", 0)
+                job.last_run_was_skipped = was_skipped
                 # Change 4: cache the actual edge count for the next job's
                 # pre-flight skip. ``total_edges`` is the provider's true
                 # scan count; we deliberately overwrite the prior hint
@@ -303,7 +305,17 @@ class AggregationWorker:
                 _total = result.get("total_edges")
                 if isinstance(_total, int) and _total >= 0:
                     job.lineage_edge_count = _total
-                job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
+                # When we skipped, the prior job's fingerprint already
+                # describes the current graph state — re-querying the
+                # provider for a fresh fingerprint would defeat the
+                # whole point of the skip. Use the prior fingerprint
+                # (carried in via the synthetic result's match) so the
+                # data-source-state row + downstream events look the
+                # same as a real rebuild against an unchanged graph.
+                if was_skipped:
+                    job.graph_fingerprint_after = job.graph_fingerprint_before
+                else:
+                    job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
 
                 # Update aggregation-owned data source state
                 await self._update_ds_state(
@@ -321,6 +333,12 @@ class AggregationWorker:
                 # would assign — we don't actually emit yet (the
                 # platform terminal event below does), but the audit
                 # row needs a stable monotonic seq.
+                terminal_payload = {
+                    "edge_count": job.created_edges,
+                    "fingerprint": job.graph_fingerprint_after,
+                    "completed_at": job.completed_at,
+                    "skipped_unchanged": was_skipped,
+                }
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
                     session,
@@ -329,11 +347,7 @@ class AggregationWorker:
                     scope=scope,
                     sequence=terminal_seq,
                     status="completed",
-                    payload={
-                        "edge_count": job.created_edges,
-                        "fingerprint": job.graph_fingerprint_after,
-                        "completed_at": job.completed_at,
-                    },
+                    payload=terminal_payload,
                 )
 
                 # Platform terminal event — closes the SSE stream
@@ -345,11 +359,7 @@ class AggregationWorker:
                     kind="aggregation",
                     scope=scope,
                     status="completed",
-                    payload={
-                        "edge_count": job.created_edges,
-                        "fingerprint": job.graph_fingerprint_after,
-                        "completed_at": job.completed_at,
-                    },
+                    payload=terminal_payload,
                 )
 
                 # Publish event for viz-service to sync its own tables
@@ -360,6 +370,7 @@ class AggregationWorker:
                         edge_count=job.created_edges,
                         fingerprint=job.graph_fingerprint_after,
                         completed_at=job.completed_at,
+                        skipped_unchanged=was_skipped,
                     )
 
                 logger.info(

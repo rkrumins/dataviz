@@ -56,6 +56,13 @@ export interface AggregationJobResponse {
    * Null on legacy paths (Neo4j / Spanner / legacy MERGE) — UI falls back to a generic label.
    */
   currentPhase?: string | null;
+  /**
+   * True when this job short-circuited via the fingerprint-based skip path
+   * rather than running a full rebuild. Lets the UI distinguish "Completed
+   * in <1s because nothing changed" from "Completed in <1s because the graph
+   * is genuinely tiny". Null on legacy rows / real-rebuild runs.
+   */
+  lastRunWasSkipped?: boolean | null;
 }
 
 export interface ResumeOverrides {

@@ -238,6 +238,13 @@ class AggregationJobResponse(BaseModel):
     # falls back to a generic label in that case.
     current_phase: Optional[str] = Field(None, alias="currentPhase")
 
+    # True when the job short-circuited via the skip-unchanged path
+    # rather than running a full rebuild. Lets the UI render a
+    # "Reused" badge so operators don't wonder how a job processed
+    # millions of edges in <1s. NULL/False on legacy rows and on
+    # real-rebuild runs.
+    last_run_was_skipped: Optional[bool] = Field(None, alias="lastRunWasSkipped")
+
     class Config:
         populate_by_name = True
 

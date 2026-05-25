@@ -12,7 +12,7 @@ Tables:
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, text
+from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, text
 from backend.app.db.engine import Base
 
 
@@ -89,6 +89,13 @@ class AggregationJobORM(Base):
     # ── Fingerprinting (change detection) ────────────────────────────
     graph_fingerprint_before = Column(Text, nullable=True)
     graph_fingerprint_after = Column(Text, nullable=True)
+
+    # True when this job short-circuited via the skip-unchanged path
+    # rather than running a full rebuild. Surfaced in the response
+    # schema so the UI can render a "Reused" badge instead of letting
+    # operators wonder why a job claims to have processed millions of
+    # edges in <1s. NULL on legacy rows; treat NULL as False.
+    last_run_was_skipped = Column(Boolean, nullable=True, default=False)
 
     # ── Idempotency ─────────────────────────────────────────────────
     idempotency_key = Column(Text, nullable=True)

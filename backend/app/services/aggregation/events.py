@@ -118,6 +118,7 @@ class AggregationEventPublisher:
         edge_count: int,
         fingerprint: Optional[str],
         completed_at: str,
+        skipped_unchanged: bool = False,
     ) -> None:
         await self.publish("job.completed", {
             "job_id": job_id,
@@ -126,6 +127,7 @@ class AggregationEventPublisher:
             "edge_count": edge_count,
             "fingerprint": fingerprint,
             "completed_at": completed_at,
+            "skipped_unchanged": skipped_unchanged,
         })
 
     async def job_failed(
