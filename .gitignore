@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Node tooling caches at the repo root (Vite leaves node_modules/.vite
+# here when build commands run from the parent dir). The frontend's own
+# node_modules is ignored via frontend/.gitignore.
+node_modules/
+
 # C extensions
 *.so
 
