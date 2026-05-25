@@ -34,6 +34,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models_graph import (
+    GraphChangeEventORM,
+    GraphCommitContributorORM,
     GraphCommitORM,
     GraphEdgeVersionORM,
     GraphMergeConflictORM,
@@ -394,6 +396,7 @@ async def plan_merge(
             session,
             graph_id=graph_id,
             target_branch=target_branch,
+            source_branch=source_branch,
             target_commit_id=target_commit_id,
             source_commit_id=source_commit_id,
             base_commit_id=base_commit_id,
@@ -537,6 +540,7 @@ async def commit_resolved_merge(
         session,
         graph_id=merge_orm.graph_id,
         target_branch=merge_orm.target_branch,
+        source_branch=merge_orm.source_branch,
         target_commit_id=fresh_target,
         source_commit_id=fresh_source,
         base_commit_id=fresh_base,
@@ -615,6 +619,7 @@ async def _persist_merge_commit(
     *,
     graph_id: str,
     target_branch: str,
+    source_branch: str,
     target_commit_id: str | None,
     source_commit_id: str | None,
     base_commit_id: str | None,
@@ -624,8 +629,20 @@ async def _persist_merge_commit(
     merge_id: str,
 ) -> tuple[str, Mapping[str, int]]:
     """Build the merge commit + advance the target ref. Returns the
-    new commit id + delta summary."""
+    new commit id + delta summary.
+
+    V1 squash semantics (V1-1, V1-2, V1-3): when ``target_branch`` is
+    the graph's default branch, this is a squash merge. The trunk
+    commit gets a single parent (the previous trunk head), the source
+    tip is captured via ``merge_source_commit_id`` (provenance
+    pointer, not a parent), and the audit events from the squashed
+    range are copied onto the new trunk commit with original actor /
+    timestamp / attribute_path preserved so trunk blame remains
+    O(1)-readable. Contributor manifest rows are derived from the
+    same scan. Non-default-branch merges keep the two-parent shape.
+    """
     graph = await graph_repo.get_graph(session, graph_id)
+    is_squash = target_branch == graph.default_branch
 
     nodes, edges = await materialize_entries(
         session, graph_id=graph_id, entries=merged_entries,
@@ -660,7 +677,10 @@ async def _persist_merge_commit(
             "edges_added": 0, "edges_modified": 0, "edges_removed": 0,
         }
 
-    extra_parents = [source_commit_id] if source_commit_id else []
+    extra_parents = (
+        [] if is_squash
+        else ([source_commit_id] if source_commit_id else [])
+    )
     result = await persist_commit(
         session,
         graph_id=graph_id,
@@ -676,8 +696,136 @@ async def _persist_merge_commit(
         pr_id=None,
         extra_parent_ids=extra_parents,
         merge_base_id=base_commit_id,
+        is_default_branch=is_squash,
+        merge_source_commit_id=source_commit_id if is_squash else None,
+        merge_source_branch=source_branch if is_squash else None,
     )
+
+    if is_squash and source_commit_id is not None:
+        await _copy_squashed_audit_and_contributors(
+            session,
+            graph_id=graph_id,
+            source_commit_id=source_commit_id,
+            base_commit_id=base_commit_id,
+            new_commit_id=result.commit_id,
+            target_branch=target_branch,
+        )
+
     return result.commit_id, plan.delta_summary
+
+
+async def _copy_squashed_audit_and_contributors(
+    session: AsyncSession,
+    *,
+    graph_id: str,
+    source_commit_id: str,
+    base_commit_id: str | None,
+    new_commit_id: str,
+    target_branch: str,
+) -> None:
+    """V1-3: Wave 6 audit-row copy + contributor manifest.
+
+    Walks the chain from ``source_commit_id`` back to (but not
+    including) ``base_commit_id``, collecting commit ids. Re-inserts
+    every ``graph_change_event`` row from those commits stamped with
+    ``commit_id = new_commit_id`` and ``branch = target_branch`` —
+    preserving original ``actor`` / ``created_at`` / ``attribute_path``
+    / ``old_value`` / ``new_value`` / content hashes. Same scan
+    aggregates ops_count + first/last timestamps per actor into
+    ``graph_commit_contributors``.
+
+    Idempotent at the row level: each new audit row gets a fresh id;
+    contributor rows use ``ON CONFLICT (commit_id, user_id) DO
+    UPDATE`` so repeated calls on the same input converge.
+    """
+    chain: list[str] = []
+    cur: str | None = source_commit_id
+    seen: set[str] = set()
+    while cur and cur != base_commit_id and cur not in seen:
+        seen.add(cur)
+        chain.append(cur)
+        row = (
+            await session.execute(
+                select(GraphCommitORM.parent_ids).where(
+                    GraphCommitORM.id == cur
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            break
+        # Linear walk: take the first parent (single-parent on drafts
+        # by construction; for any historical two-parent commit the
+        # primary parent is the right next step on the source line).
+        cur = row[0] if row else None
+    if not chain:
+        return
+
+    events = (
+        await session.execute(
+            select(GraphChangeEventORM).where(
+                GraphChangeEventORM.graph_id == graph_id,
+                GraphChangeEventORM.commit_id.in_(chain),
+            )
+        )
+    ).scalars().all()
+    if not events:
+        return
+
+    contributors: dict[str, dict[str, Any]] = {}
+    for ev in events:
+        session.add(
+            GraphChangeEventORM(
+                id=f"gce_{uuid.uuid4().hex[:12]}",
+                graph_id=ev.graph_id,
+                branch=target_branch,
+                commit_id=new_commit_id,
+                object_kind=ev.object_kind,
+                object_id=ev.object_id,
+                action=ev.action,
+                attribute_path=ev.attribute_path,
+                old_value=ev.old_value,
+                new_value=ev.new_value,
+                prev_content_hash=ev.prev_content_hash,
+                new_content_hash=ev.new_content_hash,
+                actor=ev.actor,
+                pr_id=ev.pr_id,
+                view_id=ev.view_id,
+                created_at=ev.created_at,
+            )
+        )
+        actor = ev.actor or "unknown"
+        c = contributors.setdefault(
+            actor,
+            {"ops_count": 0, "first_at": ev.created_at, "last_at": ev.created_at},
+        )
+        c["ops_count"] += 1
+        if ev.created_at < c["first_at"]:
+            c["first_at"] = ev.created_at
+        if ev.created_at > c["last_at"]:
+            c["last_at"] = ev.created_at
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    for actor, agg in contributors.items():
+        await session.execute(
+            pg_insert(GraphCommitContributorORM)
+            .values(
+                commit_id=new_commit_id,
+                user_id=actor,
+                graph_id=graph_id,
+                ops_count=agg["ops_count"],
+                first_op_at=agg["first_at"],
+                last_op_at=agg["last_at"],
+            )
+            .on_conflict_do_update(
+                index_elements=["commit_id", "user_id"],
+                set_={
+                    "ops_count": agg["ops_count"],
+                    "first_op_at": agg["first_at"],
+                    "last_op_at": agg["last_at"],
+                },
+            )
+        )
 
 
 # ── helpers ────────────────────────────────────────────────────────

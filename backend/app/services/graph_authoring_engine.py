@@ -182,6 +182,7 @@ class GraphAuthoringEngine:
             actor=actor,
             view_id=view_id,
             pr_id=pr_id,
+            is_default_branch=(branch == graph.default_branch),
         )
 
         # Commit consumed the working set: clear it and re-pin to the

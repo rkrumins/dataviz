@@ -809,6 +809,92 @@ async def history(
     ]
 
 
+# ── time-travel (V1-9) ─────────────────────────────────────────────
+
+
+@router.get("/{ws_id}/graphs/{graph_id}/as_of")
+async def get_graph_as_of(
+    ws_id: str = Path(...),
+    graph_id: str = Path(...),
+    at: str = Query(
+        ...,
+        description=(
+            "ISO 8601 timestamp. Returns the snapshot at the closest "
+            "trunk commit committed at or before this timestamp."
+        ),
+    ),
+    session: AsyncSession = Depends(get_graph_store_db_session),
+    _=Depends(requires("workspace:graph:read", workspace="ws_id")),
+):
+    """V1-9 time-travel. Resolves a timestamp to the closest-prior
+    trunk commit via ``graph_trunk_log`` (the V1-4 substrate) and
+    returns its snapshot. Non-trunk history (drafts) is intentionally
+    excluded — UC-5 is "what did the published graph look like at T?".
+    """
+    from backend.app.db.models_graph import GraphTrunkLogORM
+
+    try:
+        await graph_repo.get_graph(session, graph_id)
+    except graph_repo.GraphNotFoundError:
+        raise HTTPException(404, detail={"code": "not_found"})
+
+    row = (
+        await session.execute(
+            select(
+                GraphTrunkLogORM.commit_id,
+                GraphTrunkLogORM.committed_at,
+            )
+            .where(
+                GraphTrunkLogORM.graph_id == graph_id,
+                GraphTrunkLogORM.committed_at <= at,
+            )
+            .order_by(GraphTrunkLogORM.committed_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "no_trunk_commit_at_or_before",
+                "at": at,
+            },
+        )
+    commit_id, committed_at = row
+    nodes_by_key, edges_by_key = await graph_repo.load_graph_state(
+        session, graph_id=graph_id, commit_id=commit_id,
+    )
+    return {
+        "as_of": at,
+        "commit_id": commit_id,
+        "committed_at": committed_at,
+        "nodes": [
+            {
+                "key": k,
+                "entity_type": n.entity_type,
+                "display_name": n.display_name,
+                "position": n.position,
+                "properties": n.properties,
+                "tags": n.tags,
+                "content_hash": n.content_hash,
+            }
+            for k, n in nodes_by_key.items()
+        ],
+        "edges": [
+            {
+                "key": k,
+                "source_key": e.source_node_key,
+                "target_key": e.target_node_key,
+                "edge_type": e.edge_type,
+                "confidence": e.confidence,
+                "properties": e.properties,
+                "content_hash": e.content_hash,
+            }
+            for k, e in edges_by_key.items()
+        ],
+    }
+
+
 # ── audit / blame / diff (read endpoints) ──────────────────────────
 
 

@@ -180,6 +180,12 @@ class GraphCommitORM(GraphStoreBase):
     ontology_digest = Column(Text, nullable=True)
     delta_summary = Column(JSONB, nullable=False, default=dict)
     committed_at = Column(Text, nullable=False, default=_now)
+    # Provenance for squash-merge commits on trunk. Both NULL for
+    # direct-on-default commits and for non-trunk commits. Pointer is
+    # not a parent (trunk stays linear) but keeps the draft tip
+    # reachable as a GC root for future blob sweep + draft GC.
+    merge_source_commit_id = Column(Text, nullable=True)
+    merge_source_branch = Column(Text, nullable=True)
 
     __table_args__ = (
         # (graph_id, commit_hash) is the content-addressed identity. The
@@ -188,6 +194,12 @@ class GraphCommitORM(GraphStoreBase):
         # `id` PK for the logical schema / create_all fallback.
         UniqueConstraint("graph_id", "commit_hash", name="uq_graph_commits_hash"),
         Index("idx_graph_commits_graph_seq", "graph_id", "commit_seq"),
+        Index("idx_graph_commits_committed_at", "graph_id", "committed_at"),
+        Index(
+            "idx_graph_commits_merge_source",
+            "graph_id", "merge_source_commit_id",
+            postgresql_where=merge_source_commit_id.is_not(None),
+        ),
     )
 
 
@@ -699,6 +711,91 @@ class GraphOrphanEnrichmentORM(GraphStoreBase):
     )
 
 
+# ------------------------------------------------------------------ #
+# graph_trunk_log — trunk-only date index (V1-4)                       #
+# ------------------------------------------------------------------ #
+
+class GraphTrunkLogORM(GraphStoreBase):
+    """Insert-only date index of trunk (default-branch) commits.
+
+    One row appended whenever a commit lands on
+    ``user_graphs.default_branch`` — either a squash-merge or a direct
+    commit. Provides O(1) lookup for ``/as_of?at=`` and survives any
+    future GC of non-trunk commits. Atomic with the commit row.
+    """
+
+    __tablename__ = "graph_trunk_log"
+
+    graph_id = Column(Text, primary_key=True)
+    commit_seq = Column(BigInteger, primary_key=True)
+    commit_id = Column(Text, nullable=False)
+    committed_at = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "idx_trunk_log_committed_at",
+            "graph_id", "committed_at",
+        ),
+    )
+
+
+# ------------------------------------------------------------------ #
+# graph_commit_contributors — per-(commit, user) attribution (V1-3)    #
+# ------------------------------------------------------------------ #
+
+class GraphCommitContributorORM(GraphStoreBase):
+    """Per-(commit, user) attribution rollup. Populated at squash time
+    from the draft chain — companion to the Wave 6 audit-row copy.
+
+    Lets blame UI show "this trunk commit squashed work by Alice (12
+    ops), Bob (5 ops)" as a single SELECT instead of a per-row scan of
+    ``graph_change_event``.
+    """
+
+    __tablename__ = "graph_commit_contributors"
+
+    commit_id = Column(Text, primary_key=True)
+    user_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)
+    ops_count = Column(Integer, nullable=False, default=0)
+    first_op_at = Column(Text, nullable=True)
+    last_op_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_gcc_graph_user", "graph_id", "user_id"),
+    )
+
+
+# ------------------------------------------------------------------ #
+# graph_projector_cursor — multi-target projection state (V1-5)        #
+# ------------------------------------------------------------------ #
+
+class GraphProjectorCursorORM(GraphStoreBase):
+    """Per-(graph, target) projection cursor.
+
+    Today ``target = 'falkordb'`` only. Future read-replica /
+    warehouse / search projectors slot in as new rows. Updated by the
+    projector in the same Postgres txn that ACKs the outbox stream
+    entry. ``last_applied_commit_seq`` is the durable cursor used for
+    replay; stream IDs are volatile after ``XTRIM``.
+    """
+
+    __tablename__ = "graph_projector_cursor"
+
+    graph_id = Column(Text, primary_key=True)
+    target = Column(Text, primary_key=True)
+    last_applied_commit_seq = Column(BigInteger, nullable=True)
+    last_applied_commit_id = Column(Text, nullable=True)
+    last_stream_id = Column(Text, nullable=True)
+    lag_seconds_observed = Column(Text, nullable=True)
+    last_error = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        Index("idx_gpc_target_updated", "target", "updated_at"),
+    )
+
+
 __all__ = [
     "UserGraphORM",
     "GraphRefORM",
@@ -719,4 +816,7 @@ __all__ = [
     "GraphSourceNodeORM",
     "GraphSourceEdgeORM",
     "GraphOrphanEnrichmentORM",
+    "GraphTrunkLogORM",
+    "GraphCommitContributorORM",
+    "GraphProjectorCursorORM",
 ]

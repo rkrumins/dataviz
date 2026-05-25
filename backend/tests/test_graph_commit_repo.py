@@ -145,3 +145,125 @@ async def test_happy_path_writes_commit_audit_and_outbox_atomically():
         message="init",
         committed_at=commit_row.committed_at,
     )
+
+
+# ── V1-1 / V1-2 / V1-4: trunk substrate ────────────────────────────
+
+
+class _TrunkAwareFakeSession(_FakeSession):
+    """Extends the base fake to handle the V1-4 trunk_log Select that
+    re-reads the autoincrement ``commit_seq`` after ``flush()``."""
+
+    def __init__(self, ref, *, commit_seq=42, **kw):
+        super().__init__(ref, **kw)
+        self._commit_seq = commit_seq
+        self.flushed = False
+        self._first_select_consumed = False
+
+    async def flush(self):
+        self.flushed = True
+
+    async def execute(self, stmt):
+        name = type(stmt).__name__
+        if name == "Select":
+            if not self._first_select_consumed:
+                # First select: ref lookup (matches base fake).
+                self._first_select_consumed = True
+                return types.SimpleNamespace(
+                    scalar_one_or_none=lambda: self._ref
+                )
+            # Second select: commit_seq re-read for trunk_log write.
+            return types.SimpleNamespace(
+                scalar_one=lambda: self._commit_seq
+            )
+        if name == "Update":
+            self.update_called = True
+            return types.SimpleNamespace(rowcount=self._update_rowcount)
+        return types.SimpleNamespace()
+
+
+@pytest.mark.asyncio
+async def test_default_branch_drops_extra_parent_ids_and_writes_trunk_log():
+    """V1-1 squash gate: trunk commits are always single-parent.
+    V1-4 substrate: a graph_trunk_log row is appended in the same txn."""
+    nodes, plan = _plan()
+    sess = _TrunkAwareFakeSession(
+        ref=_Ref(commit_id="gcmt_PREV", revision=5), commit_seq=99,
+    )
+    result = await persist_commit(
+        sess, graph_id="g1", branch="main", plan=plan,
+        node_states=nodes, edge_states={},
+        author="alice", message="squash from feature",
+        expected_head_commit_id="gcmt_PREV",
+        # Caller (merge service) supplied a draft tip — must be dropped:
+        extra_parent_ids=["gcmt_DRAFT"],
+        is_default_branch=True,
+        merge_source_commit_id="gcmt_DRAFT",
+        merge_source_branch="feature-x",
+    )
+    commit_row = next(o for o in sess.added if type(o).__name__ == "GraphCommitORM")
+    # V1-1: trunk parent_ids has exactly one entry (the prior trunk head).
+    assert commit_row.parent_ids == ["gcmt_PREV"]
+    # V1-2: provenance pointer persisted on the commit row.
+    assert commit_row.merge_source_commit_id == "gcmt_DRAFT"
+    assert commit_row.merge_source_branch == "feature-x"
+    # V1-4: trunk_log row appended.
+    trunk_rows = [o for o in sess.added if type(o).__name__ == "GraphTrunkLogORM"]
+    assert len(trunk_rows) == 1
+    tl = trunk_rows[0]
+    assert tl.graph_id == "g1"
+    assert tl.commit_id == result.commit_id
+    assert tl.commit_seq == 99
+    assert sess.flushed is True
+
+
+@pytest.mark.asyncio
+async def test_non_default_branch_keeps_extra_parents_no_trunk_log():
+    """Feature-into-feature merges keep the two-parent shape and do
+    NOT write to trunk_log."""
+    nodes, plan = _plan()
+    sess = _FakeSession(
+        ref=_Ref(commit_id="gcmt_PREV", revision=5), update_rowcount=1,
+    )
+    await persist_commit(
+        sess, graph_id="g1", branch="feature-y", plan=plan,
+        node_states=nodes, edge_states={},
+        author="alice", message="merge X into Y",
+        expected_head_commit_id="gcmt_PREV",
+        extra_parent_ids=["gcmt_FEATURE_X"],
+        is_default_branch=False,  # NOT trunk
+    )
+    commit_row = next(o for o in sess.added if type(o).__name__ == "GraphCommitORM")
+    # Two parents preserved on non-trunk merges.
+    assert commit_row.parent_ids == ["gcmt_PREV", "gcmt_FEATURE_X"]
+    # No provenance fields set.
+    assert commit_row.merge_source_commit_id is None
+    assert commit_row.merge_source_branch is None
+    # No trunk_log row appended.
+    trunk_rows = [o for o in sess.added if type(o).__name__ == "GraphTrunkLogORM"]
+    assert trunk_rows == []
+
+
+@pytest.mark.asyncio
+async def test_direct_main_commit_writes_trunk_log_with_null_provenance():
+    """Direct-on-trunk commits (not a merge) still write trunk_log but
+    leave provenance fields NULL."""
+    nodes, plan = _plan()
+    sess = _TrunkAwareFakeSession(
+        ref=_Ref(commit_id="gcmt_PREV", revision=2), commit_seq=7,
+    )
+    await persist_commit(
+        sess, graph_id="g1", branch="main", plan=plan,
+        node_states=nodes, edge_states={},
+        author="alice", message="direct edit",
+        expected_head_commit_id="gcmt_PREV",
+        is_default_branch=True,
+        # No merge_source_* supplied — direct commit, not a merge.
+    )
+    commit_row = next(o for o in sess.added if type(o).__name__ == "GraphCommitORM")
+    assert commit_row.parent_ids == ["gcmt_PREV"]
+    assert commit_row.merge_source_commit_id is None
+    assert commit_row.merge_source_branch is None
+    trunk_rows = [o for o in sess.added if type(o).__name__ == "GraphTrunkLogORM"]
+    assert len(trunk_rows) == 1
+    assert trunk_rows[0].commit_seq == 7

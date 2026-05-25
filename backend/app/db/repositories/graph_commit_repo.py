@@ -43,6 +43,7 @@ from backend.app.db.models_graph import (
     GraphNodeVersionORM,
     GraphPartitionManifestORM,
     GraphRefORM,
+    GraphTrunkLogORM,
 )
 from backend.app.db.repositories import graph_store_outbox_repo
 from backend.app.services.graph_versioning.commit import (
@@ -126,11 +127,28 @@ async def persist_commit(
     pr_id: str | None = None,
     extra_parent_ids: Sequence[str] | None = None,
     merge_base_id: str | None = None,
+    is_default_branch: bool = False,
+    merge_source_commit_id: str | None = None,
+    merge_source_branch: str | None = None,
 ) -> CommitResult:
     """Persist *plan* on *branch* and advance the ref. Raises
     :class:`HeadMovedError` if the branch moved since
     ``expected_head_commit_id``. ``session`` MUST be a Graph Store
-    session; the caller commits it."""
+    session; the caller commits it.
+
+    ``is_default_branch`` triggers the V1 trunk substrate writes:
+    appends to ``graph_trunk_log`` (the trunk-only date index that
+    backs ``/as_of``) and enforces the V1-1 squash gate — any
+    ``extra_parent_ids`` are dropped so the trunk commit has exactly
+    one parent. Source provenance for that squashed work is preserved
+    via ``merge_source_commit_id`` / ``merge_source_branch`` on the
+    commit row.
+    """
+    # V1-1 squash gate: trunk commits are always single-parent. The
+    # caller's source-side tip is captured via merge_source_commit_id
+    # (V1-2 provenance pointer) rather than as a second parent.
+    if is_default_branch:
+        extra_parent_ids = None
     # 1. Load + guard the ref (optimistic concurrency).
     ref = (
         await session.execute(
@@ -253,6 +271,8 @@ async def persist_commit(
             message=message,
             delta_summary=dict(plan.delta_summary),
             committed_at=committed_at,
+            merge_source_commit_id=merge_source_commit_id,
+            merge_source_branch=merge_source_branch,
         )
     )
 
@@ -295,6 +315,28 @@ async def persist_commit(
     if res.rowcount != 1:
         # Lost the race between the read-guard and here.
         raise HeadMovedError(None)
+
+    # 6a. V1-4 trunk_log: trunk-only date index. Read commit_seq back
+    #     after the insert flushes (autoincrement assigns it). One
+    #     row per default-branch commit; survives any future GC of
+    #     non-trunk commits.
+    if is_default_branch:
+        await session.flush()
+        committed = (
+            await session.execute(
+                select(GraphCommitORM.commit_seq).where(
+                    GraphCommitORM.id == commit_id
+                )
+            )
+        ).scalar_one()
+        session.add(
+            GraphTrunkLogORM(
+                graph_id=graph_id,
+                commit_seq=committed,
+                commit_id=commit_id,
+                committed_at=committed_at,
+            )
+        )
 
     # 7. Outbox event — same transaction (atomic with everything above).
     await graph_store_outbox_repo.emit(
