@@ -934,6 +934,27 @@ class TestCandidateCypher:
             f"WHERE root.urn IN $_rootUrns WITH DISTINCT n"
         )
 
+    def test_with_scope_pre_filter_replaces_match_n(self):
+        """W1.1b: when ``scope_pre_filter`` is provided, the candidate
+        prefix is the root-anchored MATCH instead of ``MATCH (n)``.
+        ``scope_continuation`` must be empty in this shape (pre-filter
+        already enforces the scope clamp)."""
+        cypher = _build_candidate_cypher(
+            where_fragment="n.tags CONTAINS '\"PII\"'",
+            entity_types_param=False,
+            scope_continuation="",
+            candidate_cap=CANDIDATE_CAP,
+            scope_pre_filter=(
+                "MATCH (root)-[:CONTAINS*0..12]->(n) "
+                "WHERE root.urn IN $_rootUrns WITH DISTINCT n"
+            ),
+        )
+        assert cypher.startswith("MATCH (root)-[:CONTAINS*0..12]->(n)")
+        # No bare ``MATCH (n)`` prefix in this shape.
+        assert "MATCH (n) WHERE" not in cypher
+        assert "n.tags CONTAINS" in cypher
+        assert f"WITH n LIMIT {CANDIDATE_CAP}" in cypher
+
 
 # ---------------------------------------------------------------------------
 # Entity-type scope resolution against live ontology
@@ -956,8 +977,21 @@ class TestEntityTypesScopeResolution:
     the live data source only has e.g. ``object`` nodes — the original
     code blackholed every search by AND-ing two disjoint label sets."""
 
-    def test_empty_request_skips_filter(self):
+    def test_empty_request_defaults_to_live_ontology(self):
+        """W1.1b: empty entity_types defaults to the live ontology so the
+        candidate scan is bounded by all known labels rather than
+        running ``MATCH (n)`` unfiltered."""
         provider = _StubProvider({"dataset": 0, "schemaField": 1})
+        effective, note = _resolve_entity_types_scope(provider, [])
+        assert effective == ["dataset", "schemaField"]
+        assert note is not None
+        assert "defaulted" in note
+
+    def test_empty_request_skips_filter_when_no_live_ontology(self):
+        """Edge case: provider hasn't introspected its ontology yet.
+        No fallback set is available, so we return None (caller logs a
+        'no scope clamp' diagnostic)."""
+        provider = _StubProvider({})
         effective, note = _resolve_entity_types_scope(provider, [])
         assert effective is None
         assert note is None

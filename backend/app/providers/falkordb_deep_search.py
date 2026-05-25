@@ -750,6 +750,7 @@ def _build_candidate_cypher(
     scope_continuation: str,
     candidate_cap: int,
     within_hops_continuation: str = "",
+    scope_pre_filter: str = "",
 ) -> str:
     """The candidate-selection prefix.
 
@@ -762,8 +763,17 @@ def _build_candidate_cypher(
     (so candidates are first scope-clamped, then narrowed to those
     within N hops of the anchor URN-set). Both continuations end with
     ``WITH DISTINCT n`` so multiple stack cleanly.
+
+    ``scope_pre_filter`` (W1.1b) replaces the ``MATCH (n)`` prefix with
+    a root-anchored MATCH when the root URN set is small enough that
+    the indexed root lookup beats a label scan. When set,
+    ``scope_continuation`` must be empty (the pre-filter already
+    enforces the scope clamp); the executor selects between shapes.
     """
-    parts = ["MATCH (n)"]
+    if scope_pre_filter:
+        parts: List[str] = [scope_pre_filter]
+    else:
+        parts = ["MATCH (n)"]
     where_parts = []
     if entity_types_param:
         # Multi-label safe: a node with labels ['Asset', 'object']
@@ -808,17 +818,38 @@ def _resolve_entity_types_scope(
 
     Returns ``(effective_types, note)`` where:
       * ``effective_types`` — list bound to ``$_scopeEntityTypes`` (or
-        ``None`` to skip the filter entirely)
+        ``None`` to skip the filter entirely — only possible when the
+        provider has no live ontology to fall back on)
       * ``note`` — diagnostic only when partial overlap suggests a
-        user-driven mistake; ``None`` for the silently-corrected
-        and clean-overlap cases.
+        user-driven mistake or when the request was empty and we
+        defaulted to all known types; ``None`` for the
+        silently-corrected and clean-overlap cases.
+
+    **Default-to-live (W1.1b):** when ``requested`` is empty AND the
+    provider knows the live ontology, the candidate scan is bounded
+    by that set rather than running unfiltered. This keeps a
+    million-node graph performant even for views that don't restrict
+    entity types — the candidate scan never walks ``MATCH (n)``
+    without a label predicate.
     """
     requested_types = [t for t in (requested or []) if t]
-    if not requested_types:
-        return None, None
-
     live_levels = getattr(provider, "_entity_type_levels", None) or {}
     live_types = sorted(live_levels.keys())
+
+    if not requested_types:
+        # Request didn't restrict types. Default to the live ontology
+        # so the candidate scan is bounded by all known labels rather
+        # than running ``MATCH (n)`` unfiltered. If the provider has
+        # no ontology either, return None — the executor will surface
+        # a "no scope clamp; full scan with candidate-cap-only safety"
+        # diagnostic.
+        if live_types:
+            return live_types, (
+                "scope.entity_types was empty; defaulted to the live "
+                "ontology so the candidate scan stays bounded."
+            )
+        return None, None
+
     if not live_types:
         # Provider hasn't introspected its ontology yet. Trust the
         # request as the only signal we have.
@@ -900,6 +931,51 @@ def _build_scope_continuation(
     rel = "|".join(_sanitize_label(t) for t in ctypes)
     fragment = (
         f"MATCH (root)-[:{rel}*1..{int(max_depth)}]->(n) "
+        f"WHERE root.urn IN $_rootUrns "
+        f"WITH DISTINCT n"
+    )
+    return fragment, {"_rootUrns": list(effective_root_urns)}
+
+
+def _build_scope_pre_filter(
+    provider,
+    effective_root_urns: List[str],
+    max_depth: int,
+) -> Tuple[str, Dict[str, Any]]:
+    """Anchor-form scope MATCH for small root sets (W1.1b).
+
+    When ``len(effective_root_urns)`` is small enough that the
+    indexed root-URN lookup beats a label scan over the entire graph,
+    we replace the candidate-scan prefix entirely:
+
+        post-filter:  MATCH (n) WHERE ...predicate... WITH n LIMIT 5000
+                      MATCH (root)-[:ctypes*]->(n) WHERE root.urn IN $...
+
+        pre-filter:   MATCH (root)-[:ctypes*0..D]->(n)
+                      WHERE root.urn IN $_rootUrns
+                      WITH DISTINCT n
+                      WHERE ...predicate...
+                      WITH n LIMIT 5000
+
+    On a 100M-node graph with a 5-root subtree of 1000 nodes, the
+    pre-filter shape touches 1000 candidates instead of 100M. Caller
+    decides which shape to use based on
+    ``settings.scope_pre_filter_threshold``.
+
+    Returns ('', {}) when containment edge types aren't configured —
+    caller falls back to the post-filter shape.
+
+    ``*0..D`` (not ``*1..D``) so that a root URN can itself be the hit.
+    """
+    try:
+        ctypes = list(provider._get_containment_edge_types())
+    except Exception:
+        return "", {}
+    if not ctypes:
+        return "", {}
+    rel = "|".join(_sanitize_label(t) for t in ctypes)
+    fragment = (
+        f"MATCH (root)-[:{rel}*0..{int(max_depth)}]->(n) "
         f"WHERE root.urn IN $_rootUrns "
         f"WITH DISTINCT n"
     )
@@ -1040,18 +1116,35 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         )
 
     scope_continuation = ""
+    scope_pre_filter = ""
     if eff_root_urns:
-        scope_continuation, scope_params = _build_scope_continuation(
-            provider, eff_root_urns, query.scope.max_depth or 12,
-        )
-        base_params.update(scope_params)
-        if not scope_continuation:
-            notes.append(
-                "scope.root_urns supplied but the provider has no "
-                "containment edge types configured — the scope check "
-                "was dropped. All matching predicates pass without "
-                "ancestry verification."
+        # Decide scope shape (W1.1b): for small root sets, anchor on
+        # the indexed root.urn lookup and walk the subtree forward
+        # (pre-filter). For larger root sets, fall back to the
+        # post-filter shape — many roots × max_depth expansion costs
+        # more than a label scan over the bounded candidate set.
+        if len(eff_root_urns) <= _s.scope_pre_filter_threshold:
+            scope_pre_filter, scope_params = _build_scope_pre_filter(
+                provider, eff_root_urns, query.scope.max_depth or 12,
             )
+            if scope_pre_filter:
+                base_params.update(scope_params)
+                notes.append(
+                    f"scope.root_urns has {len(eff_root_urns)} URN(s); "
+                    f"using anchor-form pre-filter (W1.1b)."
+                )
+        if not scope_pre_filter:
+            scope_continuation, scope_params = _build_scope_continuation(
+                provider, eff_root_urns, query.scope.max_depth or 12,
+            )
+            base_params.update(scope_params)
+            if not scope_continuation:
+                notes.append(
+                    "scope.root_urns supplied but the provider has no "
+                    "containment edge types configured — the scope check "
+                    "was dropped. All matching predicates pass without "
+                    "ancestry verification."
+                )
 
     effective_types, et_note = _resolve_entity_types_scope(
         provider, list(query.scope.entity_types or []),
@@ -1078,6 +1171,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         scope_continuation=scope_continuation,
         candidate_cap=_s.candidate_cap,
         within_hops_continuation=wh_continuation,
+        scope_pre_filter=scope_pre_filter,
     )
 
     if query.options.results == "aggregates" and not query.options.aggregations:
@@ -1582,13 +1676,23 @@ async def execute_deep_search(
         # Intersection is empty → no rows can match
         return _empty_result(query.options.results, start)
 
-    # 3. Scope continuation Cypher (after the candidate WITH n)
+    # 3. Scope continuation Cypher (after the candidate WITH n).
+    #    For small root sets the pre-filter shape wins; otherwise we
+    #    fall back to the post-filter shape (W1.1b).
     scope_continuation = ""
+    scope_pre_filter = ""
     if eff_root_urns:
-        scope_continuation, scope_params = _build_scope_continuation(
-            provider, eff_root_urns, query.scope.max_depth or 12,
-        )
-        base_params.update(scope_params)
+        if len(eff_root_urns) <= _s.scope_pre_filter_threshold:
+            scope_pre_filter, scope_params = _build_scope_pre_filter(
+                provider, eff_root_urns, query.scope.max_depth or 12,
+            )
+            if scope_pre_filter:
+                base_params.update(scope_params)
+        if not scope_pre_filter:
+            scope_continuation, scope_params = _build_scope_continuation(
+                provider, eff_root_urns, query.scope.max_depth or 12,
+            )
+            base_params.update(scope_params)
 
     # 4. WithinHops continuation (each anchor → reachable-within-N-hops set)
     wh_continuation, wh_params, _ = _build_within_hops_continuation(
@@ -1616,6 +1720,7 @@ async def execute_deep_search(
         scope_continuation=scope_continuation,
         candidate_cap=_s.candidate_cap,
         within_hops_continuation=wh_continuation,
+        scope_pre_filter=scope_pre_filter,
     )
 
     # 5. Execute according to requested result shape
