@@ -18,7 +18,11 @@
  * Sugar predicates (isOrphan/isLeaf/isRoot/hasIncoming/hasOutgoing) all
  * share the same shape — a single `EdgeClassEditor` handles all five.
  */
+import { Filter } from 'lucide-react'
+import { useState } from 'react'
+
 import type {
+    EdgePredicateNode,
     Predicate,
     PropertyPredicate,
     PropertyOp,
@@ -46,6 +50,7 @@ import type {
 
 import { cn } from '@/lib/utils'
 
+import { EdgePredicateEditor } from './EdgePredicateEditor'
 import {
     FieldLabel,
     TextField,
@@ -577,7 +582,7 @@ function DescendantOfEditor({ value, onChange }: EditorProps<DescendantOfPredica
 }
 
 
-function WithinHopsEditor({ value, onChange }: EditorProps<WithinHopsPredicate>) {
+function WithinHopsEditor({ value, onChange, ctx }: EditorProps<WithinHopsPredicate>) {
     const direction: NonNullable<WithinHopsPredicate['direction']> = value.direction ?? 'both'
     return (
         <div className="flex flex-col gap-2">
@@ -619,12 +624,21 @@ function WithinHopsEditor({ value, onChange }: EditorProps<WithinHopsPredicate>)
                     placeholder="e.g. LINEAGE"
                 />
             </div>
+            <EdgeFilterDisclosure
+                edgePredicate={value.edgePredicate ?? null}
+                onEdgePredicateChange={(next) => onChange({
+                    ...value,
+                    edgePredicate: next ?? undefined,
+                })}
+                ctx={ctx}
+                edgeTypeHint={value.edgeTypes ?? undefined}
+            />
         </div>
     )
 }
 
 
-function PathEditor({ value, onChange }: EditorProps<PathPredicate>) {
+function PathEditor({ value, onChange, ctx }: EditorProps<PathPredicate>) {
     const direction: PathDirection = value.direction ?? 'outgoing'
     const edgeClass: EdgeClass = value.edgeClass ?? 'lineage'
     const maxHops = value.maxHops ?? 4
@@ -712,6 +726,76 @@ function PathEditor({ value, onChange }: EditorProps<PathPredicate>) {
                     placeholder="e.g. TRANSFORMS"
                 />
             </div>
+            <EdgeFilterDisclosure
+                edgePredicate={value.edgePredicate ?? null}
+                onEdgePredicateChange={(next) => onChange({
+                    ...value,
+                    edgePredicate: next ?? undefined,
+                })}
+                ctx={ctx}
+                edgeTypeHint={value.edgeTypes ?? undefined}
+            />
+        </div>
+    )
+}
+
+
+/**
+ * Collapsible "Filter the traversed edges" disclosure used by
+ * ``PathEditor`` and ``WithinHopsEditor`` (W2.3). Defaults to closed
+ * so the basic flow stays one-click — only opens when the user
+ * explicitly wants to constrain which edges count toward the
+ * traversal.
+ *
+ * When closed AND no edge predicate is set, shows a one-line
+ * "Filter edges (optional)" affordance. When an edge predicate
+ * exists, opens automatically so the user sees what's set.
+ */
+function EdgeFilterDisclosure({
+    edgePredicate, onEdgePredicateChange, ctx, edgeTypeHint,
+}: {
+    edgePredicate: EdgePredicateNode | null
+    onEdgePredicateChange: (next: EdgePredicateNode | null) => void
+    ctx: EditorContext
+    edgeTypeHint?: ReadonlyArray<string>
+}) {
+    const hasEdgePredicate = edgePredicate !== null
+    const [open, setOpen] = useState<boolean>(hasEdgePredicate)
+    const isOpen = open || hasEdgePredicate
+
+    return (
+        <div className="border-t border-glass-border/40 pt-2 mt-1">
+            <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                className={cn(
+                    'w-full flex items-center justify-between gap-2 px-1 py-1',
+                    'text-[10.5px] font-medium text-ink-muted hover:text-ink',
+                    'transition-colors',
+                )}
+                aria-expanded={isOpen}
+            >
+                <span className="inline-flex items-center gap-1.5">
+                    <Filter className="w-3 h-3" />
+                    Filter the traversed edges
+                    {hasEdgePredicate && (
+                        <span className="text-accent-lineage">·</span>
+                    )}
+                </span>
+                <span className="text-ink-muted/70">
+                    {isOpen ? '−' : '+'}
+                </span>
+            </button>
+            {isOpen && (
+                <div className="mt-1.5">
+                    <EdgePredicateEditor
+                        value={edgePredicate}
+                        onChange={onEdgePredicateChange}
+                        ctx={ctx}
+                        edgeTypeHint={edgeTypeHint}
+                    />
+                </div>
+            )}
         </div>
     )
 }
