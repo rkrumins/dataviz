@@ -36,7 +36,7 @@ import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useRevealNode } from '@/hooks/useRevealNode'
-import { useMatchUrnSet } from '@/store/searchStore'
+import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
@@ -1586,12 +1586,32 @@ export function ContextViewCanvas({
         onStartTrace={() => { if (selectedNodeIds[0]) startTraceWithSmartLevel(selectedNodeIds[0]) }}
         onExitTrace={exitTrace}
         onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
-        onOpenAdvancedSearch={() => {
-          // Simple toggle — the search panel lives on the LEFT rail, so
-          // it coexists with selection / edge-panel / creation on the
-          // right. Opening it doesn't disturb the user's other in-
-          // progress work, and clicking "Reveal" on a search hit can
-          // safely select a node without losing the results list.
+        onOpenAdvancedSearch={(seedQuery) => {
+          // Toggle the panel. When the user escalates from the
+          // quick search (passes a seed string), force-open the
+          // panel + clear the quick-search input (so the no-match
+          // escalation card disappears) + seed the Advanced
+          // panel's draft predicate with a name-text predicate so
+          // they pick up where they left off without retyping.
+          if (seedQuery && seedQuery.trim()) {
+            const trimmed = seedQuery.trim()
+            setSearchQuery('')
+            useSearchStore.getState().seedDraftPredicate({
+              kind: 'group',
+              op: 'and',
+              children: [{
+                kind: 'text',
+                value: trimmed,
+                target: 'name',
+                match: 'substring',
+              }],
+            })
+            setAdvancedSearchOpen(true)
+            return
+          }
+          // Plain toggle — the search panel lives on the LEFT rail,
+          // so it coexists with selection / edge-panel / creation on
+          // the right.
           setAdvancedSearchOpen((open) => !open)
         }}
         advancedSearchOpen={advancedSearchOpen}
