@@ -134,6 +134,20 @@ interface CanvasState {
   clearPinTargets: () => void
   setPinDisplayMode: (mode: 'hide' | 'dim') => void
 
+  // Pin Lineage — visual style for the path highlight. `intensity` tunes
+  // the amber halo's opacity/width (subtle for dense graphs, bold for
+  // emphasis). `pulse` adds a soft opacity oscillation to draw attention.
+  // `flow` adds an animated dashed stroke that flows source→target along
+  // the path edges. All defaults preserve today's static-bold visual.
+  pinPathStyle: { intensity: 'subtle' | 'bold'; pulse: boolean; flow: boolean }
+  setPinPathStyle: (partial: Partial<{ intensity: 'subtle' | 'bold'; pulse: boolean; flow: boolean }>) => void
+
+  // Pin Lineage — discoverability hint. Set true when the user dismisses
+  // the empty-state pin tip in the dock; reset to false on each new trace
+  // focus so the hint re-surfaces for the next exploration.
+  pinHintDismissed: boolean
+  setPinHintDismissed: (dismissed: boolean) => void
+
   // Cache
   cachedRegions: Map<string, LineageNode[]>
   cacheRegion: (key: string, nodes: LineageNode[]) => void
@@ -367,6 +381,14 @@ export const useCanvasStore = create<CanvasState>()(
         state.pinnedTargetUrns.length === 0 ? state : { pinnedTargetUrns: [] }
       ),
       setPinDisplayMode: (pinDisplayMode) => set({ pinDisplayMode }),
+
+      pinPathStyle: { intensity: 'bold', pulse: false, flow: false },
+      setPinPathStyle: (partial) => set((state) => ({
+        pinPathStyle: { ...state.pinPathStyle, ...partial },
+      })),
+
+      pinHintDismissed: false,
+      setPinHintDismissed: (pinHintDismissed) => set({ pinHintDismissed }),
 
       // Cache
       cachedRegions: new Map(),

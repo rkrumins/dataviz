@@ -16,6 +16,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion'
 import { Layers, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useCanvasStore } from '@/store/canvas'
 
 interface AggregatedEdgeData {
   confidence?: number
@@ -50,6 +51,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
   const isTraced = data?.isTraced ?? false
   const isDimmed = data?.isDimmed ?? false
   const isOnPinPath = data?.isOnPinPath ?? false
+  const pinPathStyle = useCanvasStore((s) => s.pinPathStyle)
 
   // Calculate path
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -95,8 +97,9 @@ export const AggregatedEdge = memo(function AggregatedEdge({
           d={edgePath}
           fill="none"
           stroke="#fbbf24"
-          strokeWidth={(isTraced ? 2 : 1.5) + 3}
-          strokeOpacity={0.28}
+          strokeWidth={(isTraced ? 2 : 1.5) + (pinPathStyle.intensity === 'subtle' ? 2 : 3)}
+          strokeOpacity={pinPathStyle.intensity === 'subtle' ? 0.18 : 0.32}
+          className={pinPathStyle.pulse ? 'animate-pulse-soft' : undefined}
           style={{
             filter: 'blur(2.5px)',
           }}
@@ -131,12 +134,13 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         className="transition-all duration-200"
       />
 
-      {/* Animated Flow Particles — only on interaction */}
-      {!isDimmed && (isHovered || selected || isTraced) && (
+      {/* Animated Flow Particles — on interaction, or always-on for edges
+          on the pinned path when the user has flow enabled. */}
+      {!isDimmed && (isHovered || selected || isTraced || (isOnPinPath && pinPathStyle.flow)) && (
         <path
           d={edgePath}
           fill="none"
-          stroke={isTraced ? traceColor : edgeColor}
+          stroke={isOnPinPath ? '#f59e0b' : isTraced ? traceColor : edgeColor}
           strokeWidth={1}
           strokeDasharray="1 12"
           className="animate-[flow_2s_linear_infinite]"

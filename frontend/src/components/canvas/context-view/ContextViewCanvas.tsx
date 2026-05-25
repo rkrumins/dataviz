@@ -930,14 +930,18 @@ export function ContextViewCanvas({
   const pinnedTargetUrns = useCanvasStore((s) => s.pinnedTargetUrns)
   const pinDisplayMode = useCanvasStore((s) => s.pinDisplayMode)
   const clearPinTargets = useCanvasStore((s) => s.clearPinTargets)
+  const setPinHintDismissed = useCanvasStore((s) => s.setPinHintDismissed)
 
   const lastFocusRef = useRef<string | null>(trace.focusId)
   useEffect(() => {
     if (lastFocusRef.current !== trace.focusId) {
       lastFocusRef.current = trace.focusId
       clearPinTargets()
+      // Re-arm the empty-state pin tip for every new trace — discoverability
+      // each time the user starts a new exploration.
+      setPinHintDismissed(false)
     }
-  }, [trace.focusId, clearPinTargets])
+  }, [trace.focusId, clearPinTargets, setPinHintDismissed])
 
   const pinPath = usePinnedLineagePath({
     edges,
@@ -967,6 +971,44 @@ export function ContextViewCanvas({
       }),
     [pinnedTargetUrns, nodeMap]
   )
+
+  // Hop distance from focus to every reachable urn — used for the chip
+  // tooltips so the user can reason about pin depth. Orientation-agnostic
+  // BFS over the lineage adjacency (skipping containment edges).
+  const hopFromFocus = useMemo(() => {
+    const m = new Map<string, number>()
+    if (!trace.focusId) return m
+    const fwd = new Map<string, string[]>()
+    const bwd = new Map<string, string[]>()
+    for (const e of edges) {
+      if (isContainmentEdge(normalizeEdgeType(e as any))) continue
+      if (!fwd.has(e.source)) fwd.set(e.source, [])
+      fwd.get(e.source)!.push(e.target)
+      if (!bwd.has(e.target)) bwd.set(e.target, [])
+      bwd.get(e.target)!.push(e.source)
+    }
+    const bfs = (adj: Map<string, string[]>): Map<string, number> => {
+      const dist = new Map<string, number>([[trace.focusId!, 0]])
+      const queue: string[] = [trace.focusId!]
+      while (queue.length) {
+        const cur = queue.shift()!
+        const d = dist.get(cur)!
+        for (const next of adj.get(cur) ?? []) {
+          if (!dist.has(next)) { dist.set(next, d + 1); queue.push(next) }
+        }
+      }
+      return dist
+    }
+    const df = bfs(fwd)
+    const db = bfs(bwd)
+    const seen = new Set<string>([...df.keys(), ...db.keys()])
+    for (const u of seen) {
+      const a = df.get(u) ?? Infinity
+      const b = db.get(u) ?? Infinity
+      m.set(u, Math.min(a, b))
+    }
+    return m
+  }, [edges, trace.focusId, isContainmentEdge])
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
@@ -1861,6 +1903,9 @@ export function ContextViewCanvas({
               pinDisplayMode={pinDisplayMode}
               onSetPinDisplayMode={(m) => useCanvasStore.getState().setPinDisplayMode(m)}
               onClearPins={clearPinTargets}
+              pathNodeCount={pinPath.pathNodeUrns.size}
+              pathEdgeCount={pinPath.pathEdgeIds.size}
+              hopFromFocus={hopFromFocus}
             />
           )}
         </AnimatePresence>

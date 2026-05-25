@@ -267,7 +267,9 @@ describe('TraceBottomDock — PinDockStrip', () => {
       unreachablePinUrns: new Set(['urn:b']),
     })
 
-    expect(screen.getByTitle(/OrphanedPin has no lineage path/i)).toBeInTheDocument()
+    // PinDockStrip uses the richer "{label} · unreachable from focus" title;
+    // the aggregate "N unreachable" chip still surfaces the count.
+    expect(screen.getByTitle(/OrphanedPin\s*·\s*unreachable from focus/i)).toBeInTheDocument()
     expect(screen.getByText(/1 unreachable/i)).toBeInTheDocument()
   })
 })

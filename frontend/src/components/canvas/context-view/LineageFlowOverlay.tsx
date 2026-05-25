@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { ComputedEdge, OverflowBadge, OverflowEdge } from './types'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useCanvasStore } from '@/store/canvas'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -111,6 +112,9 @@ export function LineageFlowOverlay({
   // Size alone is sufficient because React will re-render when the Set reference changes,
   // and we only need this for effect dependency tracking (not equality).
   const expandedNodesFingerprint = expandedNodes.size
+
+  // Pin-path highlight style — user-tunable (intensity / pulse / flow).
+  const pinPathStyle = useCanvasStore((s) => s.pinPathStyle)
 
   // Staged-change lookup map — keyed by edge ID. Recomputed when the staging
   // store's changes array changes; reads inside the edge .map() are O(1).
@@ -1010,19 +1014,37 @@ export function LineageFlowOverlay({
 
               {/* PIN-PATH GLOW — amber halo for edges on the user's pinned
                   sub-lineage. Layered after the hover/staged halos so the
-                  route reads as the dominant visual when both apply. */}
+                  route reads as the dominant visual when both apply.
+                  Intensity / pulse / flow come from pinPathStyle. */}
               {isOnPinPath && (
                 <path
                   d={pathD}
+                  className={`pointer-events-none${pinPathStyle.pulse ? ' animate-pulse-soft' : ''}`}
                   style={{
                     stroke: '#fbbf24',
-                    strokeWidth: dynamicStrokeWidth + 3,
+                    strokeWidth: dynamicStrokeWidth + (pinPathStyle.intensity === 'subtle' ? 2 : 3),
                     fill: 'none',
-                    strokeOpacity: 0.32,
+                    strokeOpacity: pinPathStyle.intensity === 'subtle' ? 0.18 : 0.32,
                     strokeLinecap: 'round',
                     filter: 'blur(2.5px)',
                   }}
-                  className="pointer-events-none"
+                />
+              )}
+
+              {/* PIN-PATH FLOW — animated dashed amber stroke along the
+                  path edges. Only rendered when the user has flow enabled. */}
+              {isOnPinPath && pinPathStyle.flow && (
+                <path
+                  d={pathD}
+                  className="pointer-events-none animate-flow"
+                  style={{
+                    stroke: '#f59e0b',
+                    strokeWidth: dynamicStrokeWidth + 0.5,
+                    fill: 'none',
+                    strokeOpacity: 0.7,
+                    strokeDasharray: '6 6',
+                    strokeLinecap: 'round',
+                  }}
                 />
               )}
 
