@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+  namespace: synodic
+data:
+  # Proxy VM's NIC0 IP (the address reachable from the GKE pod CIDR).
+  # The sidecar TCP-forwards localhost:5432 / localhost:6379 to this host
+  # on the same ports (haproxy / nginx-stream on the VM listens on 5432
+  # for Cloud SQL and 6379 for Memorystore).
+  VM_HOST: "REPLACE_ME_PROXY_VM_IP"

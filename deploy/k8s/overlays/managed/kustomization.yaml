@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Managed-services overlay: switches dataviz from the in-cluster
+# Postgres/Redis StatefulSets to managed Cloud SQL + Memorystore via a
+# dual-NIC proxy VM that bridges the GKE VPC and the services VPC.
+#
+# Per-pod a `db-proxy` and `redis-proxy` socat sidecar (rendered as
+# native sidecars via `restartPolicy: Always`) listens on
+# 127.0.0.1:5432 / 127.0.0.1:6379 and TCP-forwards to the proxy VM's
+# NIC0 address. The app keeps connecting to localhost.
+#
+# Before applying:
+#   1. Set VM_HOST in proxy-config.yaml to your proxy VM's NIC0 IP.
+#   2. Supply POSTGRES_PASSWORD via envsubst when applying (the base
+#      Secret uses ${POSTGRES_PASSWORD}; the overlay rewrites the host).
+#   3. Ensure your Cloud SQL instance has the `synodic` role + database
+#      and `aggregation` schema (the db-init Job in deploy/helm handles
+#      this if you Helm-install; otherwise run deploy/postgres-init/*.sql
+#      against Cloud SQL once).
+#
+# To extend production / staging / dev with managed services, layer this
+# overlay alongside the env overlay, or copy these patches into your
+# env overlay.
+
+resources:
+  - ../../base
+  - proxy-config.yaml
+
+patches:
+  # Remove in-cluster Postgres + Redis StatefulSets/Services — managed
+  # services own data durability.
+  - path: patches/delete-stores.yaml
+
+  # Point apps at the local sidecars instead of the in-cluster
+  # `postgres` / `redis` Services.
+  - path: patches/common-config.yaml
+  - path: patches/db-credentials.yaml
+
+  # Inject db-proxy + redis-proxy sidecars and drop the postgres/redis
+  # `nc -z` checks from the wait-for-deps initContainer.
+  - path: patches/sidecars.yaml

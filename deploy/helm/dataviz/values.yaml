@@ -67,6 +67,34 @@ secrets:
   # sync with the password inside managementDbUrl.
   postgresPassword: "REPLACE_ME"
 
+# ── TCP forwarder sidecars for managed Postgres / Redis (OPT-IN) ──────
+# When apps must connect to managed services (Cloud SQL, Memorystore)
+# through a dual-NIC proxy VM that sits between the GKE VPC and the
+# services VPC, enable a sidecar that listens on 127.0.0.1 inside the
+# pod and forwards to the VM's NIC0 address. Pair with:
+#   secrets.managementDbUrl: postgresql+asyncpg://USER:PASS@127.0.0.1:5432/synodic
+#   secrets.redisUrl:        redis://127.0.0.1:6379/0
+#   secrets.dbInitDsn:       postgresql://postgres:PASS@127.0.0.1:5432/postgres
+# The sidecar is rendered as a Kubernetes native sidecar (an initContainer
+# with restartPolicy: Always — GA in 1.29) so it is Ready before the
+# app container and the wait-for-schema initContainer start. Mutually
+# exclusive with stores.{postgres,redis}.enabled.
+proxy:
+  postgres:
+    enabled: false
+    upstream: ""              # "<vm-nic0-ip>:<vm-port>" e.g. "10.0.0.5:5432"
+    image: alpine/socat:1.8.0.0
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits:   { cpu: 100m, memory: 64Mi }
+  redis:
+    enabled: false
+    upstream: ""              # "<vm-nic0-ip>:<vm-port>" e.g. "10.0.0.5:6379"
+    image: alpine/socat:1.8.0.0
+    resources:
+      requests: { cpu: 10m, memory: 16Mi }
+      limits:   { cpu: 100m, memory: 64Mi }
+
 # ── In-cluster stateful backing stores (OPT-IN) ───────────────────────
 # Alternative to external/managed Cloud SQL + Memorystore + FalkorDB.
 # When enabled, point the app at the in-cluster Service DNS names:

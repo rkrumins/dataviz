@@ -12,7 +12,10 @@ chart (`deploy/helm/dataviz`). Both deploy the 6 app workloads
 - Docker Hub account (or any registry) and `docker` for building images.
 - Postgres, Redis, FalkorDB — either external/managed (Cloud SQL,
   Memorystore) **or** the in-cluster StatefulSets (`deploy/k8s/stores` /
-  Helm `stores.*.enabled`).
+  Helm `stores.*.enabled`). For managed services reached through a
+  dual-NIC proxy VM, see the sidecar mode: Helm `proxy.postgres.*` /
+  `proxy.redis.*`, or the Kustomize overlay
+  `deploy/k8s/overlays/managed/`.
 
 ## 2. Build & push images
 
@@ -80,6 +83,11 @@ helm install dataviz deploy/helm/dataviz -n dataviz \
 # in-cluster stores instead of managed: add
 #   --set stores.postgres.enabled=true --set stores.redis.enabled=true \
 #   --set stores.falkordb.enabled=true --set dbInit.enabled=false
+# managed Cloud SQL + Memorystore via a dual-NIC proxy VM: add
+#   --set proxy.postgres.enabled=true --set proxy.postgres.upstream=10.0.0.5:5432 \
+#   --set proxy.redis.enabled=true    --set proxy.redis.upstream=10.0.0.5:6379
+# The Secret/values must then use 127.0.0.1 in MANAGEMENT_DB_URL,
+# REDIS_URL, and DB_INIT_DSN.
 ```
 
 **Raw manifests:** edit `deploy/k8s/configmap.yaml` (FalkorDB host, CORS,

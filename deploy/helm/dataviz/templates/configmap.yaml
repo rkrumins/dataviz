@@ -32,3 +32,8 @@ data:
   STATS_POLL_TIMEOUT_SECS: {{ .Values.config.stats.pollTimeoutSecs | quote }}
   STATS_POLL_TIMEOUT_LARGE_SECS: {{ .Values.config.stats.pollTimeoutLargeSecs | quote }}
   STATS_POLL_LARGE_THRESHOLD: {{ .Values.config.stats.pollLargeThreshold | quote }}
+  {{- if .Values.proxy.redis.enabled }}
+  # FalkorDB provider's chain / URN cache lives on the same Memorystore
+  # instance the sidecar forwards to (REDIS_URL uses db 0; cache uses db 1).
+  CACHE_REDIS_URL: "redis://127.0.0.1:6379/1"
+  {{- end }}
