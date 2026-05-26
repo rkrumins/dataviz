@@ -1197,6 +1197,7 @@ export function ContextViewCanvas({
   const revealSearchHit = useRevealSearchHit({
     setExpandedNodes,
     loadChildren,
+    provider,
     scrollIntoView: scrollHitIntoView,
   })
 
@@ -1505,8 +1506,31 @@ export function ContextViewCanvas({
       // subtree (the node itself + all descendants). Runs in BOTH browse
       // mode and trace mode — `loadChildren` (browse) and trace drilldowns
       // both add edges to the canvas store on expand, so collapse must
-      // unconditionally release them. Re-expanding refetches via
-      // loadChildren / drill paths (cached by the trace store).
+      // release them. Re-expanding refetches via loadChildren / drill
+      // paths.
+      //
+      // Trace-mode exemption: edges that came from `/trace/v2` or
+      // `autoDrillOnExpand` are tracked in `useUnifiedTrace.addedEdgeIds`.
+      // We preserve only the *lineage* subset of that allowlist through
+      // collapse — those are the cross-subtree trace edges with no
+      // re-add path (neither `loadChildren` nor `autoDrillOnExpand`
+      // refetches them on re-expand). Trace *containment* edges are
+      // intentionally NOT preserved: they're real containment edges
+      // that `loadChildren` will re-fetch as part of its child-fetch
+      // result, and preserving them would make `loadChildren`'s cache
+      // check (`currentChildrenCount >= childCount` in
+      // `useGraphHydration.ts`) short-circuit on re-expand, leaving
+      // the browse-mode lineage of children un-restored. With only
+      // lineage preserved, `loadChildren` sees zero containment edges
+      // on re-expand → re-fetches the full child set + every browse-
+      // mode lineage edge alongside them.
+      //
+      // Why not skip removal entirely: keeping every browse-mode and
+      // drill-containment edge in the store after collapse leaves
+      // stale containment relationships in `parentMap`, which can
+      // re-classify visible roots as descendants and silently drop
+      // them from `useLayerAssignment`'s per-layer root list — the
+      // "nodes disappear" symptom in large layers during trace.
       const subtreeIds = new Set<string>()
       subtreeIds.add(nodeId)
       const stack: string[] = [nodeId]
@@ -1518,11 +1542,23 @@ export function ContextViewCanvas({
           if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
         }
       }
-      // Edges where the collapsed node is one endpoint should also drop so the
-      // node's children-level lineage doesn't linger as orphan edges. The
-      // collapsed parent re-acquires its aggregated edges via fetchAggregated
-      // on the next render tick.
-      removeEdgesByNodeIds(subtreeIds)
+      let preserveEdgeIds: ReadonlySet<string> | undefined
+      if (trace.isTracing && trace.addedEdgeIds.size > 0) {
+        // Build an id→edge index over the current store, then keep only
+        // the trace-added LINEAGE edges (drop containment from the
+        // preserve set — see comment above).
+        const byId = new Map<string, typeof edges[number]>()
+        for (const e of edges) byId.set(e.id, e)
+        const lineagePreserve = new Set<string>()
+        for (const id of trace.addedEdgeIds) {
+          const e = byId.get(id)
+          if (e && !isContainmentEdge(normalizeEdgeType(e))) {
+            lineagePreserve.add(id)
+          }
+        }
+        if (lineagePreserve.size > 0) preserveEdgeIds = lineagePreserve
+      }
+      removeEdgesByNodeIds(subtreeIds, preserveEdgeIds)
 
       // Synchronous companion: drop matching entries in the aggregated-edge
       // map too. Otherwise stale child-level aggregated edges linger for up
@@ -1536,7 +1572,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, autoDrillOnExpand])
+  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand, edges, isContainmentEdge])
 
 
 

@@ -259,10 +259,11 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 7. Progressive loading
   const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes } = useGraphHydration()
   useLoadingToast('graph-children', isLoadingChildren, 'Expanding hierarchy')
+  const provider = useGraphProvider()
 
   // Reveal a search hit on this canvas — same flow as ContextViewCanvas
   // (walk ancestor chain, expand each step, then select + scroll).
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({
@@ -602,7 +603,6 @@ export function GraphCanvas({ className }: { className?: string }) {
   // ref because canvas-store positions are pre-layout. Trace mode is
   // transparent here — visibility is governed by parentMap + expandedNodes,
   // not by trace state, so the cascade works under both browse and trace.
-  const provider = useGraphProvider()
   const revealAndFocus = useRevealNode({
     parentMap,
     setExpandedNodes,

@@ -18,6 +18,7 @@ import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useLoadingToast } from '@/components/ui/toast'
 
 // UX-first interaction components (shared across canvases)
@@ -87,7 +88,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // mounted on ContextView and Graph canvases.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren })
+  const provider = useGraphProvider()
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
   // Edit Mode State (shared across canvases)
   const [isPaletteOpen, setPaletteOpen] = useState(false)

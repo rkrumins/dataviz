@@ -449,13 +449,15 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingSearchSeed: null,
-    // Default to 'visible' — matches "search what I can see" mental
-    // model, includes unassigned / orphan nodes the canvas surfaces,
-    // and uses a single-clause WHERE filter that's hard to get wrong.
-    // 'view' (collapsed-folder expansion via containment) is
-    // available on demand for power users who want to reach into
-    // sub-trees they haven't opened yet.
-    scopeMode: 'visible',
+    // Default to 'view' — searches the full descendant set of the
+    // view's top-level containers, including subtrees that haven't
+    // been expanded yet. Matches the user's "search this view"
+    // mental model on a canvas that lazy-loads children (only the
+    // expanded portion lives in the local node store, so 'visible'
+    // would silently drop lazy descendants from results). 'visible'
+    // (narrow to currently-rendered nodes) and 'data_source' (escape
+    // the view boundary) remain available via the picker.
+    scopeMode: 'view',
     selectionParent: null,
     selectedIndices: [],
 

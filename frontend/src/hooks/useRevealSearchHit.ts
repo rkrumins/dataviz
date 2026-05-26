@@ -23,6 +23,8 @@
 import { useCallback } from 'react'
 
 import { useCanvasStore } from '@/store/canvas'
+import { toCanvasNode } from '@/hooks/useGraphHydration'
+import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
 
 
@@ -35,6 +37,11 @@ export interface UseRevealSearchHitDeps {
     setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
     /** Hydrate a parent node's children. Throws on network failure. */
     loadChildren: (nodeId: string) => Promise<void>
+    /** Graph data provider — used to prime missing spine ancestors via
+     *  `getNodes({ urns })` before the spine walk. Without this, the walk
+     *  halts at the first ancestor that wasn't fetched on hydration
+     *  (which, with lazy loading, is every non-top-level ancestor). */
+    provider: GraphDataProvider
     /** Optional: after the hit is selected (or after we fall back to the
      *  deepest reachable ancestor), bring that node into the viewport.
      *  Receives the canvas-node id (== URN for the ContextView layout).
@@ -47,10 +54,39 @@ export interface UseRevealSearchHitDeps {
 export type RevealSearchHit = (urn: string, ancestorPath: AncestorRef[]) => Promise<void>
 
 
-export function useRevealSearchHit({ setExpandedNodes, loadChildren, scrollIntoView }: UseRevealSearchHitDeps): RevealSearchHit {
+export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, scrollIntoView }: UseRevealSearchHitDeps): RevealSearchHit {
     const selectNode = useCanvasStore((s) => s.selectNode)
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]) => {
+        // Prime the spine: with lazy children loading, only top-level
+        // entities are in the canvas store after hydration. Each
+        // subsequent ancestor (and the hit itself) must be materialized
+        // before the spine walk can find them. One getNodes call covers
+        // the whole chain regardless of depth; containment edges are
+        // committed by the per-ancestor loadChildren calls below.
+        const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
+        const existingNodes = useCanvasStore.getState().nodes
+        const existingUrns = new Set(
+            existingNodes.flatMap((n) => {
+                const u = n.data?.urn as string | undefined
+                return u ? [n.id, u] : [n.id]
+            }),
+        )
+        const missingUrns = spineUrns.filter((u) => !existingUrns.has(u))
+        if (missingUrns.length > 0) {
+            try {
+                const fetched = await provider.getNodes({ urns: missingUrns as any[] })
+                if (fetched.length > 0) {
+                    const { addGraph } = useCanvasStore.getState()
+                    addGraph(fetched.map((n) => toCanvasNode(n)), [])
+                }
+            } catch (e) {
+                console.warn('[reveal] spine priming failed', e)
+                // Continue — the spine walk will fall back to the
+                // deepest reachable ancestor.
+            }
+        }
+
         // Spine walk: expand each ancestor in turn so the deep hit
         // becomes reachable. Each `loadChildren` is awaited so the
         // canvas store settles before the next ancestor lookup.
@@ -123,5 +159,5 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, scrollIntoV
                 break
             }
         }
-    }, [setExpandedNodes, loadChildren, selectNode, scrollIntoView])
+    }, [setExpandedNodes, loadChildren, provider, selectNode, scrollIntoView])
 }
