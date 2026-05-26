@@ -135,3 +135,37 @@ export function useCanvasViewRootUrns(): string[] {
     const roots = useCanvasViewRoots()
     return useMemo(() => roots.map((r) => r.urn), [roots])
 }
+
+
+/**
+ * Anchor options for the "Inside Subtree" filter — every node
+ * currently loaded on the canvas, regardless of entity type or
+ * containment depth. Lets the user pick any Layer, Object, Container,
+ * or deeper node as a search anchor; the BE Cypher
+ * (``MATCH (root)-[:CONTAINS*0..D]->(n) WHERE root.urn IN $_rootUrns``)
+ * has no label restriction.
+ *
+ * Ghosts and untyped placeholders are filtered out. Sorted by
+ * displayName so the dropdown reads alphabetically.
+ */
+export function useCanvasAnchorOptions(): CanvasViewRoot[] {
+    const nodes = useCanvasStore((s) => s.nodes)
+    return useMemo(() => {
+        const out: CanvasViewRoot[] = []
+        const seen = new Set<string>()
+        for (const n of nodes) {
+            const type = (n.data as { type?: string }).type
+            if (!type || type === 'ghost') continue
+            const urn = (n.data as { urn?: string }).urn ?? n.id
+            if (seen.has(urn)) continue
+            seen.add(urn)
+            const label =
+                (n.data as { label?: string; businessLabel?: string }).label
+                ?? (n.data as { businessLabel?: string }).businessLabel
+                ?? urn
+            out.push({ id: n.id, urn, displayName: label, entityType: type })
+        }
+        out.sort((a, b) => a.displayName.localeCompare(b.displayName))
+        return out
+    }, [nodes])
+}

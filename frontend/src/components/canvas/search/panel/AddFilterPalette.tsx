@@ -328,15 +328,15 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     }),
                 },
                 {
-                    id: 'root-in-view',
+                    id: 'inside-subtree',
                     icon: Layers, tone: 'structure',
-                    label: 'Root in view is…',
+                    label: 'Inside Subtree',
                     description:
-                        'Restrict to entities under one of the view\'s '
-                        + 'top-level containers (e.g. SILVER, GOLD, '
-                        + 'INTERMEDIATE_T1). Replaces the old "Layer" '
-                        + 'filter — these are the same containers you '
-                        + 'see at the top of the canvas tree.',
+                        'Restrict results to descendants of one or more '
+                        + 'anchor nodes. Pick any node visible on the '
+                        + 'canvas — Layer, Object, Container, or deeper. '
+                        + 'Combine with other filters to narrow a search '
+                        + 'to a specific section of the graph.',
                     count: counts.layers,
                     samples: samples?.layers,
                     action: 'emit',

@@ -51,7 +51,7 @@ import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
-import { useCanvasViewRoots } from './useCanvasViewRoots'
+import { useCanvasAnchorOptions } from './useCanvasViewRoots'
 
 
 export interface ConditionRowProps {
@@ -213,10 +213,12 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             // New queries use ``descendantOf`` instead (Root in view).
             return <LayerEditor {...ctx} value={value as LayerPredicate} />
         case 'descendantOf':
-            // "Root in view is…" — replaces the old Layer filter.
-            // Lists the canvas's view roots (SILVER, INTERMEDIATE_T1,
-            // …) by display name and emits a DescendantOfPredicate.
-            return <RootInViewEditor {...ctx} value={value as DescendantOfPredicate} />
+            // "Inside Subtree" — picks any canvas-loaded node as the
+            // anchor (Layer, Object, Container, deeper) and emits a
+            // DescendantOfPredicate. The BE Cypher has no label
+            // restriction on the root, so this works for arbitrary
+            // sub-tree isolation.
+            return <InsideSubtreeEditor {...ctx} value={value as DescendantOfPredicate} />
         case 'hasProperty':
             return <HasPropertyEditor {...ctx} value={value as HasPropertyPredicate} />
         case 'property':
@@ -497,36 +499,31 @@ function LayerEditor({
 
 
 /**
- * RootInViewEditor — the new "Root in view is…" filter that replaces
- * the old Layer filter. Lists the canvas's top-level container nodes
- * (the same ones the user sees at the top of the canvas tree) and
- * emits a DescendantOfPredicate so matches are constrained to the
- * chosen sub-tree(s).
- *
- * Multi-select: pick one or more roots to scope the search to their
- * union (e.g. "everything under SILVER OR GOLD").
- *
- * Empty hint covers the case where the canvas hasn't hydrated yet.
+ * InsideSubtreeEditor — anchors a search to descendants of one or
+ * more canvas nodes. The picker is fed by ``useCanvasAnchorOptions``
+ * (every canvas-loaded node, not just top-level roots) because the
+ * BE Cypher has no label restriction on the anchor. Multi-select:
+ * pick one or more anchors → union of subtrees.
  */
-function RootInViewEditor({
+function InsideSubtreeEditor({
     value, onChange, autoFocus,
 }: Omit<EditorCtx, 'value'> & { value: DescendantOfPredicate }) {
-    const roots = useCanvasViewRoots()
+    const anchors = useCanvasAnchorOptions()
     return (
-        <Field label="Root nodes">
+        <Field label="Anchor nodes">
             <UnifiedPicker
                 multiple
                 value={value.urns}
                 onChange={(next) => onChange({ ...value, urns: next })}
-                options={roots.map((r) => ({
+                options={anchors.map((r) => ({
                     value: r.urn,
                     label: r.displayName,
                     description: r.entityType,
                 }))}
-                placeholder="pick one or more roots from this view…"
+                placeholder="pick one or more anchors from this canvas…"
                 emptyHint={
-                    'No top-level nodes in this view yet. Open the view '
-                    + 'or wait for the canvas to load.'
+                    'No nodes loaded on the canvas yet. Open the view '
+                    + 'or wait for it to hydrate.'
                 }
                 autoFocus={autoFocus}
                 portal
