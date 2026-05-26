@@ -489,11 +489,19 @@ const PREDICATE_KIND_SNIPPETS: readonly Completion[] = [
     ),
     snippetCompletion(
         '{\n  "kind": "descendantOf",\n  "urns": ["${1:urn:li:domain:customers}"],\n  "maxDepth": ${2:12}\n}',
-        { label: 'descendantOf', detail: 'DescendantOfPredicate' },
+        { label: 'descendantOf', detail: 'DescendantOfPredicate — Inside Subtree' },
     ),
     snippetCompletion(
-        '{\n  "kind": "withinHops",\n  "urns": ["${1:urn:li:dataset:orders}"],\n  "hops": ${2:2},\n  "direction": "${3:both}"\n}',
-        { label: 'withinHops', detail: 'WithinHopsPredicate' },
+        // Alias for users who picked "Inside Subtree" in the palette
+        // and switched to Code mode — they search by the UI label, not
+        // the wire-format kind. Same JSON shape as the descendantOf
+        // entry above.
+        '{\n  "kind": "descendantOf",\n  "urns": ["${1:urn:li:domain:customers}"],\n  "maxDepth": ${2:12}\n}',
+        { label: 'insideSubtree', detail: 'Inside Subtree (alias for descendantOf)' },
+    ),
+    snippetCompletion(
+        '{\n  "kind": "withinHops",\n  "urns": ["${1:urn:li:dataset:orders}"],\n  "hops": ${2:2},\n  "direction": "${3:both}",\n  "edgeClass": "lineage"\n}',
+        { label: 'withinHops', detail: 'WithinHopsPredicate — N-hop neighbourhood' },
     ),
     snippetCompletion(
         '{\n  "kind": "degree",\n  "direction": "${1:in}",\n  "op": "${2:gte}",\n  "value": ${3:1},\n  "edgeClass": "lineage"\n}',

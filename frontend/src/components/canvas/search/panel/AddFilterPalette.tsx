@@ -43,6 +43,7 @@ import {
     GitMerge,
     Hash,
     KeyRound,
+    GitBranch,
     Layers,
     Milestone,
     Parentheses,
@@ -337,21 +338,42 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     }),
                 },
                 {
-                    id: 'inside-subtree',
+                    id: 'root-in-view',
                     icon: Layers, tone: 'structure',
-                    label: 'Inside Subtree',
+                    label: 'Root in view is…',
                     description:
-                        'Restrict results to descendants of one or more '
-                        + 'anchor nodes. Pick any node visible on the '
-                        + 'canvas — Layer, Object, Container, or deeper. '
-                        + 'Combine with other filters to narrow a search '
-                        + 'to a specific section of the graph.',
+                        'Restrict to entities under one of the view\'s '
+                        + 'top-level containers (e.g. SILVER, GOLD, a '
+                        + 'top-level Layer). The simple, common case — '
+                        + 'pick from the same containers visible at the '
+                        + 'top of the canvas tree.',
                     count: counts.layers,
                     samples: samples?.layers,
                     action: 'emit',
+                    // ``uiScope: 'roots'`` is the FE-only hint that
+                    // routes ConditionRow to the roots-only picker.
+                    // Stripped at the API boundary so the wire-format
+                    // predicate is plain ``descendantOf``.
                     build: () => ({
                         kind: 'descendantOf', urns: [],
-                    }),
+                        uiScope: 'roots',
+                    } as Predicate),
+                },
+                {
+                    id: 'inside-subtree',
+                    icon: GitBranch, tone: 'structure',
+                    label: 'Inside Subtree',
+                    description:
+                        'Restrict results to descendants of any node on '
+                        + 'the canvas — Layer, Object, Container, or '
+                        + 'deeper. Power-user isolation for searching '
+                        + 'a specific section of the graph that isn\'t '
+                        + 'a top-level root.',
+                    action: 'emit',
+                    build: () => ({
+                        kind: 'descendantOf', urns: [],
+                        uiScope: 'any',
+                    } as Predicate),
                 },
             ],
         },
