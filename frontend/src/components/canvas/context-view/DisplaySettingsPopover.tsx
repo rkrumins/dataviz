@@ -57,8 +57,8 @@ interface DensityOption {
 
 const DENSITY_OPTIONS: DensityOption[] = [
   { mode: 'compact', label: 'Compact', description: 'Tightest rows — fit more on screen', icon: Minimize },
-  { mode: 'comfortable', label: 'Comfortable', description: 'Balanced spacing (default)', icon: Rows3 },
-  { mode: 'spacious', label: 'Spacious', description: 'Larger rows and icons for readability', icon: Maximize },
+  { mode: 'comfortable', label: 'Comfortable', description: 'Balanced spacing', icon: Rows3 },
+  { mode: 'spacious', label: 'Spacious', description: 'Larger rows and icons for readability (default)', icon: Maximize },
 ]
 
 const POPOVER_WIDTH = 320
@@ -67,10 +67,15 @@ function formatZoom(z: number): string {
   return `${Math.round(z * 100)}%`
 }
 
-function isDefaultState(props: Pick<DisplaySettingsPopoverProps, 'canvasZoom' | 'canvasDensity' | 'showTypeBadge' | 'subtleTreeLines'>): boolean {
+function isDefaultState(props: {
+  canvasZoom: number
+  canvasDensity: CanvasDensity
+  showTypeBadge: boolean
+  subtleTreeLines: boolean
+}): boolean {
   return (
     Math.abs(props.canvasZoom - 1) < 0.001 &&
-    props.canvasDensity === 'comfortable' &&
+    props.canvasDensity === 'spacious' &&
     props.showTypeBadge === true &&
     props.subtleTreeLines === false
   )
@@ -92,7 +97,7 @@ export function DisplaySettingsPopover({
   // already nullish-coalesces, but a missing default here would crash the
   // trigger render (e.g. `canvasDensity[0]`) before the parent can heal.
   const canvasZoom = canvasZoomRaw ?? 1
-  const canvasDensity: CanvasDensity = canvasDensityRaw ?? 'comfortable'
+  const canvasDensity: CanvasDensity = canvasDensityRaw ?? 'spacious'
   const showTypeBadge = showTypeBadgeRaw ?? true
   const subtleTreeLines = subtleTreeLinesRaw ?? false
 

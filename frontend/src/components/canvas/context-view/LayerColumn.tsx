@@ -57,6 +57,11 @@ interface LayerColumnProps {
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
   isHydratingInitial?: boolean
+  /** Pulse signal from a "Reveal in canvas" action. When this changes,
+   *  the column scrolls the matching row into view via the virtualizer
+   *  (DOM scrolling can't work — rows below the overscan window aren't
+   *  mounted). Columns that don't own the URN no-op. */
+  revealTarget?: { id: string; pulse: number } | null
 }
 
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
@@ -97,6 +102,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onScroll,
   onAssignToLayer,
   isHydratingInitial = false,
+  revealTarget,
 }: LayerColumnProps) {
   // A layer that has zero entity types, rules, instance assignments, AND
   // logical nodes is configured to receive nothing — showing ghost cards
@@ -371,7 +377,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   // canvas density — densityRowHeights() is the shared source of truth so
   // scroll position stays stable across density changes. Default guards
   // users whose persisted preferences predate this field.
-  const density = usePreferencesStore(s => s.canvasDensity) ?? 'comfortable'
+  const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const rowHeights = useMemo(() => densityRowHeights(density), [density])
   const virtualizer = useVirtualizer({
     count: flatTree.length,
@@ -404,6 +410,28 @@ export const LayerColumn = React.memo(function LayerColumn({
       virtualizer.scrollToIndex(flatIndex, { align: 'auto', behavior: 'smooth' })
     }
   }, [focusedNodeId, nodeToFlatIndexMap, virtualizer])
+
+  // Auto-scroll a freshly-revealed search hit into view via the
+  // virtualizer. DOM-based scrollIntoView can't work here because the
+  // hit row may be hundreds of items below the overscan window, so it
+  // simply doesn't exist in the DOM. Each "Reveal in canvas" click
+  // bumps `revealTarget.pulse`, which re-fires this effect even when
+  // the same URN is revealed twice. Columns that don't own the URN
+  // no-op (their nodeToFlatIndexMap won't have the entry).
+  const lastRevealPulseRef = useRef<number>(-1)
+  useEffect(() => {
+    if (!revealTarget) return
+    if (lastRevealPulseRef.current === revealTarget.pulse) return
+    const flatIndex = nodeToFlatIndexMap.get(revealTarget.id)
+    if (flatIndex === undefined) return  // Wait for flatTree to update
+    lastRevealPulseRef.current = revealTarget.pulse
+    // Tiny delay so the virtualizer has its post-expand size estimates
+    // before we ask it to compute a scroll offset for an off-screen row.
+    const timer = setTimeout(() => {
+      virtualizer.scrollToIndex(flatIndex, { align: 'center', behavior: 'smooth' })
+    }, 50)
+    return () => clearTimeout(timer)
+  }, [revealTarget, nodeToFlatIndexMap, virtualizer])
 
   // Auto-scroll trace focus node into view — runs ONCE per focus change.
   // Without the ref guard the effect re-fires every time nodeToFlatIndexMap

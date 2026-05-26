@@ -8,6 +8,9 @@ import { cn } from '@/lib/utils'
 import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
 import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
+import { SearchMatchBadge } from '../search/SearchMatchBadge'
+import { useSearchHighlight } from '../search/useSearchHighlight'
+
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
   const IconComponent = (LucideIcons as unknown as Record<string, React.ComponentType<{ className?: string; style?: React.CSSProperties }>>)[name]
@@ -143,6 +146,24 @@ export const GenericNode = memo(function GenericNode({
   // Expansion mode from ontology definition: 'inline' expands in-place, 'graph' expands the canvas
   const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
 
+  // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
+  // the canonical identifier; fall back to the React Flow node id
+  // when missing (rare). Pulses on direct match, shows a chevron
+  // badge when collapsed and ancestor matches exist, dims when
+  // spotlight is active and this node isn't in the match chain.
+  const searchUrn = (entityFields['urn'] as string | undefined) ?? id
+  const schemaForBadge = useSchemaStore((s) => s.schema)
+  const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
+  // GraphCanvas nodes are typically uncollapsed (they render their
+  // children as separate React Flow nodes), so the ancestor badge
+  // only makes sense on nodes that have collapsed children
+  // (childCount > 0 AND not expanded). When in doubt, show the
+  // badge — its hover tooltip names the specific entity-types so
+  // it's never confusing.
+  const showSearchBadge = search.ancestorMatchCount > 0
+    && (entityData.childCount ?? 0) > 0
+    && !(entityData.isExpanded ?? false)
+
   return (
     <>
       {/* Node Toolbar (appears on selection) */}
@@ -184,6 +205,16 @@ export const GenericNode = memo(function GenericNode({
           !!selected && !isTraced && "ring-2 ring-offset-2",
           !!dragging && "opacity-80 cursor-grabbing",
           isGhost && "opacity-60",
+          // W2.1 — advanced-search direct-match glow (reuses the
+          // shared ``search-match-pulse`` keyframes used by
+          // FlatTreeItem + HierarchyCanvas so all canvases pulse
+          // identically). Skip on selected + traced so the existing
+          // trace/select rings stay primary.
+          search.isDirectMatch && !selected && !isTraced && !isFocus
+            && "ring-2 ring-amber-500/60 shadow-[0_0_22px_-2px_rgba(245,158,11,0.55)] search-match-pulse",
+          // Spotlight-dim: fade non-match, non-ancestor nodes when
+          // any search has matches. Trace dim wins when both active.
+          !isDimmed && search.isSpotlightDim && "opacity-40 saturate-[0.6]",
           // Trace Styling - Consistent across all views
           isDimmed && "opacity-30 grayscale-[0.6] blur-[0.5px] scale-[0.98]",
           // Focus node: Gold ring + pulse
@@ -255,14 +286,23 @@ export const GenericNode = memo(function GenericNode({
               {entityType.name}
             </span>
 
-            {/* Primary Label */}
-            <h3 className={cn(
-              "font-medium text-ink leading-tight truncate",
-              visual.size === 'xs' ? 'text-xs' :
-                visual.size === 'sm' ? 'text-sm' : 'text-sm'
-            )}>
-              {primaryLabel}
-            </h3>
+            {/* Primary Label + W2.1 search match badge */}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <h3 className={cn(
+                "font-medium text-ink leading-tight truncate flex-1 min-w-0",
+                visual.size === 'xs' ? 'text-xs' :
+                  visual.size === 'sm' ? 'text-sm' : 'text-sm'
+              )}>
+                {primaryLabel}
+              </h3>
+              {showSearchBadge && schemaForBadge && (
+                <SearchMatchBadge
+                  count={search.ancestorMatchCount}
+                  breakdown={search.ancestorBreakdown}
+                  schema={schemaForBadge}
+                />
+              )}
+            </div>
 
             {/* Secondary Label (persona-driven) */}
             {secondaryLabel && visual.size !== 'xs' && (
