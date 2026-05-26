@@ -164,6 +164,15 @@ export const GenericNode = memo(function GenericNode({
     && (entityData.childCount ?? 0) > 0
     && !(entityData.isExpanded ?? false)
 
+  // Canvas filter Isolate / Hide modes skip rendering this node. React
+  // Flow doesn't expose a clean "hide" prop, so the cheapest path is
+  // to early-return null — the edges connected to a hidden node
+  // remain in the graph but resolve to no DOM, which React Flow
+  // tolerates (the edge segment shortens to a point and is
+  // effectively invisible). Returning null AFTER the hook calls keeps
+  // the Rules of Hooks happy.
+  if (search.isHidden) return null
+
   return (
     <>
       {/* Node Toolbar (appears on selection) */}

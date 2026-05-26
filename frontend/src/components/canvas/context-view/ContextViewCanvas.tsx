@@ -1503,36 +1503,63 @@ export function ContextViewCanvas({
       cancelChildLoad(nodeId)
 
       // Collapse: drop every edge with an endpoint inside the collapsed
-      // subtree (the node itself + all descendants). Runs in BOTH browse
-      // mode and trace mode — `loadChildren` (browse) and trace drilldowns
-      // both add edges to the canvas store on expand, so collapse must
-      // release them. Re-expanding refetches via loadChildren / drill
-      // paths.
+      // subtree (the node itself + all descendants). Re-expanding
+      // refetches the dropped edges via `loadChildren` / drill paths so
+      // the store stays clean across many expand/collapse cycles.
       //
-      // Trace-mode exemption: edges that came from `/trace/v2` or
-      // `autoDrillOnExpand` are tracked in `useUnifiedTrace.addedEdgeIds`.
-      // We preserve only the *lineage* subset of that allowlist through
-      // collapse — those are the cross-subtree trace edges with no
-      // re-add path (neither `loadChildren` nor `autoDrillOnExpand`
-      // refetches them on re-expand). Trace *containment* edges are
-      // intentionally NOT preserved: they're real containment edges
-      // that `loadChildren` will re-fetch as part of its child-fetch
-      // result, and preserving them would make `loadChildren`'s cache
-      // check (`currentChildrenCount >= childCount` in
-      // `useGraphHydration.ts`) short-circuit on re-expand, leaving
-      // the browse-mode lineage of children un-restored. With only
-      // lineage preserved, `loadChildren` sees zero containment edges
-      // on re-expand → re-fetches the full child set + every browse-
-      // mode lineage edge alongside them.
+      // Trace-mode exemption: edges merged by `/trace/v2` or
+      // `autoDrillOnExpand` are tracked in
+      // `useUnifiedTrace.addedEdgeIds`. We preserve the ENTIRE set —
+      // both the lineage edges and the containment edges. Two reasons:
       //
-      // Why not skip removal entirely: keeping every browse-mode and
-      // drill-containment edge in the store after collapse leaves
-      // stale containment relationships in `parentMap`, which can
-      // re-classify visible roots as descendants and silently drop
-      // them from `useLayerAssignment`'s per-layer root list — the
-      // "nodes disappear" symptom in large layers during trace.
+      //  1. Lineage edges have no re-add path on re-expand. Neither
+      //     `loadChildren` nor `autoDrillOnExpand` refetches the
+      //     original `/trace/v2` lineage — it was a one-shot result.
+      //     Dropping it permanently kills the trace mesh until the
+      //     user re-runs the trace.
+      //
+      //  2. Containment edges are needed to keep the projection chain
+      //     intact. `useEdgeProjection`'s `ancestorMap` walks the
+      //     containment hierarchy (via `parentMap` from
+      //     `useContainmentHierarchy`) to roll a drilled child's
+      //     lineage edges up to its visible ancestor after collapse.
+      //     If we drop the drilled containment edges, the child node
+      //     stays in `canvas.nodes` but loses its parent entry — its
+      //     preserved lineage edges become unprojectable, and the
+      //     user sees "the ancestor lineage going into my focus node
+      //     vanished".
+      //
+      // Trade-off: preserving trace containment means
+      // `loadChildren`'s cache check (`currentChildrenCount >=
+      // childCount` in `useGraphHydration.ts`) short-circuits on
+      // re-expand, so browse-mode lineage between sibling children at
+      // deeper levels is not re-fetched. In trace mode this is
+      // acceptable — those edges are gated by
+      // `useEdgeProjection`'s trace context anyway (both endpoints
+      // must be in the trace context) and trace-relevant cross-edges
+      // are already in `addedEdgeIds` and preserved here.
+      //
+      // Browse-mode collapse (no trace active) is unchanged:
+      // `preserveEdgeIds === undefined` so every edge in the subtree
+      // is dropped, and the next `loadChildren` re-fetches everything
+      // from scratch.
+      // IMPORTANT: do NOT add ``nodeId`` itself to ``subtreeIds`` —
+      // only its descendants. ``removeEdgesByNodeIds`` drops every
+      // edge where source OR target is in the set, so including
+      // ``nodeId`` purges the parent's containment edge to
+      // ``nodeId`` as well. That orphans the just-collapsed node
+      // from ``useContainmentHierarchy``: the LayerColumn stops
+      // rendering it (the row vanishes) AND the parent's
+      // ``children.length`` drops below ``childCount`` so the
+      // virtualized tree spawns a stale "↓ load N more" pill. The
+      // bug only surfaced once ``useRevealSearchHit`` started
+      // priming deep entities that weren't in the initial page; the
+      // collapse flow was previously masked because the missing
+      // child was re-fetched via the normal page-load path anyway.
+      // The walk still seeds from ``nodeId`` so its descendants get
+      // enumerated; we just skip adding ``nodeId`` to the removal
+      // set itself.
       const subtreeIds = new Set<string>()
-      subtreeIds.add(nodeId)
       const stack: string[] = [nodeId]
       while (stack.length > 0) {
         const id = stack.pop()!
@@ -1542,23 +1569,10 @@ export function ContextViewCanvas({
           if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
         }
       }
-      let preserveEdgeIds: ReadonlySet<string> | undefined
-      if (trace.isTracing && trace.addedEdgeIds.size > 0) {
-        // Build an id→edge index over the current store, then keep only
-        // the trace-added LINEAGE edges (drop containment from the
-        // preserve set — see comment above).
-        const byId = new Map<string, typeof edges[number]>()
-        for (const e of edges) byId.set(e.id, e)
-        const lineagePreserve = new Set<string>()
-        for (const id of trace.addedEdgeIds) {
-          const e = byId.get(id)
-          if (e && !isContainmentEdge(normalizeEdgeType(e))) {
-            lineagePreserve.add(id)
-          }
-        }
-        if (lineagePreserve.size > 0) preserveEdgeIds = lineagePreserve
-      }
-      removeEdgesByNodeIds(subtreeIds, preserveEdgeIds)
+      removeEdgesByNodeIds(
+        subtreeIds,
+        trace.isTracing ? trace.addedEdgeIds : undefined,
+      )
 
       // Synchronous companion: drop matching entries in the aggregated-edge
       // map too. Otherwise stale child-level aggregated edges linger for up
@@ -1572,7 +1586,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand, edges, isContainmentEdge])
+  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
 
 
 

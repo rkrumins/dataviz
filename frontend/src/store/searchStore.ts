@@ -71,7 +71,7 @@ export interface BuilderValidationIssue {
 /**
  * One entry in the per-view "Recent queries" list. Auto-saved on every
  * successful dispatch. Loadable by click from the empty hero and the
- * TemplatesStrip's "Recent" tab.
+ * LibraryPopover's "Mine" tab.
  *
  * ``pinned`` entries don't count toward the 10-unpinned cap and are
  * never auto-evicted — that's the implicit "save this query" mechanism
@@ -90,7 +90,37 @@ export interface RecentQueryEntry {
      *  caller's addRecent dedupe path handles anyway. */
     timestamp: number
     pinned: boolean
+    /** Origin marker. ``'recent'`` (default) = auto-captured on
+     *  dispatch. ``'mine'`` = explicitly saved by the user via the
+     *  Library popover's "Save as…" action; rendered with ``name``
+     *  instead of ``label`` and never auto-evicted. */
+    source?: 'recent' | 'mine'
+    /** Human-readable name supplied via "Save as…" (only set when
+     *  ``source === 'mine'``). Replaces the DSL ``label`` in the UI. */
+    name?: string
+    /** Optional one-line description supplied via "Save as…" (only set
+     *  when ``source === 'mine'``). Shown as secondary text. */
+    description?: string
 }
+
+
+/**
+ * How the canvas should treat the current search results visually.
+ *
+ *   highlight  — Default. Direct matches pulse + bright; ancestors
+ *                stay bright; everything else dims to opacity-40.
+ *                This is the behavior that shipped with the original
+ *                Advanced Search.
+ *   isolate    — Render ONLY direct matches and their ancestor spine;
+ *                hide everything unrelated. Useful when the user wants
+ *                a clean view of just the matches without visual
+ *                noise from the rest of the graph.
+ *   hide       — Inverse: hide the matched nodes, render everything
+ *                else. Useful for "show me what does NOT match" flows
+ *                (e.g. "find tables without owners" → hide the
+ *                tables with owners to focus on the gaps).
+ */
+export type CanvasFilterMode = 'highlight' | 'isolate' | 'hide'
 
 
 interface SearchStoreState {
@@ -250,6 +280,61 @@ interface SearchStoreState {
      */
     selectionParent: string | null
     selectedIndices: ReadonlyArray<number>
+
+    /**
+     * Ordered list of matched URNs derived at ``setResult`` time from
+     * the iterable passed by ``useAdvancedSearch``. Preserves the
+     * backend hit order so the MatchBar stepper walks results in the
+     * same order the user sees them in ``ResultsPane``.
+     *
+     * ``matchUrnSet`` (above) remains the source of truth for "is this
+     * URN a match" lookups; this is purely the ordered companion used
+     * by the prev/next stepper and ``focusedMatchIndex``.
+     */
+    orderedMatchUrns: ReadonlyArray<string>
+
+    /**
+     * Index into ``orderedMatchUrns`` of the match the user is currently
+     * focused on via the MatchBar stepper or keyboard (J/K/↑/↓). Drives:
+     *   - ResultsPane auto-scrolls the focused row into view.
+     *   - useRevealSearchHit auto-fires for the focused URN.
+     *   - The focused result row gets an additional pulse/highlight class.
+     *
+     * ``null`` means "nothing focused" — the initial state after a fresh
+     * query and after ``clear()``. First press of the stepper / J / →
+     * initializes to 0 (or -1 + step which becomes 0). Reset to ``null``
+     * on every ``setResult`` so a new query doesn't carry over stale
+     * focus.
+     */
+    focusedMatchIndex: number | null
+
+    /**
+     * How the canvas should treat search matches visually. See the
+     * ``CanvasFilterMode`` doc for per-mode semantics. Persisted
+     * per-view in localStorage so the user's preference survives panel
+     * close/reopen and page reloads.
+     *
+     * Default ``'highlight'`` matches the behaviour that shipped with
+     * the original Advanced Search.
+     */
+    canvasFilterMode: CanvasFilterMode
+
+    /**
+     * Snapshot of the predicate that was most-recently DISPATCHED
+     * (i.e. sent to the backend and returned results). Captured
+     * inside ``addRecent`` since that's the one chokepoint every
+     * successful dispatch passes through.
+     *
+     * Drives the "Back to last query" toolbar action: when the user
+     * has edited the draft after running a query, this lets them
+     * restore the predicate that actually produced the visible
+     * results in one click — distinct from ``undo`` (which steps
+     * back through individual edits regardless of dispatch status).
+     *
+     * ``null`` when no query has run yet in this session, or after
+     * ``clear()`` wipes the panel.
+     */
+    lastDispatchedPredicate: Predicate | null
 }
 
 
@@ -307,6 +392,13 @@ interface SearchStoreActions {
      *  Caller supplies ``label`` (DSL string) so the store doesn't have
      *  to depend on the panel's stringifier. */
     addRecent: (entry: { viewId: string; predicate: Predicate; label: string }) => void
+    /** Restore the draft to the predicate that produced the
+     *  currently-published results (the most recent successful
+     *  dispatch). Used by the "Back to last query" toolbar action.
+     *  No-op when there's no snapshot or when the draft already
+     *  equals the snapshot. Pushes the discarded edits onto the
+     *  undo stack so the user can re-apply them with Redo. */
+    restoreLastDispatched: () => void
     /** Flip the ``pinned`` flag on a Recent entry by its timestamp.
      *  Pinned entries are never auto-evicted by the 10-cap. */
     togglePinRecent: (timestamp: number) => void
@@ -335,6 +427,23 @@ interface SearchStoreActions {
     toggleRowSelection: (parentPath: string, index: number) => void
     /** Clear all row selection. */
     clearRowSelection: () => void
+    /** Move the focused-match cursor by one step. ``'next'`` advances,
+     *  ``'prev'`` retreats. Wraps around at both ends (clicking next
+     *  on the last match jumps to the first). No-op when
+     *  ``orderedMatchUrns`` is empty. Initializes to 0 when called
+     *  from the ``null`` state. */
+    stepFocus: (direction: 'next' | 'prev') => void
+    /** Set the focused-match index directly (e.g. when the user clicks
+     *  a specific result row). Pass ``null`` to clear focus. Out-of-
+     *  range values are coerced to the valid range. */
+    setFocusedMatchIndex: (index: number | null) => void
+    /** Set the canvas filter mode. Persisted per-view in localStorage. */
+    setCanvasFilterMode: (mode: CanvasFilterMode, viewId: string | null) => void
+    /** Promote a Recent entry into a named, pinned "Mine" entry. Sets
+     *  ``source: 'mine'``, ``pinned: true``, and the supplied ``name`` /
+     *  ``description``. Used by the Library popover's "Save as…" flow.
+     *  No-op when the timestamp doesn't match an existing entry. */
+    promoteToMine: (timestamp: number, name: string, description?: string) => void
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set<string>()
@@ -394,8 +503,14 @@ const RECENT_CAP_PER_VIEW = 10
 /** localStorage key for the persisted Recent + Pinned list. */
 const RECENT_STORAGE_KEY = 'synodic.advancedSearch.recent.v1'
 
+/** localStorage key for the persisted canvas-filter-mode map (per
+ *  viewId → mode). Separate from the recent list so a corrupt mode
+ *  blob never wipes out the saved queries. */
+const CANVAS_FILTER_STORAGE_KEY = 'synodic.advancedSearch.canvasFilterMode.v1'
+
 const EMPTY_HISTORY: ReadonlyArray<Predicate | null> = Object.freeze([])
 const EMPTY_RECENT: ReadonlyArray<RecentQueryEntry> = Object.freeze([])
+const EMPTY_ORDERED_URNS: ReadonlyArray<string> = Object.freeze([])
 
 
 /**
@@ -435,6 +550,42 @@ function saveRecentToStorage(entries: ReadonlyArray<RecentQueryEntry>): void {
     }
 }
 
+
+/**
+ * Persisted shape for the per-view canvas filter mode. Stored as an
+ * object so multiple views can hold distinct preferences in the same
+ * localStorage key. Unknown viewIds resolve to ``'highlight'``.
+ */
+type CanvasFilterModeMap = Record<string, CanvasFilterMode>
+
+function loadCanvasFilterMap(): CanvasFilterModeMap {
+    try {
+        const raw = localStorage.getItem(CANVAS_FILTER_STORAGE_KEY)
+        if (!raw) return {}
+        const parsed = JSON.parse(raw)
+        if (!parsed || typeof parsed !== 'object') return {}
+        // Soft validation: drop unknown mode values to avoid leaking a
+        // garbage string into the render path.
+        const out: CanvasFilterModeMap = {}
+        for (const [k, v] of Object.entries(parsed)) {
+            if (v === 'highlight' || v === 'isolate' || v === 'hide') {
+                out[k] = v
+            }
+        }
+        return out
+    } catch {
+        return {}
+    }
+}
+
+function saveCanvasFilterMap(map: CanvasFilterModeMap): void {
+    try {
+        localStorage.setItem(CANVAS_FILTER_STORAGE_KEY, JSON.stringify(map))
+    } catch {
+        // Same non-fatal stance as saveRecentToStorage.
+    }
+}
+
 export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set, get) => ({
     viewId: null,
     matchUrnSet: EMPTY_SET,
@@ -460,11 +611,30 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     scopeMode: 'view',
     selectionParent: null,
     selectedIndices: [],
+    orderedMatchUrns: EMPTY_ORDERED_URNS,
+    focusedMatchIndex: null,
+    // Initial mode is 'highlight'; per-view persisted overrides are
+    // applied via the setCanvasFilterMode action on first read. We
+    // don't seed from the map here because we don't know which view
+    // is active at store-create time — callers (SearchMapPanel mount)
+    // hydrate the right value via setCanvasFilterMode.
+    canvasFilterMode: 'highlight',
+    lastDispatchedPredicate: null,
 
     setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
         const next = new Set<string>()
+        // Build the ordered list and the set in one pass so iteration
+        // order from the caller (backend hit order) is preserved for
+        // the MatchBar stepper. Duplicates in the iterable still get
+        // de-duped in the Set; the ordered array keeps the first
+        // occurrence only.
+        const ordered: string[] = []
         for (const urn of matchUrns) {
-            if (urn) next.add(urn)
+            if (!urn) continue
+            if (!next.has(urn)) {
+                next.add(urn)
+                ordered.push(urn)
+            }
         }
         const { counts, breakdowns } = ancestorPaths
             ? deriveAncestorRollups(ancestorPaths)
@@ -473,6 +643,11 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set({
             viewId,
             matchUrnSet: next,
+            orderedMatchUrns: ordered.length === 0 ? EMPTY_ORDERED_URNS : ordered,
+            // Reset focus on every new result set — carrying over a
+            // stale index across queries would land the user on a
+            // different match than they expected.
+            focusedMatchIndex: null,
             ancestorMatchCounts: counts,
             ancestorMatchTypeBreakdowns: breakdowns,
             queryHash,
@@ -607,7 +782,24 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             }
         }
         saveRecentToStorage(kept)
-        set({ recentQueries: kept })
+        // Capture the dispatched predicate so "Back to last query"
+        // can restore the user to whatever was last run, even after
+        // the draft has been edited. Lives in-memory (not persisted)
+        // — restoring after a hard reload would feel unexpected.
+        set({ recentQueries: kept, lastDispatchedPredicate: predicate })
+    },
+
+    restoreLastDispatched: () => {
+        const { lastDispatchedPredicate, draftPredicate } = get()
+        if (!lastDispatchedPredicate) return
+        if (JSON.stringify(draftPredicate)
+            === JSON.stringify(lastDispatchedPredicate)) {
+            // Already on the snapshot — nothing to restore.
+            return
+        }
+        // Use the standard commit path so the discarded edits land
+        // on the undo stack (the user can press Redo to re-apply).
+        get().commitDraft(lastDispatchedPredicate)
     },
 
     togglePinRecent: (timestamp) => {
@@ -628,6 +820,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set({
             viewId: null,
             matchUrnSet: EMPTY_SET,
+            orderedMatchUrns: EMPTY_ORDERED_URNS,
+            focusedMatchIndex: null,
             queryHash: null,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
@@ -681,6 +875,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set((s) => ({
             viewId: null,
             matchUrnSet: EMPTY_SET,
+            orderedMatchUrns: EMPTY_ORDERED_URNS,
+            focusedMatchIndex: null,
             queryHash: null,
             draftPredicate: null,
             draftRevision: s.draftRevision + 1,
@@ -694,7 +890,76 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             // separately via localStorage.
             historyPast: EMPTY_HISTORY,
             historyFuture: EMPTY_HISTORY,
+            // The "back to last query" snapshot is session-local and
+            // should not survive a panel clear — if results are gone,
+            // there's nothing to go back to anyway.
+            lastDispatchedPredicate: null,
         }))
+    },
+
+    stepFocus: (direction) => {
+        const { orderedMatchUrns, focusedMatchIndex } = get()
+        if (orderedMatchUrns.length === 0) return
+        const last = orderedMatchUrns.length - 1
+        let nextIndex: number
+        if (focusedMatchIndex === null) {
+            // First press always lands on index 0, regardless of
+            // direction — there's no "previous to nothing" semantic.
+            nextIndex = 0
+        } else if (direction === 'next') {
+            nextIndex = focusedMatchIndex >= last ? 0 : focusedMatchIndex + 1
+        } else {
+            nextIndex = focusedMatchIndex <= 0 ? last : focusedMatchIndex - 1
+        }
+        set({ focusedMatchIndex: nextIndex })
+    },
+
+    setFocusedMatchIndex: (index) => {
+        const { orderedMatchUrns } = get()
+        if (index === null) {
+            set({ focusedMatchIndex: null })
+            return
+        }
+        if (orderedMatchUrns.length === 0) {
+            set({ focusedMatchIndex: null })
+            return
+        }
+        const last = orderedMatchUrns.length - 1
+        // Coerce to valid range — out-of-band callers (stale render,
+        // race with a new query) should land on the nearest valid
+        // index rather than crash a downstream reveal lookup.
+        const clamped = Math.max(0, Math.min(last, index))
+        set({ focusedMatchIndex: clamped })
+    },
+
+    setCanvasFilterMode: (mode, viewId) => {
+        set({ canvasFilterMode: mode })
+        // Persist per-view so closing the panel and reopening it on
+        // the same view restores the preference. Across views, each
+        // view holds its own setting.
+        if (viewId) {
+            const current = loadCanvasFilterMap()
+            current[viewId] = mode
+            saveCanvasFilterMap(current)
+        }
+    },
+
+    promoteToMine: (timestamp, name, description) => {
+        const trimmedName = name.trim()
+        if (!trimmedName) return
+        const next = get().recentQueries.map((e) =>
+            e.timestamp === timestamp
+                ? {
+                    ...e,
+                    source: 'mine' as const,
+                    name: trimmedName,
+                    description: description?.trim() || undefined,
+                    pinned: true,
+                }
+                : e,
+        )
+        saveRecentToStorage(next)
+        set({ recentQueries: next })
     },
 }))
 
@@ -797,6 +1062,24 @@ export function useCanRedo(): boolean {
 }
 
 /**
+ * True when there's a dispatched-predicate snapshot AND the current
+ * draft differs from it — i.e. clicking "Back to last query" would
+ * actually do something. Drives the disabled state of the toolbar's
+ * Back button so it only lights up when there's a destination.
+ *
+ * The JSON-stringify comparison is fine here: it runs only on
+ * snapshot/draft changes, which happen on user input cadence (not
+ * render cadence).
+ */
+export function useCanRestoreLastDispatched(): boolean {
+    return useSearchStore((s) => {
+        if (!s.lastDispatchedPredicate) return false
+        return JSON.stringify(s.draftPredicate)
+            !== JSON.stringify(s.lastDispatchedPredicate)
+    })
+}
+
+/**
  * Recent queries for a specific view, sorted: pinned first by recency,
  * then unpinned by recency.
  *
@@ -818,4 +1101,64 @@ export function useRecentQueries(viewId: string | null | undefined): ReadonlyArr
             return b.timestamp - a.timestamp
         })
     }, [all, viewId])
+}
+
+
+// ---------------------------------------------------------------------------
+// MatchBar / canvas-filter selectors
+// ---------------------------------------------------------------------------
+
+/** Subscribe to the ordered match URN list (backend hit order). */
+export function useOrderedMatchUrns(): ReadonlyArray<string> {
+    return useSearchStore((s) => s.orderedMatchUrns)
+}
+
+/** Subscribe to the focused-match index (or null when none). */
+export function useFocusedMatchIndex(): number | null {
+    return useSearchStore((s) => s.focusedMatchIndex)
+}
+
+/**
+ * Subscribe to the URN of the currently focused match. ``null`` when
+ * nothing is focused or the result set is empty. Convenience around
+ * ``orderedMatchUrns[focusedMatchIndex]`` for components that only
+ * care about the focused URN (e.g. the reveal effect in ResultsPane).
+ */
+export function useFocusedMatchUrn(): string | null {
+    return useSearchStore((s) =>
+        s.focusedMatchIndex !== null
+            ? s.orderedMatchUrns[s.focusedMatchIndex] ?? null
+            : null,
+    )
+}
+
+/** Subscribe to the current canvas filter mode. */
+export function useCanvasFilterMode(): CanvasFilterMode {
+    return useSearchStore((s) => s.canvasFilterMode)
+}
+
+/**
+ * Subscribe to whether a single URN is the currently focused match.
+ * Each row gets its own subscription; Zustand's referential equality
+ * means a row only re-renders when its own focus state flips, not on
+ * every step. This is what makes the MatchBar stepper feel free even
+ * with 1000+ result rows mounted.
+ */
+export function useIsFocusedMatch(urn: string | undefined): boolean {
+    return useSearchStore((s) => {
+        if (!urn || s.focusedMatchIndex === null) return false
+        return s.orderedMatchUrns[s.focusedMatchIndex] === urn
+    })
+}
+
+/**
+ * Read the persisted canvas filter mode for a given view from
+ * localStorage. Returns ``'highlight'`` when no entry exists. Pure
+ * read; no store subscription. Used at panel-mount time to hydrate
+ * ``canvasFilterMode`` for the active view.
+ */
+export function readPersistedCanvasFilterMode(viewId: string | null | undefined): CanvasFilterMode {
+    if (!viewId) return 'highlight'
+    const map = loadCanvasFilterMap()
+    return map[viewId] ?? 'highlight'
 }

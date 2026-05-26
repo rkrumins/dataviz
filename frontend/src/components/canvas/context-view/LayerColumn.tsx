@@ -18,6 +18,11 @@ import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
+import {
+  useAncestorMatchCounts,
+  useCanvasFilterMode,
+  useMatchUrnSet,
+} from '@/store/searchStore'
 import type { ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
@@ -152,8 +157,22 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
   }, [activeSearchNodes, expandedNodes, onToggle])
 
+  // Search-driven canvas filter state. ``matchUrnSet`` is the source of
+  // truth for "is this row a direct match"; ``ancestorMatchCounts > 0``
+  // means the row sits on the spine to at least one match.
+  // ``canvasFilterMode`` is the user's choice from the MatchBar:
+  //   highlight → no skip (today's behavior, dim happens in
+  //               FlatTreeItem via useSearchHighlight)
+  //   isolate   → drop everything that's not a match and not a spine row
+  //   hide      → drop direct matches; keep everything else
+  // The selected row is exempt from skipping so the user never loses
+  // visual contact with what they're inspecting.
+  const matchUrnSet = useMatchUrnSet()
+  const ancestorMatchCounts = useAncestorMatchCounts()
+  const canvasFilterMode = useCanvasFilterMode()
+
   // Build flat tree from hierarchy (visible items only)
-  const flatTree = useMemo(() => {
+  const rawFlatTree = useMemo(() => {
     const result: FlatTreeNode[] = []
 
     // Iterative findNode — prevents stack overflow on deep hierarchies
@@ -266,6 +285,40 @@ export const LayerColumn = React.memo(function LayerColumn({
 
     return result
   }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes, isTracing])
+
+  // Canvas filter pass: drop rows the user asked to hide via the
+  // MatchBar's Isolate / Hide modes. We filter at the data layer (not
+  // per-row via CSS) so the virtualizer's row-count and offset math
+  // collapse around the dropped rows — Isolate mode on a 10k-node
+  // hierarchy should render only the matched ancestor chain, not 10k
+  // invisible rows. Search-aux rows (load-more, skeletons, search
+  // boxes) ride along with their parent node's visibility.
+  const flatTree = useMemo(() => {
+    // Fast path: no active search OR plain highlight mode — return
+    // raw tree by reference so downstream memos don't invalidate on
+    // search-state changes that don't affect visibility.
+    if (matchUrnSet.size === 0) return rawFlatTree
+    if (canvasFilterMode === 'highlight') return rawFlatTree
+
+    const isVisibleNode = (n: HierarchyNode): boolean => {
+      // Selection always wins so the user can never accidentally
+      // make their inspected row vanish.
+      if (selectedNodeId === n.id) return true
+      const key = n.urn ?? n.id
+      const isMatch = matchUrnSet.has(key)
+      const onSpine = (ancestorMatchCounts.get(key) ?? 0) > 0
+      if (canvasFilterMode === 'isolate') {
+        return isMatch || onSpine
+      }
+      // 'hide' — drop the matched leaves but keep ancestor context.
+      return !isMatch
+    }
+
+    return rawFlatTree.filter((item) => isVisibleNode(item.node))
+  }, [
+    rawFlatTree, matchUrnSet, ancestorMatchCounts, canvasFilterMode,
+    selectedNodeId,
+  ])
 
   // Count total including nested
   const totalCount = useMemo(() => {
@@ -418,6 +471,13 @@ export const LayerColumn = React.memo(function LayerColumn({
   // bumps `revealTarget.pulse`, which re-fires this effect even when
   // the same URN is revealed twice. Columns that don't own the URN
   // no-op (their nodeToFlatIndexMap won't have the entry).
+  //
+  // After the vertical scroll fires, we also chain a horizontal
+  // ``scrollIntoView({ inline: 'center' })`` so the LayerColumn
+  // itself is brought into the canvas viewport — without this the
+  // virtualizer scrolls the row to the center of its OWN column but
+  // the column may sit entirely off-screen, requiring the user to
+  // manually pan. That's the source of the "3-click reveal" problem.
   const lastRevealPulseRef = useRef<number>(-1)
   useEffect(() => {
     if (!revealTarget) return
@@ -425,10 +485,31 @@ export const LayerColumn = React.memo(function LayerColumn({
     const flatIndex = nodeToFlatIndexMap.get(revealTarget.id)
     if (flatIndex === undefined) return  // Wait for flatTree to update
     lastRevealPulseRef.current = revealTarget.pulse
+    const targetId = revealTarget.id
     // Tiny delay so the virtualizer has its post-expand size estimates
     // before we ask it to compute a scroll offset for an off-screen row.
     const timer = setTimeout(() => {
       virtualizer.scrollToIndex(flatIndex, { align: 'center', behavior: 'smooth' })
+      // Two rAFs: the first lets the virtualizer kick off its scroll
+      // (which materializes the row in the DOM via overscan), the
+      // second lets the row mount before we ask it to scroll its
+      // horizontally-scrollable ancestor (the canvas's
+      // ``horizontalScrollRef`` container) into view.
+      // ``block: 'nearest'`` keeps the virtualizer's vertical scroll
+      // from being overridden; ``inline: 'center'`` is what brings
+      // the LayerColumn horizontally on-screen.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const row = document.getElementById(`layer-node-${targetId}`)
+          if (row) {
+            row.scrollIntoView({
+              inline: 'center',
+              block: 'nearest',
+              behavior: 'smooth',
+            })
+          }
+        })
+      })
     }, 50)
     return () => clearTimeout(timer)
   }, [revealTarget, nodeToFlatIndexMap, virtualizer])

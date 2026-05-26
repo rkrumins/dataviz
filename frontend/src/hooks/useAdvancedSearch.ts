@@ -25,6 +25,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useSchemaStore } from '@/store/schema'
 import { DEFAULT_DRAFT_OPTIONS, useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
 import type {
@@ -325,12 +326,36 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
             // BE skips the containment clamp entirely and returns
             // results from outside the view — the "Legacy_Archive
             // leaking in" bug).
-            const allCanvasRootUrns = computeViewRootUrns(
-                canvas.nodes,
-                canvas.edges,
-                schema?.containmentEdgeTypes ?? [],
-                schema?.rootEntityTypes ?? [],
-            )
+            //
+            // CLOSED-SCOPE OVERRIDE: when the view config carries
+            // explicit ``entityAssignments`` (i.e. the user dragged
+            // specific entities into layers via the Layer Studio),
+            // those URNs ARE the authoritative scope. The BE's
+            // ``scope.rootUrns`` includes the URN + all containment
+            // descendants, so passing the assignment URNs gives us
+            // exactly the same closed scope the canvas renders.
+            // Without this override, ``computeViewRootUrns`` walks
+            // the loaded canvas nodes and includes top-level
+            // containers like the Sales domain even when Sales isn't
+            // assigned to any layer — leaking unassigned subtrees
+            // into "All nodes in this view" search results. Mirrors
+            // the closed-scope semantics in useLayerAssignment.
+            const layerAssignments = useReferenceModelStore.getState().layers
+            const explicitAssignmentUrns: string[] = []
+            for (const layer of layerAssignments) {
+                if (!layer.entityAssignments) continue
+                for (const a of layer.entityAssignments) {
+                    if (a.entityId) explicitAssignmentUrns.push(a.entityId)
+                }
+            }
+            const allCanvasRootUrns = explicitAssignmentUrns.length > 0
+                ? explicitAssignmentUrns
+                : computeViewRootUrns(
+                    canvas.nodes,
+                    canvas.edges,
+                    schema?.containmentEdgeTypes ?? [],
+                    schema?.rootEntityTypes ?? [],
+                )
 
             // Client-side safety net: cap matches the BE default
             // (DEEP_SEARCH_SCOPE_ROOT_URNS_CAP=256). If the view has

@@ -642,12 +642,18 @@ function HierarchyContainer({
     ancestorMatchCount,
     ancestorBreakdown,
     isSpotlightDim,
+    isHidden: isHiddenByCanvasFilter,
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
   const isFocusNode = traceFocusId === node.id
   const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
+
+  // Canvas filter Isolate / Hide modes drop this row entirely. Same
+  // null-return pattern as GenericNode — keeps the hook order intact
+  // while collapsing the row out of the rendered tree.
+  if (isHiddenByCanvasFilter) return null
 
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {

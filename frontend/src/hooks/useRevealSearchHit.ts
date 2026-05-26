@@ -28,9 +28,22 @@ import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
 
 
-/** How long to wait after the spine walk before looking up the hit
- *  node. State updates are batched, so we let one tick settle. */
-const REVEAL_SETTLE_MS = 80
+/**
+ * Wait one animation frame so the just-fired ``setExpandedNodes`` React
+ * state update commits before we attempt the hit lookup. Replaces the
+ * previous ``setTimeout(80)`` hack which was both arbitrary AND lost
+ * its race on slow networks / deep spines (the user then had to
+ * re-click to actually land on the hit).
+ *
+ * One rAF is sufficient because the canvas store (Zustand) commits
+ * synchronously on ``loadChildren`` resolution; the only async wait we
+ * need is for React's scheduler to flush the expansion state so the
+ * LayerColumn re-renders with the new ``flatTree`` before its
+ * ``revealTarget`` effect re-runs.
+ */
+function nextFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()))
+}
 
 export interface UseRevealSearchHitDeps {
     /** Setter for the canvas's `expandedNodes` set. */
@@ -119,10 +132,14 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
             }
         }
 
-        // Settle one tick before looking for the hit; state updates
-        // are batched and the latest spine expansion may not have
-        // produced its store rows yet.
-        await new Promise((resolve) => setTimeout(resolve, REVEAL_SETTLE_MS))
+        // Settle one animation frame so React commits the latest
+        // ``setExpandedNodes`` before we look up the hit row — the
+        // LayerColumn's ``flatTree`` (and therefore its
+        // ``nodeToFlatIndexMap``) only updates after the expansion
+        // state propagates. The canvas store itself sees loaded
+        // children synchronously via ``getState()`` (Zustand commits
+        // outside React batching), so a single frame is enough.
+        await nextFrame()
         const allNodes = useCanvasStore.getState().nodes
         const hitNode = allNodes.find(
             (n) => (n.data?.urn as string) === urn || n.id === urn,
@@ -160,4 +177,44 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
             }
         }
     }, [setExpandedNodes, loadChildren, provider, selectNode, scrollIntoView])
+}
+
+
+/**
+ * Warm the spine cache for a search hit without expanding the canvas.
+ *
+ * Intended to be fired when the user focuses a match in the MatchBar
+ * (via the stepper or J/K keys) so the SUBSEQUENT click on "Reveal in
+ * canvas" — or an auto-reveal triggered by ``focusedMatchIndex`` — does
+ * not pay the spine-fetch round-trip. The actual ``selectNode`` /
+ * scroll happens via ``useRevealSearchHit``; this hook only seeds the
+ * canvas store with the ancestor + hit nodes so the reveal walk skips
+ * its priming step entirely.
+ *
+ * No-op for spines already present in the store, so it's safe to call
+ * eagerly on every focus change.
+ */
+export function usePrefetchSearchHitSpine(provider: GraphDataProvider) {
+    return useCallback(async (urn: string, ancestorPath: AncestorRef[]) => {
+        const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
+        const existingNodes = useCanvasStore.getState().nodes
+        const existingUrns = new Set(
+            existingNodes.flatMap((n) => {
+                const u = n.data?.urn as string | undefined
+                return u ? [n.id, u] : [n.id]
+            }),
+        )
+        const missingUrns = spineUrns.filter((u) => !existingUrns.has(u))
+        if (missingUrns.length === 0) return
+        try {
+            const fetched = await provider.getNodes({ urns: missingUrns as any[] })
+            if (fetched.length === 0) return
+            const { addGraph } = useCanvasStore.getState()
+            addGraph(fetched.map((n) => toCanvasNode(n)), [])
+        } catch (e) {
+            console.warn('[reveal] prefetch failed', e)
+            // Non-fatal — the subsequent reveal walk will retry the
+            // missing URNs anyway.
+        }
+    }, [provider])
 }

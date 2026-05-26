@@ -28,19 +28,23 @@
  * the lineage canvas spotlights matches and shows enriched badges.
  */
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, Code2, LayoutTemplate, Settings2, X, Maximize2 } from 'lucide-react'
+import { BookOpen, SlidersHorizontal, X } from 'lucide-react'
 import {
     type FC,
-    type ReactNode,
     useCallback,
+    useEffect,
     useMemo,
+    useRef,
     useState,
 } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useAdvancedSearch } from '@/hooks/useAdvancedSearch'
 import {
+    DEFAULT_DRAFT_OPTIONS,
+    readPersistedCanvasFilterMode,
     useAncestorMatchCounts,
+    useDraftOptions,
     useDraftPredicate,
     useRecentQueries,
     useSearchStore,
@@ -48,20 +52,19 @@ import {
 } from '@/store/searchStore'
 import type { AncestorRef } from '@/types/search'
 
-import { DynamicIcon } from '@/components/ui/DynamicIcon'
-
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
+import { LibraryPopover } from './panel/LibraryPopover'
+import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
+import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { ScopeStrip } from './panel/ScopeStrip'
-import { TemplatePicker } from './TemplatePicker'
 import {
     defaultInputs,
-    featuredTemplates,
     type SearchTemplate,
 } from './searchTemplates'
 
@@ -143,10 +146,11 @@ function PanelInner({
 }: PanelInnerProps) {
     const {
         view, scope, runPredicate, drillInto, popScope, cancel,
-        loadMore, isLoadingMore,
+        resetTemplate, loadMore, isLoadingMore,
     } = useAdvancedSearch(viewId)
 
     const draftPredicate = useDraftPredicate()
+    const draftOptions = useDraftOptions()
     const matchUrnSet = useSearchStore((s) => s.matchUrnSet)
     const ancestorMatchCounts = useAncestorMatchCounts()
     const commitDraft = useSearchStore((s) => s.commitDraft)
@@ -154,20 +158,70 @@ function PanelInner({
     const recentQueries = useRecentQueries(viewId)
     const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
     const removeRecent = useSearchStore((s) => s.removeRecent)
+    const promoteToMine = useSearchStore((s) => s.promoteToMine)
+    const stepFocus = useSearchStore((s) => s.stepFocus)
+    const setCanvasFilterMode = useSearchStore((s) => s.setCanvasFilterMode)
 
     const [advancedOpen, setAdvancedOpen] = useState(false)
     const [advancedTab, setAdvancedTab] = useState<DrawerTab>('options')
-    const [templatesOpen, setTemplatesOpen] = useState(false)
+    const [libraryOpen, setLibraryOpen] = useState(false)
+    // Save-as dialog state owned at the panel level (not inside
+    // LibraryPopover) so the dialog survives when the popover closes —
+    // see SaveQueryDialog for the framer-motion portal rationale and
+    // LibraryPopover for the lifecycle handoff.
+    const [saveTarget, setSaveTarget] = useState<RecentQueryEntry | null>(null)
 
     const openAdvanced = useCallback((tab: DrawerTab = 'options') => {
         setAdvancedTab(tab)
         setAdvancedOpen(true)
     }, [])
 
+    // Hydrate per-view canvas-filter-mode preference on mount /
+    // viewId change. The store keeps a single ``canvasFilterMode``
+    // slot; we sync it from the persisted per-view map so
+    // ContextViewCanvas / GraphCanvas / HierarchyCanvas pick up the
+    // user's saved preference for THIS view.
+    useEffect(() => {
+        const persisted = readPersistedCanvasFilterMode(viewId)
+        setCanvasFilterMode(persisted, viewId)
+    }, [viewId, setCanvasFilterMode])
+
+    // Count of options that differ from defaults — drives the badge
+    // on the Options toolbar chip. Power-user-tuned queries get a
+    // visible "someone has set non-default options here" signal
+    // instead of silently behaving differently than fresh queries.
+    const optionsDeltaCount = useMemo(() => {
+        if (!draftOptions) return 0
+        let delta = 0
+        if (draftOptions.candidateCap !== DEFAULT_DRAFT_OPTIONS.candidateCap) delta += 1
+        if (draftOptions.pageSize !== DEFAULT_DRAFT_OPTIONS.pageSize) delta += 1
+        if (draftOptions.includeAncestorPath !== DEFAULT_DRAFT_OPTIONS.includeAncestorPath) delta += 1
+        if (draftOptions.aggregations.length > 0) delta += 1
+        return delta
+    }, [draftOptions])
+
     const handleClear = useCallback(() => {
+        // Three resets — each owns a different slice of state and skipping
+        // any leaves stale UI behind:
+        //   1. cancel()       aborts an in-flight request and clears
+        //                     the searchStore's published result set
+        //                     (matchUrnSet etc.) so the canvas drops
+        //                     its highlight ring.
+        //   2. resetTemplate() moves the panel's local ``view`` state
+        //                     back to ``'idle'`` — without this the
+        //                     MatchBar + ResultsPane stay mounted (the
+        //                     ``showResultsSection`` gate keeps them
+        //                     visible for any non-idle kind) so the X
+        //                     button looked like it did nothing.
+        //   3. clearStore()   wipes the draft predicate / undo stack
+        //                     too so the QueryCard returns to its
+        //                     empty hero rather than redisplaying the
+        //                     same filter rows the cleared run came
+        //                     from.
         cancel()
+        resetTemplate()
         clearStore()
-    }, [cancel, clearStore])
+    }, [cancel, resetTemplate, clearStore])
 
     /**
      * Seed-from-template: rather than calling runTemplate (which would
@@ -182,12 +236,12 @@ function PanelInner({
         if (built.predicate) {
             commitDraft(built.predicate)
         }
-        setTemplatesOpen(false)
+        setLibraryOpen(false)
     }, [commitDraft])
 
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
-        setTemplatesOpen(false)
+        setLibraryOpen(false)
     }, [commitDraft])
 
     const frameTargetUrns = useMemo<string[]>(() => {
@@ -216,14 +270,99 @@ function PanelInner({
         || view.kind === 'results'
         || view.kind === 'error'
 
+    // Resolve the focused match's ancestor path from the current
+    // result page. Stepping (J/K) only updates ``focusedMatchIndex``;
+    // canvas reveal is reserved for this explicit handler so the user
+    // controls when the canvas pans/expands. No-op when there's no
+    // focused match or no matching hit in the current page.
+    const revealFocusedOnCanvas = useCallback(() => {
+        if (!onRevealNode) return
+        const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
+        if (focusedMatchIndex === null) return
+        const urn = orderedMatchUrns[focusedMatchIndex]
+        if (!urn) return
+        const hits = view.kind === 'results' ? (view.result.hits ?? []) : []
+        const hit = hits.find((h) => h.node.urn === urn)
+        onRevealNode(urn, hit?.ancestorPath ?? [])
+    }, [onRevealNode, view])
+
+    // Panel-level keyboard handler. J/↓ → next match, K/↑ → prev,
+    // Enter → reveal the focused match on the canvas (the deliberate
+    // canvas-motion action that stepping deliberately avoids). Only
+    // fires when focus is inside the panel AND not currently in a
+    // text input so the user can still type in the query card / row
+    // filter without triggering these shortcuts.
+    const panelRef = useRef<HTMLDivElement>(null)
+    const handlePanelKeyDown = useCallback((e: React.KeyboardEvent) => {
+        const target = e.target as HTMLElement | null
+        if (target && (
+            target.tagName === 'INPUT'
+            || target.tagName === 'TEXTAREA'
+            || target.isContentEditable
+        )) return
+        switch (e.key) {
+            case 'j':
+            case 'J':
+            case 'ArrowDown':
+                e.preventDefault()
+                stepFocus('next')
+                return
+            case 'k':
+            case 'K':
+            case 'ArrowUp':
+                e.preventDefault()
+                stepFocus('prev')
+                return
+            case 'Enter': {
+                e.preventDefault()
+                revealFocusedOnCanvas()
+                return
+            }
+            default:
+                return
+        }
+    }, [stepFocus, revealFocusedOnCanvas])
+
     return (
-        <>
-            <CompactHeader
-                onClose={onClose}
-                onToggleAdvanced={() => openAdvanced('options')}
-                onToggleTemplates={() => setTemplatesOpen((v) => !v)}
-                templatesOpen={templatesOpen}
-            />
+        <div
+            ref={panelRef}
+            tabIndex={-1}
+            onKeyDown={handlePanelKeyDown}
+            className="h-full flex flex-col overflow-hidden outline-none"
+        >
+            <LibraryPopover
+                open={libraryOpen}
+                onOpenChange={setLibraryOpen}
+                recentQueries={recentQueries}
+                onSeedTemplate={handleSeedTemplate}
+                onLoadRecent={handleLoadRecent}
+                onTogglePinRecent={togglePinRecent}
+                onRemoveRecent={removeRecent}
+                onSaveAs={setSaveTarget}
+                viewId={viewId}
+                activeDraft={Boolean(draftPredicate)}
+            >
+                <div>
+                    <CompactHeader
+                        onClose={onClose}
+                        onOpenLibrary={() => setLibraryOpen((v) => !v)}
+                        libraryOpen={libraryOpen}
+                        onOpenOptions={() => openAdvanced('options')}
+                        optionsDeltaCount={optionsDeltaCount}
+                    />
+                </div>
+            </LibraryPopover>
+
+            {saveTarget && (
+                <SaveQueryDialog
+                    entry={saveTarget}
+                    onCancel={() => setSaveTarget(null)}
+                    onSave={(name, description) => {
+                        promoteToMine(saveTarget.timestamp, name, description)
+                        setSaveTarget(null)
+                    }}
+                />
+            )}
 
             {advancedOpen ? (
                 <AdvancedDrawer
@@ -246,23 +385,9 @@ function PanelInner({
                             onOpenAdvanced={() => openAdvanced('options')}
                         />
 
-                        <AnimatePresence>
-                            {templatesOpen && (
-                                <TemplatesStrip
-                                    onSeed={handleSeedTemplate}
-                                    onDismiss={() => setTemplatesOpen(false)}
-                                    activeDraft={Boolean(draftPredicate)}
-                                    recentQueries={recentQueries}
-                                    onLoadRecent={handleLoadRecent}
-                                    onTogglePinRecent={togglePinRecent}
-                                    onRemoveRecent={removeRecent}
-                                />
-                            )}
-                        </AnimatePresence>
-
                         {showResultsSection && (
                             <div className="flex flex-col gap-2">
-                                <ResultsHeader
+                                <MatchBar
                                     count={resultsCount}
                                     elapsedMs={elapsedMs}
                                     isRunning={view.kind === 'running'}
@@ -273,12 +398,13 @@ function PanelInner({
                                     onFrame={canFrame
                                         ? () => onFrameMatches?.(frameTargetUrns)
                                         : undefined}
-                                    onViewCypher={draftPredicate
-                                        ? () => openAdvanced('cypher')
+                                    onShowFocusedOnCanvas={onRevealNode
+                                        ? revealFocusedOnCanvas
                                         : undefined}
                                     onClear={view.kind === 'results' || view.kind === 'error'
                                         ? handleClear
                                         : undefined}
+                                    viewId={viewId}
                                 />
                                 <ResultsPane
                                     view={view}
@@ -293,29 +419,42 @@ function PanelInner({
                     </div>
                 </>
             )}
-        </>
+        </div>
     )
 }
 
 
 // =============================================================================
-// Header (title + ⚙ Advanced + 📋 Templates + ×)
+// Header — labeled toolbar (Library | Mode | Options | ×)
 // =============================================================================
 
+/**
+ * Header toolbar. Replaces the previous opaque-icon row. Each control
+ * is a labeled chip so the user can identify it without hovering for
+ * a tooltip:
+ *
+ *   - Library: opens the unified LibraryPopover (Mine / Shared /
+ *     Templates tabs). Active state when open.
+ *   - Options: opens the Advanced drawer on its Options tab. Shows a
+ *     numeric badge when any option differs from default so a query
+ *     that's been power-user-tuned is visually distinct.
+ *   - ×:       closes the panel.
+ */
 function CompactHeader({
-    onClose, onToggleAdvanced, onToggleTemplates, templatesOpen,
+    onClose, onOpenLibrary, libraryOpen, onOpenOptions, optionsDeltaCount,
 }: {
     onClose: () => void
-    onToggleAdvanced: () => void
-    onToggleTemplates: () => void
-    templatesOpen: boolean
+    onOpenLibrary: () => void
+    libraryOpen: boolean
+    onOpenOptions: () => void
+    optionsDeltaCount: number
 }) {
     return (
         <div className={cn(
             'flex items-center gap-2 px-4 py-3',
             'border-b border-glass-border/60 bg-canvas-elevated/60',
         )}>
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-2 min-w-0 shrink-0">
                 <div className={cn(
                     'w-7 h-7 rounded-lg flex items-center justify-center shrink-0',
                     'bg-gradient-to-br from-accent-lineage/30 to-cyan-500/20',
@@ -333,38 +472,30 @@ function CompactHeader({
                     <ScopeModePicker />
                 </div>
             </div>
-            <div className="ml-auto flex items-center gap-0.5">
-                <button
-                    type="button"
-                    onClick={onToggleTemplates}
-                    title="Seed the Query card from a template"
-                    aria-pressed={templatesOpen}
-                    className={cn(
-                        'inline-flex items-center justify-center w-8 h-8 rounded-lg transition-colors',
-                        templatesOpen
-                            ? 'text-accent-lineage bg-accent-lineage/10'
-                            : 'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
-                    )}
-                >
-                    <LayoutTemplate className="w-4 h-4" />
-                </button>
-                <button
-                    type="button"
-                    onClick={onToggleAdvanced}
-                    title="Options · JSON · Cypher"
-                    className={cn(
-                        'inline-flex items-center justify-center w-8 h-8 rounded-lg',
-                        'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 transition-colors',
-                    )}
-                >
-                    <Settings2 className="w-4 h-4" />
-                </button>
+            <div className="ml-auto flex items-center gap-1">
+                <ToolbarChip
+                    label="Library"
+                    title="Saved queries, recent runs, and templates"
+                    Icon={BookOpen}
+                    active={libraryOpen}
+                    onClick={onOpenLibrary}
+                />
+                <ToolbarChip
+                    label="Options"
+                    title={optionsDeltaCount > 0
+                        ? `${optionsDeltaCount} option${optionsDeltaCount === 1 ? '' : 's'} differ from default`
+                        : 'Advanced options'}
+                    Icon={SlidersHorizontal}
+                    active={false}
+                    onClick={onOpenOptions}
+                    badge={optionsDeltaCount > 0 ? optionsDeltaCount : undefined}
+                />
                 <button
                     type="button"
                     onClick={onClose}
                     title="Close"
                     className={cn(
-                        'inline-flex items-center justify-center w-8 h-8 rounded-lg',
+                        'inline-flex items-center justify-center w-7 h-7 rounded-md ml-1',
                         'text-ink-muted hover:text-ink hover:bg-glass/40 transition-colors',
                     )}
                 >
@@ -376,431 +507,56 @@ function CompactHeader({
 }
 
 
-// =============================================================================
-// Results header (count + Frame + Clear) — sits above the ResultsPane
-// =============================================================================
-
-function ResultsHeader({
-    count, elapsedMs, isRunning, errorMessage, truncated,
-    deadlineExceeded, candidateCount,
-    onFrame, onViewCypher, onClear,
-}: {
-    count: number | null
-    elapsedMs: number | null
-    isRunning: boolean
-    errorMessage?: string | null
-    /** True when the candidate cap (5000) was hit — the count is a
-     *  ceiling, not the true total. Surface this prominently so the
-     *  user understands some matches may be missing from the canvas. */
-    truncated?: boolean
-    deadlineExceeded?: boolean
-    candidateCount?: number | null
-    onFrame?: () => void
-    /** Open the Advanced drawer on the Cypher tab so a power user can
-     *  see the exact compiled query that ran against FalkorDB (with
-     *  bound parameters + resolved scope). */
-    onViewCypher?: () => void
-    onClear?: () => void
-}) {
-    const isError = Boolean(errorMessage)
-    const showTruncation = Boolean(truncated && !isRunning && !isError)
-    const showDeadlineExceeded = Boolean(
-        deadlineExceeded && !isRunning && !isError,
-    )
-    return (
-        <div className="flex flex-col gap-1.5">
-        <div className={cn(
-            'flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg',
-            isError ? 'bg-rose-500/10 border border-rose-500/30' : '',
-        )}>
-            <div className="flex items-baseline gap-2 min-w-0 flex-1">
-                {isRunning ? (
-                    <span className="text-[11.5px] text-ink-muted">Searching…</span>
-                ) : isError ? (
-                    <span className="text-[11.5px] text-rose-300 truncate" title={errorMessage ?? ''}>
-                        Error · {errorMessage}
-                    </span>
-                ) : count !== null ? (
-                    <>
-                        <span className="text-[14px] font-display font-semibold text-ink tabular-nums">
-                            {count.toLocaleString()}{showTruncation && '+'}
-                        </span>
-                        <span className="text-[12px] text-ink-muted">
-                            {count === 1 ? 'match' : 'matches'}
-                        </span>
-                        {elapsedMs !== null && (
-                            <span className="text-[10.5px] text-ink-muted/70 tabular-nums">
-                                · {elapsedMs} ms
-                            </span>
-                        )}
-                    </>
-                ) : null}
-            </div>
-            <div className="flex items-center gap-0.5 shrink-0">
-                {onFrame && !isRunning && !isError && (
-                    <button
-                        type="button"
-                        onClick={onFrame}
-                        title="Frame matches on the canvas"
-                        className={cn(
-                            'inline-flex items-center gap-1 px-2 h-6 rounded-md',
-                            'text-[11px] font-medium',
-                            'bg-accent-lineage/15 text-accent-lineage',
-                            'hover:bg-accent-lineage/25 transition-colors',
-                        )}
-                    >
-                        <Maximize2 className="w-3 h-3" />
-                        Frame
-                    </button>
-                )}
-                {onViewCypher && !isRunning && (
-                    <button
-                        type="button"
-                        onClick={onViewCypher}
-                        title="Show the exact compiled Cypher + bound parameters this search ran against FalkorDB"
-                        className={cn(
-                            'inline-flex items-center gap-1 px-2 h-6 rounded-md',
-                            'text-[11px] font-medium',
-                            'bg-glass/40 text-ink-secondary',
-                            'hover:bg-glass/60 hover:text-ink transition-colors',
-                            'border border-glass-border/60',
-                        )}
-                    >
-                        <Code2 className="w-3 h-3" />
-                        Cypher
-                    </button>
-                )}
-                {onClear && (
-                    <button
-                        type="button"
-                        onClick={onClear}
-                        title="Clear results"
-                        className={cn(
-                            'inline-flex items-center justify-center w-6 h-6 rounded-md',
-                            'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10 transition-colors',
-                        )}
-                    >
-                        <X className="w-3 h-3" />
-                    </button>
-                )}
-            </div>
-        </div>
-        {(showTruncation || showDeadlineExceeded) && (
-            <WarningBanner
-                truncated={showTruncation}
-                deadlineExceeded={showDeadlineExceeded}
-                candidateCount={candidateCount ?? null}
-            />
-        )}
-        </div>
-    )
-}
-
-
 /**
- * High-contrast warning banner for ``truncated`` / ``deadlineExceeded``
- * result states. The previous ``text-amber-200/95`` on
- * ``bg-amber-500/10`` was barely legible on the panel's translucent
- * background — users missed that their result set was incomplete.
- *
- * This version uses a saturated amber border + brighter text +
- * ``font-semibold`` body copy + an emoji icon backed by a tinted
- * pill so the warning reads as a deliberate callout, not subtle
- * styling. Truncation and deadline-exceeded share the layout but
- * each gets its own headline + remediation.
+ * One labeled chip in the header toolbar. Icon + 1-word label sits
+ * inline on a single line; active state is a filled accent background
+ * (not just a color shift) so it reads as a clear "this is open right
+ * now" toggle. The badge slot is for the Options chip's
+ * non-default-count indicator.
  */
-function WarningBanner({
-    truncated, deadlineExceeded, candidateCount,
+function ToolbarChip({
+    label, title, Icon, active, onClick, badge,
 }: {
-    truncated: boolean
-    deadlineExceeded: boolean
-    candidateCount: number | null
-}) {
-    return (
-        <div className={cn(
-            'flex flex-col gap-2',
-        )}>
-            {truncated && (
-                <div className={cn(
-                    'flex items-start gap-2.5 px-3 py-2.5 rounded-lg',
-                    'border-l-4 border-l-amber-400 border border-amber-400/50',
-                    'bg-amber-500/[0.18] dark:bg-amber-500/[0.14]',
-                    'shadow-[0_0_18px_-4px_rgba(245,158,11,0.35)]',
-                )}>
-                    <div className={cn(
-                        'shrink-0 w-6 h-6 rounded-md flex items-center justify-center',
-                        'bg-amber-400/30 border border-amber-400/60',
-                    )}>
-                        <AlertTriangle className="w-3.5 h-3.5 text-amber-700 dark:text-amber-200" strokeWidth={2.6} />
-                    </div>
-                    <div className="flex-1 min-w-0 text-[12px] leading-snug">
-                        <div className="font-display font-semibold text-amber-900 dark:text-amber-100">
-                            Results truncated — candidate cap reached
-                        </div>
-                        <div className="mt-0.5 text-amber-900/85 dark:text-amber-100/90">
-                            {candidateCount !== null
-                                ? `${candidateCount.toLocaleString()} candidates scanned before the cap fired. `
-                                : 'The candidate-scan cap fired before the full result set was returned. '}
-                            Some matches aren't shown. Narrow your filters,
-                            tighten the scope, or raise the candidate cap in
-                            Advanced options.
-                        </div>
-                    </div>
-                </div>
-            )}
-            {deadlineExceeded && (
-                <div className={cn(
-                    'flex items-start gap-2.5 px-3 py-2.5 rounded-lg',
-                    'border-l-4 border-l-rose-400 border border-rose-400/50',
-                    'bg-rose-500/[0.18] dark:bg-rose-500/[0.14]',
-                    'shadow-[0_0_18px_-4px_rgba(244,63,94,0.35)]',
-                )}>
-                    <div className={cn(
-                        'shrink-0 w-6 h-6 rounded-md flex items-center justify-center',
-                        'bg-rose-400/30 border border-rose-400/60',
-                    )}>
-                        <AlertTriangle className="w-3.5 h-3.5 text-rose-700 dark:text-rose-200" strokeWidth={2.6} />
-                    </div>
-                    <div className="flex-1 min-w-0 text-[12px] leading-snug">
-                        <div className="font-display font-semibold text-rose-900 dark:text-rose-100">
-                            Soft deadline exceeded — partial results
-                        </div>
-                        <div className="mt-0.5 text-rose-900/85 dark:text-rose-100/90">
-                            The provider returned what it had when the
-                            timeout fired. Some matches are missing.
-                            Tighten the predicate, lower the candidate cap,
-                            or raise the deadline in Advanced options.
-                        </div>
-                    </div>
-                </div>
-            )}
-        </div>
-    )
-}
-
-
-// =============================================================================
-// Templates strip (shown when 📋 toggled OR on the empty state)
-// =============================================================================
-
-type StripTab = 'starts' | 'all' | 'recent'
-
-function TemplatesStrip({
-    onSeed, onDismiss, activeDraft,
-    recentQueries, onLoadRecent, onTogglePinRecent, onRemoveRecent,
-}: {
-    onSeed: (template: SearchTemplate) => void
-    onDismiss: () => void
-    activeDraft: boolean
-    recentQueries: ReadonlyArray<RecentQueryEntry>
-    onLoadRecent: (entry: RecentQueryEntry) => void
-    onTogglePinRecent: (timestamp: number) => void
-    onRemoveRecent: (timestamp: number) => void
-}) {
-    const featured = featuredTemplates()
-    // Default to Recent when there are any — power users opening this
-    // strip mid-session usually want their history. Falls back to
-    // Quick starts when Recent is empty (first session on this view).
-    const [tab, setTab] = useState<StripTab>(
-        recentQueries.length > 0 ? 'recent' : 'starts',
-    )
-    return (
-        <motion.div
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.12 }}
-            className={cn(
-                'rounded-xl border border-glass-border bg-canvas-base/30',
-                'flex flex-col gap-2 px-3 py-2.5',
-            )}
-        >
-            <div className="flex items-center justify-between gap-2">
-                <div className="inline-flex rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5">
-                    <StripTabBtn
-                        active={tab === 'starts'}
-                        onClick={() => setTab('starts')}
-                    >
-                        Quick starts
-                    </StripTabBtn>
-                    <StripTabBtn
-                        active={tab === 'all'}
-                        onClick={() => setTab('all')}
-                    >
-                        Browse all
-                    </StripTabBtn>
-                    <StripTabBtn
-                        active={tab === 'recent'}
-                        onClick={() => setTab('recent')}
-                    >
-                        Recent
-                        {recentQueries.length > 0 && (
-                            <span className="ml-1 tabular-nums opacity-70">
-                                {recentQueries.length}
-                            </span>
-                        )}
-                    </StripTabBtn>
-                </div>
-                <button
-                    type="button"
-                    onClick={onDismiss}
-                    className="text-[10.5px] text-ink-muted hover:text-ink"
-                >
-                    Hide
-                </button>
-            </div>
-            {tab === 'starts' && (
-                <>
-                    <div className="flex flex-wrap gap-1.5">
-                        {featured.map((t) => (
-                            <button
-                                key={t.id}
-                                type="button"
-                                onClick={() => onSeed(t)}
-                                title={t.description}
-                                className={cn(
-                                    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl',
-                                    'text-[11.5px] font-medium',
-                                    'bg-canvas-base/50 border border-glass-border',
-                                    'text-ink-secondary hover:text-ink hover:border-accent-lineage/40',
-                                    'hover:bg-accent-lineage/10 transition-all',
-                                    'active:scale-95',
-                                )}
-                            >
-                                <DynamicIcon name={t.icon} className="w-3.5 h-3.5 text-accent-lineage" />
-                                {t.chipLabel ?? t.label}
-                            </button>
-                        ))}
-                    </div>
-                    <div className="text-[10.5px] text-ink-muted/70 leading-snug">
-                        {activeDraft
-                            ? 'Picking a template REPLACES your current filters.'
-                            : 'Picking a template fills the Query card with editable rows.'}
-                    </div>
-                </>
-            )}
-            {tab === 'all' && (
-                <div className="max-h-[60vh] overflow-y-auto custom-scrollbar -mx-1 px-1">
-                    <TemplatePicker onPick={onSeed} />
-                </div>
-            )}
-            {tab === 'recent' && (
-                <RecentStripList
-                    recentQueries={recentQueries}
-                    onLoad={onLoadRecent}
-                    onTogglePin={onTogglePinRecent}
-                    onRemove={onRemoveRecent}
-                />
-            )}
-        </motion.div>
-    )
-}
-
-
-function StripTabBtn({
-    active, onClick, children,
-}: {
+    label: string
+    title: string
+    Icon: typeof BookOpen
     active: boolean
     onClick: () => void
-    children: ReactNode
+    badge?: number
 }) {
     return (
         <button
             type="button"
             onClick={onClick}
+            title={title}
+            aria-pressed={active}
             className={cn(
-                'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold',
-                'transition-colors',
+                'inline-flex items-center gap-1.5 h-7 px-2 rounded-md',
+                'text-[11.5px] font-medium transition-colors relative',
                 active
                     ? 'bg-accent-lineage/20 text-accent-lineage'
-                    : 'text-ink-muted hover:text-ink',
+                    : 'text-ink-secondary hover:text-ink hover:bg-glass/40',
             )}
         >
-            {children}
+            <Icon className="w-3.5 h-3.5" />
+            <span>{label}</span>
+            {badge !== undefined && (
+                <span className={cn(
+                    'inline-flex items-center justify-center min-w-[14px] h-[14px] px-1',
+                    'text-[9.5px] font-semibold tabular-nums rounded-full',
+                    'bg-amber-500/30 text-amber-700 dark:text-amber-200',
+                    'border border-amber-500/50',
+                )}>
+                    {badge}
+                </span>
+            )}
         </button>
-    )
-}
-
-
-function RecentStripList({
-    recentQueries, onLoad, onTogglePin, onRemove,
-}: {
-    recentQueries: ReadonlyArray<RecentQueryEntry>
-    onLoad: (entry: RecentQueryEntry) => void
-    onTogglePin: (timestamp: number) => void
-    onRemove: (timestamp: number) => void
-}) {
-    if (recentQueries.length === 0) {
-        return (
-            <div className="px-2 py-4 text-[11.5px] text-ink-muted italic text-center">
-                No recent searches yet — they'll appear here as you run queries.
-            </div>
-        )
-    }
-    return (
-        <div className="flex flex-col gap-1 max-h-72 overflow-y-auto custom-scrollbar">
-            {recentQueries.map((entry) => {
-                const label = entry.label || '(empty)'
-                const truncated = label.length > 80 ? label.slice(0, 77) + '…' : label
-                return (
-                    <div
-                        key={entry.timestamp}
-                        className={cn(
-                            'group/recent flex items-stretch gap-0 rounded-lg overflow-hidden',
-                            'bg-canvas-base/40 hover:bg-canvas-base/70',
-                            'border border-glass-border/60 hover:border-accent-lineage/40',
-                            'transition-colors',
-                        )}
-                    >
-                        <button
-                            type="button"
-                            onClick={() => onLoad(entry)}
-                            title={`Load: ${label}`}
-                            className="flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 text-left"
-                        >
-                            <DynamicIcon name="Search" className="w-3 h-3 text-ink-muted/70 shrink-0" />
-                            <span className="text-[11.5px] font-mono text-ink truncate">
-                                {truncated}
-                            </span>
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => onTogglePin(entry.timestamp)}
-                            title={entry.pinned ? 'Unpin (allow auto-eviction)' : 'Pin to keep this query'}
-                            aria-pressed={entry.pinned}
-                            className={cn(
-                                'inline-flex items-center justify-center w-7 shrink-0',
-                                'transition-colors',
-                                entry.pinned
-                                    ? 'text-amber-400 hover:text-amber-300'
-                                    : 'text-ink-muted/40 hover:text-amber-400 opacity-0 group-hover/recent:opacity-100',
-                            )}
-                        >
-                            <DynamicIcon
-                                name={entry.pinned ? 'Star' : 'Star'}
-                                className="w-3 h-3"
-                                style={{ fill: entry.pinned ? 'currentColor' : 'transparent' }}
-                            />
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => onRemove(entry.timestamp)}
-                            title="Remove from Recent"
-                            className={cn(
-                                'inline-flex items-center justify-center w-6 shrink-0',
-                                'text-ink-muted/40 hover:text-rose-400',
-                                'opacity-0 group-hover/recent:opacity-100 transition-opacity',
-                            )}
-                        >
-                            <DynamicIcon name="X" className="w-3 h-3" />
-                        </button>
-                    </div>
-                )
-            })}
-        </div>
     )
 }
 
 
 // The QueryCard now owns its empty-state hero (with discovery-driven
 // example queries), so SearchMapPanel doesn't need a redundant hint.
+// The previous TemplatesStrip / StripTabBtn / RecentStripList helpers
+// were removed when LibraryPopover replaced them — see
+// ./panel/LibraryPopover.tsx for the unified library surface.

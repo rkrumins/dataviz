@@ -3,17 +3,19 @@
  *
  * Rendered by SearchMapPanel only when a search is running, has results,
  * or has errored — the AskBar above IS the empty state, so this pane
- * never shows an "idle" coachmark. The compact results header lives in
- * SearchMapPanel (CompactResultsHeader); this component owns only the
- * scrollable body that paints aggregates / hits / paths / error.
+ * never shows an "idle" coachmark. The count + stepper + canvas-filter
+ * controls live in ``./MatchBar.tsx``; this component owns only the
+ * scrollable body that paints aggregates / hits / paths / error AND
+ * the focused-match auto-reveal effect.
  */
 import { Filter, X } from 'lucide-react'
-import { type FC, type RefObject, useCallback, useMemo, useRef, useState } from 'react'
+import { type FC, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { PanelView } from '@/hooks/useAdvancedSearch'
 import { useSchemaStore } from '@/store/schema'
+import { useFocusedMatchUrn } from '@/store/searchStore'
 import type {
     AncestorRef,
     SearchAggregateBucket,
@@ -22,6 +24,7 @@ import type {
 
 import { AggregateBucketCard } from '../AggregateBucketCard'
 import { PathResultPanel } from '../PathResultPanel'
+import { HIT_ROW_ID_PREFIX } from '../SearchHitRow'
 import { ZeroResultsDiagnostic } from '../ZeroResultsDiagnostic'
 
 import { ErrorView } from './ErrorView'
@@ -190,6 +193,46 @@ function ResultsContent({
         })
     }, [hits, filter, activeTypes])
     const filterActive = filter.trim().length > 0 || activeTypes.size > 0
+
+    // Index of hits by URN for O(1) ancestor-path lookup when the
+    // MatchBar stepper / J-K keyboard advances the focused match. We
+    // build this from the unfiltered hits so the auto-reveal works
+    // even when the user's row filter would have hidden the focused
+    // hit — the focused URN is always a valid match regardless of
+    // the presentational filter.
+    const hitsByUrn = useMemo(() => {
+        const map = new Map<string, SearchHit>()
+        for (const h of hits) {
+            if (h.node.urn) map.set(h.node.urn, h)
+        }
+        return map
+    }, [hits])
+
+    // Focus-tracking effect: when the focused-match URN changes,
+    // scroll the focused row into view in the panel. We deliberately
+    // do NOT fire ``onReveal`` here anymore — that triggered the full
+    // spine-walk + horizontal canvas pan on every J/K step, producing
+    // the "jumping all over" UX the user reported. Reveal-on-canvas
+    // is now an explicit action (the MatchBar "Show on canvas"
+    // button, or Enter inside the panel) so stepping is light and
+    // canvas motion is always deliberate.
+    //
+    // ``hitsByUrn`` is still indexed so the future prefetch-spine
+    // wiring can resolve the focused URN's ancestor path without
+    // re-walking ``hits``.
+    void hitsByUrn
+    const focusedMatchUrn = useFocusedMatchUrn()
+    useEffect(() => {
+        if (!focusedMatchUrn) return
+        // Scroll the row into view (if rendered). The
+        // ``HIT_ROW_ID_PREFIX`` id is stamped on each SearchHitRow's
+        // outer div. ``block: 'nearest'`` avoids unnecessary jumps
+        // when the row is already on-screen.
+        const row = document.getElementById(`${HIT_ROW_ID_PREFIX}${focusedMatchUrn}`)
+        if (row) {
+            row.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+        }
+    }, [focusedMatchUrn])
 
     const hasAggregates = allBuckets.length > 0
     const hasHits = hits.length > 0

@@ -41,7 +41,9 @@ import {
     FileCode,
     Undo2,
     Redo2,
+    RotateCcw,
     Star,
+    Trash2,
     X,
     CornerDownLeft,
 } from 'lucide-react'
@@ -59,6 +61,7 @@ import { cn } from '@/lib/utils'
 import { useActiveView, useSchemaStore } from '@/store/schema'
 import {
     useCanRedo,
+    useCanRestoreLastDispatched,
     useCanUndo,
     useDraftPredicate,
     useRecentQueries,
@@ -338,6 +341,11 @@ export const QueryCard: FC<QueryCardProps> = ({
     // a confident "start here" surface with example-led onboarding.
     const isEmptyVisual = mode === 'visual' && conditions.length === 0
     const showHeader = !isEmptyVisual
+    // Action footer mirrors header visibility — only meaningful when
+    // there's an actual draft to act on (Run / Undo / Back to last).
+    const showActionFooter = !isEmptyVisual
+    const canRestoreLastDispatched = useCanRestoreLastDispatched()
+    const restoreLastDispatched = useSearchStore((s) => s.restoreLastDispatched)
 
     return (
         <div
@@ -347,69 +355,50 @@ export const QueryCard: FC<QueryCardProps> = ({
                 'flex flex-col',
             )}
         >
-            {/* Header — hidden in the empty-visual hero state */}
+            {/* Title strip — minimal, premium identification of the
+                surface. The previous header packed Clear/Undo/Redo/
+                Run/Visual/Code into a single row which felt cramped
+                and "not premium" per the user feedback. The toolbar
+                actions now live in the ActionFooter at the bottom
+                of the card; only the Visual/Code editor mode stays
+                here because it's a meta choice about what the body
+                renders, not a per-edit action. */}
             {showHeader && (
                 <div className={cn(
-                    'flex items-center justify-between gap-2 px-3 py-2',
+                    'flex items-center gap-2 px-4 py-2.5',
                     'border-b border-glass-border/60',
                 )}>
-                    <div className="flex items-baseline gap-2 min-w-0">
-                        <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-ink-muted/70">
+                    <div className="flex items-baseline gap-2 min-w-0 flex-1">
+                        <span className="text-[11px] font-display font-semibold text-ink leading-tight">
                             Query
                         </span>
                         {conditions.length > 0 ? (
-                            <span className="text-[11.5px] text-ink-muted tabular-nums">
-                                {completeCount} filter{completeCount === 1 ? '' : 's'}
+                            <span className="text-[11px] text-ink-muted/80 tabular-nums truncate">
+                                · {completeCount}
+                                {' '}filter{completeCount === 1 ? '' : 's'}
                                 {incompleteCount > 0 && (
-                                    <span className="text-amber-400/90">
+                                    <span className="text-amber-500 dark:text-amber-400/90 font-medium">
                                         {' '}· {incompleteCount} incomplete
                                     </span>
                                 )}
                             </span>
                         ) : (
-                            <span className="text-[11.5px] text-ink-muted italic">
-                                Code mode · paste DSL
+                            <span className="text-[11px] text-ink-muted/80 italic truncate">
+                                · Code mode · paste DSL
                             </span>
                         )}
                     </div>
-                    <div className="flex items-center gap-2">
-                        {conditions.length > 0 && (
-                            <button
-                                type="button"
-                                onClick={handleClearAll}
-                                disabled={isRunning}
-                                className={cn(
-                                    'text-[10.5px] text-ink-muted hover:text-rose-400 transition-colors',
-                                    isRunning && 'opacity-50 cursor-not-allowed',
-                                )}
-                            >
-                                Clear all
-                            </button>
-                        )}
-                        <UndoRedoButtons
-                            canUndo={canUndo}
-                            canRedo={canRedo}
-                            onUndo={undo}
-                            onRedo={redo}
-                        />
-                        {conditions.length > 0 && (
-                            <RunControls
-                                runMode={runMode}
-                                onRunModeChange={setRunMode}
-                                canRun={runnable !== null}
-                                hasPendingChanges={hasPendingChanges}
-                                isRunning={isRunning}
-                                onRunNow={dispatchRun}
-                            />
-                        )}
-                        <div className="inline-flex rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5">
-                            <ToggleBtn active={mode === 'visual'} onClick={() => setMode('visual')}>
-                                <Eye className="w-3 h-3" /> Visual
-                            </ToggleBtn>
-                            <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
-                                <Code2 className="w-3 h-3" /> Code
-                            </ToggleBtn>
-                        </div>
+                    <div className={cn(
+                        'inline-flex rounded-md p-0.5 shrink-0',
+                        'bg-black/[0.03] dark:bg-white/[0.04]',
+                        'border border-slate-200 dark:border-glass-border/60',
+                    )}>
+                        <ToggleBtn active={mode === 'visual'} onClick={() => setMode('visual')}>
+                            <Eye className="w-3 h-3" /> Visual
+                        </ToggleBtn>
+                        <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
+                            <Code2 className="w-3 h-3" /> Code
+                        </ToggleBtn>
                     </div>
                 </div>
             )}
@@ -560,6 +549,34 @@ export const QueryCard: FC<QueryCardProps> = ({
                     />
                 )}
             </div>
+
+            {/* Action footer — premium toolbar separated from the
+                body. Three groups, each visually distinct: history
+                (Back + Undo/Redo), run-mode (Auto/Manual), primary
+                action (Clear + Run). The previous header packed all
+                of these into one cramped row above the conditions
+                list; pulling them down here gives each group breathing
+                room AND makes the primary CTA (Run) the visual focus
+                point of the card. Skipped in the empty-hero state
+                because there's nothing to act on yet. */}
+            {showActionFooter && conditions.length > 0 && (
+                <ActionFooter
+                    canBack={canRestoreLastDispatched}
+                    onBack={restoreLastDispatched}
+                    canUndo={canUndo}
+                    canRedo={canRedo}
+                    onUndo={undo}
+                    onRedo={redo}
+                    canClear={conditions.length > 0}
+                    onClear={handleClearAll}
+                    runMode={runMode}
+                    onRunModeChange={setRunMode}
+                    canRun={runnable !== null}
+                    hasPendingChanges={hasPendingChanges}
+                    isRunning={isRunning}
+                    onRunNow={dispatchRun}
+                />
+            )}
         </div>
     )
 }
@@ -847,6 +864,14 @@ function PremiumEmptyHero({
     onRemoveRecent: (timestamp: number) => void
 }) {
     const [quickValue, setQuickValue] = useState('')
+    // Recents dropdown: opens only on EXPLICIT user actions — mouse
+    // click inside the input, or ArrowDown when the input has
+    // keyboard focus. The previous ``onFocus`` trigger was too
+    // aggressive because ``autoFocus`` on the input fired focus on
+    // mount, opening the dropdown before the user touched anything.
+    // Closes on Escape, outside-click, or after the user submits.
+    const [recentsOpen, setRecentsOpen] = useState(false)
+    const searchContainerRef = useRef<HTMLDivElement>(null)
     // W2.7 — when the user escalated from ContextViewHeader with a
     // typed quick-search query, the panel set
     // ``pendingSearchSeed`` on the store right before opening. The
@@ -857,12 +882,42 @@ function PremiumEmptyHero({
         const seed = useSearchStore.getState().consumePendingSearchSeed()
         if (seed) setQuickValue(seed)
     }, [])
+    // Close the recents dropdown when the user clicks outside the
+    // search container. The blur handler alone isn't enough because
+    // hovering the dropdown's row-action buttons (pin/remove) blurs
+    // the input even though the user is still interacting with the
+    // dropdown — clicking outside is the source of truth.
+    useEffect(() => {
+        if (!recentsOpen) return
+        const onPointerDown = (e: PointerEvent) => {
+            const target = e.target as Node | null
+            if (!target) return
+            if (!searchContainerRef.current?.contains(target)) {
+                setRecentsOpen(false)
+            }
+        }
+        document.addEventListener('pointerdown', onPointerDown)
+        return () => document.removeEventListener('pointerdown', onPointerDown)
+    }, [recentsOpen])
     const submitQuick = () => {
         const trimmed = quickValue.trim()
         if (!trimmed) return
         onQuickSearch(trimmed)
         setQuickValue('')
+        setRecentsOpen(false)
     }
+    // Filter recents by the typed value so the dropdown also acts
+    // as autocomplete over the user's history. Compare against
+    // ``name`` (named saves) AND ``label`` (DSL string) so either
+    // surface matches the typed query.
+    const filteredRecents = useMemo(() => {
+        const q = quickValue.trim().toLowerCase()
+        if (!q) return recentQueries
+        return recentQueries.filter((e) => {
+            const hay = `${e.name ?? ''} ${e.label}`.toLowerCase()
+            return hay.includes(q)
+        })
+    }, [recentQueries, quickValue])
     type Example = {
         icon: typeof Search
         accent: string
@@ -984,8 +1039,10 @@ function PremiumEmptyHero({
                 </div>
             </div>
 
-            {/* Quick search input — the most direct entry point */}
-            <div className="relative px-5 pb-3">
+            {/* Quick search input — the most direct entry point.
+                Wrapped in a positioned container so the focus
+                dropdown anchors to it. */}
+            <div className="relative px-5 pb-3" ref={searchContainerRef}>
                 <div className={cn(
                     'group/qs flex items-center gap-2 px-3 h-10 rounded-xl',
                     'bg-canvas-base/60 border border-glass-border/60',
@@ -998,10 +1055,19 @@ function PremiumEmptyHero({
                         type="text"
                         value={quickValue}
                         onChange={(e) => setQuickValue(e.target.value)}
+                        onClick={() => {
+                            if (recentQueries.length > 0) setRecentsOpen(true)
+                        }}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter') {
                                 e.preventDefault()
                                 submitQuick()
+                            } else if (e.key === 'Escape') {
+                                e.preventDefault()
+                                setRecentsOpen(false)
+                            } else if (e.key === 'ArrowDown' && recentQueries.length > 0) {
+                                e.preventDefault()
+                                setRecentsOpen(true)
                             }
                         }}
                         autoFocus
@@ -1029,41 +1095,42 @@ function PremiumEmptyHero({
                     </button>
                 </div>
                 <div className="mt-1.5 px-1 text-[10.5px] text-ink-muted/70">
-                    Press Enter to search · or pick an example below
+                    {recentQueries.length > 0
+                        ? 'Press Enter to search · ↓ to browse recent searches · or pick an example below'
+                        : 'Press Enter to search · or pick an example below'}
                 </div>
+
+                {/* Recents dropdown — anchored to the input. Only
+                    rendered when (a) the input has focus AND (b) the
+                    user has any recents to show. Doubles as
+                    autocomplete: typing filters the list in-place,
+                    so users can quickly re-run a partially-remembered
+                    query. */}
+                <AnimatePresence>
+                    {recentsOpen && filteredRecents.length > 0 && (
+                        <RecentsDropdown
+                            entries={filteredRecents}
+                            totalCount={recentQueries.length}
+                            onLoad={(e) => { onLoadRecent(e); setRecentsOpen(false) }}
+                            onTogglePin={onTogglePinRecent}
+                            onRemove={onRemoveRecent}
+                        />
+                    )}
+                </AnimatePresence>
             </div>
 
-            {/* Examples */}
-            <div className="relative px-3 pb-3 flex flex-col gap-1.5">
-                {examples.slice(0, 5).map((ex, i) => (
-                    <ExampleCard key={i} index={i} example={ex} onSeed={onSeed} />
-                ))}
-            </div>
-
-            {/* Recent searches */}
-            {recentQueries.length > 0 && (
-                <div className="relative px-3 pb-3">
-                    <div className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted/70 flex items-center justify-between">
-                        <span>Recent searches</span>
-                        {recentQueries.length > 5 && (
-                            <span className="text-ink-muted/60 normal-case tracking-normal">
-                                Showing 5 of {recentQueries.length}
-                            </span>
-                        )}
-                    </div>
-                    <div className="flex flex-col gap-1">
-                        {recentQueries.slice(0, 5).map((entry) => (
-                            <RecentQueryRow
-                                key={entry.timestamp}
-                                entry={entry}
-                                onLoad={() => onLoadRecent(entry)}
-                                onTogglePin={() => onTogglePinRecent(entry.timestamp)}
-                                onRemove={() => onRemoveRecent(entry.timestamp)}
-                            />
-                        ))}
-                    </div>
+            {/* Examples — the curated discovery surface. Recents
+                used to render here as a separate static section but
+                they now live in the focus dropdown above (saves
+                permanent vertical space; surfaces them only when the
+                user actively asks). */}
+            <div className="relative px-3 pb-3">
+                <div className="flex flex-col gap-1.5">
+                    {examples.slice(0, 5).map((ex, i) => (
+                        <ExampleCard key={i} index={i} example={ex} onSeed={onSeed} />
+                    ))}
                 </div>
-            )}
+            </div>
 
             {/* Footer — discovery telemetry + DSL escape hatch */}
             <div className={cn(
@@ -1175,7 +1242,96 @@ function ExampleCard({
  * commitDraft). Pin keeps the entry from being auto-evicted by the
  * 10-cap. × removes the entry.
  */
-function RecentQueryRow({
+/**
+ * RecentsDropdown — overlay panel anchored beneath the empty-hero
+ * search input. Renders only when the input is focused, surfacing
+ * the user's history as a quick-pick autocomplete instead of always
+ * occupying vertical space in the empty hero.
+ *
+ * Visual identity matches the Library popover Mine tab (same card
+ * chrome via ``RecentQueryRow``) so the discovery surfaces feel
+ * coordinated. Scrollable when the user has > 5 entries; the
+ * footer hints at the Library button for the full list.
+ */
+/**
+ * Compact recents dropdown. Visual density tuned DOWN from the
+ * earlier "feels too aggressive" iteration: slim header strip,
+ * single-line rows (no card chrome), tight padding. The dropdown
+ * is a quick-pick affordance, NOT a primary surface — the full
+ * library lives in the toolbar's Library button.
+ */
+function RecentsDropdown({
+    entries, totalCount, onLoad, onTogglePin, onRemove,
+}: {
+    entries: ReadonlyArray<RecentQueryEntry>
+    totalCount: number
+    onLoad: (entry: RecentQueryEntry) => void
+    onTogglePin: (timestamp: number) => void
+    onRemove: (timestamp: number) => void
+}) {
+    const VISIBLE_CAP = 5
+    const visible = entries.slice(0, VISIBLE_CAP)
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: -2 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -2 }}
+            transition={{ duration: 0.1, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+                'absolute left-5 right-5 mt-1.5 z-50',
+                'rounded-lg overflow-hidden',
+                'bg-canvas-elevated',
+                'border border-slate-200 dark:border-glass-border',
+                'shadow-lg shadow-black/20',
+            )}
+            onPointerDown={(e) => e.stopPropagation()}
+            role="listbox"
+            aria-label="Recent searches"
+        >
+            <div className={cn(
+                'flex items-center justify-between gap-2 px-2.5 py-1',
+                'border-b border-slate-200/70 dark:border-glass-border/60',
+            )}>
+                <span className="text-[9.5px] font-mono uppercase tracking-[0.14em] text-ink-muted/70">
+                    Recent
+                </span>
+                <span className="text-[9.5px] text-ink-muted/60 tabular-nums">
+                    {entries.length === totalCount
+                        ? `${totalCount}`
+                        : `${entries.length}/${totalCount}`}
+                </span>
+            </div>
+            <ul className="max-h-[180px] overflow-y-auto custom-scrollbar py-0.5">
+                {visible.map((entry) => (
+                    <CompactRecentRow
+                        key={entry.timestamp}
+                        entry={entry}
+                        onLoad={() => onLoad(entry)}
+                        onTogglePin={() => onTogglePin(entry.timestamp)}
+                        onRemove={() => onRemove(entry.timestamp)}
+                    />
+                ))}
+            </ul>
+            {totalCount > VISIBLE_CAP && (
+                <div className={cn(
+                    'px-2.5 py-1 text-[10px] text-ink-muted/60',
+                    'border-t border-slate-200/70 dark:border-glass-border/60',
+                )}>
+                    Showing {VISIBLE_CAP} of {totalCount} · open Library for all.
+                </div>
+            )}
+        </motion.div>
+    )
+}
+
+
+/**
+ * Single-line dropdown row. No icon-in-pill, no sublabel, no hover
+ * arrow — these are the "card" affordances from RecentQueryRow that
+ * made the dropdown feel oversized. Just: tiny icon, label, pin/x
+ * on hover.
+ */
+function CompactRecentRow({
     entry, onLoad, onTogglePin, onRemove,
 }: {
     entry: RecentQueryEntry
@@ -1183,57 +1339,67 @@ function RecentQueryRow({
     onTogglePin: () => void
     onRemove: () => void
 }) {
-    const label = entry.label || '(empty)'
-    const truncated = label.length > 60 ? label.slice(0, 57) + '…' : label
+    const isNamed = entry.source === 'mine' && Boolean(entry.name)
+    const label = isNamed ? entry.name! : (entry.label || '(empty)')
     return (
-        <div className={cn(
-            'group/recent flex items-stretch gap-0 rounded-lg overflow-hidden',
-            'bg-canvas-base/40 hover:bg-canvas-base/70',
-            'border border-glass-border/60 hover:border-accent-lineage/40',
-            'transition-colors',
-        )}>
-            <button
-                type="button"
-                onClick={onLoad}
-                title={`Load: ${label}`}
-                className="flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 text-left"
-            >
-                <Search className="w-3 h-3 text-ink-muted/70 shrink-0" />
-                <span className="text-[11.5px] font-mono text-ink truncate">
-                    {truncated}
-                </span>
-            </button>
-            <button
-                type="button"
-                onClick={onTogglePin}
-                title={entry.pinned ? 'Unpin (allow auto-eviction)' : 'Pin to keep this query'}
-                aria-pressed={entry.pinned}
-                className={cn(
-                    'inline-flex items-center justify-center w-7 shrink-0',
-                    'transition-colors',
-                    entry.pinned
-                        ? 'text-amber-400 hover:text-amber-300'
-                        : 'text-ink-muted/40 hover:text-amber-400 opacity-0 group-hover/recent:opacity-100',
-                )}
-            >
+        <li className={cn(
+            'group/dr flex items-center gap-1.5 px-2 py-1 mx-1 rounded-md',
+            'hover:bg-black/[0.04] dark:hover:bg-white/[0.04]',
+            'transition-colors cursor-pointer',
+        )}
+            role="option"
+            onClick={onLoad}
+        >
+            {isNamed ? (
                 <Star
-                    className="w-3 h-3"
-                    fill={entry.pinned ? 'currentColor' : 'none'}
+                    className="w-3 h-3 text-amber-500 shrink-0"
+                    fill="currentColor"
                 />
-            </button>
-            <button
-                type="button"
-                onClick={onRemove}
-                title="Remove from Recent"
-                className={cn(
-                    'inline-flex items-center justify-center w-6 shrink-0',
-                    'text-ink-muted/40 hover:text-rose-400',
-                    'opacity-0 group-hover/recent:opacity-100 transition-opacity',
-                )}
-            >
-                <X className="w-3 h-3" />
-            </button>
-        </div>
+            ) : (
+                <Search className="w-3 h-3 text-ink-muted/60 shrink-0" />
+            )}
+            <span className={cn(
+                'flex-1 min-w-0 truncate text-[12px]',
+                isNamed ? 'font-medium text-ink' : 'font-mono text-ink',
+            )}>
+                {label}
+            </span>
+            <div className={cn(
+                'flex items-center gap-0.5 shrink-0',
+                'opacity-0 group-hover/dr:opacity-100 transition-opacity',
+            )}>
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onTogglePin() }}
+                    title={entry.pinned ? 'Unpin' : 'Pin'}
+                    aria-pressed={entry.pinned}
+                    className={cn(
+                        'inline-flex items-center justify-center w-5 h-5 rounded',
+                        'hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
+                        entry.pinned
+                            ? 'text-amber-500'
+                            : 'text-ink-muted hover:text-amber-500',
+                    )}
+                >
+                    <Star
+                        className="w-3 h-3"
+                        fill={entry.pinned ? 'currentColor' : 'none'}
+                    />
+                </button>
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onRemove() }}
+                    title="Remove"
+                    className={cn(
+                        'inline-flex items-center justify-center w-5 h-5 rounded',
+                        'text-ink-muted hover:text-rose-500',
+                        'hover:bg-black/[0.06] dark:hover:bg-white/[0.08]',
+                    )}
+                >
+                    <X className="w-3 h-3" />
+                </button>
+            </div>
+        </li>
     )
 }
 
@@ -1308,6 +1474,176 @@ function EmptyDiscoveryHint({
  *   * Auto mode: secondary "run now" shortcut that bypasses the
  *     250ms debounce — useful for impatient power users.
  */
+/**
+ * ActionFooter — premium action bar that sits at the bottom of the
+ * QueryCard. Three groups, separated by spacing so each reads as a
+ * distinct concern:
+ *
+ *   [← Back] [↶][↷]   |   [Auto │ Manual]   |   [🗑]  [▷ Run]
+ *    history          |    dispatch mode    |   destructive + primary
+ *
+ * The footer takes over what the old single-row header tried to do.
+ * Splitting the responsibilities makes the toolbar look intentional
+ * and gives the primary CTA (Run) the visual prominence it deserves.
+ */
+function ActionFooter({
+    canBack, onBack,
+    canUndo, canRedo, onUndo, onRedo,
+    canClear, onClear,
+    runMode, onRunModeChange,
+    canRun, hasPendingChanges, isRunning, onRunNow,
+}: {
+    canBack: boolean
+    onBack: () => void
+    canUndo: boolean
+    canRedo: boolean
+    onUndo: () => void
+    onRedo: () => void
+    canClear: boolean
+    onClear: () => void
+    runMode: 'auto' | 'manual'
+    onRunModeChange: (next: 'auto' | 'manual') => void
+    canRun: boolean
+    hasPendingChanges: boolean
+    isRunning: boolean
+    onRunNow: () => void
+}) {
+    return (
+        <div className={cn(
+            'flex items-center gap-2 gap-y-2 flex-wrap',
+            'px-3 py-2.5',
+            'border-t border-glass-border/60',
+            'bg-black/[0.02] dark:bg-white/[0.015]',
+        )}>
+            {/* History group: Back-to-last + Undo/Redo. Back is
+                visually distinct (text label) because it's the
+                semantic "back" the user asked for; Undo/Redo are
+                tight icon buttons since they're per-edit utility. */}
+            <div className="flex items-center gap-1 shrink-0">
+                <BackToLastButton
+                    canBack={canBack}
+                    onBack={onBack}
+                    disabled={isRunning}
+                />
+                <UndoRedoButtons
+                    canUndo={canUndo}
+                    canRedo={canRedo}
+                    onUndo={onUndo}
+                    onRedo={onRedo}
+                />
+            </div>
+
+            {/* Auto/Manual run-mode toggle — single segmented group. */}
+            <div className="shrink-0">
+                <RunControls
+                    runMode={runMode}
+                    onRunModeChange={onRunModeChange}
+                    canRun={canRun}
+                    hasPendingChanges={hasPendingChanges}
+                    isRunning={isRunning}
+                    onRunNow={onRunNow}
+                />
+            </div>
+
+            {/* Destructive + primary group on the far right.
+                ``ml-auto`` pushes it to the trailing edge so the
+                primary CTA always lands in the same spot regardless
+                of how much space the history / run-mode groups
+                consume. */}
+            <div className="flex items-center gap-1.5 ml-auto shrink-0">
+                <ClearAllButton
+                    onClear={onClear}
+                    disabled={!canClear || isRunning}
+                />
+            </div>
+        </div>
+    )
+}
+
+
+/**
+ * "Back" returns the draft to the predicate that produced the
+ * currently-visible results. Distinct from Undo (which steps back
+ * through every edit): Back is a single jump regardless of how many
+ * edits intervened. Rendered as a labeled button (not icon-only)
+ * because the user explicitly asked for a visible "back" affordance.
+ */
+function BackToLastButton({
+    canBack, onBack, disabled,
+}: {
+    canBack: boolean
+    onBack: () => void
+    disabled?: boolean
+}) {
+    const isDisabled = !canBack || disabled
+    return (
+        <button
+            type="button"
+            onClick={onBack}
+            disabled={isDisabled}
+            title={canBack
+                ? 'Restore the draft to the last query that ran'
+                : 'No prior query to restore'}
+            aria-label="Back to last query"
+            className={cn(
+                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
+                'text-[11px] font-medium transition-colors',
+                'border',
+                isDisabled
+                    ? cn(
+                        'border-transparent text-ink-muted/40 cursor-not-allowed',
+                    )
+                    : cn(
+                        'border-slate-200 dark:border-glass-border/60',
+                        'text-ink-secondary hover:text-accent-lineage',
+                        'hover:bg-accent-lineage/10 hover:border-accent-lineage/40',
+                    ),
+            )}
+        >
+            <RotateCcw className="w-3 h-3" />
+            Back
+        </button>
+    )
+}
+
+
+/**
+ * Clear-all as a destructive icon button (was previously a tiny
+ * text link buried between filter-count and Undo, which the user
+ * couldn't find). Hover treatment promotes it to a rose-tinted
+ * action so it reads as destructive without screaming for attention
+ * by default.
+ */
+function ClearAllButton({
+    onClear, disabled,
+}: {
+    onClear: () => void
+    disabled?: boolean
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClear}
+            disabled={disabled}
+            title="Clear all filters"
+            aria-label="Clear all filters"
+            className={cn(
+                'inline-flex items-center justify-center w-7 h-7 rounded-md',
+                'border border-transparent transition-colors',
+                disabled
+                    ? 'text-ink-muted/40 cursor-not-allowed'
+                    : cn(
+                        'text-ink-muted hover:text-rose-500',
+                        'hover:bg-rose-500/10 hover:border-rose-500/30',
+                    ),
+            )}
+        >
+            <Trash2 className="w-3.5 h-3.5" />
+        </button>
+    )
+}
+
+
 /**
  * Two small icon buttons. Both disabled when the matching stack is
  * empty. Don't render anything when BOTH are disabled and we're in the
