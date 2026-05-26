@@ -1001,6 +1001,84 @@ def _build_scope_continuation(
     return fragment, {"_rootUrns": list(effective_root_urns)}
 
 
+def _build_scope_continuation_chain(
+    provider,
+    urn_sets: List[List[str]],
+    max_depth: int,
+) -> Tuple[str, Dict[str, Any]]:
+    """Emit one MATCH continuation per non-empty URN set, AND'd via
+    chained ``WITH DISTINCT n``.
+
+    Replaces the URN-set intersection semantics of
+    ``_effective_root_urns`` + ``_build_scope_continuation`` for the
+    nested-anchor case: ``scope.root_urns=[LayerA]`` AND
+    ``descendantOf=[ObjectInsideLayerA]`` previously produced ∅; now
+    each set becomes its own MATCH and Cypher's natural AND narrows
+    correctly to the most-specific subtree.
+
+    Each MATCH uses an indexed param name (``_scopeRootUrnsK``) and an
+    indexed root variable (``rootK``) so the multiple MATCH clauses
+    don't collide. Empty input sets are skipped (defensive — the
+    compiler never emits empty hoists in practice).
+
+    Returns ``('', {})`` when the provider has no configured
+    containment edge types (the caller continues without scope
+    verification and logs a warning, mirroring
+    ``_build_scope_continuation``).
+    """
+    if not urn_sets:
+        return "", {}
+    try:
+        ctypes = list(provider._get_containment_edge_types())
+    except Exception:
+        logger.warning(
+            "deep_search: containment edge types not configured; "
+            "scope.root_urns and hoisted descendantOf will be ignored",
+        )
+        return "", {}
+    if not ctypes:
+        return "", {}
+    rel = "|".join(_sanitize_label(t) for t in ctypes)
+    fragments: List[str] = []
+    params: Dict[str, Any] = {}
+    depth = int(max_depth)
+    for i, urns in enumerate(urn_sets):
+        if not urns:
+            continue
+        param_name = f"_scopeRootUrns{i}"
+        root_var = f"root{i}"
+        params[param_name] = list(urns)
+        fragments.append(
+            f"MATCH ({root_var})-[:{rel}*0..{depth}]->(n) "
+            f"WHERE {root_var}.urn IN ${param_name} "
+            f"WITH DISTINCT n"
+        )
+    return " ".join(fragments), params
+
+
+def _collect_scope_urn_sets(query, compiler) -> List[List[str]]:
+    """Collect the URN sets that should each become a scope-clamp
+    continuation, in display order.
+
+    ``view`` mode contributes ``scope.root_urns`` (the view's
+    authorised top-level containers) plus every hoisted DescendantOf
+    set. ``visible`` and ``data_source`` modes contribute only the
+    hoisted sets — view-root enforcement is suppressed in those modes
+    (visible uses the URN-equality clause in the WHERE; data_source is
+    by definition the whole graph).
+
+    Empty sets are dropped — an empty hoisted set would be a compiler
+    bug, and ``scope.root_urns`` of ``None`` is the no-clamp case.
+    """
+    sets: List[List[str]] = []
+    if query.scope.scope_mode == "view" and query.scope.root_urns:
+        sets.append(list(query.scope.root_urns))
+    for s in compiler.hoisted_root_urns:
+        if s:
+            sets.append(list(s))
+    return sets
+
+
 def _build_scope_pre_filter(
     provider,
     effective_root_urns: List[str],
@@ -1173,24 +1251,33 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     where_fragment = compiler.compile(query.predicate)
     base_params: Dict[str, Any] = dict(compiler.params)
 
+    # Collect the URN sets to apply as scope continuations. Each set
+    # becomes its own MATCH clause in the chain — Cypher AND's them
+    # naturally so nested anchors (scope.root_urns ∋ a hoisted
+    # descendantOf URN) compose without the URN-set intersection that
+    # used to collapse to ∅. ``_effective_root_urns`` is still computed
+    # for the diagnostic field but no longer drives Cypher emission.
     eff_root_urns = _effective_root_urns(compiler, query.scope.root_urns)
-    if eff_root_urns is not None and not eff_root_urns:
-        notes.append(
-            "scope.root_urns intersected with hoisted DescendantOf "
-            "predicates produced an empty set — no rows can match."
-        )
+    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
+    eff_union: Optional[List[str]] = None
+    if scope_urn_sets:
+        union: set = set()
+        for s in scope_urn_sets:
+            union.update(s)
+        eff_union = sorted(union)
 
     # Scope mode resolution.
     #
     # ``visible``      → narrow the candidate scan to the URN set the FE
     #                    just rendered. ``MATCH (n) WHERE n.urn IN $vis``
     #                    is index-backed by the URN unique constraint and
-    #                    is the fastest possible scope. No scope
-    #                    continuation needed.
-    # ``data_source``  → no containment clamp; the candidate scan is
-    #                    bounded only by entity-type filter + cap.
+    #                    is the fastest possible scope. Hoisted
+    #                    descendantOf URNs still chain after.
+    # ``data_source``  → no view-root clamp; hoisted descendantOf URNs
+    #                    still apply (the user's explicit anchor).
     # ``view`` (else)  → today's behaviour: containment expansion from
-    #                    the view's authorised roots.
+    #                    the view's authorised roots PLUS any hoisted
+    #                    descendantOf anchors, chained via WITH DISTINCT n.
     scope_mode = query.scope.scope_mode
     visible_urns = list(query.scope.visible_urns or [])
     where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
@@ -1199,55 +1286,31 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
     scope_continuation = ""
     if scope_mode == "data_source":
-        # Skip the containment scope clamp. Effective root URNs are
-        # still resolved for ``ScopeDiagnostics`` consumers; the
-        # candidate Cypher just doesn't apply them.
-        if eff_root_urns:
+        if query.scope.root_urns:
             notes.append(
                 "scope_mode='data_source' — searching the entire data "
                 "source; the view's authorised root URNs are not "
                 "enforced. Results may include nodes that are not in "
                 "this view."
             )
-    elif scope_mode == "visible":
-        if not visible_clause_added:
-            notes.append(
-                "scope_mode='visible' but scope.visible_urns is empty — "
-                "no candidate filter applied. Falling back to "
-                "view-scope semantics."
-            )
-        # Hoisted DescendantOf URNs always apply as a scope continuation,
-        # composing with the visible clause via AND (n must be visible
-        # AND descend from one of the chosen roots). When visible_urns
-        # is empty, this is also the view-scope fallback for the note
-        # above. Previously a `not visible_clause_added` guard here
-        # silently dropped DescendantOf whenever visible_urns was
-        # supplied — see test_visible_with_descendantof_emits_both_clauses.
-        if eff_root_urns:
-            scope_continuation, scope_params = _build_scope_continuation(
-                provider, eff_root_urns, query.scope.max_depth or 12,
-            )
-            base_params.update(scope_params)
-    elif eff_root_urns:
-        # Post-filter scope check: ``MATCH (root)-[:CONTAINS*1..D]->(n)``
-        # appended after the candidate ``WITH n LIMIT $cap``. Anchor-
-        # form pre-filter (``_build_scope_pre_filter``) exists but is
-        # NOT activated by default — variable-length expansion on a
-        # deep subtree (max_depth=12) materialises far more paths than
-        # the candidate cap would have bounded, causing FalkorDB 504s
-        # on common workloads (regression from W1.1b). The post-filter
-        # shape keeps the 5000-candidate ceiling and the planner does
-        # the right thing.
-        scope_continuation, scope_params = _build_scope_continuation(
-            provider, eff_root_urns, query.scope.max_depth or 12,
+    elif scope_mode == "visible" and not visible_clause_added:
+        notes.append(
+            "scope_mode='visible' but scope.visible_urns is empty — "
+            "no candidate filter applied. Falling back to "
+            "view-scope semantics."
+        )
+
+    if scope_urn_sets:
+        scope_continuation, scope_params = _build_scope_continuation_chain(
+            provider, scope_urn_sets, query.scope.max_depth or 12,
         )
         base_params.update(scope_params)
         if not scope_continuation:
             notes.append(
-                "scope.root_urns supplied but the provider has no "
-                "containment edge types configured — the scope check "
-                "was dropped. All matching predicates pass without "
-                "ancestry verification."
+                "scope.root_urns / descendantOf were supplied but the "
+                "provider has no containment edge types configured — "
+                "the scope check was dropped. All matching predicates "
+                "pass without ancestry verification."
             )
 
     effective_types, et_note = _resolve_entity_types_scope(
@@ -1292,7 +1355,14 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         "params": base_params,
         "candidate_cap": effective_candidate_cap,
         "hoisted_root_urns": [list(s) for s in compiler.hoisted_root_urns],
-        "effective_root_urns": eff_root_urns,
+        # Flattened union of every URN set that became a scope MATCH —
+        # diagnostic-only ("the URNs being enforced"). The legacy
+        # ``_effective_root_urns`` (intersection of literals) is
+        # preserved for tests that exercise the helper directly, but
+        # no longer drives Cypher emission. ``eff_union`` reflects the
+        # chain semantics: union of all sets, sorted.
+        "effective_root_urns": eff_union if eff_union is not None else eff_root_urns,
+        "effective_root_urn_sets": [list(s) for s in scope_urn_sets],
         "notes": notes,
     }
 
@@ -1776,39 +1846,20 @@ async def execute_deep_search(
                 cache_hit=False,
             )
 
-    # 2. Effective scope (scope.root_urns ∩ hoisted DescendantOf urns)
-    eff_root_urns = _effective_root_urns(compiler, query.scope.root_urns)
-    if eff_root_urns is not None and not eff_root_urns:
-        # Intersection is empty → no rows can match
-        return _empty_result(query.options.results, start)
+    # 2. Effective scope — collect the URN sets each becoming its own
+    #    scope-clamp MATCH (see explain_deep_search for the rationale).
+    scope_urn_sets = _collect_scope_urn_sets(query, compiler)
 
-    # 3. Scope mode resolution (see explain_deep_search for full notes).
-    #    visible: AND n.urn IN $_visibleUrns into the where-fragment.
-    #    data_source: skip the containment scope check.
-    #    view: today's post-filter shape.
+    # 3. Scope mode resolution (mirrors explain_deep_search).
     scope_mode = query.scope.scope_mode
     visible_urns_list = list(query.scope.visible_urns or [])
-    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
+    where_fragment, _visible_clause_added = _maybe_add_visible_urns_clause(
         where_fragment, scope_mode, visible_urns_list, base_params,
     )
     scope_continuation = ""
-    if scope_mode == "data_source":
-        # No containment clamp.
-        pass
-    elif scope_mode == "visible":
-        # The visible_urns clause (if added) lives in the candidate
-        # WHERE. Hoisted DescendantOf URNs still apply as a scope
-        # continuation — AND'd with the visible filter, not replaced
-        # by it. When visible_urns is empty this is also the
-        # view-scope fallback. Mirrors explain_deep_search.
-        if eff_root_urns:
-            scope_continuation, scope_params = _build_scope_continuation(
-                provider, eff_root_urns, query.scope.max_depth or 12,
-            )
-            base_params.update(scope_params)
-    elif eff_root_urns:
-        scope_continuation, scope_params = _build_scope_continuation(
-            provider, eff_root_urns, query.scope.max_depth or 12,
+    if scope_urn_sets:
+        scope_continuation, scope_params = _build_scope_continuation_chain(
+            provider, scope_urn_sets, query.scope.max_depth or 12,
         )
         base_params.update(scope_params)
 

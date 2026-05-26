@@ -981,11 +981,10 @@ class TestVisibleModeWithDescendantOf:
         cypher = result["cypher"]
         # Visible clause is in the candidate WHERE.
         assert "n.urn IN $_visibleUrns" in cypher
-        # Scope continuation is appended after WITH n LIMIT $cap.
-        assert "MATCH (root)-[:CONTAINS*0..12]->(n)" in cypher
-        assert "root.urn IN $_rootUrns" in cypher
-        # Both params are bound; their sets are independent.
-        assert result["params"]["_rootUrns"] == ["urn:reporting"]
+        # One scope continuation per hoisted URN set, indexed.
+        assert "MATCH (root0)-[:CONTAINS*0..12]->(n)" in cypher
+        assert "root0.urn IN $_scopeRootUrns0" in cypher
+        assert result["params"]["_scopeRootUrns0"] == ["urn:reporting"]
         assert "urn:reporting" in result["params"]["_visibleUrns"]
 
     def test_visible_without_descendantof_emits_no_continuation(self):
@@ -1005,8 +1004,8 @@ class TestVisibleModeWithDescendantOf:
         result = explain_deep_search(_StubScopeProvider(), q)
         cypher = result["cypher"]
         assert "n.urn IN $_visibleUrns" in cypher
-        assert "MATCH (root)" not in cypher
-        assert "_rootUrns" not in result["params"]
+        assert "MATCH (root" not in cypher
+        assert "_scopeRootUrns0" not in result["params"]
 
     def test_visible_empty_urns_with_descendantof_still_emits_continuation(self):
         """The pre-existing fallback path: visible mode + empty
@@ -1031,8 +1030,108 @@ class TestVisibleModeWithDescendantOf:
         result = explain_deep_search(_StubScopeProvider(), q)
         cypher = result["cypher"]
         assert "n.urn IN $_visibleUrns" not in cypher
-        assert "MATCH (root)-[:CONTAINS*0..12]->(n)" in cypher
-        assert "root.urn IN $_rootUrns" in cypher
+        assert "MATCH (root0)-[:CONTAINS*0..12]->(n)" in cypher
+        assert "root0.urn IN $_scopeRootUrns0" in cypher
+        assert result["params"]["_scopeRootUrns0"] == ["urn:reporting"]
+
+
+class TestScopeChainSemantics:
+    """The new scope-continuation chain: one MATCH per non-empty URN
+    set (scope.root_urns + each hoisted DescendantOf set), AND'd via
+    chained ``WITH DISTINCT n``. Replaces the old URN-set intersection
+    in ``_effective_root_urns`` which produced empty results whenever
+    the scope and the user's descendantOf anchor were nested (e.g. View
+    root LayerA AND descendantOf=[ObjectInsideLayerA] → ∅).
+    """
+
+    def test_view_mode_nested_anchor_emits_two_matches(self):
+        """View mode + scope.root_urns=[LayerA] + descendantOf=[ObjectX]
+        previously produced an empty result (URN-set intersection ∅).
+        Now: two MATCH continuations narrow n to descend from both."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["PII"]),
+                DescendantOfPredicate(urns=["urn:objectX"]),
+            ]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="view",
+                root_urns=["urn:layerA"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert cypher.count("MATCH (root") == 2
+        assert "$_scopeRootUrns0" in cypher
+        assert "$_scopeRootUrns1" in cypher
+        assert result["params"]["_scopeRootUrns0"] == ["urn:layerA"]
+        assert result["params"]["_scopeRootUrns1"] == ["urn:objectX"]
+
+    def test_multiple_anded_descendant_of_each_gets_match(self):
+        """Two top-level descendantOf predicates AND'd → two distinct
+        MATCH continuations, AND'd via chained WITH DISTINCT n."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                DescendantOfPredicate(urns=["urn:a"]),
+                DescendantOfPredicate(urns=["urn:b"]),
+                TagPredicate(values=["PII"]),
+            ]),
+            scope=SearchScope(view_id="view_test", scope_mode="data_source"),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        # data_source mode contributes no scope.root_urns MATCH; two
+        # hoisted descendantOf sets give two MATCHes.
+        assert cypher.count("MATCH (root") == 2
+        assert result["params"]["_scopeRootUrns0"] == ["urn:a"]
+        assert result["params"]["_scopeRootUrns1"] == ["urn:b"]
+
+    def test_data_source_mode_honours_descendant_of(self):
+        """Pre-fix: data_source mode dropped scope.root_urns AND
+        silently dropped hoisted descendantOf. Post-fix: the user's
+        explicit anchor still applies — data_source only suppresses
+        the view's authorised root URNs."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["PII"]),
+                DescendantOfPredicate(urns=["urn:anchor"]),
+            ]),
+            scope=SearchScope(view_id="view_test", scope_mode="data_source"),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert "MATCH (root0)" in cypher
+        assert result["params"]["_scopeRootUrns0"] == ["urn:anchor"]
+
+    def test_view_mode_without_descendant_of_still_emits_scope_match(self):
+        """View mode + scope.root_urns + no hoisted descendantOf →
+        exactly one MATCH continuation for scope.root_urns. Guards
+        against regression where the chain builder skipped the
+        scope-only case."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="view",
+                root_urns=["urn:layerA"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert cypher.count("MATCH (root") == 1
+        assert result["params"]["_scopeRootUrns0"] == ["urn:layerA"]
 
 
 # ---------------------------------------------------------------------------
