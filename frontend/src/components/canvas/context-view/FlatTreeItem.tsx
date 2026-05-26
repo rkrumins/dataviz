@@ -254,6 +254,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.4),0_0_18px_-2px_rgba(245,158,11,0.45)]",
             "search-match-pulse",
         ),
+        // Ancestor of a search match — softer amber treatment so the
+        // user can scan the canvas top-down and see at a glance which
+        // branches contain hits, without the row competing with direct
+        // matches for attention. Applies whether the row is collapsed
+        // (with a ✦N badge) or expanded (descendants then carry their
+        // own stronger highlight). Suppressed when the row is itself a
+        // direct match, selected, or part of a trace focus path.
+        ancestorMatchCount > 0 && !isSearchResult && !isSelected && !isFocusNode && cn(
+            "bg-gradient-to-r from-amber-500/[0.06] to-transparent",
+            "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.18)]",
+        ),
         // Focus node (trace target)
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
