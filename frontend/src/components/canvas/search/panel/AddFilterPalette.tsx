@@ -40,7 +40,6 @@ import {
     Boxes,
     Equal,
     Flag,
-    GitBranch,
     GitMerge,
     Hash,
     KeyRound,
@@ -159,6 +158,11 @@ export interface AddFilterPaletteProps {
     onAddMany: (predicates: Predicate[]) => void
     /** Open Advanced for group / path authoring. */
     onOpenAdvanced: () => void
+    /** Open the Code (JSON) editor with a stub of the named predicate
+     *  kind appended to the current draft. Used by the "Code-only"
+     *  Advanced entries (path, withinHops) — visual editors for these
+     *  shapes don't exist; the user authors them in JSON instead. */
+    onOpenCode: (kind: 'path' | 'withinHops') => void
     disabled?: boolean
 }
 
@@ -179,14 +183,19 @@ interface PaletteEntry {
     /** Sample values rendered as small chips below the description.
      *  Up to ~4 are surfaced; the rest fold into a "+N more" chip. */
     samples?: ReadonlyArray<string>
-    /** Either emit a predicate (most rows) or trigger Advanced (paths/groups). */
-    action: 'emit' | 'advanced'
+    /** Row action:
+     *    - ``emit``: build a predicate and add it to the query.
+     *    - ``advanced``: open the Advanced drawer (groups, options).
+     *    - ``code``: open the JSON editor with a stub of ``codeKind``
+     *      appended to the current draft (path / withinHops). */
+    action: 'emit' | 'advanced' | 'code'
     build?: () => Predicate
+    codeKind?: 'path' | 'withinHops'
 }
 
 
 export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
-    counts, samples, onAdd, onAddMany, onOpenAdvanced, disabled,
+    counts, samples, onAdd, onAddMany, onOpenAdvanced, onOpenCode, disabled,
 }) => {
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
@@ -449,22 +458,23 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                     id: 'path',
                     icon: Route, tone: 'group',
                     label: 'Path from A to B',
-                    description: 'Lineage paths between two URNs — opens Advanced',
-                    action: 'advanced',
+                    description:
+                        'Lineage paths between two URN sets — Code only. '
+                        + 'Opens the JSON editor with a stub; fill in '
+                        + 'sourceUrns and targetUrns.',
+                    action: 'code',
+                    codeKind: 'path',
                 },
                 {
                     id: 'within-hops',
                     icon: Radar, tone: 'group',
                     label: 'Within N hops of…',
-                    description: 'N-hop neighbourhood of an anchor URN — opens Advanced',
-                    action: 'advanced',
-                },
-                {
-                    id: 'subtree',
-                    icon: GitBranch, tone: 'group',
-                    label: 'Inside subtree…',
-                    description: 'Limit to descendants of one or more URNs — opens Advanced',
-                    action: 'advanced',
+                    description:
+                        'N-hop neighbourhood of an anchor URN — Code only. '
+                        + 'Opens the JSON editor with a stub; fill in '
+                        + 'urns and hops.',
+                    action: 'code',
+                    codeKind: 'withinHops',
                 },
                 {
                     id: 'and-group',
@@ -537,12 +547,14 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
     const handleEntry = useCallback((entry: PaletteEntry) => {
         if (entry.action === 'advanced') {
             onOpenAdvanced()
+        } else if (entry.action === 'code' && entry.codeKind) {
+            onOpenCode(entry.codeKind)
         } else if (entry.build) {
             onAdd(entry.build())
         }
         setOpen(false)
         setQuery('')
-    }, [onAdd, onOpenAdvanced])
+    }, [onAdd, onOpenAdvanced, onOpenCode])
 
     const handlePasteDsl = useCallback(() => {
         if (!dslPreview) return

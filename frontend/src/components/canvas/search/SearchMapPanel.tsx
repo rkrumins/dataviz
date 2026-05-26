@@ -46,7 +46,7 @@ import {
     useSearchStore,
     type RecentQueryEntry,
 } from '@/store/searchStore'
-import type { AncestorRef } from '@/types/search'
+import type { AncestorRef, Predicate } from '@/types/search'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 
@@ -164,6 +164,49 @@ function PanelInner({
         setAdvancedOpen(true)
     }, [])
 
+    /**
+     * Open the JSON editor with a stub of the named predicate kind
+     * appended to the current draft. Used by the "Code-only" palette
+     * entries (Path, Within hops) whose visual editors were removed —
+     * the user authors the predicate in JSON instead. Existing draft
+     * predicates are preserved by wrapping in an AND group.
+     */
+    const openCode = useCallback((kind: 'path' | 'withinHops') => {
+        const stub: Predicate = kind === 'path'
+            ? {
+                kind: 'path',
+                sourceUrns: [],
+                targetUrns: [],
+                maxHops: 4,
+                edgeClass: 'lineage',
+                direction: 'outgoing',
+            } as unknown as Predicate
+            : {
+                kind: 'withinHops',
+                urns: [],
+                hops: 2,
+                direction: 'both',
+                edgeClass: 'lineage',
+            } as unknown as Predicate
+        const current = useSearchStore.getState().draftPredicate
+        let next: Predicate
+        if (!current) {
+            next = stub
+        } else if (current.kind === 'group' && current.op === 'and') {
+            next = {
+                kind: 'group', op: 'and',
+                children: [...current.children, stub],
+            }
+        } else {
+            next = {
+                kind: 'group', op: 'and',
+                children: [current, stub],
+            }
+        }
+        commitDraft(next)
+        openAdvanced('json')
+    }, [commitDraft, openAdvanced])
+
     const handleClear = useCallback(() => {
         cancel()
         clearStore()
@@ -244,6 +287,7 @@ function PanelInner({
                             isRunning={view.kind === 'running'}
                             onRun={(p, options) => void runPredicate(p, options)}
                             onOpenAdvanced={() => openAdvanced('options')}
+                            onOpenCode={openCode}
                         />
 
                         <AnimatePresence>

@@ -99,6 +99,10 @@ export interface QueryCardProps {
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
     /** Open Advanced drawer (for OR/NOT/path authoring). */
     onOpenAdvanced: () => void
+    /** Open the JSON editor with a stub for ``kind`` appended to the
+     *  current draft. Used by the "Code-only" palette entries
+     *  (path / withinHops) that have no visual editor. */
+    onOpenCode: (kind: 'path' | 'withinHops') => void
 }
 
 
@@ -123,7 +127,7 @@ type ViewMode = 'visual' | 'code'
 
 
 export const QueryCard: FC<QueryCardProps> = ({
-    viewId, isRunning, onRun, onOpenAdvanced,
+    viewId, isRunning, onRun, onOpenAdvanced, onOpenCode,
 }) => {
     const draftPredicate = useDraftPredicate()
     const seedDraftPredicate = useSearchStore((s) => s.seedDraftPredicate)
@@ -496,6 +500,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     onAdd={handleAddOne}
                                     onAddMany={handleAddMany}
                                     onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={onOpenCode}
                                     disabled={isRunning}
                                 />
                                 <DiscoveryTelemetry

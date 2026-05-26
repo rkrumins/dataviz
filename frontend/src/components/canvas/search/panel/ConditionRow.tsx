@@ -233,7 +233,10 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             return null
         case 'withinHops':
         case 'path':
-            return <OpenAdvancedHint onOpen={ctx.onOpenAdvanced} />
+            // No visual editor — these predicate kinds are Code-only.
+            // Saved queries that still contain them render this banner;
+            // editing happens via the JSON view in the Advanced drawer.
+            return <CodeOnlyHint onOpen={ctx.onOpenAdvanced} />
         case 'group': {
             const g = value as GroupPredicate
             return (
@@ -650,14 +653,14 @@ function PropertyEditor({
 }
 
 
-function OpenAdvancedHint({ onOpen }: { onOpen: () => void }) {
+function CodeOnlyHint({ onOpen }: { onOpen: () => void }) {
     return (
         <div className={cn(
             'rounded-lg border border-glass-border/60 bg-canvas-base/30',
             'px-3 py-2.5 flex items-center justify-between gap-3',
         )}>
             <span className="text-[11.5px] text-ink-muted">
-                This filter needs the Advanced builder (multiple URNs / hops / paths).
+                This filter lives in Code mode — open the JSON view to edit it.
             </span>
             <button
                 type="button"
@@ -669,7 +672,7 @@ function OpenAdvancedHint({ onOpen }: { onOpen: () => void }) {
                 )}
             >
                 <ExternalLink className="w-3 h-3" />
-                Open in Advanced
+                Open in Code
             </button>
         </div>
     )
