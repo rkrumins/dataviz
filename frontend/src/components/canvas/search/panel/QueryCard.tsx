@@ -99,10 +99,6 @@ export interface QueryCardProps {
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
     /** Open Advanced drawer (for OR/NOT/path authoring). */
     onOpenAdvanced: () => void
-    /** Open the JSON editor with a stub for ``kind`` appended to the
-     *  current draft. Used by the "Code-only" palette entries
-     *  (path / withinHops) that have no visual editor. */
-    onOpenCode: (kind: 'path' | 'withinHops') => void
 }
 
 
@@ -127,7 +123,7 @@ type ViewMode = 'visual' | 'code'
 
 
 export const QueryCard: FC<QueryCardProps> = ({
-    viewId, isRunning, onRun, onOpenAdvanced, onOpenCode,
+    viewId, isRunning, onRun, onOpenAdvanced,
 }) => {
     const draftPredicate = useDraftPredicate()
     const seedDraftPredicate = useSearchStore((s) => s.seedDraftPredicate)
@@ -158,6 +154,49 @@ export const QueryCard: FC<QueryCardProps> = ({
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
 
     const [mode, setMode] = useState<ViewMode>('visual')
+
+    /**
+     * Code-only palette entries (path, withinHops) hand off to the
+     * main panel's Code view rather than the AdvancedDrawer JSON tab.
+     * Seed a stub predicate of the chosen kind into the draft
+     * (preserving existing work via AND-wrap), then flip the local
+     * mode to 'code' so the user lands directly in the DSL editor.
+     */
+    const handleOpenCode = useCallback((kind: 'path' | 'withinHops') => {
+        const stub: Predicate = kind === 'path'
+            ? ({
+                kind: 'path',
+                sourceUrns: [],
+                targetUrns: [],
+                maxHops: 4,
+                edgeClass: 'lineage',
+                direction: 'outgoing',
+            } as unknown as Predicate)
+            : ({
+                kind: 'withinHops',
+                urns: [],
+                hops: 2,
+                direction: 'both',
+                edgeClass: 'lineage',
+            } as unknown as Predicate)
+        const current = useSearchStore.getState().draftPredicate
+        let next: Predicate
+        if (!current) {
+            next = stub
+        } else if (current.kind === 'group' && current.op === 'and') {
+            next = {
+                kind: 'group', op: 'and',
+                children: [...current.children, stub],
+            }
+        } else {
+            next = {
+                kind: 'group', op: 'and',
+                children: [current, stub],
+            }
+        }
+        commitDraft(next)
+        setMode('code')
+    }, [commitDraft])
     // Identifies the most recently inserted condition kind so the
     // corresponding row's first editor gets autofocus on mount. Cleared
     // on a microtask so subsequent edits don't re-trigger focus.
@@ -500,7 +539,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     onAdd={handleAddOne}
                                     onAddMany={handleAddMany}
                                     onOpenAdvanced={onOpenAdvanced}
-                                    onOpenCode={onOpenCode}
+                                    onOpenCode={handleOpenCode}
                                     disabled={isRunning}
                                 />
                                 <DiscoveryTelemetry

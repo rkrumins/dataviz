@@ -138,6 +138,63 @@ export function useCanvasViewRootUrns(): string[] {
 
 
 /**
+ * Top-level containment parents on the canvas — nodes that have at
+ * least one HAS-child but no HAS-parent on canvas. Type-agnostic, so
+ * it works for ontologies where ``rootEntityTypes`` is narrowly
+ * declared (e.g. only 'dashboard') and the real top-level containers
+ * are typed 'Container', 'DataPlatform', etc.
+ *
+ * Returns the 6 visible canvas containers in this view (SILVER,
+ * INTERMEDIATE_T1, INTERMEDIATE_T2, GOLD, REPORTING, Tableau) by
+ * structural definition: each is the parent of one or more
+ * containment children, and itself has no containment parent on the
+ * loaded canvas.
+ *
+ * Powers the "Root in view is…" picker, which previously fed from
+ * ``useCanvasViewRoots`` and broke whenever the ontology's root
+ * entity-type set didn't include the container entity types the user
+ * actually sees on canvas.
+ */
+export function useTopLevelCanvasContainers(): CanvasViewRoot[] {
+    const nodes = useCanvasStore((s) => s.nodes)
+    const edges = useCanvasStore((s) => s.edges)
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+    return useMemo(() => {
+        const hasParent = new Set<string>()
+        const hasChild = new Set<string>()
+        for (const edge of edges) {
+            if (!isContainmentEdgeType(
+                normalizeEdgeType(edge),
+                containmentEdgeTypes as string[],
+            )) continue
+            hasParent.add(edge.target)
+            hasChild.add(edge.source)
+        }
+        const out: CanvasViewRoot[] = []
+        const seen = new Set<string>()
+        for (const n of nodes) {
+            if (hasParent.has(n.id)) continue
+            if (!hasChild.has(n.id)) continue
+            const data = n.data as {
+                type?: string
+                urn?: string
+                label?: string
+                businessLabel?: string
+            }
+            if (!data.type || data.type === 'ghost') continue
+            const urn = data.urn ?? n.id
+            if (seen.has(urn)) continue
+            seen.add(urn)
+            const label = data.label ?? data.businessLabel ?? urn
+            out.push({ id: n.id, urn, displayName: label, entityType: data.type })
+        }
+        out.sort((a, b) => a.displayName.localeCompare(b.displayName))
+        return out
+    }, [nodes, edges, containmentEdgeTypes])
+}
+
+
+/**
  * Anchor options for the "Inside Subtree" filter — every node
  * currently loaded on the canvas, regardless of entity type or
  * containment depth. Lets the user pick any Layer, Object, Container,

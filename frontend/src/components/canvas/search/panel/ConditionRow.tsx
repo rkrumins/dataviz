@@ -51,7 +51,7 @@ import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
-import { useCanvasAnchorOptions, useCanvasViewRoots } from './useCanvasViewRoots'
+import { useCanvasAnchorOptions, useTopLevelCanvasContainers } from './useCanvasViewRoots'
 
 
 /** FE-only augmentation on DescendantOfPredicate so we can route to
@@ -526,7 +526,7 @@ function LayerEditor({
 function RootInViewEditor({
     value, onChange, autoFocus,
 }: Omit<EditorCtx, 'value'> & { value: DescendantOfPredicateWithScope }) {
-    const roots = useCanvasViewRoots()
+    const roots = useTopLevelCanvasContainers()
     return (
         <Field label="Root nodes">
             <UnifiedPicker
