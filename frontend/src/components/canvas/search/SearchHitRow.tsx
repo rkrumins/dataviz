@@ -24,7 +24,16 @@ import * as LucideIcons from 'lucide-react'
 import { type FC, useMemo } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useIsFocusedMatch } from '@/store/searchStore'
 import type { AncestorRef, SearchHit } from '@/types/search'
+
+
+/**
+ * Stable DOM-id prefix for hit rows. Used by ResultsPane's
+ * focused-match effect to ``scrollIntoView`` the focused row without
+ * having to thread refs through HitsByParent → VirtualizedHitList.
+ */
+export const HIT_ROW_ID_PREFIX = 'search-hit-row-'
 
 
 interface EntityTypeStyle {
@@ -140,6 +149,10 @@ export interface SearchHitRowProps {
 export const SearchHitRow: FC<SearchHitRowProps> = ({
     hit, index, onReveal, onOpen, onAncestorClick,
 }) => {
+    // Per-row focused subscription. Re-renders only when THIS row's
+    // focus state flips, not on every MatchBar step — see the
+    // useIsFocusedMatch selector doc.
+    const isFocused = useIsFocusedMatch(hit.node.urn)
     const style = useMemo(
         () => styleFor(hit.node.entityType),
         [hit.node.entityType],
@@ -149,6 +162,7 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
 
     return (
         <motion.div
+            id={`${HIT_ROW_ID_PREFIX}${hit.node.urn}`}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{
@@ -162,6 +176,11 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                 "hover:bg-glass/40 hover:border-glass-border",
                 "hover:shadow-sm",
                 "transition-all duration-150",
+                // Focus state — driven by the MatchBar stepper /
+                // J-K keyboard. Ring overlay (instead of border) so
+                // the focus indicator doesn't compete with the
+                // existing hover border treatment.
+                isFocused && "ring-2 ring-accent-lineage/60 ring-inset bg-accent-lineage/10",
             )}
         >
             {/* Icon — gradient container matching bucket cards */}
