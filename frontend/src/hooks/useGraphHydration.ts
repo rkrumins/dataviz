@@ -13,7 +13,7 @@ import {
     useViewEntityTypes,
     useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
-import type { GraphNode, GraphEdge, EntityTypeDefinition, GraphDataProvider } from '@/providers/GraphDataProvider'
+import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { BoundedQueue } from '@/lib/concurrency'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -32,30 +32,6 @@ const CHILD_LOAD_CONCURRENCY = (() => {
     const fromEnv = Number(import.meta.env?.VITE_CHILD_LOAD_CONCURRENCY)
     return Number.isFinite(fromEnv) && fromEnv >= 1 ? fromEnv : 6
 })()
-
-/**
- * Page size for exhaustively fetching children of a user-assigned entity.
- * Assignment-driven hydration must surface every child the user placed in a
- * Layer Column — no silent cap — so we page until the source runs out.
- */
-const CHILD_PAGE_SIZE = 500
-
-async function fetchAllChildren(
-    provider: GraphDataProvider,
-    parentUrn: string,
-    signal: AbortSignal,
-): Promise<GraphNode[]> {
-    const all: GraphNode[] = []
-    for (let offset = 0; ; offset += CHILD_PAGE_SIZE) {
-        if (signal.aborted) break
-        const page = await provider
-            .getChildren(parentUrn, { limit: CHILD_PAGE_SIZE, offset })
-            .catch(() => [] as GraphNode[])
-        all.push(...page)
-        if (page.length < CHILD_PAGE_SIZE) break
-    }
-    return all
-}
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 
@@ -308,25 +284,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allNodes = batchResults.flat()
                         if (controller.signal.aborted) return
 
-                        // Also load children of assigned entities (for hierarchy within layers).
-                        // This ensures containment trees are populated, not just top-level entities.
-                        setHydrationPhase('children')
-                        if (allNodes.length > 0) {
-                            const parentsWithChildren = allNodes.filter(n => (n.childCount ?? 0) > 0)
-                            if (parentsWithChildren.length > 0) {
-                                const childResults = await Promise.all(
-                                    parentsWithChildren.map(parent =>
-                                        fetchAllChildren(provider, parent.urn, controller.signal)
-                                    )
-                                )
-                                const childNodes = childResults.flat()
-                                if (controller.signal.aborted) return
-                                // Dedup: children might overlap with assigned entities
-                                const knownUrns = new Set(allNodes.map(n => n.urn))
-                                const newChildren = childNodes.filter(c => !knownUrns.has(c.urn))
-                                allNodes = [...allNodes, ...newChildren]
-                            }
-                        }
+                        // Children are NOT prefetched. Top-level assigned entities
+                        // render collapsed; the user expands a parent to fire the
+                        // existing 20-per-page lazy loader (loadChildren below),
+                        // and AutoLoadSentinel pages through the rest on scroll.
                     } else {
                         // ── Type-based loading (empty/new views) ──
                         // No assignments yet — load by entity type so the view has data
@@ -656,12 +617,16 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
                 const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
 
-                // Single round-trip: children + edges for search results
+                // Single round-trip: children + edges for search results.
+                // The backend filters the parent's FULL child set by searchQuery
+                // (not the loaded subset), so this is global within the subtree.
+                // limit=200 is the match-count cap: ensures wide queries against
+                // 1000+ children still surface a useful spread of results.
                 const result = await provider.getChildrenWithEdges(urn, {
                     edgeTypes: fetchTypes,
                     lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
                     searchQuery: query,
-                    limit: 50,
+                    limit: 200,
                     includeLineageEdges: true,
                 })
 

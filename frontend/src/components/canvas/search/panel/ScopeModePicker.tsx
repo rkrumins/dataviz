@@ -40,19 +40,19 @@ interface ModeMeta {
 const MODES: Record<ScopeMode, ModeMeta> = {
     visible: {
         label: 'Visible nodes',
-        sub: 'Only what’s on the canvas right now — fast and predictable.',
+        sub: 'Only what’s on the canvas right now — narrow, fast, '
+            + 'and skips any subtree you haven’t expanded yet.',
         icon: Eye,
-        tone: 'text-accent-lineage',
-        badge: 'recommended',
+        tone: 'text-emerald-300',
     },
     view: {
         label: 'All nodes in this view',
-        sub: 'Expands into collapsed folders too. Slower; useful when you '
-            + 'know a match lives in a sub-tree you haven’t opened yet. '
+        sub: 'Includes descendants of every top-level node in this '
+            + 'view, even ones you haven’t expanded yet — the default. '
             + 'Up to 256 top-level containers per query.',
         icon: LayersIcon,
-        tone: 'text-emerald-300',
-        badge: 'slower',
+        tone: 'text-accent-lineage',
+        badge: 'recommended',
     },
     data_source: {
         label: 'Entire data source',
@@ -110,9 +110,9 @@ export function ScopeModePicker() {
     // Tone classes (matches the active mode) — applied to the trigger
     // border + soft tonal background so the picker reads as a
     // first-class control, not a footnote.
-    const triggerTone = scopeMode === 'visible'
+    const triggerTone = scopeMode === 'view'
         ? 'border-accent-lineage/40 bg-accent-lineage/[0.06]'
-        : scopeMode === 'view'
+        : scopeMode === 'visible'
             ? 'border-emerald-500/40 bg-emerald-500/[0.06]'
             : 'border-amber-500/45 bg-amber-500/[0.08]'
 

@@ -436,28 +436,54 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </div>
 
-      {/* Right-side info cluster — match-count badge + descendant count.
-          Both fade out and slide right when the row is hovered so the
-          action buttons overlay below can claim the same slot cleanly,
-          no visual stacking, no color clash with the green +N pill.
-          Off-hover, the badges restore at full opacity (information
-          first, action on demand). Industry-standard pattern. */}
-      <motion.div
-        initial={false}
-        animate={{ opacity: isHovered ? 0 : 1, x: isHovered ? 10 : 0 }}
-        transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-        className={cn(
-          "flex items-center gap-1.5 flex-shrink-0",
-          isHovered && "pointer-events-none",
-        )}
-        aria-hidden={isHovered}
-      >
-        {/* Advanced-search roll-up badge: compact pill (count only) on
-            COLLAPSED ancestors that contain at least one match anywhere
-            in their subtree. The per-entityType breakdown is moved into
-            a hover tooltip so it doesn't compete vertically with the
-            entity name or push the row taller. */}
+      {/* Right-side metadata cluster — in-flow flex child so the row's
+          name (`flex-1`) reserves space for it and never overflows
+          underneath. Two slots:
+
+            ┌──────────────────┬─────────┐
+            │ +N descendant    │ badge   │
+            │ pill (fades on   │ slot    │
+            │ hover)            │ (w-11)  │
+            └──────────────────┴─────────┘
+
+          The badge slot is ALWAYS reserved at the row's right edge
+          (44px — fits up to 3-digit counts) so the +N pill, the badge,
+          and the action overlay all land at consistent X positions
+          across every row, regardless of whether a given row has a
+          search match. The +N's right edge aligns with the action
+          overlay's right edge (both at `badge_slot_width + gap` from
+          the row's right edge), so the cross-fade swap is geometrically
+          clean and the badge stays untouched in its own column. */}
+      <div className="flex items-center gap-1.5 flex-shrink-0 relative">
+        {/* Descendant count — fades out on hover so the action overlay
+            can claim the same slot without visual stacking. */}
         <AnimatePresence>
+          {descendantCount > 0 && (
+            <motion.span
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{
+                opacity: isHovered ? 0 : 1,
+                scale: 1,
+                x: isHovered ? 10 : 0,
+              }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+              className={cn(
+                "text-[11px] px-2 py-1 rounded-lg bg-white/[0.06] border border-white/[0.08] text-ink-muted font-semibold tabular-nums flex-shrink-0",
+                isHovered && "pointer-events-none",
+              )}
+            >
+              +{descendantCount}
+            </motion.span>
+          )}
+        </AnimatePresence>
+
+        {/* Badge slot — always reserved so the +N column lines up
+            across rows. Holds the search-match badge when present at
+            z-[5] above the action overlay (z-[4]); since the badge
+            column sits in its own X slot the cursor can always reach
+            it without the action icons intercepting. */}
+        <div className="w-11 flex items-center justify-end flex-shrink-0 relative z-[5]">
           {ancestorMatchCount > 0 && !isExpanded && hasChildren && !isSearchResult && (
             <SearchMatchBadge
               count={ancestorMatchCount}
@@ -465,52 +491,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
               schema={schema}
             />
           )}
-        </AnimatePresence>
+        </div>
+      </div>
 
-        {/* Descendant count — collapsed-row hint ("there are N more inside"). */}
-        <AnimatePresence>
-          {descendantCount > 0 && (
-            <motion.span
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.8 }}
-              className="text-[11px] px-2 py-1 rounded-lg bg-white/[0.06] border border-white/[0.08] text-ink-muted font-semibold tabular-nums flex-shrink-0"
-            >
-              +{descendantCount}
-            </motion.span>
-          )}
-        </AnimatePresence>
-      </motion.div>
-
-      {/* Action buttons — overlay anchored to the right edge.
-
-          Vertical centering strategy: the wrapper STRETCHES the full
-          height of the row (`inset-y-0` = `top:0; bottom:0`) and uses
-          `flex items-center` to centre the button cluster on the row's
-          true cross-axis centre. This avoids the `top-1/2
-          -translate-y-1/2` pitfall where the wrapper's own bounding
-          box (which can be slightly bigger than the visible buttons
-          due to baseline / line-height inheritance from the row's
-          font) lands its midpoint a couple of pixels off the row's
-          visual midline. With inset-y-0 + items-center the centring
-          is delegated to the row itself — exactly the same alignment
-          flow the row's other flex children (chevron, icon, name)
-          already use, so all four columns sit on one shared line.
-
-          Each button is itself `flex items-center justify-center
-          leading-none` so the SVG glyph is at the button's geometric
-          centre rather than its text baseline (otherwise icons read
-          as "slightly high"). */}
+      {/* Action buttons — absolute overlay anchored to the row (which
+          is `relative`). Right offset of `3.125rem` = badge slot width
+          (44px) + cluster gap (6px) = 50px, so the overlay's right
+          edge aligns exactly with the +N pill's right edge and never
+          reaches the badge slot's column. `inset-y-0` of the row gives
+          the overlay the row's full height for proper vertical
+          centring of the buttons. */}
       <motion.div
         initial={false}
         animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
         transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
         className={cn(
-          "absolute right-2 inset-y-0 flex items-center gap-1 pl-10 pr-1 rounded-l-xl z-[4]",
-          // Mask: solid on the right where the buttons sit, fading
-          // to transparent on the left so the entity name stays
-          // readable. Strong enough to cleanly cover the badge area
-          // during the cross-fade.
+          "absolute right-[3.125rem] inset-y-0 flex items-center gap-1 pl-10 pr-1 rounded-l-xl z-[4]",
           isHovered && "backdrop-blur-md bg-gradient-to-l from-canvas-elevated via-canvas-elevated/92 to-transparent dark:from-canvas-elevated dark:via-canvas-elevated/90",
           !isHovered && "pointer-events-none"
         )}
