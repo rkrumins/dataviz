@@ -129,7 +129,7 @@ export function ContextViewCanvas({
   // undefined for that cohort until the next setter fires.
   const canvasZoom = usePreferencesStore((s) => s.canvasZoom) ?? 1
   const setCanvasZoom = usePreferencesStore((s) => s.setCanvasZoom)
-  const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'comfortable'
+  const canvasDensity = usePreferencesStore((s) => s.canvasDensity) ?? 'spacious'
   const setCanvasDensity = usePreferencesStore((s) => s.setCanvasDensity)
   const showCanvasTypeBadge = usePreferencesStore((s) => s.showCanvasTypeBadge) ?? true
   const toggleCanvasTypeBadge = usePreferencesStore((s) => s.toggleCanvasTypeBadge)

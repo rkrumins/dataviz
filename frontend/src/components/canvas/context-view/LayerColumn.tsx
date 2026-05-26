@@ -377,7 +377,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   // canvas density — densityRowHeights() is the shared source of truth so
   // scroll position stays stable across density changes. Default guards
   // users whose persisted preferences predate this field.
-  const density = usePreferencesStore(s => s.canvasDensity) ?? 'comfortable'
+  const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const rowHeights = useMemo(() => densityRowHeights(density), [density])
   const virtualizer = useVirtualizer({
     count: flatTree.length,

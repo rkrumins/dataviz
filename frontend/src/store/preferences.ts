@@ -9,8 +9,13 @@ export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
 /** Visual density of layer column tree items in the Context View canvas. */
 export type CanvasDensity = 'compact' | 'comfortable' | 'spacious'
 
-export const CANVAS_ZOOM_MIN = 0.75
-export const CANVAS_ZOOM_MAX = 1.5
+// Canvas zoom range — wide enough to support both tiny-overview ("zoom out
+// to see the whole hierarchy") and large-text accessibility ("zoom in for
+// readability") without forcing users into browser zoom (which scales the
+// chrome too). Step is 0.05 (5%) so the slider feels precise without
+// flooding the value space.
+export const CANVAS_ZOOM_MIN = 0.5
+export const CANVAS_ZOOM_MAX = 2.5
 export const CANVAS_ZOOM_STEP = 0.05
 
 /**
@@ -228,7 +233,11 @@ export const usePreferencesStore = create<PreferencesState>()(
       setCanvasZoom: (n) => set({
         canvasZoom: Math.min(CANVAS_ZOOM_MAX, Math.max(CANVAS_ZOOM_MIN, Math.round(n / CANVAS_ZOOM_STEP) * CANVAS_ZOOM_STEP)),
       }),
-      canvasDensity: 'comfortable',
+      // Default to 'spacious' so the canvas presents at maximum readability
+      // out of the box (larger rows + icons + text). Existing users keep
+      // whatever density they've persisted; this default only applies to
+      // first-load state or after Reset.
+      canvasDensity: 'spacious',
       setCanvasDensity: (canvasDensity) => set({ canvasDensity }),
       showCanvasTypeBadge: true,
       toggleCanvasTypeBadge: () => set((s) => ({ showCanvasTypeBadge: !s.showCanvasTypeBadge })),
@@ -236,7 +245,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       toggleSubtleCanvasTreeLines: () => set((s) => ({ subtleCanvasTreeLines: !s.subtleCanvasTreeLines })),
       resetCanvasDisplaySettings: () => set({
         canvasZoom: 1,
-        canvasDensity: 'comfortable',
+        canvasDensity: 'spacious',
         showCanvasTypeBadge: true,
         subtleCanvasTreeLines: false,
       }),
