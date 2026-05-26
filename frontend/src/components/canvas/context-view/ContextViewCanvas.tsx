@@ -37,6 +37,8 @@ import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useRevealNode } from '@/hooks/useRevealNode'
+import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
+import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
@@ -73,6 +75,7 @@ import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
+import { SearchMapPanel } from '../search/SearchMapPanel'
 import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
@@ -507,6 +510,10 @@ export function ContextViewCanvas({
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useViewRelationshipTypes()
+
+  // Advanced Search — production panel for template-driven exploration,
+  // visual predicate builder, raw JSON (Power tools), and Ask (NL2Query).
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -999,6 +1006,26 @@ export function ContextViewCanvas({
     )
   }, [searchQuery, displayFlat])
 
+  // Advanced-search match URN set (W1 substrate). Subscribed once so a
+  // re-render fires only when the set object identity changes. The
+  // canvas highlights these URNs via the existing `searchResults` prop
+  // on LayerColumn — same visual treatment as the legacy quick-search
+  // fallback, just sourced server-side. Union with the legacy quick-
+  // search hits so both lit at once (legacy is W9 cleanup target).
+  const advancedMatchUrns = useMatchUrnSet()
+  const matchedNodeIds = useMemo(() => {
+    const out = new Set<string>(searchResults.map((n) => n.id))
+    if (advancedMatchUrns.size > 0) {
+      for (const node of displayFlat) {
+        const urn = (node as { urn?: string }).urn ?? node.id
+        if (advancedMatchUrns.has(urn) || advancedMatchUrns.has(node.id)) {
+          out.add(node.id)
+        }
+      }
+    }
+    return Array.from(out)
+  }, [searchResults, advancedMatchUrns, displayFlat])
+
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
   // updateView — the actual schema mutation happens during applyAll.
@@ -1148,6 +1175,63 @@ export function ContextViewCanvas({
     },
     [revealAndFocus],
   )
+
+  // Reveal-into-view: the LayerColumn that owns the hit URN uses its
+  // virtualizer's scrollToIndex (DOM scrollIntoView can't work — rows
+  // below the overscan window aren't in the DOM at all). We signal via
+  // a pulse-counter object so re-revealing the same URN still scrolls.
+  const [revealTarget, setRevealTarget] = useState<{ id: string; pulse: number } | null>(null)
+  const revealPulseRef = useRef(0)
+  const scrollHitIntoView = useCallback((nodeId: string) => {
+    revealPulseRef.current += 1
+    setRevealTarget({ id: nodeId, pulse: revealPulseRef.current })
+  }, [])
+
+  // Reveal callback for advanced-search hits and pin clicks. Walks the
+  // ancestor chain, expanding each step so the deep hit becomes
+  // reachable; falls back to deepest-reachable on partial load. Shared
+  // by SearchMapPanel (hit rows + bucket actions) and SearchPinOverlay
+  // (W3). Uses `useRevealSearchHit` (renamed from the original Advanced
+  // Search `useRevealNode` during the resilience-hardening integration to
+  // coexist with the entity-drawer reveal hook above).
+  const revealSearchHit = useRevealSearchHit({
+    setExpandedNodes,
+    loadChildren,
+    scrollIntoView: scrollHitIntoView,
+  })
+
+  // "Frame matches" — scroll the horizontal canvas container so the
+  // first match-bearing node is centered, expanding the spine to it
+  // so collapsed ancestors reveal their children. This is a viewport-
+  // not-zoom action since the context view is a horizontal layered
+  // layout (no React Flow zoom).
+  const handleFrameMatches = useCallback(async (urns: string[]) => {
+    if (urns.length === 0) return
+    const container = horizontalScrollRef.current
+    if (!container) return
+
+    // First pass: look for an already-rendered node and scroll to it.
+    for (const urn of urns) {
+      // The DOM ids are keyed by canvas node id which may equal the URN
+      // or be a derived id. Search both.
+      const el =
+        document.getElementById(`layer-node-${urn}`) ??
+        document.querySelector<HTMLElement>(`[id^="layer-node-"][data-urn="${CSS.escape(urn)}"]`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
+        return
+      }
+    }
+
+    // None of the matches are rendered yet — most likely they're sitting
+    // under collapsed ancestors. Expand every URN we know about so the
+    // matches become reachable; the user can then re-click Frame.
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      for (const urn of urns) next.add(urn)
+      return next
+    })
+  }, [setExpandedNodes])
 
   // Hydration phase mirrored into the canvas store by CanvasRouter — drives
   // the ghost-card stack in empty layers and the GhostLineageOverlay.
@@ -1717,11 +1801,28 @@ export function ContextViewCanvas({
         )}
       </AnimatePresence>
 
-      {/* Row layout: canvas column + right-rail panels.
+      {/* Row layout: [left rail SearchMapPanel] + canvas column + [right-rail panels].
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
-          overlaid. Only one right-rail panel is mounted at a time. */}
+          overlaid.
+
+          Left rail: Advanced Search (independent slot — coexists with any
+          right-rail panel, so the user can keep refining their query while
+          inspecting a hit in the entity drawer).
+          Right rail: mutually exclusive — selection > edge-panel > creation. */}
       <div className="flex-1 flex flex-row min-h-0 overflow-hidden">
+      <AnimatePresence>
+        {advancedSearchOpen && (
+          <SearchMapPanel
+            key="search-map-panel"
+            open={advancedSearchOpen}
+            onClose={() => setAdvancedSearchOpen(false)}
+            viewId={activeView?.id ?? ''}
+            onRevealNode={revealSearchHit}
+            onFrameMatches={handleFrameMatches}
+          />
+        )}
+      </AnimatePresence>
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       {/* Editor Toolbar - Unified with LineageCanvas */}
       <div className="absolute top-4 left-4 z-30">
@@ -1762,6 +1863,28 @@ export function ContextViewCanvas({
           if (trace.isTracing) void trace.retrace()
         }}
         onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
+        onOpenAdvancedSearch={(seedQuery) => {
+          // Toggle the panel. When the user escalates from the
+          // quick search (passes a seed string), force-open the
+          // panel + clear the quick-search input (so the no-match
+          // escalation card disappears) + stash the typed query as
+          // a one-shot ``pendingSearchSeed`` (W2.7) so the empty
+          // hero's "Type to search by name across this view…"
+          // input opens pre-filled with the user's text. The hero
+          // consumes + clears the seed on mount.
+          if (seedQuery && seedQuery.trim()) {
+            const trimmed = seedQuery.trim()
+            setSearchQuery('')
+            useSearchStore.getState().setPendingSearchSeed(trimmed)
+            setAdvancedSearchOpen(true)
+            return
+          }
+          // Plain toggle — the search panel lives on the LEFT rail,
+          // so it coexists with selection / edge-panel / creation on
+          // the right.
+          setAdvancedSearchOpen((open) => !open)
+        }}
+        advancedSearchOpen={advancedSearchOpen}
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
         activeWorkspaceId={activeWorkspaceId}
@@ -1967,7 +2090,7 @@ export function ContextViewCanvas({
                 schema={schema}
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedNodes}
-                searchResults={searchResults.map((n) => n.id)}
+                searchResults={matchedNodeIds}
                 onSelect={selectNode}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
@@ -1994,6 +2117,7 @@ export function ContextViewCanvas({
                 onScroll={handleLayerScroll}
                 onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
                 isHydratingInitial={isHydratingInitial}
+                revealTarget={revealTarget}
               />
             ))}
           </div>
@@ -2004,9 +2128,12 @@ export function ContextViewCanvas({
       </div>{/* end canvas column */}
 
       {/* Right-rail panels — flex siblings of the canvas column.
-          Mutual exclusion: selection > edge-panel > creation. Only one is
-          ever mounted at a time, so the canvas shrinks by exactly one
-          panel's width whenever any of them opens. */}
+          Mutual exclusion: selection > edge-panel > creation. Only one
+          is mounted at a time. Advanced Search lives on the LEFT rail
+          (see above) so it always coexists with whichever right-rail
+          panel is active — clicking "Reveal" on a search hit selects
+          a node and opens the entity drawer without losing the
+          results list. */}
       <AnimatePresence>
         {drawerNodeId && (
           <EntityDrawer

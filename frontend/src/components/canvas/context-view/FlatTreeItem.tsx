@@ -11,6 +11,8 @@ import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
 import { usePreferencesStore } from '@/store/preferences'
 import { densityRowTokens } from './density'
+import { SearchMatchBadge } from '../search/SearchMatchBadge'
+import { useSearchHighlight } from '../search/useSearchHighlight'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -130,6 +132,27 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
+
+  // Advanced-search roll-up: number of matches sitting anywhere in this
+  // node's subtree (N levels deep, deduped per hit). Drives the
+  // "[N matches inside]" badge on collapsed ancestor rows so a user
+  // can see, before expanding, that a domain contains 47 PII fields.
+  //
+  // W2.1: the row-decoration bundle is now produced by
+  // ``useSearchHighlight`` so GraphCanvas + HierarchyCanvas can light
+  // up identically with a single hook call.
+  const urnOrId = node.urn ?? node.id
+  // Note: FlatTreeItem receives ``isSearchResult`` from its parent
+  // (ContextViewCanvas merges quick-search + advanced-search hits),
+  // which already drives the pulse class — so we don't destructure
+  // ``isDirectMatch`` here. Other canvases (GraphCanvas /
+  // HierarchyCanvas) consume ``isDirectMatch`` directly because they
+  // bind to the store, not the prop.
+  const {
+    ancestorMatchCount,
+    ancestorBreakdown: ancestorMatchBreakdown,
+    isSpotlightDim,
+  } = useSearchHighlight(urnOrId, { isSelected })
   // In trace mode, useTraceFilteredHierarchy already prunes node.children to
   // the trace context, so children.length reflects what the user will see on
   // expand. The graph-wide childCount would mislead them with siblings the
@@ -153,12 +176,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const iconSize = sizing.iconSize
   const iconContainerSize = sizing.iconContainerSize
 
-  // Dimming applies only to the click-highlight feature now. Trace mode used
-  // to dim non-traced nodes here, but ContextViewCanvas's
-  // `useTraceFilteredHierarchy` removes them from the render tree entirely
-  // — so anything that reaches FlatTreeItem during trace IS in the trace
-  // context and should render at full opacity.
-  const isDimmed = isDimmedByHighlight
+  // Dimming applies to (a) the click-highlight feature, and (b) the
+  // advanced-search "spotlight" mode (sourced from useSearchHighlight
+  // above): when any search has matches, every node that's NOT a
+  // direct match AND NOT an ancestor of one fades to 40% so the
+  // matched chain is visually unmissable. Selected rows stay bright
+  // regardless so the user never loses their focus during search.
+  // Trace mode used to dim non-traced nodes here, but
+  // ContextViewCanvas's ``useTraceFilteredHierarchy`` removes them
+  // from the render tree entirely — so anything that reaches
+  // FlatTreeItem during trace IS in the trace context and should
+  // render at full opacity.
+  const isDimmed = isDimmedByHighlight || isSpotlightDim
 
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
@@ -219,8 +248,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
         // Selected state with accent glow
         isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
-        // Search result highlight
-        isSearchResult && !isSelected && "bg-gradient-to-r from-amber-500/15 to-transparent shadow-[inset_0_0_0_1px_rgba(245,158,11,0.3)]",
+        // Search result highlight — direct match (advanced search or quick search)
+        isSearchResult && !isSelected && cn(
+            "bg-gradient-to-r from-amber-500/15 to-transparent",
+            "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.4),0_0_18px_-2px_rgba(245,158,11,0.45)]",
+            "search-match-pulse",
+        ),
         // Focus node (trace target)
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
@@ -403,6 +436,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </div>
 
+      {/* Advanced-search roll-up badge: compact pill (count only) on
+          COLLAPSED ancestors that contain at least one match anywhere
+          in their subtree. The per-entityType breakdown is moved into
+          a hover tooltip so it doesn't compete vertically with the
+          entity name or push the row taller. */}
+      <AnimatePresence>
+        {ancestorMatchCount > 0 && !isExpanded && hasChildren && !isSearchResult && (
+          <SearchMatchBadge
+            count={ancestorMatchCount}
+            breakdown={ancestorMatchBreakdown}
+            schema={schema}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Badges - Descendant count */}
       <AnimatePresence>
         {descendantCount > 0 && (
@@ -495,3 +543,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     </div>
   )
 })
+
+
+// `formatBreakdown` + `pluralize` moved into ./SearchMatchBadge.tsx
+// alongside the tooltip rendering that consumes them.

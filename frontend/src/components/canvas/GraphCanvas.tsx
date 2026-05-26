@@ -46,6 +46,9 @@ import { AggregatedEdge } from './edges/AggregatedEdge'
 import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/EntityDrawer'
+import { SearchMapPanel } from './search/SearchMapPanel'
+import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 
 // UX components
@@ -132,6 +135,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const [isPaletteOpen, setPaletteOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
+  // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
+  // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+  const activeView = useSchemaStore((s) => s.getActiveView())
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)
@@ -252,6 +259,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 7. Progressive loading
   const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes } = useGraphHydration()
   useLoadingToast('graph-children', isLoadingChildren, 'Expanding hierarchy')
+
+  // Reveal a search hit on this canvas — same flow as ContextViewCanvas
+  // (walk ancestor chain, expand each step, then select + scroll).
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren })
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({
@@ -1492,6 +1503,28 @@ export function GraphCanvas({ className }: { className?: string }) {
         onFocusNode={revealAndFocus}
         onLocateMany={locateManyOnCanvas}
       />
+
+      {/* Advanced search trigger + panel. The trigger handles ⌘K
+          globally; the panel mounts as a flex-sibling drawer (parity
+          with ContextViewCanvas). Disabled when no view is active. */}
+      <CanvasSearchTrigger
+        open={advancedSearchOpen}
+        onToggle={() => setAdvancedSearchOpen((v) => !v)}
+        hideButton={isEdgePanelOpen}
+      />
+      <AnimatePresence>
+        {activeView?.id && advancedSearchOpen && (
+          <SearchMapPanel
+            key="advanced-search-panel"
+            open={advancedSearchOpen}
+            onClose={() => setAdvancedSearchOpen(false)}
+            viewId={activeView.id}
+            onRevealNode={(urn, ancestorPath) =>
+              revealSearchHit(urn, ancestorPath)
+            }
+          />
+        )}
+      </AnimatePresence>
 
       {/* UX Components */}
       <CanvasContextMenu
