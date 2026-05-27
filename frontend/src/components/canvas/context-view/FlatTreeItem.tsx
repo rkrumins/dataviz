@@ -440,10 +440,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           isHovered && !isSelected && "text-ink",
           // Strikethrough for pending-delete makes the destruction intent unmissable
           stagedColor === 'red' && "line-through decoration-rose-300/80 decoration-2",
-          // 2-line clamp + word-wrap. ``break-words`` triggers only
+          // 3-line cap + word-wrap. ``break-words`` triggers only
           // when a word genuinely cannot fit, so normal labels
-          // stay on a single line.
-          "line-clamp-2 break-words"
+          // stay on a single line. The 3-line ceiling handles
+          // extra-long snake_case identifiers (e.g. the user's
+          // ``INTERMEDIATE_T1a sfdasdfasdfasdfafaf`` test case)
+          // without losing the tail to ellipsis. The virtualizer
+          // re-measures rows dynamically so taller rows reflow
+          // their successors without scroll-jump.
+          "line-clamp-3 break-words"
         )}>
           {node.name}
         </span>
