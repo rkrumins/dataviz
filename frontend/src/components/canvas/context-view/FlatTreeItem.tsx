@@ -417,8 +417,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         />
       </div>
 
-      {/* Name - IMPROVED: Better visibility with tooltip */}
-      <div className="flex-1 min-w-0 flex flex-col justify-center" title={stagedSummary ?? node.name}>
+      {/* Name + type — the text region IS the row's primary payload.
+          ``min-w-0`` keeps the flex child from forcing the row to
+          expand to fit a long word; ``break-words`` lets only
+          genuinely-unbreakable identifiers wrap mid-character (the
+          earlier ``break-all`` was too eager — it broke normal
+          names like ``INTERMEDIATE_T1`` into ``IN``/``T..``).
+          ``line-clamp-2`` caps height so the virtualizer's row
+          estimate stays accurate. The action overlay uses a
+          backdrop-blur gradient so text behind it stays legible
+          without us having to re-flow the layout on hover (the
+          previous ``pr-[120px]`` reflow shrank the text to
+          unreadable widths). */}
+      <div
+        className="flex-1 min-w-0 flex flex-col justify-center"
+        title={stagedSummary ?? node.name}
+      >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
           textClass,
@@ -426,8 +440,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           isHovered && !isSelected && "text-ink",
           // Strikethrough for pending-delete makes the destruction intent unmissable
           stagedColor === 'red' && "line-through decoration-rose-300/80 decoration-2",
-          // Allow text to wrap to 2 lines for better readability
-          "line-clamp-2"
+          // 3-line cap + word-wrap. ``break-words`` triggers only
+          // when a word genuinely cannot fit, so normal labels
+          // stay on a single line. The 3-line ceiling handles
+          // extra-long snake_case identifiers (e.g. the user's
+          // ``INTERMEDIATE_T1a sfdasdfasdfasdfafaf`` test case)
+          // without losing the tail to ellipsis. The virtualizer
+          // re-measures rows dynamically so taller rows reflow
+          // their successors without scroll-jump.
+          "line-clamp-3 break-words"
         )}>
           {node.name}
         </span>
@@ -447,78 +468,87 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
       </div>
 
-      {/* Right-side metadata cluster — in-flow flex child so the row's
-          name (`flex-1`) reserves space for it and never overflows
-          underneath. Two slots:
+      {/* Right-side metadata cluster — descendant count + search
+          badge. NO reserved slot: both items only occupy space when
+          they have something to show, so a short name like ``Sales``
+          on a dataset with no matches gets the entire row width.
 
-            ┌──────────────────┬─────────┐
-            │ +N descendant    │ badge   │
-            │ pill (fades on   │ slot    │
-            │ hover)            │ (w-11)  │
-            └──────────────────┴─────────┘
+          The cluster STAYS VISIBLE on hover so the user can scan
+          + hover the SearchMatchBadge to open its premium
+          breakdown tooltip — that hover affordance is the whole
+          reason the badge exists. Only the ``+N`` descendant pill
+          fades, because it overlaps the action overlay's slot.
+          The action overlay positions itself with
+          ``right-[3.125rem]`` when a badge is present so it lands
+          to the LEFT of the badge, never on top of it. */}
+      <div className="flex items-center gap-1.5 flex-shrink-0 relative z-[5]">
+        {descendantCount > 0 && (
+          <span className={cn(
+            "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",
+            "bg-white/[0.06] border border-white/[0.08]",
+            "text-ink-muted font-semibold tabular-nums",
+            "transition-opacity duration-150",
+            isHovered && "opacity-0 pointer-events-none",
+          )}>
+            +{descendantCount}
+          </span>
+        )}
 
-          The badge slot is ALWAYS reserved at the row's right edge
-          (44px — fits up to 3-digit counts) so the +N pill, the badge,
-          and the action overlay all land at consistent X positions
-          across every row, regardless of whether a given row has a
-          search match. The +N's right edge aligns with the action
-          overlay's right edge (both at `badge_slot_width + gap` from
-          the row's right edge), so the cross-fade swap is geometrically
-          clean and the badge stays untouched in its own column. */}
-      <div className="flex items-center gap-1.5 flex-shrink-0 relative">
-        {/* Descendant count — fades out on hover so the action overlay
-            can claim the same slot without visual stacking. */}
-        <AnimatePresence>
-          {descendantCount > 0 && (
-            <motion.span
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{
-                opacity: isHovered ? 0 : 1,
-                scale: 1,
-                x: isHovered ? 10 : 0,
-              }}
-              exit={{ opacity: 0, scale: 0.8 }}
-              transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-              className={cn(
-                "text-[11px] px-2 py-1 rounded-lg bg-white/[0.06] border border-white/[0.08] text-ink-muted font-semibold tabular-nums flex-shrink-0",
-                isHovered && "pointer-events-none",
-              )}
-            >
-              +{descendantCount}
-            </motion.span>
-          )}
-        </AnimatePresence>
-
-        {/* Badge slot — always reserved so the +N column lines up
-            across rows. Holds the search-match badge when present at
-            z-[5] above the action overlay (z-[4]); since the badge
-            column sits in its own X slot the cursor can always reach
-            it without the action icons intercepting. */}
-        <div className="w-11 flex items-center justify-end flex-shrink-0 relative z-[5]">
-          {ancestorMatchCount > 0 && !isExpanded && hasChildren && !isSearchResult && (
-            <SearchMatchBadge
-              count={ancestorMatchCount}
-              breakdown={ancestorMatchBreakdown}
-              schema={schema}
-            />
-          )}
-        </div>
+        {/* Search-match badge — shows even when the row itself is a
+            direct match. A search for "account" against a dataset
+            called ``account_details`` whose columns are
+            ``account_number`` etc. needs to tell the user that
+            expanding surfaces more matches; suppressing the badge on
+            direct-match rows hid that signal. (GraphCanvas +
+            HierarchyCanvas already render it unconditionally — this
+            keeps ContextView aligned.) */}
+        {ancestorMatchCount > 0 && !isExpanded && hasChildren && (
+          <SearchMatchBadge
+            count={ancestorMatchCount}
+            breakdown={ancestorMatchBreakdown}
+            schema={schema}
+          />
+        )}
       </div>
 
-      {/* Action buttons — absolute overlay anchored to the row (which
-          is `relative`). Right offset of `3.125rem` = badge slot width
-          (44px) + cluster gap (6px) = 50px, so the overlay's right
-          edge aligns exactly with the +N pill's right edge and never
-          reaches the badge slot's column. `inset-y-0` of the row gives
-          the overlay the row's full height for proper vertical
-          centring of the buttons. */}
+      {/* Action buttons — absolute overlay anchored to the row's
+          right edge. Right offset is DYNAMIC so the overlay never
+          covers the SearchMatchBadge:
+            - When a badge is present, sit at ``right-[3.125rem]``
+              (50px) so the badge column stays interactive (the
+              user can still hover the badge for the breakdown
+              tooltip).
+            - When no badge, sit at ``right-2`` (8px) so the
+              overlay uses the row's full trailing edge.
+
+          Backdrop strategy — when text wraps to 2 lines the row
+          height grows, so the overlay now sits on top of the
+          SECOND line of text too. The previous
+          ``from-X via-X/92 to-transparent`` gradient kept the
+          leftmost ~50% of the overlay transparent, which exposed
+          the wrapped text behind the buttons (buttons read as
+          "invisible" because their semi-transparent bgs mixed with
+          the text below). The fix:
+            1. Push the solid-to-transparent fade into the
+               leftmost ~25% only (``via-75%``) so the entire button
+               column sits on a fully opaque canvas-elevated bg.
+            2. Bump blur from ``backdrop-blur-md`` to
+               ``backdrop-blur-xl`` so even the fade zone obscures
+               any text it overlaps. */}
       <motion.div
         initial={false}
         animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
         transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
         className={cn(
-          "absolute right-[3.125rem] inset-y-0 flex items-center gap-1 pl-10 pr-1 rounded-l-xl z-[4]",
-          isHovered && "backdrop-blur-md bg-gradient-to-l from-canvas-elevated via-canvas-elevated/92 to-transparent dark:from-canvas-elevated dark:via-canvas-elevated/90",
+          "absolute inset-y-0 flex items-center gap-1 pl-8 pr-1 rounded-l-xl z-[4]",
+          (ancestorMatchCount > 0 && !isExpanded && hasChildren)
+            ? "right-[3.125rem]"
+            : "right-2",
+          isHovered && cn(
+            "backdrop-blur-xl",
+            "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
+            "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
+          ),
           !isHovered && "pointer-events-none"
         )}
       >
