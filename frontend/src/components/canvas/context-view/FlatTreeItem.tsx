@@ -493,9 +493,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             across rows. Holds the search-match badge when present at
             z-[5] above the action overlay (z-[4]); since the badge
             column sits in its own X slot the cursor can always reach
-            it without the action icons intercepting. */}
+            it without the action icons intercepting.
+            CRITICAL: the badge shows even when the row itself is a
+            direct match (``isSearchResult``). Previously we suppressed
+            it via ``&& !isSearchResult`` on the assumption that a
+            highlighted parent told the whole story — but the
+            highlight only says "this row matched", not "and so did
+            entities inside it". A search for "account" against a
+            dataset called ``account_details`` whose columns are
+            ``account_number``, ``account_deleted_flag``, etc. would
+            light up the dataset but give the user no signal that
+            expanding it surfaces 3 more matches. The badge restores
+            that signal. (GraphCanvas + HierarchyCanvas already
+            render it unconditionally — this aligns ContextView with
+            them.) */}
         <div className="w-11 flex items-center justify-end flex-shrink-0 relative z-[5]">
-          {ancestorMatchCount > 0 && !isExpanded && hasChildren && !isSearchResult && (
+          {ancestorMatchCount > 0 && !isExpanded && hasChildren && (
             <SearchMatchBadge
               count={ancestorMatchCount}
               breakdown={ancestorMatchBreakdown}
