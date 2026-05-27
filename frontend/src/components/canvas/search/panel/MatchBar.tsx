@@ -95,100 +95,33 @@ export const MatchBar: FC<MatchBarProps> = ({
     }, [hasMatches, focusedMatchIndex])
 
     return (
-        <div className="flex flex-col gap-1.5">
-            {/* ``flex-wrap`` + ``gap-y-1.5`` mirrors the QueryCard
-                header fix: when the search panel is resized narrow,
-                the action cluster wraps below the count readout
-                instead of overflowing or clipping the right-most
-                button ("Fram" in the bug screenshot). */}
-            <div className={cn(
-                'flex items-center gap-2 gap-y-1.5 flex-wrap',
-                'px-2 py-1.5 rounded-lg',
-                isError ? 'bg-rose-500/10 border border-rose-500/30' : '',
-            )}>
-                <CountReadout
-                    isRunning={isRunning}
-                    isError={isError}
-                    errorMessage={errorMessage ?? null}
-                    count={count}
-                    elapsedMs={elapsedMs}
-                    showTruncation={showTruncation}
+        <div className={cn(
+            'flex flex-col rounded-lg overflow-hidden',
+            'border border-slate-200 dark:border-glass-border/60',
+            isError && 'border-rose-500/40',
+        )}>
+            <SummaryStrip
+                isRunning={isRunning}
+                isError={isError}
+                errorMessage={errorMessage ?? null}
+                count={count}
+                elapsedMs={elapsedMs}
+                showTruncation={showTruncation}
+                onClear={onClear}
+            />
+            {hasMatches && !isRunning && !isError && (
+                <ToolbarStrip
+                    stepperPosition={displayPosition ?? 0}
+                    stepperTotal={orderedMatchUrns.length}
+                    onStepPrev={() => stepFocus('prev')}
+                    onStepNext={() => stepFocus('next')}
+                    onShowFocused={onShowFocusedOnCanvas}
+                    focusedMatchIndex={focusedMatchIndex}
+                    canvasFilterMode={canvasFilterMode}
+                    onModeChange={(m) => setCanvasFilterMode(m, viewId)}
+                    onFrame={onFrame}
                 />
-
-                <div className={cn(
-                    'flex items-center gap-1.5 flex-wrap gap-y-1.5',
-                    'ml-auto justify-end',
-                )}>
-                    {hasMatches && !isRunning && !isError && (
-                        <Stepper
-                            position={displayPosition ?? 0}
-                            total={orderedMatchUrns.length}
-                            onPrev={() => stepFocus('prev')}
-                            onNext={() => stepFocus('next')}
-                        />
-                    )}
-
-                    {hasMatches && !isRunning && !isError
-                        && onShowFocusedOnCanvas && (
-                        <button
-                            type="button"
-                            onClick={onShowFocusedOnCanvas}
-                            disabled={focusedMatchIndex === null}
-                            title={focusedMatchIndex === null
-                                ? 'Use the stepper or press J / ↓ to focus a match first'
-                                : 'Reveal the focused match on the canvas (Enter)'}
-                            className={cn(
-                                'inline-flex items-center gap-1 px-2 h-6 rounded-md',
-                                'text-[11px] font-medium transition-colors',
-                                focusedMatchIndex === null
-                                    ? 'bg-glass/30 text-ink-muted/50 cursor-not-allowed'
-                                    : 'bg-accent-lineage text-canvas-base hover:bg-accent-lineage/90',
-                            )}
-                        >
-                            <Crosshair className="w-3 h-3" />
-                            Show
-                        </button>
-                    )}
-
-                    {hasMatches && !isRunning && !isError && (
-                        <ModeToggle
-                            mode={canvasFilterMode}
-                            onChange={(m) => setCanvasFilterMode(m, viewId)}
-                        />
-                    )}
-
-                    {onFrame && !isRunning && !isError && (
-                        <button
-                            type="button"
-                            onClick={onFrame}
-                            title="Frame all matches on the canvas"
-                            className={cn(
-                                'inline-flex items-center gap-1 px-2 h-6 rounded-md',
-                                'text-[11px] font-medium',
-                                'bg-accent-lineage/15 text-accent-lineage',
-                                'hover:bg-accent-lineage/25 transition-colors',
-                            )}
-                        >
-                            <Maximize2 className="w-3 h-3" />
-                            Frame
-                        </button>
-                    )}
-
-                    {onClear && (
-                        <button
-                            type="button"
-                            onClick={onClear}
-                            title="Clear results"
-                            className={cn(
-                                'inline-flex items-center justify-center w-6 h-6 rounded-md',
-                                'text-ink-muted hover:text-rose-400 hover:bg-rose-500/10 transition-colors',
-                            )}
-                        >
-                            <X className="w-3 h-3" />
-                        </button>
-                    )}
-                </div>
-            </div>
+            )}
             {(showTruncation || showDeadlineExceeded) && (
                 <WarningBanner
                     truncated={showTruncation}
@@ -196,6 +129,156 @@ export const MatchBar: FC<MatchBarProps> = ({
                     candidateCount={candidateCount ?? null}
                 />
             )}
+        </div>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// Summary strip — hero count + close. Always single-line because the
+// only two elements (count + ×) can never not fit. Pulling the close
+// button out of the action cluster also means "dismiss results" sits
+// in a predictable, premium location (top-right of the results pane,
+// like every modal in the system).
+// ---------------------------------------------------------------------------
+function SummaryStrip({
+    isRunning, isError, errorMessage, count, elapsedMs,
+    showTruncation, onClear,
+}: {
+    isRunning: boolean
+    isError: boolean
+    errorMessage: string | null
+    count: number | null
+    elapsedMs: number | null
+    showTruncation: boolean
+    onClear?: () => void
+}) {
+    return (
+        <div className={cn(
+            'flex items-center justify-between gap-3 px-3 py-2',
+            isError && 'bg-rose-500/[0.06]',
+        )}>
+            <CountReadout
+                isRunning={isRunning}
+                isError={isError}
+                errorMessage={errorMessage}
+                count={count}
+                elapsedMs={elapsedMs}
+                showTruncation={showTruncation}
+            />
+            {onClear && (
+                <button
+                    type="button"
+                    onClick={onClear}
+                    title="Clear results"
+                    aria-label="Clear results"
+                    className={cn(
+                        'inline-flex items-center justify-center w-7 h-7 rounded-md shrink-0',
+                        'text-ink-muted transition-colors',
+                        'hover:text-rose-500 hover:bg-rose-500/10',
+                    )}
+                >
+                    <X className="w-3.5 h-3.5" />
+                </button>
+            )}
+        </div>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// Toolbar strip — two intentional flex groups separated by
+// ``justify-between``. Each group is ``flex-nowrap shrink-0`` so when
+// the panel is narrow the entire RIGHT group falls intact to the next
+// line; groups never split mid-cluster (the bug from Phase 2
+// flex-wrap-by-accident). Sits below the summary inside the same
+// rounded card so the results region reads as one premium unit.
+// ---------------------------------------------------------------------------
+function ToolbarStrip({
+    stepperPosition, stepperTotal, onStepPrev, onStepNext,
+    onShowFocused, focusedMatchIndex,
+    canvasFilterMode, onModeChange,
+    onFrame,
+}: {
+    stepperPosition: number
+    stepperTotal: number
+    onStepPrev: () => void
+    onStepNext: () => void
+    onShowFocused?: () => void
+    focusedMatchIndex: number | null
+    canvasFilterMode: CanvasFilterMode
+    onModeChange: (mode: CanvasFilterMode) => void
+    onFrame?: () => void
+}) {
+    return (
+        <div className={cn(
+            'flex items-center justify-between gap-3 gap-y-2 flex-wrap',
+            'px-3 py-2',
+            'border-t border-slate-200/70 dark:border-glass-border/40',
+            'bg-black/[0.015] dark:bg-white/[0.015]',
+        )}>
+            {/* Navigation cluster — step through matches + reveal */}
+            <div className="flex items-center gap-1.5 flex-nowrap shrink-0">
+                <Stepper
+                    position={stepperPosition}
+                    total={stepperTotal}
+                    onPrev={onStepPrev}
+                    onNext={onStepNext}
+                />
+                {onShowFocused && (
+                    <button
+                        type="button"
+                        onClick={onShowFocused}
+                        disabled={focusedMatchIndex === null}
+                        title={focusedMatchIndex === null
+                            ? 'Use the stepper or press J / ↓ to focus a match first'
+                            : 'Reveal the focused match on the canvas (Enter)'}
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2.5 h-7 rounded-md',
+                            'text-[11px] font-medium transition-colors shrink-0',
+                            focusedMatchIndex === null
+                                ? cn(
+                                    'bg-slate-100 dark:bg-white/5',
+                                    'text-slate-400 dark:text-ink-muted/60',
+                                    'cursor-not-allowed',
+                                )
+                                : cn(
+                                    'bg-cyan-600 hover:bg-cyan-700 text-white',
+                                    'shadow-sm shadow-cyan-600/25',
+                                ),
+                        )}
+                    >
+                        <Crosshair className="w-3 h-3" strokeWidth={2.4} />
+                        Show
+                    </button>
+                )}
+            </div>
+
+            {/* Canvas-action cluster — filter mode + frame */}
+            <div className="flex items-center gap-1.5 flex-nowrap shrink-0">
+                <ModeToggle
+                    mode={canvasFilterMode}
+                    onChange={onModeChange}
+                />
+                {onFrame && (
+                    <button
+                        type="button"
+                        onClick={onFrame}
+                        title="Frame all matches on the canvas"
+                        aria-label="Frame all matches"
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-7 rounded-md',
+                            'text-[11px] font-medium shrink-0',
+                            'text-ink-secondary hover:text-cyan-600 dark:hover:text-cyan-400',
+                            'hover:bg-cyan-500/10 transition-colors',
+                            'border border-slate-200 dark:border-glass-border/60',
+                        )}
+                    >
+                        <Maximize2 className="w-3 h-3" />
+                        Frame
+                    </button>
+                )}
+            </div>
         </div>
     )
 }
@@ -214,21 +297,27 @@ function CountReadout({
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
             {isRunning ? (
-                <span className="text-[11.5px] text-ink-muted">Searching…</span>
+                <span className="text-[12px] text-ink-muted">Searching…</span>
             ) : isError ? (
-                <span className="text-[11.5px] text-rose-300 truncate" title={errorMessage ?? ''}>
+                <span
+                    className="text-[12px] text-rose-600 dark:text-rose-300 truncate font-medium"
+                    title={errorMessage ?? ''}
+                >
                     Error · {errorMessage}
                 </span>
             ) : count !== null ? (
                 <>
-                    <span className="text-[14px] font-display font-semibold text-ink tabular-nums">
+                    {/* Hero count — the largest text in the results pane.
+                        Tabular numerals keep the digits aligned when the
+                        count updates between runs. */}
+                    <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
                         {count.toLocaleString()}{showTruncation && '+'}
                     </span>
-                    <span className="text-[12px] text-ink-muted">
+                    <span className="text-[12px] text-ink-secondary leading-none">
                         {count === 1 ? 'match' : 'matches'}
                     </span>
                     {elapsedMs !== null && (
-                        <span className="text-[10.5px] text-ink-muted/70 tabular-nums">
+                        <span className="text-[10.5px] text-ink-muted/70 tabular-nums leading-none">
                             · {elapsedMs} ms
                         </span>
                     )}
@@ -249,8 +338,8 @@ function Stepper({
 }) {
     return (
         <div className={cn(
-            'inline-flex items-center rounded-md',
-            'bg-canvas-base/50 border border-glass-border/60',
+            'inline-flex items-center rounded-md overflow-hidden shrink-0',
+            'bg-canvas-elevated border border-slate-200 dark:border-glass-border/60',
         )}>
             <button
                 type="button"
@@ -258,16 +347,18 @@ function Stepper({
                 aria-label="Previous match"
                 title="Previous match (K or ↑)"
                 className={cn(
-                    'inline-flex items-center justify-center w-6 h-6',
-                    'text-ink-muted hover:text-ink hover:bg-glass/60',
-                    'rounded-l-md transition-colors',
+                    'inline-flex items-center justify-center w-7 h-7',
+                    'text-ink-muted hover:text-ink',
+                    'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
+                    'transition-colors',
                 )}
             >
-                <ChevronLeft className="w-3 h-3" />
+                <ChevronLeft className="w-3.5 h-3.5" />
             </button>
             <span className={cn(
-                'px-2 text-[11px] font-mono tabular-nums text-ink-secondary',
-                'border-l border-r border-glass-border/40 leading-6',
+                'px-2.5 text-[11.5px] font-medium tabular-nums text-ink',
+                'border-l border-r border-slate-200 dark:border-glass-border/60',
+                'leading-7 min-w-[64px] text-center',
             )}>
                 {position === 0 ? '–' : position} of {total}
             </span>
@@ -277,12 +368,13 @@ function Stepper({
                 aria-label="Next match"
                 title="Next match (J or ↓)"
                 className={cn(
-                    'inline-flex items-center justify-center w-6 h-6',
-                    'text-ink-muted hover:text-ink hover:bg-glass/60',
-                    'rounded-r-md transition-colors',
+                    'inline-flex items-center justify-center w-7 h-7',
+                    'text-ink-muted hover:text-ink',
+                    'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
+                    'transition-colors',
                 )}
             >
-                <ChevronRight className="w-3 h-3" />
+                <ChevronRight className="w-3.5 h-3.5" />
             </button>
         </div>
     )

@@ -38,12 +38,12 @@ import {
     Tag as TagIcon,
     Layers,
     ArrowDownToLine,
+    BookmarkPlus,
     FileCode,
+    FilePlus2,
     Undo2,
     Redo2,
-    RotateCcw,
     Star,
-    Trash2,
     X,
     CornerDownLeft,
 } from 'lucide-react'
@@ -61,7 +61,6 @@ import { cn } from '@/lib/utils'
 import { useActiveView, useSchemaStore } from '@/store/schema'
 import {
     useCanRedo,
-    useCanRestoreLastDispatched,
     useCanUndo,
     useDraftPredicate,
     useRecentQueries,
@@ -341,11 +340,6 @@ export const QueryCard: FC<QueryCardProps> = ({
     // a confident "start here" surface with example-led onboarding.
     const isEmptyVisual = mode === 'visual' && conditions.length === 0
     const showHeader = !isEmptyVisual
-    // Action footer mirrors header visibility — only meaningful when
-    // there's an actual draft to act on (Run / Undo / Back to last).
-    const showActionFooter = !isEmptyVisual
-    const canRestoreLastDispatched = useCanRestoreLastDispatched()
-    const restoreLastDispatched = useSearchStore((s) => s.restoreLastDispatched)
 
     return (
         <div
@@ -355,51 +349,74 @@ export const QueryCard: FC<QueryCardProps> = ({
                 'flex flex-col',
             )}
         >
-            {/* Title strip — minimal, premium identification of the
-                surface. The previous header packed Clear/Undo/Redo/
-                Run/Visual/Code into a single row which felt cramped
-                and "not premium" per the user feedback. The toolbar
-                actions now live in the ActionFooter at the bottom
-                of the card; only the Visual/Code editor mode stays
-                here because it's a meta choice about what the body
-                renders, not a per-edit action. */}
+            {/* Unified header — title + actions in one bordered
+                region. Previously the title strip and ActionFooter
+                were two separate surfaces (title above body, footer
+                below); per user feedback we merged them so the entire
+                "manage this query" UI reads as one premium block at
+                the top of the card. Body sits cleanly below.
+                Two rows internally so the layout breathes:
+                  Row 1 — Title · filter status               · Visual│Code
+                  Row 2 — [↺ Back] [↶][↷] [Auto│Manual]          [🗑] [▷ Run]
+            */}
             {showHeader && (
                 <div className={cn(
-                    'flex items-center gap-2 px-4 py-2.5',
-                    'border-b border-glass-border/60',
+                    'flex flex-col border-b border-glass-border/60',
+                    'bg-black/[0.015] dark:bg-white/[0.02]',
                 )}>
-                    <div className="flex items-baseline gap-2 min-w-0 flex-1">
-                        <span className="text-[11px] font-display font-semibold text-ink leading-tight">
-                            Query
-                        </span>
-                        {conditions.length > 0 ? (
-                            <span className="text-[11px] text-ink-muted/80 tabular-nums truncate">
-                                · {completeCount}
-                                {' '}filter{completeCount === 1 ? '' : 's'}
-                                {incompleteCount > 0 && (
-                                    <span className="text-amber-500 dark:text-amber-400/90 font-medium">
-                                        {' '}· {incompleteCount} incomplete
-                                    </span>
-                                )}
+                    {/* Row 1 — title + editor mode */}
+                    <div className="flex items-center gap-2 px-3 py-2">
+                        <div className="flex items-baseline gap-1.5 min-w-0 flex-1">
+                            <span className="text-[11.5px] font-display font-semibold text-ink leading-tight">
+                                Query
                             </span>
-                        ) : (
-                            <span className="text-[11px] text-ink-muted/80 italic truncate">
-                                · Code mode · paste DSL
-                            </span>
-                        )}
+                            {conditions.length > 0 ? (
+                                <span className="text-[11px] text-ink-muted/85 tabular-nums truncate">
+                                    · {completeCount}
+                                    {' '}filter{completeCount === 1 ? '' : 's'}
+                                    {incompleteCount > 0 && (
+                                        <span className="text-amber-500 dark:text-amber-400/90 font-medium">
+                                            {' '}· {incompleteCount} incomplete
+                                        </span>
+                                    )}
+                                </span>
+                            ) : (
+                                <span className="text-[11px] text-ink-muted/80 italic truncate">
+                                    · Code mode · paste DSL
+                                </span>
+                            )}
+                        </div>
+                        <div className={cn(
+                            'inline-flex rounded-md p-0.5 shrink-0',
+                            'bg-black/[0.04] dark:bg-white/[0.04]',
+                            'border border-black/[0.08] dark:border-white/[0.06]',
+                        )}>
+                            <ToggleBtn active={mode === 'visual'} onClick={() => setMode('visual')}>
+                                <Eye className="w-3 h-3" /> Visual
+                            </ToggleBtn>
+                            <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
+                                <Code2 className="w-3 h-3" /> Code
+                            </ToggleBtn>
+                        </div>
                     </div>
-                    <div className={cn(
-                        'inline-flex rounded-md p-0.5 shrink-0',
-                        'bg-black/[0.03] dark:bg-white/[0.04]',
-                        'border border-slate-200 dark:border-glass-border/60',
-                    )}>
-                        <ToggleBtn active={mode === 'visual'} onClick={() => setMode('visual')}>
-                            <Eye className="w-3 h-3" /> Visual
-                        </ToggleBtn>
-                        <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
-                            <Code2 className="w-3 h-3" /> Code
-                        </ToggleBtn>
-                    </div>
+
+                    {/* Row 2 — action toolbar (skipped in empty hero) */}
+                    {conditions.length > 0 && (
+                        <HeaderActions
+                            canUndo={canUndo}
+                            canRedo={canRedo}
+                            onUndo={undo}
+                            onRedo={redo}
+                            canClear={true}
+                            onClear={handleClearAll}
+                            runMode={runMode}
+                            onRunModeChange={setRunMode}
+                            canRun={runnable !== null}
+                            hasPendingChanges={hasPendingChanges}
+                            isRunning={isRunning}
+                            onRunNow={dispatchRun}
+                        />
+                    )}
                 </div>
             )}
 
@@ -550,33 +567,6 @@ export const QueryCard: FC<QueryCardProps> = ({
                 )}
             </div>
 
-            {/* Action footer — premium toolbar separated from the
-                body. Three groups, each visually distinct: history
-                (Back + Undo/Redo), run-mode (Auto/Manual), primary
-                action (Clear + Run). The previous header packed all
-                of these into one cramped row above the conditions
-                list; pulling them down here gives each group breathing
-                room AND makes the primary CTA (Run) the visual focus
-                point of the card. Skipped in the empty-hero state
-                because there's nothing to act on yet. */}
-            {showActionFooter && conditions.length > 0 && (
-                <ActionFooter
-                    canBack={canRestoreLastDispatched}
-                    onBack={restoreLastDispatched}
-                    canUndo={canUndo}
-                    canRedo={canRedo}
-                    onUndo={undo}
-                    onRedo={redo}
-                    canClear={conditions.length > 0}
-                    onClear={handleClearAll}
-                    runMode={runMode}
-                    onRunModeChange={setRunMode}
-                    canRun={runnable !== null}
-                    hasPendingChanges={hasPendingChanges}
-                    isRunning={isRunning}
-                    onRunNow={dispatchRun}
-                />
-            )}
         </div>
     )
 }
@@ -1475,32 +1465,34 @@ function EmptyDiscoveryHint({
  *     250ms debounce — useful for impatient power users.
  */
 /**
- * ActionFooter — premium action bar that sits at the bottom of the
- * QueryCard. Three groups, separated by spacing so each reads as a
- * distinct concern:
+ * HeaderActions — action toolbar rendered as the second row of the
+ * unified QueryCard header. Three groups, separated visually so each
+ * reads as a distinct concern:
  *
- *   [← Back] [↶][↷]   |   [Auto │ Manual]   |   [🗑]  [▷ Run]
- *    history          |    dispatch mode    |   destructive + primary
+ *   [↺ Back] [↶][↷]   ·   [Auto │ Manual]   ·   [🗑]  [▷ Run]
+ *    history          ·    dispatch mode    ·   destructive + primary
  *
- * The footer takes over what the old single-row header tried to do.
- * Splitting the responsibilities makes the toolbar look intentional
- * and gives the primary CTA (Run) the visual prominence it deserves.
+ * The old design had this toolbar as a separate "ActionFooter" below
+ * the body. User feedback pushed for one cohesive header surface; this
+ * sits inside the header card, sharing its bordered region. Subtle
+ * top divider visually separates Row 1 (title + Visual/Code) from
+ * Row 2 (this) without splitting the card.
  */
-function ActionFooter({
-    canBack, onBack,
+function HeaderActions({
     canUndo, canRedo, onUndo, onRedo,
     canClear, onClear,
+    canSave, onSave,
     runMode, onRunModeChange,
     canRun, hasPendingChanges, isRunning, onRunNow,
 }: {
-    canBack: boolean
-    onBack: () => void
     canUndo: boolean
     canRedo: boolean
     onUndo: () => void
     onRedo: () => void
     canClear: boolean
     onClear: () => void
+    canSave: boolean
+    onSave: () => void
     runMode: 'auto' | 'manual'
     onRunModeChange: (next: 'auto' | 'manual') => void
     canRun: boolean
@@ -1511,20 +1503,11 @@ function ActionFooter({
     return (
         <div className={cn(
             'flex items-center gap-2 gap-y-2 flex-wrap',
-            'px-3 py-2.5',
-            'border-t border-glass-border/60',
-            'bg-black/[0.02] dark:bg-white/[0.015]',
+            'px-3 pb-2 pt-1.5',
+            'border-t border-slate-200/70 dark:border-glass-border/40',
         )}>
-            {/* History group: Back-to-last + Undo/Redo. Back is
-                visually distinct (text label) because it's the
-                semantic "back" the user asked for; Undo/Redo are
-                tight icon buttons since they're per-edit utility. */}
-            <div className="flex items-center gap-1 shrink-0">
-                <BackToLastButton
-                    canBack={canBack}
-                    onBack={onBack}
-                    disabled={isRunning}
-                />
+            {/* History group — Undo/Redo per-edit utility. */}
+            <div className="flex items-center gap-1 flex-nowrap shrink-0">
                 <UndoRedoButtons
                     canUndo={canUndo}
                     canRedo={canRedo}
@@ -1533,7 +1516,7 @@ function ActionFooter({
                 />
             </div>
 
-            {/* Auto/Manual run-mode toggle — single segmented group. */}
+            {/* Auto/Manual run-mode toggle + Run primary CTA */}
             <div className="shrink-0">
                 <RunControls
                     runMode={runMode}
@@ -1545,13 +1528,16 @@ function ActionFooter({
                 />
             </div>
 
-            {/* Destructive + primary group on the far right.
-                ``ml-auto`` pushes it to the trailing edge so the
-                primary CTA always lands in the same spot regardless
-                of how much space the history / run-mode groups
-                consume. */}
-            <div className="flex items-center gap-1.5 ml-auto shrink-0">
-                <ClearAllButton
+            {/* Trailing group — Save (persist to library) + New
+                (start fresh). ``ml-auto`` anchors them to the
+                trailing edge regardless of how much space the
+                history / run-mode groups consume. */}
+            <div className="flex items-center gap-1 ml-auto flex-nowrap shrink-0">
+                <SaveQueryButton
+                    onSave={onSave}
+                    disabled={!canSave || isRunning}
+                />
+                <NewQueryButton
                     onClear={onClear}
                     disabled={!canClear || isRunning}
                 />
@@ -1562,59 +1548,15 @@ function ActionFooter({
 
 
 /**
- * "Back" returns the draft to the predicate that produced the
- * currently-visible results. Distinct from Undo (which steps back
- * through every edit): Back is a single jump regardless of how many
- * edits intervened. Rendered as a labeled button (not icon-only)
- * because the user explicitly asked for a visible "back" affordance.
+ * "New query" — discards the current draft and resets the panel to
+ * the empty hero so the user can start fresh without manually
+ * deleting filters. Renamed from "Clear all" per user feedback:
+ * users couldn't discover the action by intent ("I want to start a
+ * new search") because the previous trash icon read as destructive
+ * cleanup rather than a workflow step. Same wipe behaviour, more
+ * discoverable affordance.
  */
-function BackToLastButton({
-    canBack, onBack, disabled,
-}: {
-    canBack: boolean
-    onBack: () => void
-    disabled?: boolean
-}) {
-    const isDisabled = !canBack || disabled
-    return (
-        <button
-            type="button"
-            onClick={onBack}
-            disabled={isDisabled}
-            title={canBack
-                ? 'Restore the draft to the last query that ran'
-                : 'No prior query to restore'}
-            aria-label="Back to last query"
-            className={cn(
-                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
-                'text-[11px] font-medium transition-colors',
-                'border',
-                isDisabled
-                    ? cn(
-                        'border-transparent text-ink-muted/40 cursor-not-allowed',
-                    )
-                    : cn(
-                        'border-slate-200 dark:border-glass-border/60',
-                        'text-ink-secondary hover:text-accent-lineage',
-                        'hover:bg-accent-lineage/10 hover:border-accent-lineage/40',
-                    ),
-            )}
-        >
-            <RotateCcw className="w-3 h-3" />
-            Back
-        </button>
-    )
-}
-
-
-/**
- * Clear-all as a destructive icon button (was previously a tiny
- * text link buried between filter-count and Undo, which the user
- * couldn't find). Hover treatment promotes it to a rose-tinted
- * action so it reads as destructive without screaming for attention
- * by default.
- */
-function ClearAllButton({
+function NewQueryButton({
     onClear, disabled,
 }: {
     onClear: () => void
@@ -1625,20 +1567,67 @@ function ClearAllButton({
             type="button"
             onClick={onClear}
             disabled={disabled}
-            title="Clear all filters"
-            aria-label="Clear all filters"
+            title="New query (clears current filters)"
+            aria-label="New query"
             className={cn(
                 'inline-flex items-center justify-center w-7 h-7 rounded-md',
-                'border border-transparent transition-colors',
+                'border transition-colors',
                 disabled
-                    ? 'text-ink-muted/40 cursor-not-allowed'
+                    ? cn(
+                        'border-transparent text-ink-muted/40 cursor-not-allowed',
+                    )
                     : cn(
-                        'text-ink-muted hover:text-rose-500',
-                        'hover:bg-rose-500/10 hover:border-rose-500/30',
+                        'border-slate-200 dark:border-glass-border/60',
+                        'text-ink-secondary hover:text-accent-lineage',
+                        'hover:bg-accent-lineage/10 hover:border-accent-lineage/40',
                     ),
             )}
         >
-            <Trash2 className="w-3.5 h-3.5" />
+            <FilePlus2 className="w-3.5 h-3.5" />
+        </button>
+    )
+}
+
+
+/**
+ * "Save query" — persists the current draft into the user's Mine
+ * library via the SaveQueryDialog. Opens the dialog with a synthetic
+ * RecentQueryEntry built from the live draft + its DSL stringify;
+ * on confirm, the store action ``saveDraftAsMineEntry`` creates a
+ * pinned, named entry that shows up in the Library popover's Mine
+ * tab. Disabled when there's no runnable draft (nothing to save).
+ */
+function SaveQueryButton({
+    onSave, disabled,
+}: {
+    onSave: () => void
+    disabled?: boolean
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onSave}
+            disabled={disabled}
+            title={disabled
+                ? 'Add at least one complete filter to save'
+                : 'Save this query to your library'}
+            aria-label="Save query"
+            className={cn(
+                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
+                'text-[11px] font-medium border transition-colors',
+                disabled
+                    ? cn(
+                        'border-transparent text-ink-muted/40 cursor-not-allowed',
+                    )
+                    : cn(
+                        'border-slate-200 dark:border-glass-border/60',
+                        'text-ink-secondary hover:text-amber-500',
+                        'hover:bg-amber-500/10 hover:border-amber-400/40',
+                    ),
+            )}
+        >
+            <BookmarkPlus className="w-3.5 h-3.5" />
+            Save
         </button>
     )
 }
@@ -1744,21 +1733,47 @@ function RunControls({
                             : 'Re-run the current draft'
                 }
                 className={cn(
-                    'relative inline-flex items-center gap-1 px-2 h-6 rounded-md',
-                    'text-[11px] font-semibold transition-colors',
+                    'relative inline-flex items-center gap-1.5 px-3 h-7 rounded-lg',
+                    'text-[12px] font-semibold transition-all duration-200',
+                    'border',
                     !canRun || isRunning
-                        ? 'bg-glass/30 text-ink-muted cursor-not-allowed'
+                        ? cn(
+                            'bg-black/[0.04] border-black/[0.10]',
+                            'text-ink-muted/60 cursor-not-allowed',
+                            'dark:bg-white/[0.04] dark:border-white/[0.08]',
+                        )
+                        // Adopt the ContextViewHeader primary-action
+                        // palette: subtle accent gradient + accent
+                        // text + accent border, not a solid colored
+                        // button. Reads as the primary action without
+                        // shouting. Pulse state strengthens the
+                        // gradient + adds an amber dot.
                         : pulse
-                            ? 'bg-accent-lineage text-canvas-base shadow-[0_0_0_2px_rgba(45,150,255,0.25)]'
-                            : 'bg-accent-lineage/20 text-accent-lineage hover:bg-accent-lineage/30',
+                            ? cn(
+                                'bg-gradient-to-r from-accent-lineage/25 to-accent-lineage/15',
+                                'text-accent-lineage border-accent-lineage/50',
+                                'shadow-sm shadow-accent-lineage/20',
+                                'hover:from-accent-lineage/35 hover:to-accent-lineage/20',
+                            )
+                            : cn(
+                                'bg-gradient-to-r from-accent-lineage/15 to-accent-lineage/[0.08]',
+                                'text-accent-lineage border-accent-lineage/35',
+                                'shadow-sm shadow-accent-lineage/10',
+                                'hover:from-accent-lineage/20 hover:to-accent-lineage/[0.12]',
+                                'hover:border-accent-lineage/50',
+                            ),
                 )}
             >
-                <Play className="w-3 h-3" />
+                {isRunning ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
+                ) : (
+                    <Play className="w-3.5 h-3.5" strokeWidth={2.4} fill="currentColor" />
+                )}
                 Run
                 {pulse && (
                     <span className={cn(
-                        'absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full',
-                        'bg-amber-400 animate-pulse',
+                        'absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full',
+                        'bg-amber-400 ring-2 ring-amber-400/30 animate-pulse',
                     )} />
                 )}
             </button>
