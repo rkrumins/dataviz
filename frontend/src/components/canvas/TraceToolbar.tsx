@@ -20,6 +20,7 @@ import {
     type TraceResult,
     type TraceStatistics
 } from '@/hooks/useUnifiedTrace'
+import { TraceModeIndicator, deriveTraceMode } from './trace/TraceModeIndicator'
 
 // ============================================
 // Types
@@ -176,24 +177,21 @@ export function TraceToolbar({
         >
             {/* Main Toolbar Row */}
             <div className="flex items-center gap-2 px-4 py-2">
-                {/* Loading indicator or Focus Indicator */}
-                {isLoading ? (
-                    <div className="flex items-center gap-2 text-sm font-medium text-ink">
-                        <LucideIcons.Loader2 className="w-4 h-4 animate-spin text-accent-lineage" />
-                        <span className="text-ink-muted">Tracing...</span>
-                    </div>
-                ) : (
-                    <div className="flex items-center gap-2 text-sm font-medium text-ink">
-                        <motion.span
-                            className="w-2 h-2 rounded-full bg-accent-lineage"
-                            animate={{ scale: [1, 1.2, 1] }}
-                            transition={{ duration: 1.5, repeat: Infinity }}
-                        />
-                        <span className="text-ink-muted text-xs">Tracing</span>
-                        <span className="font-bold text-accent-lineage max-w-[150px] truncate">
-                            {focusNodeName}
-                        </span>
-                    </div>
+                {/* Mode indicator — semantic label (Root Cause / Impact /
+                    Full Lineage) mirroring the EntityDrawer vocabulary, with
+                    the focused node name to its right. */}
+                <TraceModeIndicator
+                    mode={deriveTraceMode(showUpstream, showDownstream)}
+                    isLoading={isLoading}
+                    compact
+                />
+                {!isLoading && (
+                    <span
+                        className="font-bold text-ink max-w-[150px] truncate text-sm"
+                        title={focusNodeName}
+                    >
+                        {focusNodeName}
+                    </span>
                 )}
 
                 {/* Divider */}
