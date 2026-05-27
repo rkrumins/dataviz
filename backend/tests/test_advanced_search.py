@@ -133,6 +133,143 @@ class TestModelConstruction:
 
 
 # ---------------------------------------------------------------------------
+# _safe_property_name — direct unit tests for the Cypher backtick helper
+# ---------------------------------------------------------------------------
+#
+# The helper is module-private but its correctness underpins every property
+# filter in the search panel. Six compile-time call sites interpolate its
+# return value directly into Cypher (PropertyPredicate, HasPropertyPredicate,
+# TextPredicate's ``target=property`` branch, EdgePropertyPredicate,
+# EdgeHasPropertyPredicate, and the aggregation pivot). A regression in the
+# escape logic would silently slip through happy-path compiler tests but
+# would either crash FalkorDB with a syntax error OR — worse — expose a
+# Cypher-injection vector. These tests pin the contract:
+#
+#   1. Always returns a backtick-wrapped string (never a bare identifier).
+#   2. Doubles any internal backticks per OpenCypher / FalkorDB grammar.
+#   3. Tolerates spaces / hyphens / dots / leading digits / unicode.
+#   4. Rejects only the genuinely-invalid cases (empty, non-string).
+# ---------------------------------------------------------------------------
+
+class TestSafePropertyName:
+    """Direct exercises of ``_safe_property_name`` (no compiler involved).
+
+    Imported via the canonical underscore-prefix path because Python
+    treats it as module-private. The function is short but load-bearing
+    — testing in isolation guards against accidental regressions when
+    callers refactor (e.g. someone replaces ``_safe_property_name(k)``
+    with a raw ``f"`{k}`"`` and forgets the backtick-doubling escape).
+    """
+
+    @staticmethod
+    def _safe_property_name(key):
+        from backend.app.providers.falkordb_deep_search import (
+            _safe_property_name,
+        )
+        return _safe_property_name(key)
+
+    # ── Happy path: always wraps in backticks ──────────────────────────
+    def test_returns_plain_name_wrapped_in_backticks(self):
+        """The "always quote" contract — even a perfectly safe
+        identifier comes back backtick-wrapped. This keeps the
+        compilation path branch-free and gives consistent output."""
+        assert self._safe_property_name("foo") == "`foo`"
+
+    def test_wraps_name_with_spaces(self):
+        """The original bug report: property keys like ``Asset Owner``
+        (with spaces) used to return HTTP 400; now they backtick-wrap."""
+        assert self._safe_property_name("Asset Owner") == "`Asset Owner`"
+
+    def test_wraps_name_with_hyphen(self):
+        """Hyphens are common in real-world property keys
+        (``pii-class``, ``data-source-id``)."""
+        assert self._safe_property_name("pii-class") == "`pii-class`"
+
+    def test_wraps_name_with_dot(self):
+        """Dots also appear in property keys (``user.id``,
+        ``audit.timestamp``) when source systems flatten nested
+        objects into dotted keys."""
+        assert self._safe_property_name("user.id") == "`user.id`"
+
+    def test_wraps_name_starting_with_digit(self):
+        """Backticked identifiers may begin with a digit — common in
+        year-prefixed property names (``2024_revenue``)."""
+        assert self._safe_property_name("2024_revenue") == "`2024_revenue`"
+
+    def test_wraps_unicode_name(self):
+        """FalkorDB stores UTF-8 property keys; the helper must
+        round-trip non-ASCII characters as-is inside the backticks."""
+        assert self._safe_property_name("属性名") == "`属性名`"
+
+    def test_whitespace_only_name_is_wrapped(self):
+        """A single space is a legal Cypher identifier when quoted —
+        weird but legal. The helper doesn't second-guess the caller."""
+        assert self._safe_property_name(" ") == "` `"
+
+    # ── Backtick escaping: the only character that needs special handling ─
+    def test_doubles_internal_backtick(self):
+        """The Cypher / OpenCypher / FalkorDB grammar escapes an
+        internal backtick by doubling it. Without this escape, the
+        first internal backtick would terminate the outer pair early
+        and the rest would be syntax garbage."""
+        assert self._safe_property_name("a`b") == "`a``b`"
+
+    def test_doubles_multiple_internal_backticks(self):
+        """Each internal backtick is doubled independently."""
+        assert self._safe_property_name("a`b`c") == "`a``b``c`"
+
+    def test_doubles_consecutive_backticks(self):
+        """Two consecutive internal backticks become four (each
+        doubled). Without this the parser would close the outer pair
+        on the first internal ``\\``` and re-open with the second."""
+        assert self._safe_property_name("a``b") == "`a````b`"
+
+    def test_backtick_only_name(self):
+        """Degenerate case: the name is JUST a backtick. Doubled →
+        two backticks. Wrapped → four backticks total: the outer
+        opening backtick + two doubled inner + the outer closing
+        backtick = ``\\`\\`\\`\\```."""
+        assert self._safe_property_name("`") == "````"
+
+    # ── Injection neutralisation: the SECURITY contract ──────────────────
+    def test_wraps_injection_attempt_safely(self):
+        """A Cypher-injection attempt that escaped the old
+        ``alphanumeric + underscore`` allowlist now compiles to a
+        single, harmless backtick-quoted identifier. The semicolon,
+        parentheses, and comment markers never reach the Cypher
+        parser as syntax — they're literal characters inside one
+        identifier."""
+        hostile = "x); DROP TABLE //"
+        assert self._safe_property_name(hostile) == f"`{hostile}`"
+
+    # ── Error paths: only invalid inputs raise ────────────────────────────
+    def test_empty_string_raises(self):
+        from backend.app.providers.falkordb_deep_search import (
+            CompileError,
+        )
+        with pytest.raises(CompileError, match="empty property name"):
+            self._safe_property_name("")
+
+    def test_non_string_int_raises(self):
+        from backend.app.providers.falkordb_deep_search import (
+            CompileError,
+        )
+        with pytest.raises(CompileError, match="must be a string"):
+            self._safe_property_name(42)
+
+    def test_non_string_none_raises(self):
+        """``None`` is rejected by the upfront ``if not key`` guard
+        (Python truthiness) — it raises ``empty property name``
+        rather than the type-check message, but it never escapes as
+        an unhandled exception or returns garbage Cypher."""
+        from backend.app.providers.falkordb_deep_search import (
+            CompileError,
+        )
+        with pytest.raises(CompileError):
+            self._safe_property_name(None)
+
+
+# ---------------------------------------------------------------------------
 # Service validator — depth / leaf / OR-branch caps
 # ---------------------------------------------------------------------------
 
@@ -418,7 +555,25 @@ class TestCompilerLeaves:
             value="abc", target="property", property_key="logicalType",
             match="prefix",
         ))
-        assert where == "toLower(toString(n.logicalType)) STARTS WITH $p0"
+        # Backtick-wrapped per the new ``_safe_property_name`` — any
+        # user-supplied property key is quoted to allow spaces /
+        # punctuation safely.
+        assert where == "toLower(toString(n.`logicalType`)) STARTS WITH $p0"
+
+    def test_text_predicate_property_target_with_spaces(self):
+        """Per-call-site coverage for the property-name backtick fix:
+        TextPredicate's ``target='property'`` branch (compile site at
+        falkordb_deep_search.py line ~301) must also accept property
+        keys with spaces. Without this guarantee the ``LIKE`` /
+        ``CONTAINS`` text search would fail for any "Asset Owner"-
+        style key even though the equality / IN paths now work."""
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="ops", target="property", property_key="Asset Owner",
+            match="prefix",
+        ))
+        assert where == "toLower(toString(n.`Asset Owner`)) STARTS WITH $p0"
+        assert c.params == {"p0": "ops"}
 
     def test_text_target_any_matches_display_name(self):
         # A node with displayName='Orders Pipeline' has its lowercased
@@ -472,13 +627,15 @@ class TestCompilerLeaves:
     def test_property_eq(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="eq", value="STRING"))
-        assert where == "n.logicalType = $p0"
+        # All user-supplied property keys are backtick-quoted by
+        # ``_safe_property_name`` so spaces / punctuation work safely.
+        assert where == "n.`logicalType` = $p0"
         assert c.params == {"p0": "STRING"}
 
     def test_property_between(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="rowCount", op="between", value=[100, 200]))
-        assert where == "(n.rowCount >= $p0 AND n.rowCount <= $p1)"
+        assert where == "(n.`rowCount` >= $p0 AND n.`rowCount` <= $p1)"
         assert c.params == {"p0": 100, "p1": 200}
 
     def test_property_between_bad_value(self):
@@ -489,30 +646,61 @@ class TestCompilerLeaves:
     def test_property_in(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="in", value=["A", "B"]))
-        assert where == "n.logicalType IN $p0"
+        assert where == "n.`logicalType` IN $p0"
         assert c.params == {"p0": ["A", "B"]}
 
     def test_property_not_in(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="logicalType", op="notIn", value=["A"]))
-        assert where == "NOT (n.logicalType IN $p0)"
+        assert where == "NOT (n.`logicalType` IN $p0)"
 
     def test_property_contains(self):
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="dataType", op="contains", value="INT"))
-        assert where == "toLower(toString(n.dataType)) CONTAINS $p0"
+        assert where == "toLower(toString(n.`dataType`)) CONTAINS $p0"
         assert c.params == {"p0": "int"}
 
-    def test_property_injection_blocked(self):
+    def test_property_with_spaces_compiles_safely(self):
+        """Real-world property names like ``Asset Owner`` (with spaces)
+        must compile via Cypher's backtick-quoting syntax. Used to
+        return HTTP 400 ``disallowed chars`` — now permitted because
+        the backticked identifier is unambiguous Cypher."""
         c = _Compiler()
-        with pytest.raises(CompileError, match="disallowed chars"):
-            # Cypher injection attempt — semicolon, parens, etc. should be rejected
-            c.compile(PropertyPredicate(key="x); DROP TABLE", op="eq", value="y"))
+        where = c.compile(PropertyPredicate(key="Asset Owner", op="eq", value="ops"))
+        assert where == "n.`Asset Owner` = $p0"
+        assert c.params == {"p0": "ops"}
 
-    def test_property_name_starting_with_digit_rejected(self):
+    def test_property_with_hyphens_and_dots_compiles_safely(self):
+        """Same rationale — hyphens and dots are common in
+        real-world property names (``pii-class``, ``user.id``)."""
         c = _Compiler()
-        with pytest.raises(CompileError, match="start with a digit"):
-            c.compile(PropertyPredicate(key="9foo", op="eq", value="x"))
+        where = c.compile(PropertyPredicate(key="pii-class", op="eq", value="high"))
+        assert where == "n.`pii-class` = $p0"
+
+    def test_property_injection_neutralised_by_backticks(self):
+        """Cypher injection attempts now compile to safe Cypher
+        instead of raising. The backtick wrapping makes the entire
+        string a single identifier; the semicolon/parens never
+        reach the Cypher parser as syntax."""
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(key="x); DROP TABLE", op="eq", value="y"))
+        assert where == "n.`x); DROP TABLE` = $p0"
+        assert c.params == {"p0": "y"}
+
+    def test_property_internal_backtick_escaped(self):
+        """A property name containing a literal backtick must double
+        the backtick (Cypher's standard escape) so the wrapping
+        backticks aren't terminated early."""
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(key="a`b", op="eq", value="z"))
+        assert where == "n.`a``b` = $p0"
+
+    def test_property_with_leading_digit_compiles_safely(self):
+        """Backticked identifiers may begin with a digit; common in
+        year-prefixed property names (``2024_revenue``)."""
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(key="2024_revenue", op="eq", value=100))
+        assert where == "n.`2024_revenue` = $p0"
 
     def test_tag_has(self):
         c = _Compiler()
@@ -535,12 +723,22 @@ class TestCompilerLeaves:
     def test_has_property(self):
         c = _Compiler()
         where = c.compile(HasPropertyPredicate(key="pii_class"))
-        assert where == "EXISTS(n.pii_class)"
+        # Backtick-wrapped by ``_safe_property_name``.
+        assert where == "EXISTS(n.`pii_class`)"
 
     def test_has_property_negate(self):
         c = _Compiler()
         where = c.compile(HasPropertyPredicate(key="pii_class", negate=True))
-        assert where == "NOT (EXISTS(n.pii_class))"
+        assert where == "NOT (EXISTS(n.`pii_class`))"
+
+    def test_has_property_predicate_with_spaces(self):
+        """Per-call-site coverage: HasPropertyPredicate (compile site
+        at falkordb_deep_search.py line ~407) accepts property keys
+        with spaces. Common real-world use case: "has Asset Owner"
+        filter to surface entities missing an ownership tag."""
+        c = _Compiler()
+        where = c.compile(HasPropertyPredicate(key="Asset Owner"))
+        assert where == "EXISTS(n.`Asset Owner`)"
 
     def test_entity_type_in(self):
         c = _Compiler()
@@ -842,7 +1040,7 @@ class TestCompilerGroups:
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
         assert where == (
-            "((n.tags CONTAINS $p0) AND n.logicalType = $p1)"
+            "((n.tags CONTAINS $p0) AND n.`logicalType` = $p1)"
         )
         assert c.params == {"p0": '"PII"', "p1": "STRING"}
 
@@ -860,7 +1058,7 @@ class TestCompilerGroups:
             "((toLower(toString(n.displayName)) = $p0"
             " OR toLower(toString(n.qualifiedName)) = $p0"
             " OR toLower(toString(n.searchableText)) = $p0)"
-            " OR EXISTS(n.foo))"
+            " OR EXISTS(n.`foo`))"
         )
 
     def test_not(self):
@@ -878,7 +1076,7 @@ class TestCompilerGroups:
             DescendantOfPredicate(urns=["urn:domain:A", "urn:domain:B"]),
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
-        assert where == "(true AND n.logicalType = $p0)"
+        assert where == "(true AND n.`logicalType` = $p0)"
         assert c.hoisted_root_urns == [["urn:domain:A", "urn:domain:B"]]
 
     def test_descendant_of_inside_or_rejected(self):
@@ -1404,9 +1602,10 @@ class TestAggregationByProperty:
         )
         assert len(prov.calls) == 1
         cypher = prov.calls[0][0]
-        # Critical assertions: pivots on n.layer, filters out nulls, uses GROUP BY
-        assert "WHERE EXISTS(n.layer)" in cypher
-        assert "WITH n.layer AS pkey, n" in cypher
+        # Critical assertions: pivots on n.`layer`, filters out nulls, uses GROUP BY.
+        # Property keys are backtick-quoted by ``_safe_property_name``.
+        assert "WHERE EXISTS(n.`layer`)" in cypher
+        assert "WITH n.`layer` AS pkey, n" in cypher
         assert "count(DISTINCT n) AS mc" in cypher
         assert "ORDER BY mc DESC LIMIT 20" in cypher
         assert "collect(DISTINCT n)[..3]" in cypher
@@ -1423,23 +1622,96 @@ class TestAggregationByProperty:
                 timeout_s=3.0,
             )
 
-    def test_property_name_injection_blocked(self):
-        # The property name is interpolated into the Cypher (it can't
-        # be parameterised), so the same alnum+_ guard from the predicate
-        # compiler must apply here too.
+    def test_property_name_injection_neutralised_by_backticks(self):
+        # Property names are interpolated into the Cypher (they can't
+        # be parameterised). Injection is prevented by Cypher's
+        # backtick-quoting (see ``_safe_property_name``): the whole
+        # supplied string becomes one identifier inside backticks,
+        # so semicolons/parens never reach the Cypher parser as
+        # syntax. The aggregation path uses the same helper as the
+        # predicate compiler, so calling it with a hostile name no
+        # longer raises CompileError — instead it would issue a
+        # safely-quoted query (which the test's stub backend
+        # accepts without doing anything destructive).
         import asyncio
         from backend.app.providers.falkordb_deep_search import (
             _run_aggregation_property,
         )
 
         async def go():
+            # Pass None for the provider — the function will fail at
+            # the first ``await provider.run_query`` (not at compile
+            # time), proving compilation succeeded.
             await _run_aggregation_property(
                 None, "x", {},
                 AggregationSpec(by="property", propertyKey="x); DROP"),
                 timeout_s=3.0,
             )
-        with pytest.raises(CompileError, match="disallowed chars"):
+
+        # No longer raises CompileError on compilation; failure (if
+        # any) comes later from the None provider. The whole point
+        # of this assertion is: compilation MUST succeed for hostile
+        # property names because backticks neutralise the threat.
+        try:
             asyncio.run(go())
+        except CompileError as e:
+            raise AssertionError(
+                f"compile should succeed for backtick-quoted names: {e}"
+            )
+        except Exception:
+            # Any non-CompileError exception is fine — it confirms
+            # we got past compilation. The None provider can't
+            # actually execute the query.
+            pass
+
+    @pytest.mark.asyncio
+    async def test_aggregation_property_with_spaces(self):
+        """Per-call-site coverage: the aggregation pivot (compile
+        site at falkordb_deep_search.py line ~2147) accepts a
+        property key with spaces. Uses the same capturing-provider
+        pattern as the layer-aggregation happy-path test so we can
+        assert on the EXACT compiled Cypher and verify both
+        ``EXISTS(n.\`Asset Owner\`)`` and ``n.\`Asset Owner\` AS pkey``
+        appear correctly. Without backtick quoting the raw
+        ``n.Asset Owner`` would be a Cypher syntax error."""
+        import asyncio  # noqa: F401  (kept for parity with the sibling test)
+
+        class _CapturingProvider:
+            def __init__(self):
+                self.calls = []
+
+            async def _ro_query(self, cypher, *, params=None, timeout=None):
+                self.calls.append((cypher, params, timeout))
+                class R:
+                    result_set = []
+                return R()
+
+            def _get_containment_edge_types(self):
+                return ["CONTAINS"]
+
+            def _extract_node_from_result(self, _row):
+                return None
+
+        prov = _CapturingProvider()
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_property,
+        )
+        spec = AggregationSpec(
+            by="property", propertyKey="Asset Owner",
+            maxBuckets=20, sampleHitsPerBucket=3,
+        )
+        cand_cypher = "MATCH (n) WHERE n.tags CONTAINS $p0 WITH n LIMIT 5000"
+        await _run_aggregation_property(
+            prov, cand_cypher, {"p0": '"PII"'}, spec, timeout_s=3.0,
+        )
+        assert len(prov.calls) == 1
+        cypher = prov.calls[0][0]
+        # Both the EXISTS guard AND the WITH pivot must use the
+        # backtick-quoted form. If either site bypassed
+        # ``_safe_property_name``, FalkorDB would reject the query
+        # with a syntax error on the bare space.
+        assert "WHERE EXISTS(n.`Asset Owner`)" in cypher
+        assert "WITH n.`Asset Owner` AS pkey, n" in cypher
 
 
 class TestSortByProperty:
@@ -1759,7 +2031,24 @@ class TestEdgePredicateCompile:
             "edgePredicate": {"kind": "edgeProperty",
                               "key": "confidence", "op": "eq", "value": 0.5},
         }))
-        assert c.hoisted_path["edge_where"] == "rel.confidence = $p0"
+        # Edge property keys are backtick-quoted by ``_safe_property_name``
+        # exactly like node property keys — same safety story.
+        assert c.hoisted_path["edge_where"] == "rel.`confidence` = $p0"
+        assert c.params == {"p0": 0.5}
+
+    def test_edge_property_predicate_with_spaces(self):
+        """Per-call-site coverage: EdgePropertyPredicate (compile
+        site at falkordb_deep_search.py line ~650). Edge properties
+        with spaces — e.g. ``Edge Weight`` from a Looker / Tableau
+        export — must work the same as node properties."""
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeProperty",
+                              "key": "Edge Weight", "op": "eq",
+                              "value": 0.5},
+        }))
+        assert c.hoisted_path["edge_where"] == "rel.`Edge Weight` = $p0"
         assert c.params == {"p0": 0.5}
 
     def test_edge_property_between(self):
@@ -1771,7 +2060,7 @@ class TestEdgePredicateCompile:
                               "value": [0.1, 0.9]},
         }))
         assert c.hoisted_path["edge_where"] == \
-            "(rel.weight >= $p0 AND rel.weight <= $p1)"
+            "(rel.`weight` >= $p0 AND rel.`weight` <= $p1)"
 
     def test_edge_property_between_invalid_raises(self):
         from backend.common.models.search import EdgePropertyPredicate
@@ -1791,7 +2080,7 @@ class TestEdgePredicateCompile:
             "edgePredicate": {"kind": "edgeHasProperty",
                               "key": "verified"},
         }))
-        assert c.hoisted_path["edge_where"] == "EXISTS(rel.verified)"
+        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`verified`)"
 
     def test_edge_has_property_negate(self):
         c = _degree_compiler()
@@ -1800,7 +2089,21 @@ class TestEdgePredicateCompile:
             "edgePredicate": {"kind": "edgeHasProperty",
                               "key": "verified", "negate": True},
         }))
-        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.verified))"
+        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.`verified`))"
+
+    def test_edge_has_property_predicate_with_spaces(self):
+        """Per-call-site coverage: EdgeHasPropertyPredicate (compile
+        site at falkordb_deep_search.py line ~683). Edge attributes
+        like ``Last Verified`` (timestamp) need the same backtick
+        treatment as node properties — common in lineage edges
+        annotated with audit timestamps."""
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeHasProperty",
+                              "key": "Last Verified"},
+        }))
+        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`Last Verified`)"
 
     def test_edge_group_and(self):
         c = _degree_compiler()
@@ -1816,7 +2119,7 @@ class TestEdgePredicateCompile:
             },
         }))
         assert c.hoisted_path["edge_where"] == \
-            "(rel.confidence > $p0 AND EXISTS(rel.producedBy))"
+            "(rel.`confidence` > $p0 AND EXISTS(rel.`producedBy`))"
 
     def test_edge_group_or(self):
         c = _degree_compiler()
@@ -1841,7 +2144,7 @@ class TestEdgePredicateCompile:
                 "children": [{"kind": "edgeHasProperty", "key": "stale"}],
             },
         }))
-        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.stale))"
+        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.`stale`))"
 
     def test_path_cypher_injects_edge_predicate(self):
         from backend.app.providers.falkordb_deep_search import _build_path_cypher
@@ -1884,7 +2187,7 @@ class TestEdgePredicateCompile:
             c.hoisted_within_hops, c._param_counter,
         )
         assert "_whP0 = (anchor)" in cont
-        assert "ALL(rel IN relationships(_whP0) WHERE rel.weight >= $p0)" in cont
+        assert "ALL(rel IN relationships(_whP0) WHERE rel.`weight` >= $p0)" in cont
 
     def test_within_hops_continuation_no_edge_predicate(self):
         # Regression: legacy shape still produces no per-edge filter

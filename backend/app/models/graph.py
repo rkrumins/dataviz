@@ -58,5 +58,7 @@ __all__ = [
     "RelationshipVisualSchema", "RelationshipTypeDefinition", "GraphSchema",
     "AggregatedEdgeRequest", "AggregatedEdgeInfo", "AggregatedEdgeResult",
     "CreateNodeRequest", "CreateNodeResult",
+    "CreateEdgeRequest", "UpdateEdgeRequest", "EdgeMutationResult",
+    "BatchCommand", "BatchCommandRequest", "BatchCommandResult", "BatchResponse",
     "TraceFocus", "TraceRequest", "TraceResult", "ExpandRequest",
 ]
