@@ -38,9 +38,9 @@ import {
     Tag as TagIcon,
     Layers,
     ArrowDownToLine,
-    BookmarkPlus,
     FileCode,
-    FilePlus2,
+    Save as SaveIcon,
+    SquarePen,
     Undo2,
     Redo2,
     Star,
@@ -91,6 +91,7 @@ import {
 } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
+import { SaveQueryDialog } from './SaveQueryDialog'
 import { WhatThisMeansDisclosure } from './WhatThisMeansDisclosure'
 
 
@@ -142,6 +143,7 @@ export const QueryCard: FC<QueryCardProps> = ({
     const recentQueries = useRecentQueries(viewId)
     const togglePinRecent = useSearchStore((s) => s.togglePinRecent)
     const removeRecent = useSearchStore((s) => s.removeRecent)
+    const saveDraftAsMineEntry = useSearchStore((s) => s.saveDraftAsMineEntry)
     // clearSearchResults wipes match URNs / ancestor maps but leaves
     // draft + history alone — needed by the auto-run effect so an
     // empty draft doesn't destroy the history stack the user just
@@ -312,6 +314,28 @@ export const QueryCard: FC<QueryCardProps> = ({
         commitDraft(null)
     }, [commitDraft])
 
+    // Save the current draft into the user's Mine library. Builds a
+    // synthetic ``RecentQueryEntry`` from the live predicate +
+    // ``stringifyPredicate`` so SaveQueryDialog can show the DSL
+    // preview the same way it does for promote-from-recent. On
+    // confirm, ``saveDraftAsMineEntry`` persists a pinned + named
+    // entry that appears in the Library popover's Mine tab. The
+    // dialog itself uses ``createPortal`` so it escapes the
+    // panel's framer-motion stacking context.
+    const [saveTargetEntry, setSaveTargetEntry] =
+        useState<RecentQueryEntry | null>(null)
+    const handleOpenSave = useCallback(() => {
+        if (!draftPredicate) return
+        setSaveTargetEntry({
+            viewId,
+            predicate: draftPredicate,
+            label: stringifyPredicate(draftPredicate),
+            timestamp: Date.now(),
+            pinned: true,
+            source: 'mine',
+        })
+    }, [draftPredicate, viewId])
+
     // Quick-search Enter from the empty hero → wrap the typed value
     // in a name-substring TextPredicate and commit (pushes to history,
     // triggers the auto-run if in Auto mode).
@@ -409,6 +433,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                             onRedo={redo}
                             canClear={true}
                             onClear={handleClearAll}
+                            canSave={runnable !== null}
+                            onSave={handleOpenSave}
                             runMode={runMode}
                             onRunModeChange={setRunMode}
                             canRun={runnable !== null}
@@ -567,6 +593,26 @@ export const QueryCard: FC<QueryCardProps> = ({
                 )}
             </div>
 
+            {/* Save-query dialog — mounts via createPortal so it
+                escapes the panel's framer-motion stacking context
+                (see SaveQueryDialog doc). State is local to QueryCard
+                because the Save button is the only trigger. */}
+            {saveTargetEntry && (
+                <SaveQueryDialog
+                    entry={saveTargetEntry}
+                    onCancel={() => setSaveTargetEntry(null)}
+                    onSave={(name, description) => {
+                        saveDraftAsMineEntry({
+                            viewId: saveTargetEntry.viewId,
+                            predicate: saveTargetEntry.predicate,
+                            label: saveTargetEntry.label,
+                            name,
+                            description,
+                        })
+                        setSaveTargetEntry(null)
+                    }}
+                />
+            )}
         </div>
     )
 }
@@ -1506,7 +1552,7 @@ function HeaderActions({
             'px-3 pb-2 pt-1.5',
             'border-t border-slate-200/70 dark:border-glass-border/40',
         )}>
-            {/* History group — Undo/Redo per-edit utility. */}
+            {/* LEFT — secondary utilities (history + mode) */}
             <div className="flex items-center gap-1 flex-nowrap shrink-0">
                 <UndoRedoButtons
                     canUndo={canUndo}
@@ -1515,31 +1561,38 @@ function HeaderActions({
                     onRedo={onRedo}
                 />
             </div>
-
-            {/* Auto/Manual run-mode toggle + Run primary CTA */}
             <div className="shrink-0">
-                <RunControls
+                <RunModeToggle
                     runMode={runMode}
                     onRunModeChange={onRunModeChange}
+                />
+            </div>
+
+            {/* RIGHT — workflow + primary CTA. ``ml-auto`` anchors the
+                cluster to the trailing edge of the row. Order within
+                the cluster follows form-button convention: workflow
+                actions (New, Save) sit just left of the primary CTA
+                (Run) which is always the rightmost element so the
+                user's mouse naturally lands on the "Go" action.
+                ``gap-2`` between the workflow icons and Run gives
+                Run its own visual breathing room. */}
+            <div className="flex items-center gap-2 ml-auto flex-nowrap shrink-0">
+                <div className="flex items-center gap-1 flex-nowrap">
+                    <NewQueryButton
+                        onClear={onClear}
+                        disabled={!canClear || isRunning}
+                    />
+                    <SaveQueryButton
+                        onSave={onSave}
+                        disabled={!canSave || isRunning}
+                    />
+                </div>
+                <RunButton
+                    runMode={runMode}
                     canRun={canRun}
                     hasPendingChanges={hasPendingChanges}
                     isRunning={isRunning}
                     onRunNow={onRunNow}
-                />
-            </div>
-
-            {/* Trailing group — Save (persist to library) + New
-                (start fresh). ``ml-auto`` anchors them to the
-                trailing edge regardless of how much space the
-                history / run-mode groups consume. */}
-            <div className="flex items-center gap-1 ml-auto flex-nowrap shrink-0">
-                <SaveQueryButton
-                    onSave={onSave}
-                    disabled={!canSave || isRunning}
-                />
-                <NewQueryButton
-                    onClear={onClear}
-                    disabled={!canClear || isRunning}
                 />
             </div>
         </div>
@@ -1553,8 +1606,13 @@ function HeaderActions({
  * deleting filters. Renamed from "Clear all" per user feedback:
  * users couldn't discover the action by intent ("I want to start a
  * new search") because the previous trash icon read as destructive
- * cleanup rather than a workflow step. Same wipe behaviour, more
- * discoverable affordance.
+ * cleanup rather than a workflow step.
+ *
+ * Icon: ``SquarePen`` — the same "compose new" affordance Linear /
+ * Notion / Slack use for "create a new note / message". Reads
+ * intuitively as "start writing something new" rather than the
+ * generic "+" which is too ambiguous next to the existing "+ Add
+ * filter" button inside the body.
  */
 function NewQueryButton({
     onClear, disabled,
@@ -1570,8 +1628,8 @@ function NewQueryButton({
             title="New query (clears current filters)"
             aria-label="New query"
             className={cn(
-                'inline-flex items-center justify-center w-7 h-7 rounded-md',
-                'border transition-colors',
+                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
+                'text-[11px] font-medium border transition-colors',
                 disabled
                     ? cn(
                         'border-transparent text-ink-muted/40 cursor-not-allowed',
@@ -1583,7 +1641,8 @@ function NewQueryButton({
                     ),
             )}
         >
-            <FilePlus2 className="w-3.5 h-3.5" />
+            <SquarePen className="w-3.5 h-3.5" />
+            New
         </button>
     )
 }
@@ -1596,6 +1655,11 @@ function NewQueryButton({
  * on confirm, the store action ``saveDraftAsMineEntry`` creates a
  * pinned, named entry that shows up in the Library popover's Mine
  * tab. Disabled when there's no runnable draft (nothing to save).
+ *
+ * Icon: ``Save`` — the universal floppy-disk save glyph. Recognised
+ * across business users regardless of technical background; far
+ * less ambiguous than the previous ``BookmarkPlus`` which read as
+ * "add bookmark" rather than "save to library".
  */
 function SaveQueryButton({
     onSave, disabled,
@@ -1626,7 +1690,7 @@ function SaveQueryButton({
                     ),
             )}
         >
-            <BookmarkPlus className="w-3.5 h-3.5" />
+            <SaveIcon className="w-3.5 h-3.5" />
             Save
         </button>
     )
@@ -1686,98 +1750,115 @@ function UndoRedoButtons({
 }
 
 
-function RunControls({
+/**
+ * RunModeToggle — Auto/Manual segmented control. Split out from the
+ * old combined ``RunControls`` so the HeaderActions layout can place
+ * the mode toggle in the mid-left action cluster while the primary
+ * Run CTA anchors to the far right (where users instinctively look
+ * for the "Go" action — same affordance as a form's Submit button).
+ */
+function RunModeToggle({
     runMode, onRunModeChange,
-    canRun, hasPendingChanges, isRunning, onRunNow,
 }: {
     runMode: 'auto' | 'manual'
     onRunModeChange: (next: 'auto' | 'manual') => void
+}) {
+    const manualLabel = runMode === 'manual'
+        ? 'Manual — only runs on click'
+        : 'Auto — runs on every edit (250ms debounce)'
+    return (
+        <div
+            className="inline-flex rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5"
+            title={manualLabel}
+        >
+            <ToggleBtn
+                active={runMode === 'auto'}
+                onClick={() => onRunModeChange('auto')}
+            >
+                <Zap className="w-3 h-3" /> Auto
+            </ToggleBtn>
+            <ToggleBtn
+                active={runMode === 'manual'}
+                onClick={() => onRunModeChange('manual')}
+            >
+                <Hand className="w-3 h-3" /> Manual
+            </ToggleBtn>
+        </div>
+    )
+}
+
+
+/**
+ * RunButton — primary CTA. Sits at the far right of the action
+ * toolbar so it follows the standard form-action convention
+ * (primary action on the right; cancel/secondary on the left).
+ * Uses the ContextViewHeader primary-action palette (subtle accent
+ * gradient + accent text + accent border), not a solid coloured
+ * button — reads as the primary action without shouting. Pulse
+ * state intensifies the gradient and adds an amber dot when
+ * Manual mode has pending edits.
+ */
+function RunButton({
+    runMode, canRun, hasPendingChanges, isRunning, onRunNow,
+}: {
+    runMode: 'auto' | 'manual'
     canRun: boolean
     hasPendingChanges: boolean
     isRunning: boolean
     onRunNow: () => void
 }) {
     const pulse = runMode === 'manual' && hasPendingChanges && !isRunning
-    const manualLabel = runMode === 'manual'
-        ? 'Manual — only runs on click'
-        : 'Auto — runs on every edit (250ms debounce)'
-
     return (
-        <div className="inline-flex items-center gap-1">
-            <div
-                className="inline-flex rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5"
-                title={manualLabel}
-            >
-                <ToggleBtn
-                    active={runMode === 'auto'}
-                    onClick={() => onRunModeChange('auto')}
-                >
-                    <Zap className="w-3 h-3" /> Auto
-                </ToggleBtn>
-                <ToggleBtn
-                    active={runMode === 'manual'}
-                    onClick={() => onRunModeChange('manual')}
-                >
-                    <Hand className="w-3 h-3" /> Manual
-                </ToggleBtn>
-            </div>
-            <button
-                type="button"
-                onClick={onRunNow}
-                disabled={!canRun || isRunning}
-                title={
-                    !canRun
-                        ? 'Add at least one complete filter to run'
-                        : hasPendingChanges
-                            ? 'Run the current draft'
-                            : 'Re-run the current draft'
-                }
-                className={cn(
-                    'relative inline-flex items-center gap-1.5 px-3 h-7 rounded-lg',
-                    'text-[12px] font-semibold transition-all duration-200',
-                    'border',
-                    !canRun || isRunning
+        <button
+            type="button"
+            onClick={onRunNow}
+            disabled={!canRun || isRunning}
+            title={
+                !canRun
+                    ? 'Add at least one complete filter to run'
+                    : hasPendingChanges
+                        ? 'Run the current draft'
+                        : 'Re-run the current draft'
+            }
+            className={cn(
+                'relative inline-flex items-center gap-1.5 px-3 h-7 rounded-lg',
+                'text-[12px] font-semibold transition-all duration-200',
+                'border',
+                !canRun || isRunning
+                    ? cn(
+                        'bg-black/[0.04] border-black/[0.10]',
+                        'text-ink-muted/60 cursor-not-allowed',
+                        'dark:bg-white/[0.04] dark:border-white/[0.08]',
+                    )
+                    : pulse
                         ? cn(
-                            'bg-black/[0.04] border-black/[0.10]',
-                            'text-ink-muted/60 cursor-not-allowed',
-                            'dark:bg-white/[0.04] dark:border-white/[0.08]',
+                            'bg-gradient-to-r from-accent-lineage/25 to-accent-lineage/15',
+                            'text-accent-lineage border-accent-lineage/50',
+                            'shadow-sm shadow-accent-lineage/20',
+                            'hover:from-accent-lineage/35 hover:to-accent-lineage/20',
                         )
-                        // Adopt the ContextViewHeader primary-action
-                        // palette: subtle accent gradient + accent
-                        // text + accent border, not a solid colored
-                        // button. Reads as the primary action without
-                        // shouting. Pulse state strengthens the
-                        // gradient + adds an amber dot.
-                        : pulse
-                            ? cn(
-                                'bg-gradient-to-r from-accent-lineage/25 to-accent-lineage/15',
-                                'text-accent-lineage border-accent-lineage/50',
-                                'shadow-sm shadow-accent-lineage/20',
-                                'hover:from-accent-lineage/35 hover:to-accent-lineage/20',
-                            )
-                            : cn(
-                                'bg-gradient-to-r from-accent-lineage/15 to-accent-lineage/[0.08]',
-                                'text-accent-lineage border-accent-lineage/35',
-                                'shadow-sm shadow-accent-lineage/10',
-                                'hover:from-accent-lineage/20 hover:to-accent-lineage/[0.12]',
-                                'hover:border-accent-lineage/50',
-                            ),
-                )}
-            >
-                {isRunning ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
-                ) : (
-                    <Play className="w-3.5 h-3.5" strokeWidth={2.4} fill="currentColor" />
-                )}
-                Run
-                {pulse && (
-                    <span className={cn(
-                        'absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full',
-                        'bg-amber-400 ring-2 ring-amber-400/30 animate-pulse',
-                    )} />
-                )}
-            </button>
-        </div>
+                        : cn(
+                            'bg-gradient-to-r from-accent-lineage/15 to-accent-lineage/[0.08]',
+                            'text-accent-lineage border-accent-lineage/35',
+                            'shadow-sm shadow-accent-lineage/10',
+                            'hover:from-accent-lineage/20 hover:to-accent-lineage/[0.12]',
+                            'hover:border-accent-lineage/50',
+                        ),
+            )}
+        >
+            {isRunning ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
+            ) : (
+                <Play className="w-3.5 h-3.5" strokeWidth={2.4} fill="currentColor" />
+            )}
+            Run
+            {pulse && (
+                <span className={cn(
+                    'absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full',
+                    'bg-amber-400 ring-2 ring-amber-400/30 animate-pulse',
+                )} />
+            )}
+        </button>
     )
 }
 
