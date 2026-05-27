@@ -318,23 +318,6 @@ interface SearchStoreState {
      * the original Advanced Search.
      */
     canvasFilterMode: CanvasFilterMode
-
-    /**
-     * Snapshot of the predicate that was most-recently DISPATCHED
-     * (i.e. sent to the backend and returned results). Captured
-     * inside ``addRecent`` since that's the one chokepoint every
-     * successful dispatch passes through.
-     *
-     * Drives the "Back to last query" toolbar action: when the user
-     * has edited the draft after running a query, this lets them
-     * restore the predicate that actually produced the visible
-     * results in one click — distinct from ``undo`` (which steps
-     * back through individual edits regardless of dispatch status).
-     *
-     * ``null`` when no query has run yet in this session, or after
-     * ``clear()`` wipes the panel.
-     */
-    lastDispatchedPredicate: Predicate | null
 }
 
 
@@ -392,13 +375,6 @@ interface SearchStoreActions {
      *  Caller supplies ``label`` (DSL string) so the store doesn't have
      *  to depend on the panel's stringifier. */
     addRecent: (entry: { viewId: string; predicate: Predicate; label: string }) => void
-    /** Restore the draft to the predicate that produced the
-     *  currently-published results (the most recent successful
-     *  dispatch). Used by the "Back to last query" toolbar action.
-     *  No-op when there's no snapshot or when the draft already
-     *  equals the snapshot. Pushes the discarded edits onto the
-     *  undo stack so the user can re-apply them with Redo. */
-    restoreLastDispatched: () => void
     /** Flip the ``pinned`` flag on a Recent entry by its timestamp.
      *  Pinned entries are never auto-evicted by the 10-cap. */
     togglePinRecent: (timestamp: number) => void
@@ -444,6 +420,20 @@ interface SearchStoreActions {
      *  ``description``. Used by the Library popover's "Save as…" flow.
      *  No-op when the timestamp doesn't match an existing entry. */
     promoteToMine: (timestamp: number, name: string, description?: string) => void
+    /** Save the current draft directly into the Mine library without
+     *  going through the recent-runs path. Used by the QueryCard
+     *  header's Save button so a user can persist a query before
+     *  ever running it. Dedupe by ``(viewId, predicate)`` — saving
+     *  the same predicate twice updates the existing entry instead
+     *  of creating a duplicate. Always sets ``pinned: true`` and
+     *  ``source: 'mine'``. */
+    saveDraftAsMineEntry: (entry: {
+        viewId: string
+        predicate: Predicate
+        label: string
+        name: string
+        description?: string
+    }) => void
 }
 
 const EMPTY_SET: ReadonlySet<string> = new Set<string>()
@@ -619,7 +609,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // is active at store-create time — callers (SearchMapPanel mount)
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
-    lastDispatchedPredicate: null,
 
     setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
         const next = new Set<string>()
@@ -782,24 +771,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             }
         }
         saveRecentToStorage(kept)
-        // Capture the dispatched predicate so "Back to last query"
-        // can restore the user to whatever was last run, even after
-        // the draft has been edited. Lives in-memory (not persisted)
-        // — restoring after a hard reload would feel unexpected.
-        set({ recentQueries: kept, lastDispatchedPredicate: predicate })
-    },
-
-    restoreLastDispatched: () => {
-        const { lastDispatchedPredicate, draftPredicate } = get()
-        if (!lastDispatchedPredicate) return
-        if (JSON.stringify(draftPredicate)
-            === JSON.stringify(lastDispatchedPredicate)) {
-            // Already on the snapshot — nothing to restore.
-            return
-        }
-        // Use the standard commit path so the discarded edits land
-        // on the undo stack (the user can press Redo to re-apply).
-        get().commitDraft(lastDispatchedPredicate)
+        set({ recentQueries: kept })
     },
 
     togglePinRecent: (timestamp) => {
@@ -890,10 +862,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             // separately via localStorage.
             historyPast: EMPTY_HISTORY,
             historyFuture: EMPTY_HISTORY,
-            // The "back to last query" snapshot is session-local and
-            // should not survive a panel clear — if results are gone,
-            // there's nothing to go back to anyway.
-            lastDispatchedPredicate: null,
         }))
     },
 
@@ -958,6 +926,35 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 }
                 : e,
         )
+        saveRecentToStorage(next)
+        set({ recentQueries: next })
+    },
+
+    saveDraftAsMineEntry: ({ viewId, predicate, label, name, description }) => {
+        const trimmedName = name.trim()
+        if (!trimmedName) return
+        const dedupeKey = JSON.stringify(predicate)
+        const current = get().recentQueries
+        // De-dupe by (viewId, predicate). Saving the same predicate
+        // twice should UPDATE the existing entry's name/description
+        // rather than create two entries with different names that
+        // point at the same query.
+        const existing = current.find(
+            (e) => e.viewId === viewId
+                && JSON.stringify(e.predicate) === dedupeKey,
+        )
+        const filtered = current.filter((e) => e !== existing)
+        const entry: RecentQueryEntry = {
+            viewId,
+            predicate,
+            label,
+            timestamp: existing?.timestamp ?? Date.now(),
+            pinned: true,
+            source: 'mine',
+            name: trimmedName,
+            description: description?.trim() || undefined,
+        }
+        const next = [entry, ...filtered]
         saveRecentToStorage(next)
         set({ recentQueries: next })
     },
@@ -1059,24 +1056,6 @@ export function useCanUndo(): boolean {
 /** True when there's at least one entry in the redo stack. */
 export function useCanRedo(): boolean {
     return useSearchStore((s) => s.historyFuture.length > 0)
-}
-
-/**
- * True when there's a dispatched-predicate snapshot AND the current
- * draft differs from it — i.e. clicking "Back to last query" would
- * actually do something. Drives the disabled state of the toolbar's
- * Back button so it only lights up when there's a destination.
- *
- * The JSON-stringify comparison is fine here: it runs only on
- * snapshot/draft changes, which happen on user input cadence (not
- * render cadence).
- */
-export function useCanRestoreLastDispatched(): boolean {
-    return useSearchStore((s) => {
-        if (!s.lastDispatchedPredicate) return false
-        return JSON.stringify(s.draftPredicate)
-            !== JSON.stringify(s.lastDispatchedPredicate)
-    })
 }
 
 /**
