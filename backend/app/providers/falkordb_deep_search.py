@@ -108,28 +108,49 @@ def __getattr__(name: str):
 # ---------------------------------------------------------------------------
 
 def _safe_property_name(key: str) -> str:
-    """Validate a property name as Cypher-safe (alphanumeric + underscore).
+    """Escape a property name for safe interpolation into Cypher.
 
     Property names can't be parameterised in Cypher — they're inlined
-    into the query text. We reject (rather than silently sanitise) any
-    char outside ``[A-Za-z0-9_]`` so the user gets a clear error
-    instead of a query that silently matches the wrong field
-    (e.g. ``pii-class`` quietly becoming ``pii_class``).
+    into the query text. We use Cypher's backtick-quoting syntax to
+    safely interpolate ANY printable property name, including ones
+    with spaces (``Asset Owner``), hyphens (``pii-class``), dots
+    (``user.id``), or other punctuation that real-world data sources
+    legitimately use as property keys. This replaces the previous
+    ``alphanumeric + underscore only`` allowlist which rejected such
+    names with HTTP 400.
+
+    Cypher injection is prevented by the backtick wrapping plus
+    doubling of any internal backticks (the standard escape per
+    OpenCypher / Neo4j / FalkorDB grammar):
+
+        ``Asset Owner``       → ```Asset Owner```
+        ``pii-class``         → ```pii-class```
+        ``x); DROP TABLE``    → ```x); DROP TABLE```   (safe — the
+                                whole string is one identifier inside
+                                backticks; the semicolon/parens are
+                                not interpreted as Cypher syntax)
+        ``has`backtick``      → ```has``backtick```    (internal
+                                backtick doubled per the spec)
+
+    Returns the BACKTICK-WRAPPED form including the surrounding
+    backticks. Callers interpolate it directly:
+
+        f"n.{_safe_property_name(key)}"   →   n.`Asset Owner`
+
+    Trade-off: the rendered Cypher always uses backticks even for
+    pure-alphanumeric names. That's slightly noisier in logs but
+    semantically identical to bare identifiers and avoids a
+    conditional branch on the hot compilation path.
     """
     if not key:
         raise CompileError("empty property name")
     if not isinstance(key, str):
         raise CompileError(f"property name must be a string: {key!r}")
-    if key[0].isdigit():
-        raise CompileError(
-            f"property name cannot start with a digit: {key!r}"
-        )
-    if not all(c.isalnum() or c == "_" for c in key):
-        raise CompileError(
-            f"property name has disallowed chars "
-            f"(alphanumeric + underscore only): {key!r}"
-        )
-    return key
+    # Escape any internal backticks by doubling them — Cypher's
+    # standard mechanism for embedding ``\``` inside a backticked
+    # identifier (e.g. ``a`b`` becomes ```a``b```).
+    escaped = key.replace("`", "``")
+    return f"`{escaped}`"
 
 
 def _sanitize_label(s: str) -> str:
