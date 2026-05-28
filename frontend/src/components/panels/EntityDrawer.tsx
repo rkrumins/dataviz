@@ -7,14 +7,24 @@
  * - Raw JSON mode: Advanced editing for power users
  * - Quick actions: Trace, Pin, External links
  *
+ * Property values are plain JSON (Text/Date/Link→string, Number→number,
+ * Yes/No→bool, Tags→string[], Group→object); friendly field types are INFERRED
+ * from the value on read (see property/fieldTypes.ts), so nothing extra is
+ * persisted. FalkorDB already stores arbitrary JSON property bags (scalars +
+ * flat scalar-lists as native node props, complex values in a `propertiesRaw`
+ * JSON blob — see falkordb_provider._split_user_properties), so these values
+ * round-trip as-is once the write path below lands.
+ *
  * TODO(backend): Drawer edits currently stage as `update_entity` with a no-op
- * apply hook. To persist edits to the backend we need:
+ * apply hook. To persist edits, mirror the existing edge PATCH pattern:
  *   1. `PATCH /api/v1/{wsId}/graph/nodes/{urn}` route in
- *      backend/app/api/v1/endpoints/graph.py
- *   2. `GraphDataProvider.update_node(urn, properties)` ABC method in
- *      backend/common/interfaces/provider.py
- *   3. Implementations in FalkorDB / Neo4j / Spanner providers
- * Wire the apply hook in `handleSave` once the endpoint exists.
+ *      backend/app/api/v1/endpoints/graph.py (mirror PATCH /edges/{id})
+ *   2. `GraphDataProvider.update_node(urn, payload)` (mirror `update_edge`),
+ *      implemented for FalkorDB (Neo4j/Spanner can follow).
+ *   3. `RemoteGraphProvider.updateNode` + replace the `apply` console.warn
+ *      below with the call.
+ * Payload persists the editable surface: `properties` + descriptive fields
+ * (displayName, description, qualifiedName, sourceSystem, layerAssignment, tags).
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'

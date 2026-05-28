@@ -100,7 +100,8 @@ describe('PropertyEditor', () => {
     expect(screen.getByText('owner')).toBeInTheDocument()
     expect(screen.getByDisplayValue('analytics')).toBeInTheDocument()
     expect(screen.getByDisplayValue('42')).toBeInTheDocument()
-    expect(screen.getByText('true')).toBeInTheDocument()
+    // boolean renders as a friendly Yes/No toggle
+    expect(screen.getByText('Yes')).toBeInTheDocument()
   })
 
   it('opens the value modal for long strings and saves edits', async () => {
@@ -110,7 +111,7 @@ describe('PropertyEditor', () => {
 
     await user.click(screen.getByTitle('Open editor (Markdown)'))
 
-    const modalEditor = screen.getByPlaceholderText(/Markdown is supported/i)
+    const modalEditor = screen.getByPlaceholderText(/Write here/i)
     await user.clear(modalEditor)
     await user.type(modalEditor, 'Short summary')
     await user.click(screen.getByRole('button', { name: 'Save' }))
@@ -226,7 +227,7 @@ describe('PropertyEditor', () => {
 
     // Short value still exposes the always-visible expand affordance.
     await user.click(screen.getByTitle('Open editor (Markdown)'))
-    const editor = screen.getByPlaceholderText(/Markdown is supported/i)
+    const editor = screen.getByPlaceholderText(/Write here/i)
     await user.clear(editor)
     await user.type(editor, '# Owner')
     await user.click(screen.getByRole('button', { name: 'Save' }))
@@ -373,5 +374,83 @@ describe('PropertyEditor — path grouping', () => {
     await user.click(within(folderA).getByTitle(/Delete folder/i))
     await user.click(within(folderA).getByTitle('Confirm delete'))
     expect(onChange).toHaveBeenCalledWith({ keep: 2 })
+  })
+})
+
+import { isJsonSafe } from './property/fieldTypes'
+
+describe('PropertyEditor — business field types & formatting', () => {
+  async function openComposerOnEmpty(user: ReturnType<typeof userEvent.setup>) {
+    // Empty object → "Add first property"; opens the composer with a single
+    // type chip (no existing rows to collide with).
+    await user.click(screen.getByRole('button', { name: /Add first property/i }))
+  }
+
+  it('adds a Yes/No (boolean) property as JSON true/false', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{}} onChange={onChange} />)
+    await openComposerOnEmpty(user)
+    await user.type(screen.getByPlaceholderText('Property name'), 'flag')
+    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByText('Yes / No'))
+    await user.click(screen.getByRole('switch')) // flip No → Yes
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(onChange).toHaveBeenCalledWith({ flag: true })
+    expect(isJsonSafe(onChange.mock.calls.at(-1)![0])).toBe(true)
+  })
+
+  it('adds a Date property as an ISO string', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{}} onChange={onChange} />)
+    await openComposerOnEmpty(user)
+    await user.type(screen.getByPlaceholderText('Property name'), 'when')
+    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByText('Date'))
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    const arg = onChange.mock.calls.at(-1)![0] as Record<string, unknown>
+    expect(String(arg.when)).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(isJsonSafe(arg)).toBe(true)
+  })
+
+  it('adds a Tags property as a string[]', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{}} onChange={onChange} />)
+    await openComposerOnEmpty(user)
+    await user.type(screen.getByPlaceholderText('Property name'), 'labels')
+    await user.click(screen.getByTitle('Change type'))
+    await user.click(screen.getByText('Tags'))
+    const tagInput = screen.getByPlaceholderText(/Type a tag/i)
+    await user.type(tagInput, 'red{Enter}blue{Enter}')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(onChange).toHaveBeenCalledWith({ labels: ['red', 'blue'] })
+    expect(isJsonSafe(onChange.mock.calls.at(-1)![0])).toBe(true)
+  })
+
+  it('toolbar Bold wraps the selection in **…**', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    const ta = screen.getByPlaceholderText(/Write here/i) as HTMLTextAreaElement
+    ta.focus()
+    ta.setSelectionRange(0, 2) // select "hi"
+    await user.click(screen.getByTitle(/^Bold/))
+    expect(ta.value).toBe('**hi**')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(onChange).toHaveBeenCalledWith({ note: '**hi**' })
+  })
+
+  it('View mode toggles between Formatted and Markdown source', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={{ note: '**bold**' }} readOnly searchable groupByPath />)
+    // Formatted (default): rendered via markdown (mocked → data-testid="md")
+    expect(screen.getAllByTestId('md').length).toBeGreaterThanOrEqual(1)
+    // Switch to source: raw markdown text is shown, no markdown render
+    await user.click(screen.getByRole('button', { name: 'Markdown' }))
+    expect(screen.queryByTestId('md')).not.toBeInTheDocument()
+    expect(screen.getByText('**bold**')).toBeInTheDocument()
   })
 })

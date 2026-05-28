@@ -11,10 +11,8 @@
  * to a few lines and can be opened in a Markdown editor/preview modal.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import {
   ChevronDown,
   ChevronRight,
@@ -25,12 +23,6 @@ import {
   Code,
   Check,
   X as XIcon,
-  Type as TypeIcon,
-  Hash,
-  ToggleLeft,
-  CircleDashed,
-  Braces,
-  Brackets,
   Search,
   Maximize2,
   Copy,
@@ -40,13 +32,37 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
-import { markdownComponents } from '@/components/docs/MarkdownComponents'
+import {
+  type FieldType,
+  FIELD_TYPE_META,
+  COMMON_TYPES,
+  ADVANCED_TYPES,
+  inferFieldType,
+  valueForType,
+  coerceToType,
+} from './property/fieldTypes'
+import {
+  BooleanToggle,
+  DateField,
+  UrlField,
+  TagInput,
+  InlineMarkdown,
+  FormattedDate,
+  FormattedLink,
+  FormattedTags,
+} from './property/valueWidgets'
+import { MarkdownValueModal } from './property/MarkdownValueEditor'
 
 // ============================================
 // Types
 // ============================================
 
 type ValueKind = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array'
+
+/** In read-only (View) mode, whether string values render as formatted Markdown
+ *  or as raw source. Irrelevant in edit mode (values are editable inputs). */
+type DisplayMode = 'formatted' | 'source'
+const DisplayModeContext = createContext<DisplayMode>('source')
 
 export interface PropertyEditorProps {
   value: unknown
@@ -82,39 +98,6 @@ function kindOf(v: unknown): ValueKind {
   return typeof v as ValueKind
 }
 
-function coerceValue(value: unknown, target: ValueKind): unknown {
-  switch (target) {
-    case 'string':
-      if (value === null || value === undefined) return ''
-      if (typeof value === 'object') return JSON.stringify(value)
-      return String(value)
-    case 'number': {
-      const n = Number(value)
-      return Number.isFinite(n) ? n : 0
-    }
-    case 'boolean':
-      if (typeof value === 'string') return value.toLowerCase() === 'true' || value === '1'
-      return Boolean(value)
-    case 'null':
-      return null
-    case 'object':
-      return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {}
-    case 'array':
-      return Array.isArray(value) ? value : []
-  }
-}
-
-function defaultForKind(kind: ValueKind): unknown {
-  switch (kind) {
-    case 'string': return ''
-    case 'number': return 0
-    case 'boolean': return false
-    case 'null': return null
-    case 'object': return {}
-    case 'array': return []
-  }
-}
-
 /** Flat, lowercase text used to test a row against the search query. */
 function searchableText(value: unknown): string {
   if (value === null || value === undefined) return ''
@@ -122,15 +105,6 @@ function searchableText(value: unknown): string {
     try { return JSON.stringify(value).toLowerCase() } catch { return '' }
   }
   return String(value).toLowerCase()
-}
-
-const KIND_META: Record<ValueKind, { label: string; icon: typeof TypeIcon; tone: string }> = {
-  string: { label: 'str', icon: TypeIcon, tone: 'text-blue-500 bg-blue-500/10' },
-  number: { label: 'num', icon: Hash, tone: 'text-purple-500 bg-purple-500/10' },
-  boolean: { label: 'bool', icon: ToggleLeft, tone: 'text-amber-500 bg-amber-500/10' },
-  null: { label: 'null', icon: CircleDashed, tone: 'text-ink-muted bg-white/5' },
-  object: { label: 'obj', icon: Braces, tone: 'text-emerald-500 bg-emerald-500/10' },
-  array: { label: 'arr', icon: Brackets, tone: 'text-cyan-500 bg-cyan-500/10' },
 }
 
 // ============================================
@@ -526,8 +500,8 @@ function PropertyRow({
   onValueChange,
   onDelete,
 }: PropertyRowProps) {
-  const kind = kindOf(value)
-  const isContainer = kind === 'object' || kind === 'array'
+  const fieldType = inferFieldType(value)
+  const isContainer = fieldType === 'group' || fieldType === 'list'
   const [expanded, setExpanded] = useState(depth < 1)
   const [editingKey, setEditingKey] = useState(false)
   const [keyDraft, setKeyDraft] = useState(rowKey)
@@ -544,8 +518,8 @@ function PropertyRow({
     }
   }
 
-  const changeKind = (next: ValueKind) => {
-    onValueChange(coerceValue(value, next))
+  const changeType = (next: FieldType) => {
+    onValueChange(coerceToType(value, next))
   }
 
   return (
@@ -573,7 +547,7 @@ function PropertyRow({
 
         {/* Type chip */}
         <div className="h-6 flex items-center flex-shrink-0">
-          <TypeChip kind={kind} readOnly={readOnly} onChange={readOnly ? undefined : changeKind} />
+          <FieldTypeChip fieldType={fieldType} readOnly={readOnly} onChange={readOnly ? undefined : changeType} />
         </div>
 
         {/* Key column — fixed basis so rows align consistently */}
@@ -612,7 +586,7 @@ function PropertyRow({
         <div className="flex-1 min-w-0">
           {isContainer ? (
             <span className="text-2xs text-ink-muted h-6 flex items-center">
-              {kind === 'object'
+              {fieldType === 'group'
                 ? `${Object.keys(value as object).length} ${Object.keys(value as object).length === 1 ? 'key' : 'keys'}`
                 : `${(value as unknown[]).length} ${(value as unknown[]).length === 1 ? 'item' : 'items'}`}
             </span>
@@ -622,7 +596,7 @@ function PropertyRow({
               onChange={onValueChange}
               readOnly={readOnly}
               query={query}
-              fieldLabel={isArrayItem ? rowKey : rowKey}
+              fieldLabel={rowKey}
             />
           )}
         </div>
@@ -656,7 +630,7 @@ function PropertyRow({
       {/* Container body */}
       {isContainer && expanded && depth < MAX_DEPTH - 1 && (
         <div className="ml-5 mb-1">
-          {kind === 'object' ? (
+          {fieldType === 'group' ? (
             <ObjectBody
               value={value as Record<string, unknown>}
               onChange={onValueChange as (v: Record<string, unknown>) => void}
@@ -719,62 +693,10 @@ function PrimitiveValueEditor({
   query?: string
   fieldLabel?: string
 }) {
-  const kind = kindOf(value)
+  const display = useContext(DisplayModeContext)
+  const fieldType = inferFieldType(value)
   const [modalOpen, setModalOpen] = useState(false)
 
-  if (kind === 'null') {
-    return <span className="text-xs font-mono text-ink-muted italic h-6 flex items-center">null</span>
-  }
-
-  if (kind === 'boolean') {
-    const v = Boolean(value)
-    return (
-      <div className="h-6 flex items-center">
-        <button
-          onClick={() => !readOnly && onChange(!v)}
-          disabled={readOnly}
-          className={cn(
-            "px-2.5 py-0.5 rounded-md text-xs font-medium transition-colors",
-            v ? "bg-emerald-500/15 text-emerald-500" : "bg-white/5 text-ink-muted",
-            readOnly && "cursor-default",
-          )}
-        >
-          {v ? 'true' : 'false'}
-        </button>
-      </div>
-    )
-  }
-
-  if (kind === 'number') {
-    if (readOnly) {
-      return (
-        <span className="text-xs font-mono text-ink h-6 flex items-center">
-          <HighlightedText text={String(value)} query={query} />
-        </span>
-      )
-    }
-    return (
-      <input
-        type="number"
-        value={value as number}
-        onChange={(e) => {
-          const n = Number(e.target.value)
-          onChange(Number.isFinite(n) ? n : 0)
-        }}
-        className={cn(
-          "w-full px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-mono",
-          "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
-        )}
-      />
-    )
-  }
-
-  // string
-  const stringValue = value === null || value === undefined ? '' : String(value)
-  const isLong = stringValue.length > LONG_VALUE_THRESHOLD || stringValue.includes('\n')
-
-  // Always-visible so the full editor (with Markdown) is reachable for any
-  // string value, not just long ones.
   const expandButton = (
     <button
       onClick={() => setModalOpen(true)}
@@ -785,43 +707,90 @@ function PrimitiveValueEditor({
     </button>
   )
 
-  const copyButton = (
-    <CopyButton text={stringValue} />
-  )
-
+  // ---------------------------------------------------------------- read-only
   if (readOnly) {
+    if (fieldType === 'none') {
+      return <span className="text-xs text-ink-muted italic h-6 flex items-center">—</span>
+    }
+    if (fieldType === 'boolean') {
+      return <div className="h-6 flex items-center"><BooleanToggle value={Boolean(value)} onChange={() => {}} readOnly /></div>
+    }
+    if (fieldType === 'number') {
+      return <span className="text-xs font-mono text-ink h-6 flex items-center"><HighlightedText text={String(value)} query={query} /></span>
+    }
+    if (fieldType === 'tags') {
+      return display === 'source'
+        ? <span className="text-xs font-mono text-ink-muted break-all">{JSON.stringify(value)}</span>
+        : <FormattedTags value={value as string[]} />
+    }
+    // text / date / url — all stored as strings
+    const s = value === null || value === undefined ? '' : String(value)
+    let body: React.ReactNode
+    if (display === 'source') {
+      body = (
+        <div className="text-xs font-mono text-ink whitespace-pre-wrap break-words">
+          {s === '' ? <span className="italic text-ink-muted">empty</span> : <HighlightedText text={s} query={query} />}
+        </div>
+      )
+    } else if (fieldType === 'date') {
+      body = <FormattedDate value={s} />
+    } else if (fieldType === 'url') {
+      body = <FormattedLink value={s} />
+    } else {
+      body = s === '' ? <span className="text-xs italic text-ink-muted">empty</span> : <InlineMarkdown text={s} />
+    }
     return (
       <>
         <div className="flex items-start gap-1">
-          <div className={cn("flex-1 min-w-0 text-xs text-ink whitespace-pre-wrap break-words", isLong && "line-clamp-3")}>
-            {stringValue === ''
-              ? <span className="text-ink-muted italic">empty</span>
-              : <HighlightedText text={stringValue} query={query} />}
-          </div>
+          <div className="flex-1 min-w-0">{body}</div>
           <div className="flex items-start">
-            {stringValue !== '' && copyButton}
-            {expandButton}
+            {s !== '' && <CopyButton text={s} />}
+            {fieldType === 'text' && expandButton}
           </div>
         </div>
         {modalOpen && (
-          <ValueModal
-            fieldLabel={fieldLabel}
-            value={stringValue}
-            readOnly
-            onSave={() => setModalOpen(false)}
-            onClose={() => setModalOpen(false)}
-          />
+          <MarkdownValueModal fieldLabel={fieldLabel} value={s} readOnly onSave={() => setModalOpen(false)} onClose={() => setModalOpen(false)} />
         )}
       </>
     )
   }
 
-  // Editable string — full-width auto-height textarea, capped to 3 rows.
+  // ---------------------------------------------------------------- editable
+  if (fieldType === 'none') {
+    return <span className="text-xs text-ink-muted italic h-6 flex items-center">empty</span>
+  }
+  if (fieldType === 'boolean') {
+    return <div className="h-6 flex items-center"><BooleanToggle value={Boolean(value)} onChange={onChange} /></div>
+  }
+  if (fieldType === 'number') {
+    return (
+      <input
+        type="number"
+        value={value as number}
+        onChange={(e) => { const n = Number(e.target.value); onChange(Number.isFinite(n) ? n : 0) }}
+        className={cn(
+          "w-full px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-mono",
+          "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
+        )}
+      />
+    )
+  }
+  if (fieldType === 'date') {
+    return <DateField value={value === null || value === undefined ? '' : String(value)} onChange={onChange} />
+  }
+  if (fieldType === 'url') {
+    return <UrlField value={value === null || value === undefined ? '' : String(value)} onChange={onChange} />
+  }
+  if (fieldType === 'tags') {
+    return <TagInput value={value as string[]} onChange={onChange} />
+  }
+
+  // text — auto-height textarea (capped to 3 rows) + always-on Markdown editor
+  const stringValue = value === null || value === undefined ? '' : String(value)
   const lineCount = stringValue === '' ? 1 : stringValue.split('\n').length
   const rows = stringValue.includes('\n')
     ? Math.min(3, Math.max(1, lineCount))
     : stringValue.length > LONG_VALUE_THRESHOLD ? 3 : 1
-
   return (
     <>
       <div className="flex items-start gap-1">
@@ -837,12 +806,12 @@ function PrimitiveValueEditor({
           )}
         />
         <div className="flex items-start">
-          {stringValue !== '' && copyButton}
+          {stringValue !== '' && <CopyButton text={stringValue} />}
           {expandButton}
         </div>
       </div>
       {modalOpen && (
-        <ValueModal
+        <MarkdownValueModal
           fieldLabel={fieldLabel}
           value={stringValue}
           onSave={(next) => { onChange(next); setModalOpen(false) }}
@@ -876,148 +845,6 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-// ============================================
-// ValueModal — large Markdown editor + preview for long string values
-// ============================================
-
-function ValueModal({
-  fieldLabel,
-  value,
-  readOnly,
-  onSave,
-  onClose,
-}: {
-  fieldLabel?: string
-  value: string
-  readOnly?: boolean
-  onSave: (next: string) => void
-  onClose: () => void
-}) {
-  const [draft, setDraft] = useState(value)
-  const [tab, setTab] = useState<'write' | 'preview'>(readOnly ? 'preview' : 'write')
-  const [copied, setCopied] = useState(false)
-
-  const wordCount = useMemo(() => {
-    const t = draft.trim()
-    return t ? t.split(/\s+/).length : 0
-  }, [draft])
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
-        onClick={onClose}
-      >
-        <motion.div
-          initial={{ scale: 0.96, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.96, opacity: 0 }}
-          onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl"
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-glass-border/50">
-            <div className="min-w-0">
-              <h4 className="text-sm font-semibold text-ink truncate">
-                {readOnly ? 'View' : 'Edit'} {fieldLabel ? <span className="font-mono text-ink-muted">{fieldLabel}</span> : 'value'}
-              </h4>
-              <p className="text-2xs text-ink-muted mt-0.5">
-                Markdown supported · {draft.length} chars · {wordCount} {wordCount === 1 ? 'word' : 'words'}
-              </p>
-            </div>
-            <button
-              onClick={onClose}
-              className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-lg hover:bg-white/10"
-              title="Close"
-            >
-              <XIcon className="w-4 h-4 text-ink-muted" />
-            </button>
-          </div>
-
-          {/* Tabs */}
-          <div className="flex items-center gap-1 px-5 pt-3">
-            {!readOnly && (
-              <ModalTab active={tab === 'write'} onClick={() => setTab('write')} label="Write" />
-            )}
-            <ModalTab active={tab === 'preview'} onClick={() => setTab('preview')} label="Preview" />
-            <div className="ml-auto">
-              <button
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(draft)
-                    setCopied(true)
-                    setTimeout(() => setCopied(false), 1500)
-                  } catch { /* clipboard unavailable */ }
-                }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-white/10 transition-colors"
-              >
-                {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                {copied ? 'Copied' : 'Copy'}
-              </button>
-            </div>
-          </div>
-
-          {/* Body */}
-          <div className="flex-1 min-h-0 overflow-hidden px-5 py-3">
-            {tab === 'write' && !readOnly ? (
-              <textarea
-                autoFocus
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                spellCheck
-                className={cn(
-                  "w-full h-[50vh] px-3 py-2.5 rounded-xl bg-black/10 dark:bg-white/5 border border-white/10",
-                  "focus:border-accent-lineage/50 outline-none transition-colors text-sm leading-relaxed resize-none custom-scrollbar font-sans",
-                )}
-                placeholder="Write a description… Markdown is supported."
-              />
-            ) : (
-              <div className="h-[50vh] overflow-y-auto custom-scrollbar rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 px-4 py-3">
-                {draft.trim() ? (
-                  <div className="prose-synodic max-w-none text-sm">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {draft}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  <p className="text-sm text-ink-muted italic">Nothing to preview.</p>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Footer */}
-          <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-glass-border/50">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors"
-            >
-              {readOnly ? 'Close' : 'Cancel'}
-            </button>
-            {!readOnly && (
-              <button
-                onClick={() => onSave(draft)}
-                className="px-5 py-2 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25 transition-all"
-              >
-                Save
-              </button>
-            )}
-          </div>
-        </motion.div>
-      </motion.div>
-    </AnimatePresence>
-  )
-}
-
 function ModalTab({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
   return (
     <button
@@ -1033,21 +860,23 @@ function ModalTab({ active, onClick, label }: { active: boolean; onClick: () => 
 }
 
 // ============================================
-// TypeChip — popover to change a row's value kind
+// FieldTypeChip — friendly, business-facing type label + change menu
 // ============================================
 
-function TypeChip({
-  kind,
+function FieldTypeChip({
+  fieldType,
   readOnly,
   onChange,
+  showLabel = true,
 }: {
-  kind: ValueKind
+  fieldType: FieldType
   readOnly?: boolean
-  onChange?: (next: ValueKind) => void
+  onChange?: (next: FieldType) => void
+  showLabel?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-  const meta = KIND_META[kind]
+  const meta = FIELD_TYPE_META[fieldType]
   const Icon = meta.icon
 
   useEffect(() => {
@@ -1059,41 +888,48 @@ function TypeChip({
     return () => document.removeEventListener('mousedown', onDown)
   }, [open])
 
+  const renderOption = (t: FieldType) => {
+    const m = FIELD_TYPE_META[t]
+    const MIcon = m.icon
+    return (
+      <button
+        key={t}
+        onClick={() => { onChange?.(t); setOpen(false) }}
+        className={cn(
+          "w-full flex items-center gap-2.5 px-2 py-1.5 rounded-md text-xs hover:bg-white/10 transition-colors text-left",
+          fieldType === t && "bg-white/5",
+        )}
+      >
+        <MIcon className={cn("w-3.5 h-3.5 flex-shrink-0", m.tone.split(' ')[0])} />
+        <span className="flex-1 min-w-0">
+          <span className="text-ink">{m.label}</span>
+          <span className="block text-2xs text-ink-muted truncate">{m.hint}</span>
+        </span>
+        {fieldType === t && <Check className="w-3 h-3 text-accent-lineage flex-shrink-0" />}
+      </button>
+    )
+  }
+
   return (
     <div className="relative flex-shrink-0" ref={ref}>
       <button
-        onClick={() => !readOnly && onChange && setOpen(o => !o)}
+        onClick={() => !readOnly && onChange && setOpen((o) => !o)}
         disabled={readOnly || !onChange}
         className={cn(
-          "h-5 px-1.5 rounded text-2xs font-mono uppercase tracking-wider flex items-center gap-1",
+          "h-5 px-1.5 rounded-md text-2xs font-medium flex items-center gap-1",
           meta.tone,
           (readOnly || !onChange) ? "cursor-default" : "hover:brightness-125",
         )}
-        title={readOnly ? `Type: ${meta.label}` : 'Change type'}
+        title={readOnly ? meta.label : 'Change type'}
       >
         <Icon className="w-3 h-3" />
-        {meta.label}
+        {showLabel && meta.label}
       </button>
       {open && onChange && (
-        <div className="absolute left-0 top-7 z-50 min-w-[140px] rounded-lg border border-glass-border bg-canvas-elevated shadow-lg p-1">
-          {(Object.keys(KIND_META) as ValueKind[]).map(k => {
-            const km = KIND_META[k]
-            const KIcon = km.icon
-            return (
-              <button
-                key={k}
-                onClick={() => { onChange(k); setOpen(false) }}
-                className={cn(
-                  "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-white/10 transition-colors",
-                  kind === k && "bg-white/5",
-                )}
-              >
-                <KIcon className="w-3.5 h-3.5" />
-                <span className="font-mono">{km.label}</span>
-                {kind === k && <Check className="w-3 h-3 ml-auto text-accent-lineage" />}
-              </button>
-            )
-          })}
+        <div className="absolute left-0 top-7 z-50 min-w-[200px] rounded-lg border border-glass-border bg-canvas-elevated shadow-lg p-1">
+          {COMMON_TYPES.map(renderOption)}
+          <div className="my-1 px-2 text-2xs uppercase tracking-wider text-ink-muted/70">Advanced</div>
+          {ADVANCED_TYPES.map(renderOption)}
         </div>
       )}
     </div>
@@ -1120,7 +956,7 @@ function PropertyComposer({
   prefixLabel?: string
 }) {
   const [key, setKey] = useState('')
-  const [kind, setKind] = useState<ValueKind>('string')
+  const [type, setType] = useState<FieldType>('text')
   const [draft, setDraft] = useState<unknown>('')
   const [modalOpen, setModalOpen] = useState(false)
 
@@ -1128,9 +964,9 @@ function PropertyComposer({
   const isDup = variant === 'object' && key.trim() !== '' && existingKeys.includes(candidateKey)
   const canSubmit = variant === 'array' || (key.trim() !== '' && !isDup)
 
-  const changeKind = (k: ValueKind) => {
-    setKind(k)
-    setDraft(defaultForKind(k))
+  const changeType = (t: FieldType) => {
+    setType(t)
+    setDraft(valueForType(t))
   }
 
   const submit = () => {
@@ -1147,9 +983,8 @@ function PropertyComposer({
       onKeyDown={onFormKeyDown}
       className="mt-2 rounded-xl bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm"
     >
-      {/* Row 1: type + key */}
+      {/* Row 1: name + type */}
       <div className="flex items-center gap-2">
-        <TypeChip kind={kind} onChange={changeKind} />
         {prefixLabel && (
           <span
             className="text-2xs font-mono text-ink-muted bg-white/5 rounded px-1.5 py-0.5 max-w-[140px] truncate flex-shrink-0"
@@ -1166,25 +1001,26 @@ function PropertyComposer({
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
             className={cn(
-              "flex-1 min-w-0 text-xs font-mono px-2 py-1.5 rounded-md bg-white/5 border outline-none",
+              "flex-1 min-w-0 text-sm px-2.5 py-1.5 rounded-md bg-white/5 border outline-none",
               isDup ? "border-red-500/40" : "border-white/10 focus:border-accent-lineage/50",
             )}
           />
         ) : (
-          <span className="flex-1 text-xs text-ink-muted">New {KIND_META[kind].label} item</span>
+          <span className="flex-1 text-xs text-ink-muted">New {FIELD_TYPE_META[type].label} item</span>
         )}
+        <FieldTypeChip fieldType={type} onChange={changeType} />
       </div>
 
       {isDup && (
         <p className="text-2xs text-red-500 pl-1">“{candidateKey}” already exists.</p>
       )}
 
-      {/* Row 2: value (adapts to kind) */}
+      {/* Row 2: value (adapts to the chosen type) */}
       <div className="flex items-center gap-2">
         <span className="text-2xs uppercase tracking-wider text-ink-muted w-10 flex-shrink-0">Value</span>
         <div className="flex-1 min-w-0">
           <ComposerValueField
-            kind={kind}
+            type={type}
             value={draft}
             onChange={setDraft}
             onExpand={() => setModalOpen(true)}
@@ -1217,8 +1053,8 @@ function PropertyComposer({
         </button>
       </div>
 
-      {modalOpen && kind === 'string' && (
-        <ValueModal
+      {modalOpen && type === 'text' && (
+        <MarkdownValueModal
           fieldLabel={candidateKey || 'new value'}
           value={String(draft ?? '')}
           onSave={(next) => { setDraft(next); setModalOpen(false) }}
@@ -1229,45 +1065,34 @@ function PropertyComposer({
   )
 }
 
-/** Inline value editor used inside the composer; adapts to the chosen kind. */
+/** Inline value editor used inside the composer; adapts to the chosen type. */
 function ComposerValueField({
-  kind,
+  type,
   value,
   onChange,
   onExpand,
   onEnter,
 }: {
-  kind: ValueKind
+  type: FieldType
   value: unknown
   onChange: (v: unknown) => void
   onExpand: () => void
   onEnter: () => void
 }) {
-  if (kind === 'null') {
-    return <span className="text-xs font-mono text-ink-muted italic">null</span>
+  if (type === 'none') {
+    return <span className="text-xs text-ink-muted italic">No value</span>
   }
-  if (kind === 'object' || kind === 'array') {
+  if (type === 'group' || type === 'list') {
     return (
       <span className="text-2xs text-ink-muted italic">
-        Empty {kind === 'object' ? '{ }' : '[ ]'} — add contents after creating
+        Empty {type === 'group' ? '{ }' : '[ ]'} — add contents after creating
       </span>
     )
   }
-  if (kind === 'boolean') {
-    const v = Boolean(value)
-    return (
-      <button
-        onClick={() => onChange(!v)}
-        className={cn(
-          "px-2.5 py-0.5 rounded-md text-xs font-medium transition-colors",
-          v ? "bg-emerald-500/15 text-emerald-500" : "bg-white/5 text-ink-muted",
-        )}
-      >
-        {v ? 'true' : 'false'}
-      </button>
-    )
+  if (type === 'boolean') {
+    return <BooleanToggle value={Boolean(value)} onChange={onChange} />
   }
-  if (kind === 'number') {
+  if (type === 'number') {
     return (
       <input
         type="number"
@@ -1278,7 +1103,16 @@ function ComposerValueField({
       />
     )
   }
-  // string
+  if (type === 'date') {
+    return <DateField value={String(value ?? '')} onChange={onChange} />
+  }
+  if (type === 'url') {
+    return <UrlField value={String(value ?? '')} onChange={onChange} />
+  }
+  if (type === 'tags') {
+    return <TagInput value={Array.isArray(value) ? (value as string[]) : []} onChange={onChange} />
+  }
+  // text
   return (
     <div className="flex items-center gap-1">
       <input
@@ -1593,6 +1427,7 @@ function GroupedObjectRoot({
   searchable?: boolean
 }) {
   const [flat, setFlat] = useState(false)
+  const [display, setDisplay] = useState<DisplayMode>('formatted')
   const [query, setQuery] = useState('')
   const [addingRoot, setAddingRoot] = useState(false)
 
@@ -1616,16 +1451,23 @@ function GroupedObjectRoot({
   const empty = entries.length === 0
 
   return (
+    <DisplayModeContext.Provider value={readOnly ? display : 'source'}>
     <div>
-      {/* Toolbar: search + Tree/Flat toggle */}
-      <div className="flex items-center gap-2 mb-2">
+      {/* Toolbar: search + Formatted/Source (view) + Tree/Flat toggles */}
+      <div className="flex items-center gap-2 mb-2 flex-wrap">
         {searchable && (
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-[8rem]">
             <SearchBox
               query={query}
               onChange={setQuery}
               placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
             />
+          </div>
+        )}
+        {readOnly && (
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
+            <ModalTab active={display === 'formatted'} onClick={() => setDisplay('formatted')} label="Formatted" />
+            <ModalTab active={display === 'source'} onClick={() => setDisplay('source')} label="Markdown" />
           </div>
         )}
         <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
@@ -1667,6 +1509,7 @@ function GroupedObjectRoot({
         </div>
       )}
     </div>
+    </DisplayModeContext.Provider>
   )
 }
 
