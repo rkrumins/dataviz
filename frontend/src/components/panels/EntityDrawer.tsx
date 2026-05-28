@@ -752,7 +752,7 @@ function ViewModeContent({
           used (editable) in Edit mode. */}
       <Section title="Properties" icon={LucideIcons.FileText}>
         {hasAdditional ? (
-          <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable bare />
+          <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable groupByPath bare />
         ) : (
           <p className="text-xs text-ink-muted italic">
             No properties yet. Switch to Edit to add metadata.
@@ -1002,6 +1002,7 @@ function EditModeContent({
           value={propertiesBag}
           onChange={(next) => onPropertiesChange(next as Record<string, any>)}
           searchable
+          groupByPath
           bare
         />
       </div>

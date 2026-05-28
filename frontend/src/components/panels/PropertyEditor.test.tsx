@@ -67,11 +67,13 @@ function Harness({
   onChange,
   readOnly,
   searchable,
+  groupByPath,
 }: {
   initial: Record<string, unknown>
   onChange?: (next: unknown) => void
   readOnly?: boolean
   searchable?: boolean
+  groupByPath?: boolean
 }) {
   const [value, setValue] = useState<unknown>(initial)
   return (
@@ -80,6 +82,7 @@ function Harness({
       onChange={(next) => { setValue(next); onChange?.(next) }}
       readOnly={readOnly}
       searchable={searchable}
+      groupByPath={groupByPath}
       bare
     />
   )
@@ -196,5 +199,132 @@ describe('PropertyEditor', () => {
     await user.click(within(ownerRow).getByTitle('Delete'))
 
     expect(onChange).toHaveBeenCalledWith({ region: 'us' })
+  })
+})
+
+describe('PropertyEditor — path grouping', () => {
+  const PATHS = { 'A/x': 1, 'A/y': 2, 'B/z': 3, top: 4 }
+
+  it('groups slash-delimited keys into folders plus root leaves', () => {
+    render(<Harness initial={PATHS} groupByPath />)
+    // Folder headers
+    expect(screen.getByText('A')).toBeInTheDocument()
+    expect(screen.getByText('B')).toBeInTheDocument()
+    // Root leaf shown directly
+    expect(screen.getByText('top')).toBeInTheDocument()
+    // Folder A reports 2 items
+    const folderA = screen.getByText('A').closest('.group') as HTMLElement
+    expect(within(folderA).getByText('2 items')).toBeInTheDocument()
+    // Leaves render by their last segment, expanded by default at depth 0
+    expect(screen.getByText('x')).toBeInTheDocument()
+    expect(screen.getByText('y')).toBeInTheDocument()
+  })
+
+  it('collapses and expands a folder', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={PATHS} groupByPath />)
+    expect(screen.getByText('x')).toBeInTheDocument()
+    const folderA = screen.getByText('A').closest('.group') as HTMLElement
+    await user.click(within(folderA).getByTitle('Collapse'))
+    expect(screen.queryByText('x')).not.toBeInTheDocument()
+  })
+
+  it('renames a folder by rewriting all child key prefixes', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={PATHS} groupByPath onChange={onChange} />)
+    const folderA = screen.getByText('A').closest('.group') as HTMLElement
+    await user.click(within(folderA).getByTitle(/click to rename folder/i))
+    const input = within(folderA).getByDisplayValue('A')
+    await user.clear(input)
+    await user.type(input, 'A2{Enter}')
+    expect(onChange).toHaveBeenCalledWith({ 'A2/x': 1, 'A2/y': 2, 'B/z': 3, top: 4 })
+  })
+
+  it('deletes a folder and all its keys after confirm', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={PATHS} groupByPath onChange={onChange} />)
+    const folderA = screen.getByText('A').closest('.group') as HTMLElement
+    await user.click(within(folderA).getByTitle(/Delete folder/i))
+    await user.click(within(folderA).getByTitle('Confirm delete'))
+    expect(onChange).toHaveBeenCalledWith({ 'B/z': 3, top: 4 })
+  })
+
+  it('adds a property scoped to a folder', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ 'B/z': 3 }} groupByPath onChange={onChange} />)
+    const folderB = screen.getByText('B').closest('.group') as HTMLElement
+    await user.click(within(folderB).getByTitle(/Add property in this folder/i))
+    await user.type(screen.getByPlaceholderText('key name'), 'w')
+    await user.click(screen.getByTitle('Add'))
+    expect(onChange).toHaveBeenCalledWith({ 'B/z': 3, 'B/w': '' })
+  })
+
+  it('renames a leaf without touching the folder prefix', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ 'A/x': 1 }} groupByPath onChange={onChange} />)
+    const leafRow = screen.getByText('x').closest('.group') as HTMLElement
+    await user.click(within(leafRow).getByTitle(/click to rename/i))
+    const input = within(leafRow).getByDisplayValue('x')
+    await user.clear(input)
+    await user.type(input, 'x1{Enter}')
+    expect(onChange).toHaveBeenCalledWith({ 'A/x1': 1 })
+  })
+
+  it('handles a key that is both a leaf and a folder (collision) without data loss', () => {
+    render(<Harness initial={{ Technical: 't', 'Technical/Path': 'p' }} groupByPath />)
+    // Folder header "Technical" + its inline own-value row share the label
+    expect(screen.getAllByText('Technical').length).toBeGreaterThanOrEqual(1)
+    // Its own value renders inline, plus the nested leaf
+    expect(screen.getByDisplayValue('t')).toBeInTheDocument()
+    expect(screen.getByText('Path')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('p')).toBeInTheDocument()
+  })
+
+  it('nests folders arbitrarily deep (expanding each level)', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={{ 'a/b/c/leaf': 1 }} groupByPath />)
+    expect(screen.getByText('a')).toBeInTheDocument() // depth 0 expanded
+    expect(screen.getByText('b')).toBeInTheDocument()
+    // Nested folders default to collapsed — expand to reveal deeper levels
+    await user.click(within(screen.getByText('b').closest('.group') as HTMLElement).getByTitle('Expand'))
+    expect(screen.getByText('c')).toBeInTheDocument()
+    await user.click(within(screen.getByText('c').closest('.group') as HTMLElement).getByTitle('Expand'))
+    expect(screen.getByText('leaf')).toBeInTheDocument()
+  })
+
+  it('search matches by full path and value and auto-expands', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={{ 'A/x': 'alpha', 'B/z': 'beta' }} groupByPath searchable />)
+    const search = screen.getByPlaceholderText(/Search 2 properties/i)
+    // Match by value text on the A/x row
+    await user.type(search, 'alpha')
+    expect(screen.getByText('A')).toBeInTheDocument()
+    expect(screen.getByText('x')).toBeInTheDocument()
+    expect(screen.queryByText('B')).not.toBeInTheDocument()
+  })
+
+  it('toggles between Tree and Flat rendering', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={{ 'A/x': 1 }} groupByPath searchable />)
+    // Tree: folder header present, no full-path key text
+    expect(screen.getByText('A')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Flat' }))
+    // Flat: the literal key is shown
+    expect(screen.getByText('A/x')).toBeInTheDocument()
+  })
+
+  it('preserves the original key for weird separators on delete', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ 'a//b': 1, keep: 2 }} groupByPath onChange={onChange} />)
+    // 'a//b' → segments ['a','b'] → folder a, leaf b — but the stored key is intact
+    const folderA = screen.getByText('a').closest('.group') as HTMLElement
+    await user.click(within(folderA).getByTitle(/Delete folder/i))
+    await user.click(within(folderA).getByTitle('Confirm delete'))
+    expect(onChange).toHaveBeenCalledWith({ keep: 2 })
   })
 })

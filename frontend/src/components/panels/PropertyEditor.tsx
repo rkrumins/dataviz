@@ -34,6 +34,9 @@ import {
   Search,
   Maximize2,
   Copy,
+  Folder,
+  FolderOpen,
+  FolderPlus,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
@@ -57,11 +60,17 @@ export interface PropertyEditorProps {
   readOnly?: boolean
   /** Show a search box at the root that filters top-level entries by key/value. */
   searchable?: boolean
+  /** Treat '/' in top-level keys as a folder path and render an expandable tree
+   *  (e.g. "Technical/Physical Path" → folder "Technical" → leaf "Physical Path").
+   *  Pure presentation: the stored object stays a flat string→value map. */
+  groupByPath?: boolean
 }
 
 const MAX_DEPTH = 6
 /** A string longer than this (or containing newlines) gets the expand affordance. */
 const LONG_VALUE_THRESHOLD = 120
+/** Separator that turns a flat key into a folder path. */
+const PATH_SEP = '/'
 
 // ============================================
 // Helpers
@@ -135,6 +144,7 @@ export function PropertyEditor({
   bare,
   readOnly,
   searchable,
+  groupByPath,
 }: PropertyEditorProps) {
   const rootKind = kindOf(value)
 
@@ -142,6 +152,18 @@ export function PropertyEditor({
   // In practice we always pass an object from EntityDrawer, but keep this safe.
   if (rootKind !== 'object' && rootKind !== 'array') {
     return <PrimitiveValueEditor value={value} onChange={onChange} readOnly={readOnly} />
+  }
+
+  if (rootKind === 'object' && groupByPath) {
+    return (
+      <GroupedObjectRoot
+        value={value as Record<string, unknown>}
+        onChange={onChange as (v: Record<string, unknown>) => void}
+        readOnlyKeys={readOnlyKeys}
+        readOnly={readOnly}
+        searchable={searchable}
+      />
+    )
   }
 
   if (rootKind === 'array') {
@@ -221,12 +243,18 @@ interface ObjectBodyProps {
   bare?: boolean
   readOnly?: boolean
   searchable?: boolean
+  /** When provided, filter by this query instead of rendering an own SearchBox.
+   *  Used by GroupedObjectRoot's Flat view so one search box drives both modes. */
+  externalQuery?: string
 }
 
-function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, searchable }: ObjectBodyProps) {
+function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, searchable, externalQuery }: ObjectBodyProps) {
   const [adding, setAdding] = useState(false)
-  const [query, setQuery] = useState('')
-  const isSearchRoot = depth === 0 && !!searchable
+  const [ownQuery, setOwnQuery] = useState('')
+  const usesExternalQuery = externalQuery !== undefined
+  const isSearchRoot = depth === 0 && !!searchable && !usesExternalQuery
+  const query = usesExternalQuery ? externalQuery! : ownQuery
+  const setQuery = setOwnQuery
   const entries = Object.entries(value)
 
   const filteredEntries = useMemo(() => {
@@ -304,7 +332,7 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
             onDelete={() => deleteKey(key)}
           />
         ))}
-        {isSearchRoot && query.trim() && filteredEntries.length === 0 && (
+        {(isSearchRoot || usesExternalQuery) && query.trim() && filteredEntries.length === 0 && (
           <div className="text-xs text-ink-muted px-2 py-3">
             No properties match “{query.trim()}”.
           </div>
@@ -1077,16 +1105,20 @@ function AddRow({
   onCancel,
   existingKeys,
   variant,
+  prefixLabel,
 }: {
   onAdd: (key: string, kind: ValueKind) => void
   onCancel: () => void
   existingKeys: string[]
   variant: 'object' | 'array'
+  /** Read-only path chip shown before the key input (folder-scoped add). */
+  prefixLabel?: string
 }) {
   const [key, setKey] = useState('')
   const [kind, setKind] = useState<ValueKind>('string')
 
-  const isDup = variant === 'object' && existingKeys.includes(key.trim())
+  const candidateKey = prefixLabel ? `${prefixLabel}/${key.trim()}` : key.trim()
+  const isDup = variant === 'object' && existingKeys.includes(candidateKey)
   const canSubmit = variant === 'array' || (key.trim() !== '' && !isDup)
 
   const submit = () => {
@@ -1098,6 +1130,14 @@ function AddRow({
   return (
     <div className="flex items-center gap-2 py-1.5 px-2 mt-1.5 rounded-lg bg-white/[0.03] border border-accent-lineage/20">
       <TypeChip kind={kind} onChange={setKind} />
+      {prefixLabel && (
+        <span
+          className="text-2xs font-mono text-ink-muted bg-white/5 rounded px-1.5 py-0.5 max-w-[120px] truncate flex-shrink-0"
+          title={prefixLabel}
+        >
+          {prefixLabel}/
+        </span>
+      )}
       {variant === 'object' && (
         <input
           autoFocus
@@ -1249,6 +1289,471 @@ function RawJsonEditor({
         </motion.div>
       </motion.div>
     </AnimatePresence>
+  )
+}
+
+// ============================================
+// Path-grouping — virtual folders over a FLAT key→value map
+//
+// The stored object is never reshaped: every leaf carries its original flat
+// key verbatim, and all mutations operate on that flat object. Splitting on
+// '/' is purely for display. Only KEYS are split — values are untouched.
+// ============================================
+
+interface Leaf { fullKey: string; value: unknown }
+interface TreeNode {
+  name: string          // last path segment (display label)
+  path: string          // full folder path up to and including `name`
+  own?: Leaf            // a flat key exactly equal to this folder's path (collision)
+  folders: TreeNode[]
+  leaves: Leaf[]
+}
+
+function leafLabel(fullKey: string): string {
+  const segs = fullKey.split(PATH_SEP).filter(Boolean)
+  return segs.length ? segs[segs.length - 1] : fullKey
+}
+
+/** Build the display tree from flat entries, preserving first-seen order. */
+function buildPathTree(entries: [string, unknown][]): { folders: TreeNode[]; leaves: Leaf[] } {
+  const rootFolders: TreeNode[] = []
+  const rootLeaves: Leaf[] = []
+  const index = new Map<string, TreeNode>()
+
+  for (const [key, value] of entries) {
+    const segments = key.split(PATH_SEP).filter((s) => s.length > 0)
+    if (segments.length <= 1) {
+      rootLeaves.push({ fullKey: key, value })
+      continue
+    }
+    let siblings = rootFolders
+    let parentPath = ''
+    let node: TreeNode | null = null
+    for (let i = 0; i < segments.length - 1; i++) {
+      const seg = segments[i]
+      const path = parentPath ? `${parentPath}${PATH_SEP}${seg}` : seg
+      let next = index.get(path)
+      if (!next) {
+        next = { name: seg, path, folders: [], leaves: [] }
+        index.set(path, next)
+        siblings.push(next)
+      }
+      siblings = next.folders
+      parentPath = path
+      node = next
+    }
+    node!.leaves.push({ fullKey: key, value })
+  }
+
+  // Collision pass: a flat key equal to a folder path becomes that folder's
+  // own value (rendered inline), so nothing is hidden or lost.
+  const resolve = (leaves: Leaf[]): Leaf[] => {
+    const kept: Leaf[] = []
+    for (const leaf of leaves) {
+      const folder = index.get(leaf.fullKey)
+      if (folder) folder.own = leaf
+      else kept.push(leaf)
+    }
+    return kept
+  }
+  const resolvedRootLeaves = resolve(rootLeaves)
+  for (const node of index.values()) node.leaves = resolve(node.leaves)
+
+  return { folders: rootFolders, leaves: resolvedRootLeaves }
+}
+
+function countLeaves(node: TreeNode): number {
+  let n = (node.own ? 1 : 0) + node.leaves.length
+  for (const f of node.folders) n += countLeaves(f)
+  return n
+}
+
+// --- Flat mutation helpers (order-preserving) ---
+
+function setKeyValue(obj: Record<string, unknown>, key: string, v: unknown): Record<string, unknown> {
+  return { ...obj, [key]: v }
+}
+
+function renameKey(obj: Record<string, unknown>, oldKey: string, newKey: string): Record<string, unknown> {
+  if (oldKey === newKey || !newKey.trim()) return obj
+  if (Object.prototype.hasOwnProperty.call(obj, newKey)) return obj
+  const next: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) next[k === oldKey ? newKey : k] = v
+  return next
+}
+
+function deleteKey(obj: Record<string, unknown>, key: string): Record<string, unknown> {
+  const { [key]: _removed, ...rest } = obj
+  return rest
+}
+
+function renamePrefix(obj: Record<string, unknown>, oldPrefix: string, newPrefix: string): Record<string, unknown> {
+  if (oldPrefix === newPrefix || !newPrefix.trim()) return obj
+  const mapped: Array<[string, unknown, string]> = []
+  for (const [k, v] of Object.entries(obj)) {
+    let nk = k
+    if (k === oldPrefix) nk = newPrefix
+    else if (k.startsWith(oldPrefix + PATH_SEP)) nk = newPrefix + k.slice(oldPrefix.length)
+    mapped.push([nk, v, k])
+  }
+  // Abort if a renamed key would collide with an untouched key.
+  const unchanged = new Set(mapped.filter(([nk, , k]) => nk === k).map(([nk]) => nk))
+  for (const [nk, , k] of mapped) {
+    if (nk !== k && unchanged.has(nk)) return obj
+  }
+  const next: Record<string, unknown> = {}
+  for (const [nk, v] of mapped) next[nk] = v
+  return next
+}
+
+function deletePrefix(obj: Record<string, unknown>, prefix: string): Record<string, unknown> {
+  const next: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === prefix || k.startsWith(prefix + PATH_SEP)) continue
+    next[k] = v
+  }
+  return next
+}
+
+function addUnder(obj: Record<string, unknown>, prefix: string, name: string, kind: ValueKind): Record<string, unknown> {
+  if (!name.trim()) return obj
+  const key = prefix ? `${prefix}${PATH_SEP}${name.trim()}` : name.trim()
+  if (Object.prototype.hasOwnProperty.call(obj, key)) return obj
+  return { ...obj, [key]: defaultForKind(kind) }
+}
+
+interface FlatApi {
+  updateValue: (fullKey: string, v: unknown) => void
+  renameLeaf: (fullKey: string, parentPath: string, newSegment: string) => void
+  deleteKey: (fullKey: string) => void
+  renameFolder: (oldPath: string, newPath: string) => void
+  deleteFolder: (path: string) => void
+  addUnder: (prefix: string, name: string, kind: ValueKind) => void
+  existingKeys: () => string[]
+}
+
+// ============================================
+// GroupedObjectRoot — Tree/Flat toggle + search over a flat key map
+// ============================================
+
+function pruneTree(
+  folders: TreeNode[],
+  leaves: Leaf[],
+  q: string,
+): { folders: TreeNode[]; leaves: Leaf[] } {
+  const leafMatch = (l: Leaf) => l.fullKey.toLowerCase().includes(q) || searchableText(l.value).includes(q)
+  const pruneNode = (node: TreeNode): TreeNode | null => {
+    if (node.name.toLowerCase().includes(q)) return node // name hit → keep whole subtree
+    const subFolders = node.folders.map(pruneNode).filter(Boolean) as TreeNode[]
+    const subLeaves = node.leaves.filter(leafMatch)
+    const own = node.own && leafMatch(node.own) ? node.own : undefined
+    if (subFolders.length || subLeaves.length || own) {
+      return { ...node, folders: subFolders, leaves: subLeaves, own }
+    }
+    return null
+  }
+  return {
+    folders: folders.map(pruneNode).filter(Boolean) as TreeNode[],
+    leaves: leaves.filter(leafMatch),
+  }
+}
+
+function GroupedObjectRoot({
+  value,
+  onChange,
+  readOnlyKeys,
+  readOnly,
+  searchable,
+}: {
+  value: Record<string, unknown>
+  onChange: (next: Record<string, unknown>) => void
+  readOnlyKeys?: string[]
+  readOnly?: boolean
+  searchable?: boolean
+}) {
+  const [flat, setFlat] = useState(false)
+  const [query, setQuery] = useState('')
+  const [addingRoot, setAddingRoot] = useState(false)
+
+  const entries = Object.entries(value)
+  const tree = useMemo(() => buildPathTree(entries), [value])
+
+  const api: FlatApi = useMemo(() => ({
+    updateValue: (fullKey, v) => onChange(setKeyValue(value, fullKey, v)),
+    renameLeaf: (fullKey, parentPath, newSegment) =>
+      onChange(renameKey(value, fullKey, parentPath ? `${parentPath}${PATH_SEP}${newSegment}` : newSegment)),
+    deleteKey: (fullKey) => onChange(deleteKey(value, fullKey)),
+    renameFolder: (oldPath, newPath) => onChange(renamePrefix(value, oldPath, newPath)),
+    deleteFolder: (path) => onChange(deletePrefix(value, path)),
+    addUnder: (prefix, name, kind) => onChange(addUnder(value, prefix, name, kind)),
+    existingKeys: () => Object.keys(value),
+  }), [value, onChange])
+
+  const q = query.trim().toLowerCase()
+  const visible = useMemo(() => (q ? pruneTree(tree.folders, tree.leaves, q) : tree), [tree, q])
+
+  const empty = entries.length === 0
+
+  return (
+    <div>
+      {/* Toolbar: search + Tree/Flat toggle */}
+      <div className="flex items-center gap-2 mb-2">
+        {searchable && (
+          <div className="flex-1 min-w-0">
+            <SearchBox
+              query={query}
+              onChange={setQuery}
+              placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
+            />
+          </div>
+        )}
+        <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
+          <ModalTab active={!flat} onClick={() => setFlat(false)} label="Tree" />
+          <ModalTab active={flat} onClick={() => setFlat(true)} label="Flat" />
+        </div>
+      </div>
+
+      {flat ? (
+        <ObjectBody
+          value={value}
+          onChange={onChange}
+          readOnlyKeys={readOnlyKeys}
+          depth={0}
+          bare
+          readOnly={readOnly}
+          externalQuery={searchable ? query : undefined}
+        />
+      ) : empty ? (
+        readOnly ? (
+          <div className="text-xs text-ink-muted italic px-2 py-2">No properties</div>
+        ) : (
+          <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} />
+        )
+      ) : (
+        <div className="space-y-1">
+          {visible.folders.map((node) => (
+            <FolderGroup key={node.path} node={node} depth={0} readOnly={readOnly} query={q} forceExpand={!!q} api={api} />
+          ))}
+          {visible.leaves.map((leaf) => (
+            <LeafRow key={leaf.fullKey} leaf={leaf} parentPath="" depth={0} readOnly={readOnly} query={q} api={api} />
+          ))}
+          {q && visible.folders.length === 0 && visible.leaves.length === 0 && (
+            <div className="text-xs text-ink-muted px-2 py-3">No properties match “{query.trim()}”.</div>
+          )}
+          {!readOnly && !q && (
+            <RootAdder api={api} adding={addingRoot} setAdding={setAddingRoot} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RootAdder({ api, adding, setAdding }: { api: FlatApi; adding: boolean; setAdding: (b: boolean) => void }) {
+  return adding ? (
+    <AddRow
+      onAdd={(name, kind) => { api.addUnder('', name, kind); setAdding(false) }}
+      onCancel={() => setAdding(false)}
+      existingKeys={api.existingKeys()}
+      variant="object"
+    />
+  ) : (
+    <button
+      onClick={() => setAdding(true)}
+      className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1.5 ml-1"
+    >
+      <Plus className="w-3.5 h-3.5" />
+      Add property
+    </button>
+  )
+}
+
+// ============================================
+// LeafRow — a single flat key rendered via PropertyRow, path-aware callbacks
+// ============================================
+
+function LeafRow({
+  leaf,
+  parentPath,
+  depth,
+  readOnly,
+  query,
+  api,
+}: {
+  leaf: Leaf
+  parentPath: string
+  depth: number
+  readOnly?: boolean
+  query: string
+  api: FlatApi
+}) {
+  return (
+    <PropertyRow
+      rowKey={leafLabel(leaf.fullKey)}
+      value={leaf.value}
+      depth={depth}
+      readOnly={readOnly}
+      query={query}
+      onKeyChange={(seg) => api.renameLeaf(leaf.fullKey, parentPath, seg)}
+      onValueChange={(v) => api.updateValue(leaf.fullKey, v)}
+      onDelete={() => api.deleteKey(leaf.fullKey)}
+    />
+  )
+}
+
+// ============================================
+// FolderGroup — expandable folder header + recursive children
+// ============================================
+
+function FolderGroup({
+  node,
+  depth,
+  readOnly,
+  query,
+  forceExpand,
+  api,
+}: {
+  node: TreeNode
+  depth: number
+  readOnly?: boolean
+  query: string
+  forceExpand?: boolean
+  api: FlatApi
+}) {
+  const [expanded, setExpanded] = useState(depth < 1)
+  const [editingName, setEditingName] = useState(false)
+  const [nameDraft, setNameDraft] = useState(node.name)
+  const [adding, setAdding] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  useEffect(() => { setNameDraft(node.name) }, [node.name])
+
+  const isOpen = forceExpand || expanded
+  const parentPath = node.path.includes(PATH_SEP) ? node.path.slice(0, node.path.lastIndexOf(PATH_SEP)) : ''
+  const count = countLeaves(node)
+
+  const commitName = () => {
+    setEditingName(false)
+    const next = nameDraft.trim()
+    if (next && next !== node.name && !next.includes(PATH_SEP)) {
+      api.renameFolder(node.path, parentPath ? `${parentPath}${PATH_SEP}${next}` : next)
+    } else {
+      setNameDraft(node.name)
+    }
+  }
+
+  const FolderIcon = isOpen ? FolderOpen : Folder
+
+  return (
+    <div className="group">
+      <div className="flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-white/[0.04] transition-colors">
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          disabled={forceExpand}
+          className="w-5 h-5 flex items-center justify-center text-ink-muted hover:text-ink flex-shrink-0"
+          title={isOpen ? 'Collapse' : 'Expand'}
+        >
+          {isOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </button>
+        <FolderIcon className="w-4 h-4 text-amber-500 flex-shrink-0" />
+
+        {/* Folder name (inline-renamable) */}
+        <div className="basis-[140px] flex-shrink min-w-0 flex items-center">
+          {readOnly ? (
+            <span className="text-xs font-semibold text-ink truncate" title={node.path}>
+              <HighlightedText text={node.name} query={query} />
+            </span>
+          ) : editingName ? (
+            <input
+              autoFocus
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={commitName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitName()
+                if (e.key === 'Escape') { setNameDraft(node.name); setEditingName(false) }
+              }}
+              className="text-xs font-semibold px-1.5 py-0.5 rounded bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
+            />
+          ) : (
+            <button
+              onClick={() => setEditingName(true)}
+              className="text-xs font-semibold text-ink hover:text-accent-lineage truncate text-left max-w-full"
+              title={`${node.path} — click to rename folder`}
+            >
+              <HighlightedText text={node.name} query={query} />
+            </button>
+          )}
+        </div>
+
+        <span className="text-2xs text-ink-muted flex-1">{count} {count === 1 ? 'item' : 'items'}</span>
+
+        {/* Folder actions */}
+        {!readOnly && (
+          <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+            <button
+              onClick={() => { setAdding(true); setExpanded(true) }}
+              className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-white/10"
+              title="Add property in this folder"
+            >
+              <FolderPlus className="w-3 h-3" />
+            </button>
+            {confirmDelete ? (
+              <button
+                onClick={() => api.deleteFolder(node.path)}
+                onBlur={() => setConfirmDelete(false)}
+                autoFocus
+                className="px-1.5 h-6 flex items-center justify-center rounded text-2xs font-medium text-red-500 bg-red-500/10 hover:bg-red-500/20"
+                title="Confirm delete"
+              >
+                Delete {count}?
+              </button>
+            ) : (
+              <button
+                onClick={() => setConfirmDelete(true)}
+                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10"
+                title="Delete folder and all its properties"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {isOpen && (
+        <div className="ml-5 pl-3 border-l border-glass-border/40 space-y-1">
+          {node.own && (
+            <LeafRow leaf={node.own} parentPath={parentPath} depth={depth + 1} readOnly={readOnly} query={query} api={api} />
+          )}
+          {node.folders.map((child) => (
+            <FolderGroup key={child.path} node={child} depth={depth + 1} readOnly={readOnly} query={query} forceExpand={forceExpand} api={api} />
+          ))}
+          {node.leaves.map((leaf) => (
+            <LeafRow key={leaf.fullKey} leaf={leaf} parentPath={node.path} depth={depth + 1} readOnly={readOnly} query={query} api={api} />
+          ))}
+          {!readOnly && (
+            adding ? (
+              <AddRow
+                onAdd={(name, kind) => { api.addUnder(node.path, name, kind); setAdding(false) }}
+                onCancel={() => setAdding(false)}
+                existingKeys={api.existingKeys()}
+                variant="object"
+                prefixLabel={node.path}
+              />
+            ) : (
+              <button
+                onClick={() => setAdding(true)}
+                className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1 ml-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add property
+              </button>
+            )
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
