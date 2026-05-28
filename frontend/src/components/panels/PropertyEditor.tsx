@@ -1,14 +1,20 @@
 /**
  * PropertyEditor — recursive CRUD editor for arbitrary JSON values.
  *
- * Drives the nested-property editing surface inside EntityDrawer's Edit mode.
- * Pure controlled component: parent owns the value, this component emits a new
- * deep-cloned value on every mutation so referential equality checks in staging
- * stores see a real change.
+ * Drives the nested-property editing surface inside EntityDrawer's View and
+ * Edit modes. Pure controlled component: parent owns the value, this component
+ * emits a new deep-cloned value on every mutation so referential equality
+ * checks in staging stores see a real change.
+ *
+ * Layout: every row uses the same two-column grid (key | value) regardless of
+ * value type or length, so rows align consistently. Long string values clamp
+ * to a few lines and can be opened in a Markdown editor/preview modal.
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   ChevronDown,
   ChevronRight,
@@ -25,8 +31,13 @@ import {
   CircleDashed,
   Braces,
   Brackets,
+  Search,
+  Maximize2,
+  Copy,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HighlightedText } from '@/components/ui/HighlightedText'
+import { markdownComponents } from '@/components/docs/MarkdownComponents'
 
 // ============================================
 // Types
@@ -41,9 +52,16 @@ export interface PropertyEditorProps {
   readOnlyKeys?: string[]
   /** Hide the outer card chrome — useful when embedded directly in a parent section. */
   bare?: boolean
+  /** Render every value/key as non-editable. Navigation (expand/collapse,
+   *  search, copy, open-in-modal-to-read) still works. Used in View mode. */
+  readOnly?: boolean
+  /** Show a search box at the root that filters top-level entries by key/value. */
+  searchable?: boolean
 }
 
 const MAX_DEPTH = 6
+/** A string longer than this (or containing newlines) gets the expand affordance. */
+const LONG_VALUE_THRESHOLD = 120
 
 // ============================================
 // Helpers
@@ -88,6 +106,15 @@ function defaultForKind(kind: ValueKind): unknown {
   }
 }
 
+/** Flat, lowercase text used to test a row against the search query. */
+function searchableText(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value).toLowerCase() } catch { return '' }
+  }
+  return String(value).toLowerCase()
+}
+
 const KIND_META: Record<ValueKind, { label: string; icon: typeof TypeIcon; tone: string }> = {
   string: { label: 'str', icon: TypeIcon, tone: 'text-blue-500 bg-blue-500/10' },
   number: { label: 'num', icon: Hash, tone: 'text-purple-500 bg-purple-500/10' },
@@ -101,18 +128,20 @@ const KIND_META: Record<ValueKind, { label: string; icon: typeof TypeIcon; tone:
 // Root
 // ============================================
 
-export function PropertyEditor({ value, onChange, readOnlyKeys, bare }: PropertyEditorProps) {
+export function PropertyEditor({
+  value,
+  onChange,
+  readOnlyKeys,
+  bare,
+  readOnly,
+  searchable,
+}: PropertyEditorProps) {
   const rootKind = kindOf(value)
 
   // If the root isn't an object/array, render a single value editor.
   // In practice we always pass an object from EntityDrawer, but keep this safe.
   if (rootKind !== 'object' && rootKind !== 'array') {
-    return (
-      <PrimitiveValueEditor
-        value={value}
-        onChange={onChange}
-      />
-    )
+    return <PrimitiveValueEditor value={value} onChange={onChange} readOnly={readOnly} />
   }
 
   if (rootKind === 'array') {
@@ -122,6 +151,8 @@ export function PropertyEditor({ value, onChange, readOnlyKeys, bare }: Property
         onChange={onChange as (v: unknown[]) => void}
         depth={0}
         bare={bare}
+        readOnly={readOnly}
+        searchable={searchable}
       />
     )
   }
@@ -133,7 +164,48 @@ export function PropertyEditor({ value, onChange, readOnlyKeys, bare }: Property
       readOnlyKeys={readOnlyKeys}
       depth={0}
       bare={bare}
+      readOnly={readOnly}
+      searchable={searchable}
     />
+  )
+}
+
+// ============================================
+// SearchBox — root-level key/value filter
+// ============================================
+
+function SearchBox({
+  query,
+  onChange,
+  placeholder,
+}: {
+  query: string
+  onChange: (q: string) => void
+  placeholder: string
+}) {
+  return (
+    <div className="relative mb-2">
+      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted pointer-events-none" />
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={cn(
+          "w-full pl-8 pr-7 py-1.5 rounded-lg bg-white/5 border border-white/10 text-xs",
+          "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
+        )}
+      />
+      {query && (
+        <button
+          onClick={() => onChange('')}
+          className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 flex items-center justify-center rounded text-ink-muted hover:text-ink"
+          title="Clear search"
+        >
+          <XIcon className="w-3 h-3" />
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -147,11 +219,21 @@ interface ObjectBodyProps {
   readOnlyKeys?: string[]
   depth: number
   bare?: boolean
+  readOnly?: boolean
+  searchable?: boolean
 }
 
-function ObjectBody({ value, onChange, readOnlyKeys, depth, bare }: ObjectBodyProps) {
+function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, searchable }: ObjectBodyProps) {
   const [adding, setAdding] = useState(false)
+  const [query, setQuery] = useState('')
+  const isSearchRoot = depth === 0 && !!searchable
   const entries = Object.entries(value)
+
+  const filteredEntries = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return entries
+    return entries.filter(([k, v]) => k.toLowerCase().includes(q) || searchableText(v).includes(q))
+  }, [entries, query])
 
   const updateKey = useCallback((oldKey: string, newKey: string) => {
     if (oldKey === newKey || !newKey.trim()) return
@@ -180,7 +262,12 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare }: ObjectBodyPr
     setAdding(false)
   }, [value, onChange])
 
+  // Empty object: in read-only mode show a muted placeholder; in edit mode
+  // offer the add affordance.
   if (entries.length === 0 && !adding) {
+    if (readOnly) {
+      return <div className="text-xs text-ink-muted italic px-2 py-2">No properties</div>
+    }
     return (
       <div className={cn(!bare && "rounded-lg border border-glass-border/40 bg-black/5 dark:bg-white/[0.02] px-3 py-3")}>
         <button
@@ -195,37 +282,51 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare }: ObjectBodyPr
   }
 
   return (
-    <div className={cn(
-      "space-y-1",
-      depth > 0 && "pl-3 border-l border-glass-border/40 ml-1.5",
-    )}>
-      {entries.map(([key, v]) => (
-        <PropertyRow
-          key={key}
-          rowKey={key}
-          value={v}
-          readOnly={depth === 0 && readOnlyKeys?.includes(key)}
-          depth={depth}
-          onKeyChange={(nk) => updateKey(key, nk)}
-          onValueChange={(nv) => updateValue(key, nv)}
-          onDelete={() => deleteKey(key)}
+    <div className={cn(depth > 0 && "pl-3 border-l border-glass-border/40 ml-1.5")}>
+      {isSearchRoot && (
+        <SearchBox
+          query={query}
+          onChange={setQuery}
+          placeholder={`Search ${entries.length} ${entries.length === 1 ? 'property' : 'properties'}…`}
         />
-      ))}
-      {adding ? (
-        <AddRow
-          onAdd={addKey}
-          onCancel={() => setAdding(false)}
-          existingKeys={Object.keys(value)}
-          variant="object"
-        />
-      ) : (
-        <button
-          onClick={() => setAdding(true)}
-          className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1.5 ml-1"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Add property
-        </button>
+      )}
+      <div className="space-y-1">
+        {filteredEntries.map(([key, v]) => (
+          <PropertyRow
+            key={key}
+            rowKey={key}
+            value={v}
+            readOnly={readOnly || (depth === 0 && readOnlyKeys?.includes(key))}
+            depth={depth}
+            query={isSearchRoot ? query : ''}
+            onKeyChange={(nk) => updateKey(key, nk)}
+            onValueChange={(nv) => updateValue(key, nv)}
+            onDelete={() => deleteKey(key)}
+          />
+        ))}
+        {isSearchRoot && query.trim() && filteredEntries.length === 0 && (
+          <div className="text-xs text-ink-muted px-2 py-3">
+            No properties match “{query.trim()}”.
+          </div>
+        )}
+      </div>
+      {!readOnly && (
+        adding ? (
+          <AddRow
+            onAdd={addKey}
+            onCancel={() => setAdding(false)}
+            existingKeys={Object.keys(value)}
+            variant="object"
+          />
+        ) : (
+          <button
+            onClick={() => setAdding(true)}
+            className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1.5 ml-1"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add property
+          </button>
+        )
       )}
     </div>
   )
@@ -240,17 +341,27 @@ interface ArrayBodyProps {
   onChange: (next: unknown[]) => void
   depth: number
   bare?: boolean
+  readOnly?: boolean
+  searchable?: boolean
 }
 
-function ArrayBody({ value, onChange, depth, bare }: ArrayBodyProps) {
+function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: ArrayBodyProps) {
   const [adding, setAdding] = useState(false)
+  const [query, setQuery] = useState('')
+  const isSearchRoot = depth === 0 && !!searchable
 
   // Reorder.Group needs stable item identities — we use string keys derived from
-  // index + a per-render salt. To keep DnD stable, attach a refsalt-based key.
+  // index. To keep DnD stable, attach an index-based key.
   const keyedItems = useMemo(
-    () => value.map((v, i) => ({ id: `${i}`, value: v })),
+    () => value.map((v, i) => ({ id: `${i}`, value: v, index: i })),
     [value],
   )
+
+  const visibleItems = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return keyedItems
+    return keyedItems.filter((item) => searchableText(item.value).includes(q))
+  }, [keyedItems, query])
 
   const updateAt = useCallback((index: number, newValue: unknown) => {
     const next = value.slice()
@@ -272,6 +383,9 @@ function ArrayBody({ value, onChange, depth, bare }: ArrayBodyProps) {
   }, [onChange])
 
   if (value.length === 0 && !adding) {
+    if (readOnly) {
+      return <div className="text-xs text-ink-muted italic px-2 py-2">No items</div>
+    }
     return (
       <div className={cn(!bare && "rounded-lg border border-glass-border/40 bg-black/5 dark:bg-white/[0.02] px-3 py-3")}>
         <button
@@ -285,44 +399,73 @@ function ArrayBody({ value, onChange, depth, bare }: ArrayBodyProps) {
     )
   }
 
+  // While searching or in read-only mode, drag-reorder is disabled — render a
+  // plain list so the displayed order matches the source array.
+  const canReorder = !readOnly && !(isSearchRoot && query.trim())
+
   return (
-    <div className={cn(
-      "space-y-1",
-      depth > 0 && "pl-3 border-l border-glass-border/40 ml-1.5",
-    )}>
-      <Reorder.Group axis="y" values={keyedItems} onReorder={handleReorder} className="space-y-1">
-        {keyedItems.map((item, index) => (
-          <Reorder.Item
-            key={item.id}
-            value={item}
-            className="list-none"
-          >
+    <div className={cn(depth > 0 && "pl-3 border-l border-glass-border/40 ml-1.5")}>
+      {isSearchRoot && (
+        <SearchBox
+          query={query}
+          onChange={setQuery}
+          placeholder={`Search ${value.length} ${value.length === 1 ? 'item' : 'items'}…`}
+        />
+      )}
+      {canReorder ? (
+        <Reorder.Group axis="y" values={keyedItems} onReorder={handleReorder} className="space-y-1">
+          {keyedItems.map((item) => (
+            <Reorder.Item key={item.id} value={item} className="list-none">
+              <PropertyRow
+                rowKey={`[${item.index}]`}
+                value={item.value}
+                depth={depth}
+                isArrayItem
+                onValueChange={(nv) => updateAt(item.index, nv)}
+                onDelete={() => deleteAt(item.index)}
+              />
+            </Reorder.Item>
+          ))}
+        </Reorder.Group>
+      ) : (
+        <div className="space-y-1">
+          {visibleItems.map((item) => (
             <PropertyRow
-              rowKey={`[${index}]`}
+              key={item.id}
+              rowKey={`[${item.index}]`}
               value={item.value}
               depth={depth}
               isArrayItem
-              onValueChange={(nv) => updateAt(index, nv)}
-              onDelete={() => deleteAt(index)}
+              readOnly={readOnly}
+              query={isSearchRoot ? query : ''}
+              onValueChange={(nv) => updateAt(item.index, nv)}
+              onDelete={() => deleteAt(item.index)}
             />
-          </Reorder.Item>
-        ))}
-      </Reorder.Group>
-      {adding ? (
-        <AddRow
-          onAdd={addItem}
-          onCancel={() => setAdding(false)}
-          existingKeys={[]}
-          variant="array"
-        />
-      ) : (
-        <button
-          onClick={() => setAdding(true)}
-          className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1.5 ml-1"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Add item
-        </button>
+          ))}
+          {isSearchRoot && query.trim() && visibleItems.length === 0 && (
+            <div className="text-xs text-ink-muted px-2 py-3">
+              No items match “{query.trim()}”.
+            </div>
+          )}
+        </div>
+      )}
+      {!readOnly && (
+        adding ? (
+          <AddRow
+            onAdd={addItem}
+            onCancel={() => setAdding(false)}
+            existingKeys={[]}
+            variant="array"
+          />
+        ) : (
+          <button
+            onClick={() => setAdding(true)}
+            className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors mt-1.5 ml-1"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            Add item
+          </button>
+        )
       )}
     </div>
   )
@@ -338,6 +481,7 @@ interface PropertyRowProps {
   readOnly?: boolean
   isArrayItem?: boolean
   depth: number
+  query?: string
   onKeyChange?: (newKey: string) => void
   onValueChange: (newValue: unknown) => void
   onDelete: () => void
@@ -349,6 +493,7 @@ function PropertyRow({
   readOnly,
   isArrayItem,
   depth,
+  query = '',
   onKeyChange,
   onValueChange,
   onDelete,
@@ -378,11 +523,11 @@ function PropertyRow({
   return (
     <div className="group">
       <div className={cn(
-        "flex items-center gap-2 py-1.5 px-2 rounded-lg",
+        "flex items-start gap-2 py-1.5 px-2 rounded-lg",
         "hover:bg-white/[0.03] transition-colors",
       )}>
         {/* Expand / drag handle */}
-        <div className="flex items-center w-5 flex-shrink-0">
+        <div className="flex items-center h-6 w-5 flex-shrink-0">
           {isContainer ? (
             <button
               onClick={() => setExpanded(e => !e)}
@@ -391,7 +536,7 @@ function PropertyRow({
             >
               {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
             </button>
-          ) : isArrayItem ? (
+          ) : isArrayItem && !readOnly ? (
             <GripVertical className="w-3.5 h-3.5 text-ink-muted/40 cursor-grab" />
           ) : (
             <span className="w-5" />
@@ -399,16 +544,18 @@ function PropertyRow({
         </div>
 
         {/* Type chip */}
-        <TypeChip kind={kind} readOnly={readOnly} onChange={readOnly ? undefined : changeKind} />
+        <div className="h-6 flex items-center flex-shrink-0">
+          <TypeChip kind={kind} readOnly={readOnly} onChange={readOnly ? undefined : changeKind} />
+        </div>
 
-        {/* Key */}
-        <div className="min-w-0 flex-1 flex items-center gap-2">
+        {/* Key column — fixed basis so rows align consistently */}
+        <div className="basis-[132px] flex-shrink-0 min-w-0 h-6 flex items-center">
           {isArrayItem ? (
-            <span className="text-xs font-mono text-ink-muted">{rowKey}</span>
+            <span className="text-xs font-mono text-ink-muted truncate">{rowKey}</span>
           ) : readOnly ? (
             <span className="flex items-center gap-1.5 text-xs font-mono text-ink-muted truncate" title={rowKey}>
               <Lock className="w-3 h-3 flex-shrink-0" />
-              {rowKey}
+              <HighlightedText text={rowKey} query={query} className="truncate" />
             </span>
           ) : editingKey ? (
             <input
@@ -420,41 +567,44 @@ function PropertyRow({
                 if (e.key === 'Enter') commitKey()
                 if (e.key === 'Escape') { setKeyDraft(rowKey); setEditingKey(false) }
               }}
-              className="text-xs font-mono px-1.5 py-0.5 rounded bg-white/10 border border-accent-lineage/40 outline-none min-w-0 flex-1"
+              className="text-xs font-mono px-1.5 py-0.5 rounded bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
             <button
               onClick={() => setEditingKey(true)}
-              className="text-xs font-mono text-ink hover:text-accent-lineage truncate text-left"
-              title="Rename key"
+              className="text-xs font-mono text-ink hover:text-accent-lineage truncate text-left max-w-full"
+              title={`${rowKey} — click to rename`}
             >
-              {rowKey}
+              <HighlightedText text={rowKey} query={query} />
             </button>
           )}
+        </div>
 
-          {/* Inline primitive value */}
-          {!isContainer && (
-            <div className="flex-1 min-w-0 flex justify-end">
-              <PrimitiveValueEditor value={value} onChange={onValueChange} readOnly={readOnly} />
-            </div>
-          )}
-
-          {/* Container summary */}
-          {isContainer && (
-            <span className="text-2xs text-ink-muted">
+        {/* Value column — flexible, consistent across all kinds */}
+        <div className="flex-1 min-w-0">
+          {isContainer ? (
+            <span className="text-2xs text-ink-muted h-6 flex items-center">
               {kind === 'object'
-                ? `${Object.keys(value as object).length} keys`
-                : `${(value as unknown[]).length} items`}
+                ? `${Object.keys(value as object).length} ${Object.keys(value as object).length === 1 ? 'key' : 'keys'}`
+                : `${(value as unknown[]).length} ${(value as unknown[]).length === 1 ? 'item' : 'items'}`}
             </span>
+          ) : (
+            <PrimitiveValueEditor
+              value={value}
+              onChange={onValueChange}
+              readOnly={readOnly}
+              query={query}
+              fieldLabel={isArrayItem ? rowKey : rowKey}
+            />
           )}
         </div>
 
         {/* Row actions */}
         <div className={cn(
-          "flex items-center gap-0.5 flex-shrink-0",
-          "opacity-0 group-hover:opacity-100 transition-opacity",
+          "flex items-center gap-0.5 flex-shrink-0 h-6",
+          "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity",
         )}>
-          {isContainer && depth >= MAX_DEPTH - 1 && (
+          {isContainer && !readOnly && depth < MAX_DEPTH - 1 && (
             <button
               onClick={() => setRawJsonOpen(true)}
               className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-white/10"
@@ -483,18 +633,20 @@ function PropertyRow({
               value={value as Record<string, unknown>}
               onChange={onValueChange as (v: Record<string, unknown>) => void}
               depth={depth + 1}
+              readOnly={readOnly}
             />
           ) : (
             <ArrayBody
               value={value as unknown[]}
               onChange={onValueChange as (v: unknown[]) => void}
               depth={depth + 1}
+              readOnly={readOnly}
             />
           )}
         </div>
       )}
 
-      {/* Raw-JSON fallback at max depth */}
+      {/* Raw-JSON fallback at max depth (always shown when expanded) */}
       {isContainer && expanded && depth >= MAX_DEPTH - 1 && (
         <div className="ml-5 mb-1">
           <RawJsonEditor
@@ -502,18 +654,20 @@ function PropertyRow({
             onChange={onValueChange}
             isOpen={true}
             onClose={() => setRawJsonOpen(false)}
+            readOnly={readOnly}
             inline
           />
         </div>
       )}
 
-      {/* Modal raw-JSON popover (only when explicitly opened from action) */}
+      {/* Modal raw-JSON editor (opened from the Code action on any container) */}
       {rawJsonOpen && depth < MAX_DEPTH - 1 && (
         <RawJsonEditor
           value={value}
           onChange={onValueChange}
           isOpen={rawJsonOpen}
           onClose={() => setRawJsonOpen(false)}
+          readOnly={readOnly}
         />
       )}
     </div>
@@ -521,42 +675,56 @@ function PropertyRow({
 }
 
 // ============================================
-// PrimitiveValueEditor
+// PrimitiveValueEditor — consistent full-width value cell per kind
 // ============================================
 
 function PrimitiveValueEditor({
   value,
   onChange,
   readOnly,
+  query = '',
+  fieldLabel,
 }: {
   value: unknown
   onChange: (next: unknown) => void
   readOnly?: boolean
+  query?: string
+  fieldLabel?: string
 }) {
   const kind = kindOf(value)
+  const [modalOpen, setModalOpen] = useState(false)
 
   if (kind === 'null') {
-    return <span className="text-xs font-mono text-ink-muted italic">null</span>
+    return <span className="text-xs font-mono text-ink-muted italic h-6 flex items-center">null</span>
   }
 
   if (kind === 'boolean') {
     const v = Boolean(value)
     return (
-      <button
-        onClick={() => !readOnly && onChange(!v)}
-        disabled={readOnly}
-        className={cn(
-          "px-2.5 py-0.5 rounded-md text-xs font-medium transition-colors",
-          v ? "bg-emerald-500/15 text-emerald-500" : "bg-white/5 text-ink-muted",
-          readOnly && "cursor-not-allowed opacity-60",
-        )}
-      >
-        {v ? 'true' : 'false'}
-      </button>
+      <div className="h-6 flex items-center">
+        <button
+          onClick={() => !readOnly && onChange(!v)}
+          disabled={readOnly}
+          className={cn(
+            "px-2.5 py-0.5 rounded-md text-xs font-medium transition-colors",
+            v ? "bg-emerald-500/15 text-emerald-500" : "bg-white/5 text-ink-muted",
+            readOnly && "cursor-default",
+          )}
+        >
+          {v ? 'true' : 'false'}
+        </button>
+      </div>
     )
   }
 
   if (kind === 'number') {
+    if (readOnly) {
+      return (
+        <span className="text-xs font-mono text-ink h-6 flex items-center">
+          <HighlightedText text={String(value)} query={query} />
+        </span>
+      )
+    }
     return (
       <input
         type="number"
@@ -565,11 +733,9 @@ function PrimitiveValueEditor({
           const n = Number(e.target.value)
           onChange(Number.isFinite(n) ? n : 0)
         }}
-        readOnly={readOnly}
         className={cn(
-          "w-28 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-mono text-right",
+          "w-full px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-mono",
           "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
-          readOnly && "cursor-not-allowed opacity-60",
         )}
       />
     )
@@ -577,36 +743,260 @@ function PrimitiveValueEditor({
 
   // string
   const stringValue = value === null || value === undefined ? '' : String(value)
-  const isMultiline = stringValue.includes('\n') || stringValue.length > 60
+  const isLong = stringValue.length > LONG_VALUE_THRESHOLD || stringValue.includes('\n')
 
-  if (isMultiline) {
+  const expandButton = (
+    <button
+      onClick={() => setModalOpen(true)}
+      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-white/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+      title={readOnly ? 'View full value' : 'Expand & edit'}
+    >
+      <Maximize2 className="w-3 h-3" />
+    </button>
+  )
+
+  const copyButton = (
+    <CopyButton text={stringValue} />
+  )
+
+  if (readOnly) {
     return (
-      <textarea
-        value={stringValue}
-        onChange={(e) => onChange(e.target.value)}
-        readOnly={readOnly}
-        rows={Math.min(6, stringValue.split('\n').length + 1)}
-        className={cn(
-          "w-full max-w-[260px] px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
-          "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors resize-y",
-          readOnly && "cursor-not-allowed opacity-60",
+      <>
+        <div className="flex items-start gap-1">
+          <div className={cn("flex-1 min-w-0 text-xs text-ink whitespace-pre-wrap break-words", isLong && "line-clamp-3")}>
+            {stringValue === ''
+              ? <span className="text-ink-muted italic">empty</span>
+              : <HighlightedText text={stringValue} query={query} />}
+          </div>
+          <div className="flex items-start">
+            {stringValue !== '' && copyButton}
+            {isLong && expandButton}
+          </div>
+        </div>
+        {modalOpen && (
+          <ValueModal
+            fieldLabel={fieldLabel}
+            value={stringValue}
+            readOnly
+            onSave={() => setModalOpen(false)}
+            onClose={() => setModalOpen(false)}
+          />
         )}
-      />
+      </>
     )
   }
 
+  // Editable string — full-width auto-height textarea, capped to 3 rows.
+  const lineCount = stringValue === '' ? 1 : stringValue.split('\n').length
+  const rows = stringValue.includes('\n')
+    ? Math.min(3, Math.max(1, lineCount))
+    : stringValue.length > LONG_VALUE_THRESHOLD ? 3 : 1
+
   return (
-    <input
-      type="text"
-      value={stringValue}
-      onChange={(e) => onChange(e.target.value)}
-      readOnly={readOnly}
-      className={cn(
-        "max-w-[260px] flex-1 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
-        "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
-        readOnly && "cursor-not-allowed opacity-60",
+    <>
+      <div className="flex items-start gap-1">
+        <textarea
+          value={stringValue}
+          onChange={(e) => onChange(e.target.value)}
+          rows={rows}
+          className={cn(
+            "flex-1 min-w-0 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
+            "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors resize-none custom-scrollbar leading-relaxed",
+          )}
+        />
+        <div className="flex items-start">
+          {stringValue !== '' && copyButton}
+          {isLong && expandButton}
+        </div>
+      </div>
+      {modalOpen && (
+        <ValueModal
+          fieldLabel={fieldLabel}
+          value={stringValue}
+          onSave={(next) => { onChange(next); setModalOpen(false) }}
+          onClose={() => setModalOpen(false)}
+        />
       )}
-    />
+    </>
+  )
+}
+
+// ============================================
+// CopyButton — small hover-revealed copy affordance
+// ============================================
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text)
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        } catch { /* clipboard unavailable */ }
+      }}
+      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-white/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+      title={copied ? 'Copied!' : 'Copy value'}
+    >
+      {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+    </button>
+  )
+}
+
+// ============================================
+// ValueModal — large Markdown editor + preview for long string values
+// ============================================
+
+function ValueModal({
+  fieldLabel,
+  value,
+  readOnly,
+  onSave,
+  onClose,
+}: {
+  fieldLabel?: string
+  value: string
+  readOnly?: boolean
+  onSave: (next: string) => void
+  onClose: () => void
+}) {
+  const [draft, setDraft] = useState(value)
+  const [tab, setTab] = useState<'write' | 'preview'>(readOnly ? 'preview' : 'write')
+  const [copied, setCopied] = useState(false)
+
+  const wordCount = useMemo(() => {
+    const t = draft.trim()
+    return t ? t.split(/\s+/).length : 0
+  }, [draft])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
+        onClick={onClose}
+      >
+        <motion.div
+          initial={{ scale: 0.96, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          exit={{ scale: 0.96, opacity: 0 }}
+          onClick={(e) => e.stopPropagation()}
+          className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl"
+        >
+          {/* Header */}
+          <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-glass-border/50">
+            <div className="min-w-0">
+              <h4 className="text-sm font-semibold text-ink truncate">
+                {readOnly ? 'View' : 'Edit'} {fieldLabel ? <span className="font-mono text-ink-muted">{fieldLabel}</span> : 'value'}
+              </h4>
+              <p className="text-2xs text-ink-muted mt-0.5">
+                Markdown supported · {draft.length} chars · {wordCount} {wordCount === 1 ? 'word' : 'words'}
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-lg hover:bg-white/10"
+              title="Close"
+            >
+              <XIcon className="w-4 h-4 text-ink-muted" />
+            </button>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex items-center gap-1 px-5 pt-3">
+            {!readOnly && (
+              <ModalTab active={tab === 'write'} onClick={() => setTab('write')} label="Write" />
+            )}
+            <ModalTab active={tab === 'preview'} onClick={() => setTab('preview')} label="Preview" />
+            <div className="ml-auto">
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(draft)
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 1500)
+                  } catch { /* clipboard unavailable */ }
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-white/10 transition-colors"
+              >
+                {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+
+          {/* Body */}
+          <div className="flex-1 min-h-0 overflow-hidden px-5 py-3">
+            {tab === 'write' && !readOnly ? (
+              <textarea
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                spellCheck
+                className={cn(
+                  "w-full h-[50vh] px-3 py-2.5 rounded-xl bg-black/10 dark:bg-white/5 border border-white/10",
+                  "focus:border-accent-lineage/50 outline-none transition-colors text-sm leading-relaxed resize-none custom-scrollbar font-sans",
+                )}
+                placeholder="Write a description… Markdown is supported."
+              />
+            ) : (
+              <div className="h-[50vh] overflow-y-auto custom-scrollbar rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 px-4 py-3">
+                {draft.trim() ? (
+                  <div className="prose-synodic max-w-none text-sm">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {draft}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="text-sm text-ink-muted italic">Nothing to preview.</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-glass-border/50">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors"
+            >
+              {readOnly ? 'Close' : 'Cancel'}
+            </button>
+            {!readOnly && (
+              <button
+                onClick={() => onSave(draft)}
+                className="px-5 py-2 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25 transition-all"
+              >
+                Save
+              </button>
+            )}
+          </div>
+        </motion.div>
+      </motion.div>
+    </AnimatePresence>
+  )
+}
+
+function ModalTab({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+        active ? "bg-white/10 text-ink" : "text-ink-muted hover:text-ink hover:bg-white/5",
+      )}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -706,7 +1096,7 @@ function AddRow({
   }
 
   return (
-    <div className="flex items-center gap-2 py-1.5 px-2 rounded-lg bg-white/[0.03] border border-accent-lineage/20">
+    <div className="flex items-center gap-2 py-1.5 px-2 mt-1.5 rounded-lg bg-white/[0.03] border border-accent-lineage/20">
       <TypeChip kind={kind} onChange={setKind} />
       {variant === 'object' && (
         <input
@@ -759,12 +1149,14 @@ function RawJsonEditor({
   isOpen,
   onClose,
   inline,
+  readOnly,
 }: {
   value: unknown
   onChange: (next: unknown) => void
   isOpen: boolean
   onClose: () => void
   inline?: boolean
+  readOnly?: boolean
 }) {
   const [draft, setDraft] = useState(() => JSON.stringify(value, null, 2))
   const [error, setError] = useState<string | null>(null)
@@ -794,32 +1186,36 @@ function RawJsonEditor({
       <textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
+        readOnly={readOnly}
         rows={inline ? 8 : 12}
         spellCheck={false}
         className={cn(
-          "w-full px-3 py-2 rounded-md bg-black/30 border text-xs font-mono outline-none resize-y",
+          "w-full px-3 py-2 rounded-md bg-black/30 border text-xs font-mono outline-none resize-y custom-scrollbar",
           error ? "border-red-500/40" : "border-white/10 focus:border-accent-lineage/50",
+          readOnly && "cursor-default opacity-80",
         )}
       />
       {error && (
         <div className="text-2xs text-red-500">Invalid JSON: {error}</div>
       )}
-      <div className="flex items-center justify-end gap-2">
-        {!inline && (
+      {!readOnly && (
+        <div className="flex items-center justify-end gap-2">
+          {!inline && (
+            <button
+              onClick={onClose}
+              className="px-3 py-1 rounded-md text-xs text-ink-muted hover:bg-white/10"
+            >
+              Cancel
+            </button>
+          )}
           <button
-            onClick={onClose}
-            className="px-3 py-1 rounded-md text-xs text-ink-muted hover:bg-white/10"
+            onClick={commit}
+            className="px-3 py-1 rounded-md text-xs bg-accent-lineage/20 text-accent-lineage hover:bg-accent-lineage/30"
           >
-            Cancel
+            Apply
           </button>
-        )}
-        <button
-          onClick={commit}
-          className="px-3 py-1 rounded-md text-xs bg-accent-lineage/20 text-accent-lineage hover:bg-accent-lineage/30"
-        >
-          Apply
-        </button>
-      </div>
+        </div>
+      )}
     </div>
   )
 
@@ -833,7 +1229,7 @@ function RawJsonEditor({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
+        className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
         onClick={onClose}
       >
         <motion.div
@@ -844,7 +1240,7 @@ function RawJsonEditor({
           className="w-full max-w-2xl rounded-xl border border-glass-border bg-canvas-elevated shadow-xl p-5"
         >
           <div className="flex items-center justify-between mb-3">
-            <h4 className="text-sm font-semibold text-ink">Edit as JSON</h4>
+            <h4 className="text-sm font-semibold text-ink">{readOnly ? 'View JSON' : 'Edit as JSON'}</h4>
             <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10">
               <XIcon className="w-4 h-4 text-ink-muted" />
             </button>

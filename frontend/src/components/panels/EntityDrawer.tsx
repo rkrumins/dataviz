@@ -747,15 +747,18 @@ function ViewModeContent({
       <DetailsList formData={formData} />
 
       {/* Properties — nested-JSON tree rendered read-only via PropertyEditor.
-          pointer-events-none keeps the recursive UI from accepting edits in
-          View mode; the same component is used (editable) in Edit mode. */}
-      {hasAdditional && (
-        <Section title="Properties" icon={LucideIcons.FileText}>
-          <div className="pointer-events-none opacity-95">
-            <PropertyEditor value={propertiesBag} onChange={() => {}} bare />
-          </div>
-        </Section>
-      )}
+          `readOnly` keeps the recursive UI navigable (expand, search, copy,
+          open-in-modal-to-read) while blocking edits; the same component is
+          used (editable) in Edit mode. */}
+      <Section title="Properties" icon={LucideIcons.FileText}>
+        {hasAdditional ? (
+          <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable bare />
+        ) : (
+          <p className="text-xs text-ink-muted italic">
+            No properties yet. Switch to Edit to add metadata.
+          </p>
+        )}
+      </Section>
 
       {/* Classifications */}
       {formData.classifications && Array.isArray(formData.classifications) && formData.classifications.length > 0 && (
@@ -998,6 +1001,7 @@ function EditModeContent({
         <PropertyEditor
           value={propertiesBag}
           onChange={(next) => onPropertiesChange(next as Record<string, any>)}
+          searchable
           bare
         />
       </div>
