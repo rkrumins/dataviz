@@ -283,10 +283,10 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
     onChange(rest)
   }, [value, onChange])
 
-  const addKey = useCallback((key: string, kind: ValueKind) => {
+  const addKey = useCallback((key: string, newValue: unknown) => {
     if (!key.trim()) return
     if (Object.prototype.hasOwnProperty.call(value, key)) return
-    onChange({ ...value, [key]: defaultForKind(kind) })
+    onChange({ ...value, [key]: newValue })
     setAdding(false)
   }, [value, onChange])
 
@@ -340,7 +340,7 @@ function ObjectBody({ value, onChange, readOnlyKeys, depth, bare, readOnly, sear
       </div>
       {!readOnly && (
         adding ? (
-          <AddRow
+          <PropertyComposer
             onAdd={addKey}
             onCancel={() => setAdding(false)}
             existingKeys={Object.keys(value)}
@@ -401,8 +401,8 @@ function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: Array
     onChange(value.filter((_, i) => i !== index))
   }, [value, onChange])
 
-  const addItem = useCallback((_key: string, kind: ValueKind) => {
-    onChange([...value, defaultForKind(kind)])
+  const addItem = useCallback((_key: string, newValue: unknown) => {
+    onChange([...value, newValue])
     setAdding(false)
   }, [value, onChange])
 
@@ -479,7 +479,7 @@ function ArrayBody({ value, onChange, depth, bare, readOnly, searchable }: Array
       )}
       {!readOnly && (
         adding ? (
-          <AddRow
+          <PropertyComposer
             onAdd={addItem}
             onCancel={() => setAdding(false)}
             existingKeys={[]}
@@ -773,11 +773,13 @@ function PrimitiveValueEditor({
   const stringValue = value === null || value === undefined ? '' : String(value)
   const isLong = stringValue.length > LONG_VALUE_THRESHOLD || stringValue.includes('\n')
 
+  // Always-visible so the full editor (with Markdown) is reachable for any
+  // string value, not just long ones.
   const expandButton = (
     <button
       onClick={() => setModalOpen(true)}
-      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-white/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
-      title={readOnly ? 'View full value' : 'Expand & edit'}
+      className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-white/10 transition-colors"
+      title={readOnly ? 'View full value' : 'Open editor (Markdown)'}
     >
       <Maximize2 className="w-3 h-3" />
     </button>
@@ -798,7 +800,7 @@ function PrimitiveValueEditor({
           </div>
           <div className="flex items-start">
             {stringValue !== '' && copyButton}
-            {isLong && expandButton}
+            {expandButton}
           </div>
         </div>
         {modalOpen && (
@@ -827,14 +829,16 @@ function PrimitiveValueEditor({
           value={stringValue}
           onChange={(e) => onChange(e.target.value)}
           rows={rows}
+          placeholder="Empty — type a value, or ⤢ to open the editor"
           className={cn(
             "flex-1 min-w-0 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
+            "placeholder:text-ink-muted/50",
             "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors resize-none custom-scrollbar leading-relaxed",
           )}
         />
         <div className="flex items-start">
           {stringValue !== '' && copyButton}
-          {isLong && expandButton}
+          {expandButton}
         </div>
       </div>
       {modalOpen && (
@@ -1097,17 +1101,18 @@ function TypeChip({
 }
 
 // ============================================
-// AddRow — inline form for adding a key (object) or item (array)
+// PropertyComposer — guided add: key + type + value in one step
 // ============================================
 
-function AddRow({
+function PropertyComposer({
   onAdd,
   onCancel,
   existingKeys,
   variant,
   prefixLabel,
 }: {
-  onAdd: (key: string, kind: ValueKind) => void
+  /** key is '' for array items; value is the fully-formed value to insert. */
+  onAdd: (key: string, value: unknown) => void
   onCancel: () => void
   existingKeys: string[]
   variant: 'object' | 'array'
@@ -1116,64 +1121,180 @@ function AddRow({
 }) {
   const [key, setKey] = useState('')
   const [kind, setKind] = useState<ValueKind>('string')
+  const [draft, setDraft] = useState<unknown>('')
+  const [modalOpen, setModalOpen] = useState(false)
 
   const candidateKey = prefixLabel ? `${prefixLabel}/${key.trim()}` : key.trim()
-  const isDup = variant === 'object' && existingKeys.includes(candidateKey)
+  const isDup = variant === 'object' && key.trim() !== '' && existingKeys.includes(candidateKey)
   const canSubmit = variant === 'array' || (key.trim() !== '' && !isDup)
+
+  const changeKind = (k: ValueKind) => {
+    setKind(k)
+    setDraft(defaultForKind(k))
+  }
 
   const submit = () => {
     if (!canSubmit) return
-    onAdd(variant === 'array' ? '' : key.trim(), kind)
-    setKey('')
+    onAdd(variant === 'array' ? '' : key.trim(), draft)
+  }
+
+  const onFormKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') { e.preventDefault(); onCancel() }
   }
 
   return (
-    <div className="flex items-center gap-2 py-1.5 px-2 mt-1.5 rounded-lg bg-white/[0.03] border border-accent-lineage/20">
-      <TypeChip kind={kind} onChange={setKind} />
-      {prefixLabel && (
-        <span
-          className="text-2xs font-mono text-ink-muted bg-white/5 rounded px-1.5 py-0.5 max-w-[120px] truncate flex-shrink-0"
-          title={prefixLabel}
-        >
-          {prefixLabel}/
-        </span>
+    <div
+      onKeyDown={onFormKeyDown}
+      className="mt-2 rounded-xl bg-white/[0.04] border border-accent-lineage/30 p-3 space-y-2.5 shadow-sm"
+    >
+      {/* Row 1: type + key */}
+      <div className="flex items-center gap-2">
+        <TypeChip kind={kind} onChange={changeKind} />
+        {prefixLabel && (
+          <span
+            className="text-2xs font-mono text-ink-muted bg-white/5 rounded px-1.5 py-0.5 max-w-[140px] truncate flex-shrink-0"
+            title={prefixLabel}
+          >
+            {prefixLabel}/
+          </span>
+        )}
+        {variant === 'object' ? (
+          <input
+            autoFocus
+            value={key}
+            placeholder="Property name"
+            onChange={(e) => setKey(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
+            className={cn(
+              "flex-1 min-w-0 text-xs font-mono px-2 py-1.5 rounded-md bg-white/5 border outline-none",
+              isDup ? "border-red-500/40" : "border-white/10 focus:border-accent-lineage/50",
+            )}
+          />
+        ) : (
+          <span className="flex-1 text-xs text-ink-muted">New {KIND_META[kind].label} item</span>
+        )}
+      </div>
+
+      {isDup && (
+        <p className="text-2xs text-red-500 pl-1">“{candidateKey}” already exists.</p>
       )}
-      {variant === 'object' && (
-        <input
-          autoFocus
-          value={key}
-          placeholder="key name"
-          onChange={(e) => setKey(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submit()
-            if (e.key === 'Escape') onCancel()
-          }}
+
+      {/* Row 2: value (adapts to kind) */}
+      <div className="flex items-center gap-2">
+        <span className="text-2xs uppercase tracking-wider text-ink-muted w-10 flex-shrink-0">Value</span>
+        <div className="flex-1 min-w-0">
+          <ComposerValueField
+            kind={kind}
+            value={draft}
+            onChange={setDraft}
+            onExpand={() => setModalOpen(true)}
+            onEnter={submit}
+          />
+        </div>
+      </div>
+
+      {/* Row 3: actions */}
+      <div className="flex items-center justify-end gap-2 pt-0.5">
+        <button
+          onClick={onCancel}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={submit}
+          disabled={!canSubmit}
           className={cn(
-            "flex-1 text-xs font-mono px-2 py-1 rounded bg-white/5 border outline-none",
-            isDup ? "border-red-500/40" : "border-white/10 focus:border-accent-lineage/50",
+            "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+            canSubmit
+              ? "bg-accent-lineage text-white hover:brightness-110 shadow-sm shadow-accent-lineage/25"
+              : "bg-white/5 text-ink-muted/50 cursor-not-allowed",
           )}
+          title="Add property"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          Add
+        </button>
+      </div>
+
+      {modalOpen && kind === 'string' && (
+        <ValueModal
+          fieldLabel={candidateKey || 'new value'}
+          value={String(draft ?? '')}
+          onSave={(next) => { setDraft(next); setModalOpen(false) }}
+          onClose={() => setModalOpen(false)}
         />
       )}
-      {variant === 'array' && (
-        <span className="flex-1 text-xs text-ink-muted">New {kind} item</span>
-      )}
+    </div>
+  )
+}
+
+/** Inline value editor used inside the composer; adapts to the chosen kind. */
+function ComposerValueField({
+  kind,
+  value,
+  onChange,
+  onExpand,
+  onEnter,
+}: {
+  kind: ValueKind
+  value: unknown
+  onChange: (v: unknown) => void
+  onExpand: () => void
+  onEnter: () => void
+}) {
+  if (kind === 'null') {
+    return <span className="text-xs font-mono text-ink-muted italic">null</span>
+  }
+  if (kind === 'object' || kind === 'array') {
+    return (
+      <span className="text-2xs text-ink-muted italic">
+        Empty {kind === 'object' ? '{ }' : '[ ]'} — add contents after creating
+      </span>
+    )
+  }
+  if (kind === 'boolean') {
+    const v = Boolean(value)
+    return (
       <button
-        onClick={submit}
-        disabled={!canSubmit}
+        onClick={() => onChange(!v)}
         className={cn(
-          "w-6 h-6 flex items-center justify-center rounded transition-colors",
-          canSubmit ? "text-emerald-500 hover:bg-emerald-500/10" : "text-ink-muted/40 cursor-not-allowed",
+          "px-2.5 py-0.5 rounded-md text-xs font-medium transition-colors",
+          v ? "bg-emerald-500/15 text-emerald-500" : "bg-white/5 text-ink-muted",
         )}
-        title="Add"
       >
-        <Check className="w-3.5 h-3.5" />
+        {v ? 'true' : 'false'}
       </button>
+    )
+  }
+  if (kind === 'number') {
+    return (
+      <input
+        type="number"
+        value={value as number}
+        onChange={(e) => { const n = Number(e.target.value); onChange(Number.isFinite(n) ? n : 0) }}
+        onKeyDown={(e) => { if (e.key === 'Enter') onEnter() }}
+        className="w-full px-2 py-1.5 rounded-md bg-white/5 border border-white/10 text-xs font-mono focus:border-accent-lineage/50 outline-none transition-colors"
+      />
+    )
+  }
+  // string
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        type="text"
+        value={String(value ?? '')}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') onEnter() }}
+        placeholder="Enter a value…"
+        className="flex-1 min-w-0 px-2 py-1.5 rounded-md bg-white/5 border border-white/10 text-xs focus:border-accent-lineage/50 outline-none transition-colors"
+      />
       <button
-        onClick={onCancel}
-        className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:bg-white/10"
-        title="Cancel"
+        onClick={onExpand}
+        className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md text-ink-muted hover:text-ink hover:bg-white/10 transition-colors"
+        title="Open editor (Markdown)"
       >
-        <XIcon className="w-3.5 h-3.5" />
+        <Maximize2 className="w-3.5 h-3.5" />
       </button>
     </div>
   )
@@ -1415,11 +1536,11 @@ function deletePrefix(obj: Record<string, unknown>, prefix: string): Record<stri
   return next
 }
 
-function addUnder(obj: Record<string, unknown>, prefix: string, name: string, kind: ValueKind): Record<string, unknown> {
+function addEntry(obj: Record<string, unknown>, prefix: string, name: string, value: unknown): Record<string, unknown> {
   if (!name.trim()) return obj
   const key = prefix ? `${prefix}${PATH_SEP}${name.trim()}` : name.trim()
   if (Object.prototype.hasOwnProperty.call(obj, key)) return obj
-  return { ...obj, [key]: defaultForKind(kind) }
+  return { ...obj, [key]: value }
 }
 
 interface FlatApi {
@@ -1428,7 +1549,7 @@ interface FlatApi {
   deleteKey: (fullKey: string) => void
   renameFolder: (oldPath: string, newPath: string) => void
   deleteFolder: (path: string) => void
-  addUnder: (prefix: string, name: string, kind: ValueKind) => void
+  addEntry: (prefix: string, name: string, value: unknown) => void
   existingKeys: () => string[]
 }
 
@@ -1485,7 +1606,7 @@ function GroupedObjectRoot({
     deleteKey: (fullKey) => onChange(deleteKey(value, fullKey)),
     renameFolder: (oldPath, newPath) => onChange(renamePrefix(value, oldPath, newPath)),
     deleteFolder: (path) => onChange(deletePrefix(value, path)),
-    addUnder: (prefix, name, kind) => onChange(addUnder(value, prefix, name, kind)),
+    addEntry: (prefix, name, val) => onChange(addEntry(value, prefix, name, val)),
     existingKeys: () => Object.keys(value),
   }), [value, onChange])
 
@@ -1551,8 +1672,8 @@ function GroupedObjectRoot({
 
 function RootAdder({ api, adding, setAdding }: { api: FlatApi; adding: boolean; setAdding: (b: boolean) => void }) {
   return adding ? (
-    <AddRow
-      onAdd={(name, kind) => { api.addUnder('', name, kind); setAdding(false) }}
+    <PropertyComposer
+      onAdd={(name, val) => { api.addEntry('', name, val); setAdding(false) }}
       onCancel={() => setAdding(false)}
       existingKeys={api.existingKeys()}
       variant="object"
@@ -1699,15 +1820,22 @@ function FolderGroup({
               <FolderPlus className="w-3 h-3" />
             </button>
             {confirmDelete ? (
-              <button
-                onClick={() => api.deleteFolder(node.path)}
-                onBlur={() => setConfirmDelete(false)}
-                autoFocus
-                className="px-1.5 h-6 flex items-center justify-center rounded text-2xs font-medium text-red-500 bg-red-500/10 hover:bg-red-500/20"
-                title="Confirm delete"
-              >
-                Delete {count}?
-              </button>
+              <div className="flex items-center gap-0.5">
+                <button
+                  onClick={() => api.deleteFolder(node.path)}
+                  className="px-1.5 h-6 flex items-center justify-center rounded text-2xs font-semibold text-red-500 bg-red-500/10 hover:bg-red-500/20"
+                  title="Confirm delete"
+                >
+                  Delete {count}?
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink hover:bg-white/10"
+                  title="Keep folder"
+                >
+                  <XIcon className="w-3 h-3" />
+                </button>
+              </div>
             ) : (
               <button
                 onClick={() => setConfirmDelete(true)}
@@ -1734,8 +1862,8 @@ function FolderGroup({
           ))}
           {!readOnly && (
             adding ? (
-              <AddRow
-                onAdd={(name, kind) => { api.addUnder(node.path, name, kind); setAdding(false) }}
+              <PropertyComposer
+                onAdd={(name, val) => { api.addEntry(node.path, name, val); setAdding(false) }}
                 onCancel={() => setAdding(false)}
                 existingKeys={api.existingKeys()}
                 variant="object"

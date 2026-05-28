@@ -108,7 +108,7 @@ describe('PropertyEditor', () => {
     const onChange = vi.fn()
     render(<Harness initial={{ description: LONG }} onChange={onChange} />)
 
-    await user.click(screen.getByTitle('Expand & edit'))
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
 
     const modalEditor = screen.getByPlaceholderText(/Markdown is supported/i)
     await user.clear(modalEditor)
@@ -121,7 +121,7 @@ describe('PropertyEditor', () => {
   it('previews markdown in the modal', async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ notes: LONG }} />)
-    await user.click(screen.getByTitle('Expand & edit'))
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
     await user.click(screen.getByRole('button', { name: 'Preview' }))
     expect(screen.getByTestId('md')).toBeInTheDocument()
   })
@@ -161,20 +161,38 @@ describe('PropertyEditor', () => {
     // Value is plain text, not an editable control
     expect(screen.queryByDisplayValue('analytics')).not.toBeInTheDocument()
     expect(screen.getByText('analytics')).toBeInTheDocument()
-    // Long value still offers a read-only expand
-    expect(screen.getByTitle('View full value')).toBeInTheDocument()
+    // Read-only expand-to-view is offered on every string value
+    expect(screen.getAllByTitle('View full value').length).toBeGreaterThanOrEqual(1)
   })
 
-  it('adds a new property', async () => {
+  it('adds a new property with a value via the composer', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ owner: 'analytics' }} onChange={onChange} />)
 
     await user.click(screen.getByRole('button', { name: /Add property/i }))
-    await user.type(screen.getByPlaceholderText('key name'), 'region')
-    await user.click(screen.getByTitle('Add'))
+    await user.type(screen.getByPlaceholderText('Property name'), 'region')
+    await user.type(screen.getByPlaceholderText('Enter a value…'), 'us-east')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
 
-    expect(onChange).toHaveBeenCalledWith({ owner: 'analytics', region: '' })
+    expect(onChange).toHaveBeenCalledWith({ owner: 'analytics', region: 'us-east' })
+  })
+
+  it('cancels the composer without mutating', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ owner: 'analytics' }} onChange={onChange} />)
+
+    await user.click(screen.getByRole('button', { name: /Add property/i }))
+    await user.type(screen.getByPlaceholderText('Property name'), 'region')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByPlaceholderText('Property name')).not.toBeInTheDocument()
+    // And the editor is still interactive afterwards (regression for the lockup).
+    const ownerRow = screen.getByText('owner').closest('.group') as HTMLElement
+    await user.click(within(ownerRow).getByTitle('Delete'))
+    expect(onChange).toHaveBeenCalledWith({})
   })
 
   it('renames a key', async () => {
@@ -199,6 +217,35 @@ describe('PropertyEditor', () => {
     await user.click(within(ownerRow).getByTitle('Delete'))
 
     expect(onChange).toHaveBeenCalledWith({ region: 'us' })
+  })
+
+  it('opens the editor for ANY string (even short) and saves', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ owner: 'jane' }} onChange={onChange} />)
+
+    // Short value still exposes the always-visible expand affordance.
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    const editor = screen.getByPlaceholderText(/Markdown is supported/i)
+    await user.clear(editor)
+    await user.type(editor, '# Owner')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    expect(onChange).toHaveBeenCalledWith({ owner: '# Owner' })
+  })
+
+  it('stays interactive after adding a property (regression for lockup)', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ owner: 'analytics' }} onChange={onChange} />)
+
+    await user.click(screen.getByRole('button', { name: /Add property/i }))
+    await user.type(screen.getByPlaceholderText('Property name'), 'region')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    // After adding, deleting the original property must still work.
+    const ownerRow = screen.getByText('owner').closest('.group') as HTMLElement
+    await user.click(within(ownerRow).getByTitle('Delete'))
+    expect(onChange).toHaveBeenLastCalledWith({ region: '' })
   })
 })
 
@@ -257,8 +304,8 @@ describe('PropertyEditor — path grouping', () => {
     render(<Harness initial={{ 'B/z': 3 }} groupByPath onChange={onChange} />)
     const folderB = screen.getByText('B').closest('.group') as HTMLElement
     await user.click(within(folderB).getByTitle(/Add property in this folder/i))
-    await user.type(screen.getByPlaceholderText('key name'), 'w')
-    await user.click(screen.getByTitle('Add'))
+    await user.type(screen.getByPlaceholderText('Property name'), 'w')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
     expect(onChange).toHaveBeenCalledWith({ 'B/z': 3, 'B/w': '' })
   })
 

@@ -26,6 +26,7 @@ import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
+import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { cn } from '@/lib/utils'
 
@@ -752,7 +753,9 @@ function ViewModeContent({
           used (editable) in Edit mode. */}
       <Section title="Properties" icon={LucideIcons.FileText}>
         {hasAdditional ? (
-          <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable groupByPath bare />
+          <PanelErrorBoundary resetKeys={[urn]}>
+            <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable groupByPath bare />
+          </PanelErrorBoundary>
         ) : (
           <p className="text-xs text-ink-muted italic">
             No properties yet. Switch to Edit to add metadata.
@@ -998,13 +1001,15 @@ function EditModeContent({
         <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">
           Properties
         </h4>
-        <PropertyEditor
-          value={propertiesBag}
-          onChange={(next) => onPropertiesChange(next as Record<string, any>)}
-          searchable
-          groupByPath
-          bare
-        />
+        <PanelErrorBoundary resetKeys={[urn]}>
+          <PropertyEditor
+            value={propertiesBag}
+            onChange={(next) => onPropertiesChange(next as Record<string, any>)}
+            searchable
+            groupByPath
+            bare
+          />
+        </PanelErrorBoundary>
       </div>
     </div>
   )
