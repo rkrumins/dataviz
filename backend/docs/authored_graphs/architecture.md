@@ -38,11 +38,80 @@ snapshot cache are rebuildable downstream projections.
 | `/as_of?at=<iso8601>` time-travel | `graph_trunk_log` indexed lookup + `snapshot_reader.load_snapshot` | trunk-only index (decision 26) + reuse of the snapshot reader |
 | `/audit`, `/blame`, `/diff` | `graph_change_event` + `graph_commits` in Postgres | per-attribute history is dense; the row store is the right fit |
 | Working-set state (uncommitted ops) | Postgres `graph_working_set` + `graph_working_change` | client-visible only to the owning user; transactional with stage/commit |
+| Catalog/canvas reads via existing `/graph/*` endpoints | FalkorDB `authored_<graph_id>` via `ContextEngine.for_workspace(ws_id, data_source_id=)` | authored graphs are first-class workspace data sources (M1) — no parallel read path |
 
 The projector is **best-effort downstream**: a FalkorDB outage
 pauses `graph_projector_cursor` advancement and `main` HEAD raw
 queries transparently degrade to the Postgres snapshot reader.
 Correctness is unaffected; only `main` hot-path latency suffers.
+
+## Authored graphs as workspace data sources (M1/M2)
+
+Authored graphs are exposed to the existing catalog/read surface as
+ordinary `workspace_data_sources` rows so every consumer of that
+catalog — the data-source listing endpoint, freshness gauges, the
+`ContextEngine.for_workspace(ws_id, data_source_id=)` factory, the
+30+ `/graph/*` read endpoints — works against them with no change.
+There is no parallel "authored read path" and no `AuthoredProvider`
+class.
+
+### Flow
+
+1. `POST /api/v1/{ws_id}/graphs` writes the `user_graphs` row in the
+   Graph Store DB and emits `visualization.user_graph.created` to the
+   Graph Store outbox **in the same transaction** (via
+   `graph_store_outbox_repo.emit`).
+2. The existing `run_graph_outbox_relay` lifespan task drains the
+   outbox to the `graph.outbox` Redis stream (no change — same
+   transport, same contract).
+3. A new lifespan consumer
+   `services/authored_data_source_relay.run_authored_data_source_relay`
+   joins consumer group `authored_ds_relay_v1` on `graph.outbox`,
+   filters for `visualization.user_graph.{created,deleted}` and
+   `visualization.graph.materialized`, and projects each into the
+   management DB's `workspace_data_sources` table using the SQLAlchemy
+   ORM (dialect-portable for the SQLite test suite).
+4. The CREATE handler binds the row to a singleton system FalkorDB
+   provider `prov_sys_authored_falkor` (bootstrapped by alembic
+   migration `20260528_authored_falkor_provider`) with
+   `graph_name='authored_<graph_id>'` so the existing
+   `ProviderManager._create_provider_instance` dispatches to the
+   FalkorDB provider against the correct namespace — no new provider
+   class.
+5. The FalkorDB projector emits `visualization.graph.materialized`
+   atomically with its cursor advance after every successful
+   default-branch flush; the relay flips
+   `aggregation_status='ready'` + sets `last_aggregated_at` +
+   `graph_fingerprint=sha256(commit_id)` so the catalog UI's
+   freshness gauges work.
+6. `DELETE /api/v1/{ws_id}/graphs/{graph_id}` emits
+   `visualization.user_graph.deleted`; the relay soft-deletes the
+   matching row.
+
+### Why a relay instead of a synchronous write
+
+The Graph Store DB and the management DB are deliberately decoupled
+(decision 3 — separate CloudSQL instances, independent scaling).
+Spanning a write across both would require a distributed transaction,
+which the architecture rejects. The Redis-backed outbox relay gives
+at-least-once cross-DB delivery; handlers are idempotent:
+
+* CREATE uses SELECT-then-INSERT (single consumer per partition
+  guarantees no race; redelivery hits the existing
+  `uq_ds_ws_prov_graph` unique constraint anyway).
+* DELETE is an `UPDATE WHERE deleted_at IS NULL` (re-delivery just
+  re-stamps the same timestamp).
+* MATERIALIZED is an `UPDATE WHERE matching` — if `created` hasn't
+  drained yet, the UPDATE no-ops and the next commit's tick catches up.
+
+### Failure modes
+
+| Scenario | Behavior |
+|---|---|
+| Redis outage | Graph Store outbox rows accumulate; relay catches up on recovery |
+| Management DB outage | Relay batch fails; events stay unacked; redelivered when the DB returns |
+| Materialized arrives before created | UPDATE no-ops; next commit's tick brings the row to `ready` |
+| Operator wants to retire the system FalkorDB provider | Migration is idempotent; admins re-point `prov_sys_authored_falkor` via the existing provider-edit endpoint without touching the relay |
 
 ## Layered model — source + enrichment + composition
 

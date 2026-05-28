@@ -392,3 +392,33 @@ async def test_query_edges(graph_client):
     )
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+# ── POST /save (deprecated) ───────────────────────────────────────────
+
+async def test_save_endpoint_is_deprecated(graph_client):
+    """POST /save still works for legacy clients but now carries a
+    ``Deprecation: true`` response header so they can detect and
+    migrate to the versioned commit pipeline."""
+    client, _ = graph_client
+
+    resp = await client.post(
+        "/api/v1/test-ws/graph/save",
+        json={"nodes": [], "edges": []},
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("Deprecation") == "true"
+    assert resp.json()["status"] == "success"
+
+
+async def test_save_endpoint_marked_deprecated_in_openapi():
+    """The OpenAPI schema marks POST /graph/save as deprecated so
+    generated clients see the warning at build time."""
+    from backend.app.main import app
+
+    schema = app.openapi()
+    for path, methods in schema["paths"].items():
+        if path.endswith("/graph/save"):
+            assert methods["post"].get("deprecated") is True
+            return
+    raise AssertionError("POST /graph/save not found in OpenAPI schema")

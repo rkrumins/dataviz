@@ -80,9 +80,19 @@ canvas opens empty. They drag two nodes + a connecting edge, click
 1. `POST /graphs` → `endpoints/graphs.py::create_graph` →
    `GraphAuthoringEngine.create_graph` →
    `graph_repo.create_graph` writes `user_graphs` row + empty `main`
-   `GraphRefORM` with `commit_id=null, revision=0`. No outbox event
-   on create (the first commit emits one). `body.origin='authored'`
-   skips the source-sync branch.
+   `GraphRefORM` with `commit_id=null, revision=0`. `body.origin='authored'`
+   skips the source-sync branch. The endpoint then emits
+   `visualization.user_graph.created` to the Graph Store outbox
+   atomically with the insert; the `authored_data_source_relay`
+   lifespan task (consumer group `authored_ds_relay_v1` on
+   `graph.outbox`) drains it and inserts a corresponding
+   `workspace_data_sources` row (`provider_id=prov_sys_authored_falkor`,
+   `graph_name=authored_g_abc`, `aggregation_status=pending`) so the
+   new graph shows up in the catalog and routes through the standard
+   `ContextEngine.for_workspace(ws_id, data_source_id=)` read path.
+   The first commit's projector flush then emits
+   `visualization.graph.materialized`, which the same relay turns
+   into a `aggregation_status='ready'` tick.
 2. `POST /views` → `endpoints/views.py::create_view` →
    `view_repo.create_view` writes `ViewORM` with the binding columns.
    When `source_graph_id` is set, the endpoint loads the freshly-

@@ -212,6 +212,7 @@ async def lifespan(_app: FastAPI):
     #     graphs unavailable" while everything else runs.
     _app.state._graph_relay_task = None
     _app.state._falkor_projector_task = None
+    _app.state._authored_ds_relay_task = None
     try:
         from .db.graph_store_engine import init_graph_store_db  # noqa: E402
         from .services.graph_outbox_relay import (  # noqa: E402
@@ -243,6 +244,24 @@ async def lifespan(_app: FastAPI):
                 run_falkor_projector(stop_event=_falkor_projector_stop)
             )
             logger.info("FalkorDB projector started")
+
+        # 1d. Authored-graph → workspace_data_sources relay. Joins its
+        #     own consumer group on graph.outbox so it sees every
+        #     user_graph.created/deleted and graph.materialized event
+        #     and projects them into the management DB so authored
+        #     graphs appear in the data-source catalog. Feature-isolated
+        #     like the projector — failures here don't affect editing.
+        from .services.authored_data_source_relay import (  # noqa: E402
+            run_authored_data_source_relay,
+        )
+        _authored_ds_relay_stop = asyncio.Event()
+        _app.state._authored_ds_relay_stop = _authored_ds_relay_stop
+        _app.state._authored_ds_relay_task = asyncio.create_task(
+            run_authored_data_source_relay(
+                stop_event=_authored_ds_relay_stop,
+            )
+        )
+        logger.info("Authored data-source relay started")
     except Exception as exc:  # noqa: BLE001 — feature-isolated, never fatal
         logger.warning(
             "Graph Store init/relay unavailable — authored-graph feature "
@@ -788,6 +807,20 @@ async def lifespan(_app: FastAPI):
         _projector_task.cancel()
         try:
             await _projector_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Stop the authored-graph data-source relay (M1) the same way.
+    _authored_ds_task = getattr(_app.state, "_authored_ds_relay_task", None)
+    if _authored_ds_task is not None and not _authored_ds_task.done():
+        stop = getattr(_app.state, "_authored_ds_relay_stop", None)
+        if stop is not None:
+            stop.set()
+        _authored_ds_task.cancel()
+        try:
+            await _authored_ds_task
         except asyncio.CancelledError:
             pass
         except Exception:  # noqa: BLE001

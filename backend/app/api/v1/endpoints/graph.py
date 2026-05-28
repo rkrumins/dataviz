@@ -669,12 +669,29 @@ class SaveGraphRequest(BaseModel):
     edges: List[GraphEdge]
 
 
-@router.post("/save")
+@router.post("/save", deprecated=True)
 async def save_graph(
     request: SaveGraphRequest,
+    response: Response,
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Save custom graph nodes and edges."""
+    """Save custom graph nodes and edges.
+
+    Deprecated: this endpoint writes directly to the workspace's
+    primary catalog FalkorDB graph and bypasses the versioned-authoring
+    pipeline. New clients must use
+    ``POST /api/v1/{ws_id}/graphs/{graph_id}/branches/{branch}/commits``
+    so changes land as auditable, versioned commits. Existing legacy
+    callers continue to work for backward compatibility, but the
+    response now carries a ``Deprecation`` header so clients can detect
+    and migrate.
+    """
+    logger.warning(
+        "legacy POST /graph/save called: nodes=%d edges=%d — clients "
+        "should migrate to the versioned commit pipeline",
+        len(request.nodes), len(request.edges),
+    )
+    response.headers["Deprecation"] = "true"
     success = await engine.save_custom_graph(request.nodes, request.edges)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to save graph")

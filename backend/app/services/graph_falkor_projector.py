@@ -281,13 +281,36 @@ async def _process_event(
         raise
     lag_seconds = time.monotonic() - started
 
-    # Advance the cursor in its own txn after FalkorDB succeeded.
+    # Advance the cursor + emit the freshness signal in one txn after
+    # FalkorDB succeeded. The materialized event drives the authored-
+    # data-source relay to flip ``aggregation_status`` to ``ready``.
+    from datetime import datetime, timezone
+    materialized_at = datetime.now(timezone.utc).isoformat()
     async with get_graph_store_jobs_session() as session:
+        workspace_id = await _get_workspace_id(
+            session, graph_id=graph_id,
+        )
         await _advance_cursor(
             session, graph_id=graph_id, commit_seq=commit_seq,
             commit_id=commit_id, stream_id=stream_id,
             lag_seconds=lag_seconds,
         )
+        if workspace_id is not None:
+            from backend.app.db.repositories import (
+                graph_store_outbox_repo,
+            )
+            await graph_store_outbox_repo.emit(
+                session,
+                event_type="visualization.graph.materialized",
+                aggregate_id=graph_id,
+                aggregate_type="graph",
+                payload={
+                    "graph_id": graph_id,
+                    "workspace_id": workspace_id,
+                    "commit_id": commit_id,
+                    "materialized_at": materialized_at,
+                },
+            )
         await session.commit()
 
     return True
@@ -313,6 +336,20 @@ async def _get_default_branch(
     if row is not None:
         state.default_branches[graph_id] = row
     return row
+
+
+async def _get_workspace_id(
+    session: AsyncSession, *, graph_id: str,
+) -> str | None:
+    """Return the owning workspace_id for the graph, or None if the
+    graph was deleted between commit and projection."""
+    return (
+        await session.execute(
+            select(UserGraphORM.workspace_id).where(
+                UserGraphORM.id == graph_id,
+            )
+        )
+    ).scalar_one_or_none()
 
 
 async def _get_commit_seq(

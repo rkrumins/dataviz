@@ -181,6 +181,29 @@ async def create_graph(
         created_by=_uid(user),
     )
 
+    # Emit the authored-graph lifecycle event in the same Graph Store
+    # transaction as the UserGraphORM insert. The authored-data-source
+    # relay drains it from the graph.outbox Redis stream and projects
+    # it into ``workspace_data_sources`` so the new graph appears in
+    # the catalog and routes through the standard provider path.
+    await graph_store_outbox_repo.emit(
+        session,
+        event_type="visualization.user_graph.created",
+        aggregate_id=g.id,
+        aggregate_type="user_graph",
+        payload={
+            "graph_id": g.id,
+            "workspace_id": ws_id,
+            "name": body.name,
+            "description": body.description,
+            "ontology_id": body.ontology_id,
+            "schema_mode": body.schema_mode,
+            "origin": body.origin,
+            "created_by": _uid(user),
+            "falkor_namespace": f"authored_{g.id}",
+        },
+    )
+
     # Connected/fork graphs: auto-trigger the initial source sync so
     # the canvas can open immediately. Inline this round (Phase 2.5
     # promotes to a background worker). Failures degrade gracefully —
@@ -290,6 +313,21 @@ async def delete_graph(
         )
     except graph_repo.GraphNotFoundError:
         raise HTTPException(404, detail={"code": "not_found"})
+    # Cross-DB delete fan-out via the same Redis-backed relay used on
+    # create. Soft-deletes the matching ``workspace_data_sources`` row
+    # so the authored graph disappears from the catalog.
+    await graph_store_outbox_repo.emit(
+        session,
+        event_type="visualization.user_graph.deleted",
+        aggregate_id=graph_id,
+        aggregate_type="user_graph",
+        payload={
+            "graph_id": graph_id,
+            "workspace_id": ws_id,
+            "deleted_by": _uid(user),
+            "falkor_namespace": f"authored_{graph_id}",
+        },
+    )
 
 
 # ── working set ────────────────────────────────────────────────────

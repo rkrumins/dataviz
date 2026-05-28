@@ -282,3 +282,103 @@ async def test_empty_commit_refused(gs_session):
             gs_session, graph_id=g.id, branch="main", user_id="u1",
             message="nothing", author="u1", expected_head_commit_id=None,
             actor="u1")
+
+
+# ── M1: authored-graph data-source relay outbox contract ──────────────
+
+@pytest.mark.asyncio
+async def test_user_graph_created_emit_shape(gs_session):
+    """The graphs-endpoint emits a versioned, validated event the
+    authored-data-source relay relies on. The repo's `emit` enforces
+    the `<domain>.<entity>.<verb>` contract; this test pins the
+    payload shape the consumer side expects."""
+    from backend.app.db.repositories import graph_store_outbox_repo
+    from backend.app.db.models_graph import GraphStoreOutboxEventORM
+
+    await graph_store_outbox_repo.emit(
+        gs_session,
+        event_type="visualization.user_graph.created",
+        aggregate_id="g_demo123",
+        aggregate_type="user_graph",
+        payload={
+            "graph_id": "g_demo123",
+            "workspace_id": "ws1",
+            "name": "demo",
+            "description": None,
+            "ontology_id": None,
+            "schema_mode": "schemaless",
+            "origin": "authored",
+            "created_by": "u1",
+            "falkor_namespace": "authored_g_demo123",
+        },
+    )
+    await gs_session.commit()
+    rows = (await gs_session.execute(
+        select(GraphStoreOutboxEventORM))).scalars().all()
+    target = [r for r in rows if r.event_type == "visualization.user_graph.created"]
+    assert len(target) == 1
+    payload = target[0].payload
+    # Pin the consumer-facing keys so the relay's dispatch handlers
+    # stay aligned with what the endpoint emits.
+    for k in (
+        "graph_id", "workspace_id", "name", "origin",
+        "created_by", "falkor_namespace",
+    ):
+        assert k in payload
+    assert payload["falkor_namespace"] == "authored_g_demo123"
+
+
+@pytest.mark.asyncio
+async def test_user_graph_deleted_emit_shape(gs_session):
+    from backend.app.db.repositories import graph_store_outbox_repo
+    from backend.app.db.models_graph import GraphStoreOutboxEventORM
+
+    await graph_store_outbox_repo.emit(
+        gs_session,
+        event_type="visualization.user_graph.deleted",
+        aggregate_id="g_demo123",
+        aggregate_type="user_graph",
+        payload={
+            "graph_id": "g_demo123",
+            "workspace_id": "ws1",
+            "deleted_by": "u1",
+            "falkor_namespace": "authored_g_demo123",
+        },
+    )
+    await gs_session.commit()
+    rows = (await gs_session.execute(
+        select(GraphStoreOutboxEventORM))).scalars().all()
+    target = [r for r in rows if r.event_type == "visualization.user_graph.deleted"]
+    assert len(target) == 1
+
+
+# ── M2: projector materialized signal contract ───────────────────────
+
+@pytest.mark.asyncio
+async def test_graph_materialized_emit_shape(gs_session):
+    """The FalkorDB projector emits this event after a successful flush
+    so the authored-data-source relay can flip ``aggregation_status``
+    to ``ready``. Pins the payload shape the consumer expects."""
+    from backend.app.db.repositories import graph_store_outbox_repo
+    from backend.app.db.models_graph import GraphStoreOutboxEventORM
+
+    await graph_store_outbox_repo.emit(
+        gs_session,
+        event_type="visualization.graph.materialized",
+        aggregate_id="g_demo123",
+        aggregate_type="graph",
+        payload={
+            "graph_id": "g_demo123",
+            "workspace_id": "ws1",
+            "commit_id": "gcmt_abcdef",
+            "materialized_at": "2026-05-28T12:00:00+00:00",
+        },
+    )
+    await gs_session.commit()
+    rows = (await gs_session.execute(
+        select(GraphStoreOutboxEventORM))).scalars().all()
+    target = [r for r in rows if r.event_type == "visualization.graph.materialized"]
+    assert len(target) == 1
+    payload = target[0].payload
+    for k in ("graph_id", "workspace_id", "commit_id", "materialized_at"):
+        assert k in payload

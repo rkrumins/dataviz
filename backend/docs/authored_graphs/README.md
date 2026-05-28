@@ -155,6 +155,25 @@ document it in this file when it happens.
     historical state at full fidelity. Time-travel is a query over
     existing data, not a separate denormalised projection to
     maintain.
+30. **Authored graphs are first-class workspace data sources (M1/M2).**
+    `POST /api/v1/{ws_id}/graphs` emits
+    `visualization.user_graph.created` to the Graph Store outbox
+    atomically with the `user_graphs` insert; a new lifespan consumer
+    `services/authored_data_source_relay.py` (consumer group
+    `authored_ds_relay_v1` on the existing `graph.outbox` Redis stream)
+    drains it and inserts a `workspace_data_sources` row pointing at
+    a singleton system FalkorDB provider `prov_sys_authored_falkor`
+    (bootstrapped by alembic `20260528_authored_falkor_provider`) with
+    `graph_name='authored_<graph_id>'`. The existing FalkorDB provider
+    handles reads against that namespace unchanged — no
+    `AuthoredProvider` class, no `for_authored_graph` factory, no
+    retrofit of the 30+ `/graph/*` read endpoints. Default-branch
+    commits emit `visualization.graph.materialized` from the projector
+    so the same relay can tick `aggregation_status='ready'` +
+    `last_aggregated_at` + `graph_fingerprint=sha256(commit_id)`. The
+    legacy `POST /graph/save` keeps working but is marked deprecated
+    in OpenAPI and emits a `Deprecation: true` response header so
+    clients can migrate to the versioned commit pipeline.
 
 ## Layer cake
 
