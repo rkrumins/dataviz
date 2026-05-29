@@ -11,7 +11,7 @@
  * to a few lines and can be opened in a Markdown editor/preview modal.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext, lazy, Suspense } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
   ChevronDown,
@@ -63,6 +63,14 @@ type ValueKind = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array'
  *  or as raw source. Irrelevant in edit mode (values are editable inputs). */
 type DisplayMode = 'formatted' | 'source'
 const DisplayModeContext = createContext<DisplayMode>('source')
+
+/** In Edit mode, whether text values are edited as rich WYSIWYG (default) or as
+ *  raw Markdown source. */
+type EditTextMode = 'rich' | 'source'
+const EditTextModeContext = createContext<EditTextMode>('rich')
+
+// Lazy so TipTap (ProseMirror) code-splits out of the main bundle.
+const RichMarkdownEditor = lazy(() => import('./property/RichMarkdownEditor'))
 
 export interface PropertyEditorProps {
   value: unknown
@@ -698,6 +706,7 @@ function PrimitiveValueEditor({
   fieldLabel?: string
 }) {
   const display = useContext(DisplayModeContext)
+  const editTextMode = useContext(EditTextModeContext)
   const fieldType = inferFieldType(value)
   const [modalOpen, setModalOpen] = useState(false)
 
@@ -789,7 +798,7 @@ function PrimitiveValueEditor({
     return <TagInput value={value as string[]} onChange={onChange} />
   }
 
-  // text — auto-height textarea (capped to 3 rows) + always-on Markdown editor
+  // text — WYSIWYG by default (Markdown in/out); raw textarea in Source mode.
   const stringValue = value === null || value === undefined ? '' : String(value)
   const lineCount = stringValue === '' ? 1 : stringValue.split('\n').length
   const rows = stringValue.includes('\n')
@@ -798,17 +807,25 @@ function PrimitiveValueEditor({
   return (
     <>
       <div className="flex items-start gap-1">
-        <textarea
-          value={stringValue}
-          onChange={(e) => onChange(e.target.value)}
-          rows={rows}
-          placeholder="Empty — type a value, or ⤢ to open the editor"
-          className={cn(
-            "flex-1 min-w-0 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
-            "placeholder:text-ink-muted/50",
-            "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors resize-none custom-scrollbar leading-relaxed",
-          )}
-        />
+        {editTextMode === 'rich' ? (
+          <div className="flex-1 min-w-0">
+            <Suspense fallback={<div className="text-xs text-ink-muted px-2 py-1">…</div>}>
+              <RichMarkdownEditor variant="inline" value={stringValue} onChange={onChange} placeholder="Empty — type, or ⤢ to expand" />
+            </Suspense>
+          </div>
+        ) : (
+          <textarea
+            value={stringValue}
+            onChange={(e) => onChange(e.target.value)}
+            rows={rows}
+            placeholder="Empty — type a value, or ⤢ to open the editor"
+            className={cn(
+              "flex-1 min-w-0 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
+              "placeholder:text-ink-muted/50",
+              "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors resize-none custom-scrollbar leading-relaxed",
+            )}
+          />
+        )}
         <div className="flex items-start">
           {stringValue !== '' && <CopyButton text={stringValue} />}
           {expandButton}
@@ -1432,6 +1449,7 @@ function GroupedObjectRoot({
 }) {
   const [flat, setFlat] = useState(false)
   const [display, setDisplay] = useState<DisplayMode>('formatted')
+  const [editTextMode, setEditTextMode] = useState<EditTextMode>('rich')
   const [query, setQuery] = useState('')
   const [addingRoot, setAddingRoot] = useState(false)
 
@@ -1456,8 +1474,9 @@ function GroupedObjectRoot({
 
   return (
     <DisplayModeContext.Provider value={readOnly ? display : 'source'}>
+    <EditTextModeContext.Provider value={editTextMode}>
     <div>
-      {/* Toolbar: search + Formatted/Source (view) + Tree/Flat toggles */}
+      {/* Toolbar: search + Formatted/Source (view) or Rich/Source (edit) + Tree/Flat toggles */}
       <div className="flex items-center gap-2 mb-2 flex-wrap">
         {searchable && (
           <div className="flex-1 min-w-[8rem]">
@@ -1468,10 +1487,15 @@ function GroupedObjectRoot({
             />
           </div>
         )}
-        {readOnly && (
+        {readOnly ? (
           <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
             <ModalTab active={display === 'formatted'} onClick={() => setDisplay('formatted')} label="Formatted" />
             <ModalTab active={display === 'source'} onClick={() => setDisplay('source')} label="Markdown" />
+          </div>
+        ) : (
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
+            <ModalTab active={editTextMode === 'rich'} onClick={() => setEditTextMode('rich')} label="Rich" />
+            <ModalTab active={editTextMode === 'source'} onClick={() => setEditTextMode('source')} label="Source" />
           </div>
         )}
         <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5 flex-shrink-0">
@@ -1513,6 +1537,7 @@ function GroupedObjectRoot({
         </div>
       )}
     </div>
+    </EditTextModeContext.Provider>
     </DisplayModeContext.Provider>
   )
 }

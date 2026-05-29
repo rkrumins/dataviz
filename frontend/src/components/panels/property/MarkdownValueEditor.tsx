@@ -1,10 +1,11 @@
 /**
- * MarkdownValueModal — premium value editor with a formatting toolbar and a
- * live side-by-side preview. Buttons insert Markdown so non-technical users
- * never type syntax. Stores plain Markdown text.
+ * MarkdownValueModal — premium value editor. Defaults to a WYSIWYG (Rich) editor
+ * where you type and see formatting live; a Source toggle drops to a raw-Markdown
+ * textarea with an insert-Markdown toolbar + live preview. Both modes read/write
+ * Markdown, so storage stays Markdown-only.
  */
 
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -28,6 +29,9 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { markdownComponents } from '@/components/docs/MarkdownComponents'
+
+// Lazy so TipTap (ProseMirror) code-splits out of the main bundle.
+const RichMarkdownEditor = lazy(() => import('./RichMarkdownEditor'))
 
 interface Edit {
   value: string
@@ -79,6 +83,7 @@ export function MarkdownValueModal({
 }) {
   const [draft, setDraft] = useState(value)
   const [copied, setCopied] = useState(false)
+  const [mode, setMode] = useState<'rich' | 'source'>('rich')
   const [mobileTab, setMobileTab] = useState<'write' | 'preview'>('write')
   const [showPreview, setShowPreview] = useState(true)
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -168,13 +173,42 @@ export function MarkdownValueModal({
               </h4>
               <p className="text-2xs text-ink-muted mt-0.5">{draft.length} chars · {wordCount} {wordCount === 1 ? 'word' : 'words'}</p>
             </div>
-            <button onClick={onClose} className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-lg hover:bg-white/10" title="Close">
-              <XIcon className="w-4 h-4 text-ink-muted" />
-            </button>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              {!readOnly && (
+                <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-black/5 dark:bg-white/5">
+                  {(['rich', 'source'] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMode(m)}
+                      className={cn(
+                        "px-2.5 py-1 rounded-md text-xs font-medium transition-colors capitalize",
+                        mode === m ? "bg-white/10 text-ink shadow-sm" : "text-ink-muted hover:text-ink",
+                      )}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {!readOnly && (
+                <button
+                  onClick={async () => {
+                    try { await navigator.clipboard.writeText(draft); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch { /* unavailable */ }
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-white/10 transition-colors"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              )}
+              <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/10" title="Close">
+                <XIcon className="w-4 h-4 text-ink-muted" />
+              </button>
+            </div>
           </div>
 
-          {/* Toolbar */}
-          {!readOnly && (
+          {/* Source-mode formatting toolbar */}
+          {!readOnly && mode === 'source' && (
             <div className="flex items-center gap-0.5 px-4 py-2 border-b border-glass-border/40 flex-wrap">
               {tools.map((t, i) => {
                 const Icon = t.icon
@@ -202,15 +236,6 @@ export function MarkdownValueModal({
                   {showPreview ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                   {showPreview ? 'Hide preview' : 'Show preview'}
                 </button>
-                <button
-                  onClick={async () => {
-                    try { await navigator.clipboard.writeText(draft); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch { /* unavailable */ }
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-white/10 transition-colors"
-                >
-                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                  {copied ? 'Copied' : 'Copy'}
-                </button>
               </div>
             </div>
           )}
@@ -219,6 +244,10 @@ export function MarkdownValueModal({
           <div className="flex-1 min-h-0 p-4">
             {readOnly ? (
               <div className="h-full">{preview}</div>
+            ) : mode === 'rich' ? (
+              <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-ink-muted">Loading editor…</div>}>
+                <RichMarkdownEditor variant="full" value={draft} onChange={setDraft} autoFocus placeholder="Write here…" />
+              </Suspense>
             ) : (
               <div className="flex flex-col h-full">
                 {/* Mobile: Write/Preview tabs (only when the preview pane is on) */}

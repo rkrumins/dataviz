@@ -58,6 +58,20 @@ vi.mock('react-markdown', () => ({
 vi.mock('remark-gfm', () => ({ default: () => undefined }))
 vi.mock('@/components/docs/MarkdownComponents', () => ({ markdownComponents: {} }))
 
+// TipTap can't render in jsdom; stub the WYSIWYG editor as a controlled
+// textarea that round-trips its value. Covers both the inline + modal (rich)
+// uses (same resolved module). Stores plain text, mirroring Markdown storage.
+vi.mock('./property/RichMarkdownEditor', () => ({
+  default: ({ value, onChange, placeholder }: { value: string; onChange: (v: string) => void; placeholder?: string }) => (
+    <textarea
+      data-testid="rich-editor"
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  ),
+}))
+
 // ---------------------------------------------------------------------------
 // Harness — keeps the controlled value in state so interactions re-render
 // ---------------------------------------------------------------------------
@@ -95,10 +109,11 @@ const LONG = 'Lorem ipsum dolor sit amet, '.repeat(8) // > 120 chars
 // ---------------------------------------------------------------------------
 
 describe('PropertyEditor', () => {
-  it('renders keys and values for an object bag', () => {
+  it('renders keys and values for an object bag', async () => {
     render(<Harness initial={{ owner: 'analytics', rows: 42, active: true }} />)
     expect(screen.getByText('owner')).toBeInTheDocument()
-    expect(screen.getByDisplayValue('analytics')).toBeInTheDocument()
+    // text value edits in the (lazy) rich editor stub
+    expect(await screen.findByDisplayValue('analytics')).toBeInTheDocument()
     expect(screen.getByDisplayValue('42')).toBeInTheDocument()
     // boolean renders as a friendly Yes/No toggle
     expect(screen.getByText('Yes')).toBeInTheDocument()
@@ -111,7 +126,8 @@ describe('PropertyEditor', () => {
 
     await user.click(screen.getByTitle('Open editor (Markdown)'))
 
-    const modalEditor = screen.getByPlaceholderText(/Write here/i)
+    // Modal opens in Rich mode (lazy stub) — its textarea carries the placeholder.
+    const modalEditor = await screen.findByPlaceholderText(/Write here/i)
     await user.clear(modalEditor)
     await user.type(modalEditor, 'Short summary')
     await user.click(screen.getByRole('button', { name: 'Save' }))
@@ -119,10 +135,12 @@ describe('PropertyEditor', () => {
     expect(onChange).toHaveBeenCalledWith({ description: 'Short summary' })
   })
 
-  it('previews markdown in the modal', async () => {
+  it('previews markdown in the modal (Source mode)', async () => {
     const user = userEvent.setup()
     render(<Harness initial={{ notes: LONG }} />)
     await user.click(screen.getByTitle('Open editor (Markdown)'))
+    // Preview pane lives in Source mode; switch to it first.
+    await user.click(screen.getByRole('button', { name: 'source' }))
     await user.click(screen.getByRole('button', { name: 'Preview' }))
     expect(screen.getByTestId('md')).toBeInTheDocument()
   })
@@ -429,11 +447,13 @@ describe('PropertyEditor — business field types & formatting', () => {
     expect(isJsonSafe(onChange.mock.calls.at(-1)![0])).toBe(true)
   })
 
-  it('toolbar Bold wraps the selection in **…**', async () => {
+  it('Source-mode toolbar Bold wraps the selection in **…**', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
     render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
     await user.click(screen.getByTitle('Open editor (Markdown)'))
+    // Switch to Source mode where the raw textarea + insert-markdown toolbar live.
+    await user.click(screen.getByRole('button', { name: 'source' }))
     const ta = screen.getByPlaceholderText(/Write here/i) as HTMLTextAreaElement
     ta.focus()
     ta.setSelectionRange(0, 2) // select "hi"
