@@ -76,6 +76,7 @@ export function MarkdownValueModal({
   value,
   readOnly,
   initialMode = 'rich',
+  initialMaximized = false,
   onSave,
   onClose,
 }: {
@@ -83,13 +84,14 @@ export function MarkdownValueModal({
   value: string
   readOnly?: boolean
   initialMode?: 'rich' | 'source'
+  initialMaximized?: boolean
   onSave: (next: string) => void
   onClose: () => void
 }) {
   const [draft, setDraft] = useState(value)
   const [copied, setCopied] = useState(false)
   const [mode, setMode] = useState<'rich' | 'source'>(initialMode)
-  const [maximized, setMaximized] = useState(false)
+  const [maximized, setMaximized] = useState(initialMaximized)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [mobileTab, setMobileTab] = useState<'write' | 'preview'>('write')
   const [showPreview, setShowPreview] = useState(true)

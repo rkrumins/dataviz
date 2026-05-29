@@ -516,12 +516,24 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     expect(screen.queryByPlaceholderText(/Write here/i)).not.toBeInTheDocument()
   })
 
-  it('clamps long values with a "See all" that opens the modal', async () => {
+  it('long values: Expand grows in-drawer; Full screen opens the maximized modal', async () => {
     const user = userEvent.setup()
-    render(<Harness initial={{ note: LONG }} />)
-    const seeAll = screen.getByRole('button', { name: /See all/i })
-    await user.click(seeAll)
+    const big = Array(8).fill('a line of content').join('\n') // > 5 lines
+    render(<Harness initial={{ note: big }} />)
+    // Expand toggles in-drawer (no modal opens)
+    await user.click(screen.getByRole('button', { name: /Expand/i }))
+    expect(screen.getByRole('button', { name: /Collapse/i })).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/Write here/i)).not.toBeInTheDocument()
+    // Full screen opens the editor modal, already maximized (Restore visible)
+    await user.click(screen.getByRole('button', { name: /Full screen/i }))
     expect(await screen.findByPlaceholderText(/Write here/i)).toBeInTheDocument()
+    expect(screen.getByTitle('Restore')).toBeInTheDocument()
+  })
+
+  it('short values (≤5 lines) show no Expand / Full screen controls', () => {
+    render(<Harness initial={{ note: 'a short single-line value' }} />)
+    expect(screen.queryByRole('button', { name: /Expand/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Full screen/i })).not.toBeInTheDocument()
   })
 
   it('renders the modal in a body portal (escapes the drawer containing block)', async () => {

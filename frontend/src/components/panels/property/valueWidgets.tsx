@@ -5,12 +5,11 @@
  * (string / number / boolean / string[]) so values persist cleanly.
  */
 
-import { useState, useRef } from 'react'
+import { useState, useRef, memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { X as XIcon, ExternalLink, Calendar } from 'lucide-react'
+import { X as XIcon, ExternalLink, Calendar, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { markdownComponents } from '@/components/docs/MarkdownComponents'
 import { isIsoDate } from './fieldTypes'
 
 // ============================================
@@ -200,42 +199,51 @@ export function TagInput({
 }
 
 // ============================================
-// InlineMarkdown — compact formatted rendering for view mode
+// InlineMarkdown — compact, FAST formatted rendering for the property list
 // ============================================
 
-// Render single-line values inline (no block margins); only fall back to the
-// full block renderer when the text is genuinely multi-line / structured.
-const inlineComponents = {
-  p: ({ children }: { children?: React.ReactNode }) => <span>{children}</span>,
+/** Cheap check for Markdown tokens — most property values are plain strings and
+ *  skip the (relatively expensive) ReactMarkdown pipeline entirely. */
+const MD_TOKEN = /(\*\*|__|~~|`|\[[^\]]*\]\([^)]*\)|#{1,6}\s|(?:^|\n)\s*[-*+]\s|(?:^|\n)\s*\d+\.\s|(?:^|\n)\s*>\s)/
+function hasMarkdown(text: string): boolean {
+  return MD_TOKEN.test(text)
 }
 
-export function InlineMarkdown({ text }: { text: string }) {
-  const multiline = text.includes('\n')
-  if (multiline) {
+// Minimal component maps — deliberately NOT the heavy docs `markdownComponents`
+// (no RouterLink / anchor headings / mermaid), which is overkill for tiny rows.
+const liteInline = {
+  p: ({ children }: { children?: React.ReactNode }) => <span>{children}</span>,
+}
+const liteBlock = {
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  ),
+}
+
+export const InlineMarkdown = memo(function InlineMarkdown({ text }: { text: string }) {
+  // Fast path: plain text → render directly, no Markdown pipeline.
+  if (!hasMarkdown(text)) {
+    return <span className="text-xs text-ink whitespace-pre-wrap break-words">{text}</span>
+  }
+  if (text.includes('\n')) {
     return (
-      <div className="prose-synodic max-w-none text-xs leading-relaxed">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-          {text}
-        </ReactMarkdown>
+      <div className="prose-synodic max-w-none text-xs leading-relaxed break-words [&_pre]:overflow-x-auto">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={liteBlock}>{text}</ReactMarkdown>
       </div>
     )
   }
   return (
     <span className="text-xs text-ink [&_a]:text-accent-lineage [&_a]:underline [&_code]:font-mono [&_code]:text-[0.95em] [&_code]:px-1 [&_code]:rounded [&_code]:bg-black/5 dark:[&_code]:bg-white/10">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={inlineComponents}>
-        {text}
-      </ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={liteInline}>{text}</ReactMarkdown>
     </span>
   )
-}
+})
 
 // ============================================
-// ClampedText — value-cell display that clamps heavy content + opens the modal
+// ClampedText — three-tier disclosure: inline (≤5 lines) → Expand (in-drawer) → Full screen (modal)
 // ============================================
 
-const CLAMP_CHARS = 120
-
-export function ClampedText({
+export const ClampedText = memo(function ClampedText({
   text,
   source,
   onOpen,
@@ -244,13 +252,17 @@ export function ClampedText({
   text: string
   /** Show raw Markdown source instead of formatted. */
   source?: boolean
-  /** Open the full editor/viewer modal. */
-  onOpen?: () => void
-  /** Edit mode — the cell is click-to-edit. */
+  /** Open the full editor/viewer modal. `maximized` requests full-window. */
+  onOpen?: (maximized?: boolean) => void
+  /** Edit mode — clicking the cell opens the editor. */
   editable?: boolean
 }) {
+  const [expanded, setExpanded] = useState(false)
   const empty = text === ''
-  const isLong = text.includes('\n') || text.length > CLAMP_CHARS
+  const lineCount = empty ? 0 : text.split('\n').length
+  // "A few lines" (≤5) shows inline with no Expand affordance.
+  const isLong = lineCount > 5 || text.length > 280
+  const clampCollapsed = isLong && !expanded
 
   const content = empty ? (
     <span className="text-xs italic text-ink-muted">{editable ? 'Empty — click to add' : 'empty'}</span>
@@ -261,29 +273,52 @@ export function ClampedText({
   )
 
   const inner = (
-    <div className={cn("relative", isLong && "max-h-[4.2rem] overflow-hidden")}>
+    <div
+      className={cn(
+        "relative",
+        clampCollapsed && "max-h-[7.5rem] overflow-hidden",
+        isLong && expanded && "max-h-[45vh] overflow-auto custom-scrollbar",
+      )}
+    >
       {content}
-      {isLong && (
+      {clampCollapsed && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-canvas-elevated to-transparent" />
       )}
     </div>
   )
 
+  const controls = isLong ? (
+    <div className="flex items-center gap-3 mt-1">
+      <button
+        onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v) }}
+        className="inline-flex items-center gap-1 text-2xs font-medium text-accent-lineage hover:underline"
+      >
+        {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        {expanded ? 'Collapse' : 'Expand'}
+      </button>
+      {onOpen && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onOpen(true) }}
+          className="inline-flex items-center gap-1 text-2xs font-medium text-ink-muted hover:text-ink"
+        >
+          <Maximize2 className="w-3 h-3" />
+          Full screen
+        </button>
+      )}
+    </div>
+  ) : null
+
   if (editable) {
     return (
       <div>
         <div
-          onClick={onOpen}
+          onClick={() => onOpen?.(false)}
           className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-white/[0.04] transition-colors"
           title="Click to edit"
         >
           {inner}
         </div>
-        {isLong && (
-          <button onClick={onOpen} className="mt-0.5 text-2xs font-medium text-accent-lineage hover:underline">
-            See all
-          </button>
-        )}
+        {controls}
       </div>
     )
   }
@@ -291,14 +326,10 @@ export function ClampedText({
   return (
     <div>
       {inner}
-      {isLong && onOpen && (
-        <button onClick={onOpen} className="mt-0.5 text-2xs font-medium text-accent-lineage hover:underline">
-          See all
-        </button>
-      )}
+      {controls}
     </div>
   )
-}
+})
 
 // ============================================
 // Formatted read-only renderers for non-text types

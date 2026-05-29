@@ -705,10 +705,17 @@ function PrimitiveValueEditor({
   const editTextMode = useContext(EditTextModeContext)
   const fieldType = inferFieldType(value)
   const [modalOpen, setModalOpen] = useState(false)
+  const [modalMaximized, setModalMaximized] = useState(false)
+
+  // Stable handler so memoized ClampedText doesn't re-render on every parent render.
+  const openModal = useCallback((maximized?: boolean) => {
+    setModalMaximized(!!maximized)
+    setModalOpen(true)
+  }, [])
 
   const expandButton = (
     <button
-      onClick={() => setModalOpen(true)}
+      onClick={() => openModal(false)}
       className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-white/10 transition-colors"
       title={readOnly ? 'View full value' : 'Open editor (Markdown)'}
     >
@@ -746,8 +753,8 @@ function PrimitiveValueEditor({
     } else if (fieldType === 'url') {
       body = <FormattedLink value={s} />
     } else {
-      // formatted text — clamp heavy values with a "See all" → modal viewer
-      body = <ClampedText text={s} onOpen={() => setModalOpen(true)} />
+      // formatted text — clamp; Expand grows in-drawer, Full screen → modal viewer
+      body = <ClampedText text={s} onOpen={openModal} />
     }
     return (
       <>
@@ -759,7 +766,7 @@ function PrimitiveValueEditor({
           </div>
         </div>
         {modalOpen && (
-          <MarkdownValueModal fieldLabel={fieldLabel} value={s} readOnly onSave={() => setModalOpen(false)} onClose={() => setModalOpen(false)} />
+          <MarkdownValueModal fieldLabel={fieldLabel} value={s} readOnly initialMaximized={modalMaximized} onSave={() => setModalOpen(false)} onClose={() => setModalOpen(false)} />
         )}
       </>
     )
@@ -806,7 +813,7 @@ function PrimitiveValueEditor({
             text={stringValue}
             source={editTextMode === 'source'}
             editable
-            onOpen={() => setModalOpen(true)}
+            onOpen={openModal}
           />
         </div>
         <div className="flex items-start">
@@ -819,6 +826,7 @@ function PrimitiveValueEditor({
           fieldLabel={fieldLabel}
           value={stringValue}
           initialMode={editTextMode}
+          initialMaximized={modalMaximized}
           onSave={(next) => { onChange(next); setModalOpen(false) }}
           onClose={() => setModalOpen(false)}
         />
