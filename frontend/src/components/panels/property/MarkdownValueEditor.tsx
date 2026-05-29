@@ -23,6 +23,8 @@ import {
   Quote,
   Code,
   Link as LinkIcon,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { markdownComponents } from '@/components/docs/MarkdownComponents'
@@ -78,6 +80,7 @@ export function MarkdownValueModal({
   const [draft, setDraft] = useState(value)
   const [copied, setCopied] = useState(false)
   const [mobileTab, setMobileTab] = useState<'write' | 'preview'>('write')
+  const [showPreview, setShowPreview] = useState(true)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const pendingSel = useRef<[number, number] | null>(null)
 
@@ -155,7 +158,7 @@ export function MarkdownValueModal({
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.96, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl"
+          className="w-[92vw] max-w-[1200px] h-[90vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl"
         >
           {/* Header */}
           <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-glass-border/50">
@@ -189,7 +192,16 @@ export function MarkdownValueModal({
                   </span>
                 )
               })}
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-1">
+                <button
+                  onClick={() => setShowPreview((p) => !p)}
+                  title={showPreview ? 'Hide preview' : 'Show preview'}
+                  aria-label={showPreview ? 'Hide preview' : 'Show preview'}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs text-ink-muted hover:text-ink hover:bg-white/10 transition-colors"
+                >
+                  {showPreview ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  {showPreview ? 'Hide preview' : 'Show preview'}
+                </button>
                 <button
                   onClick={async () => {
                     try { await navigator.clipboard.writeText(draft); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch { /* unavailable */ }
@@ -206,15 +218,17 @@ export function MarkdownValueModal({
           {/* Body */}
           <div className="flex-1 min-h-0 p-4">
             {readOnly ? (
-              <div className="h-[55vh]">{preview}</div>
+              <div className="h-full">{preview}</div>
             ) : (
-              <>
-                {/* Mobile: Write/Preview tabs */}
-                <div className="flex sm:hidden items-center gap-1 mb-2">
-                  <button onClick={() => setMobileTab('write')} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium", mobileTab === 'write' ? "bg-white/10 text-ink" : "text-ink-muted")}>Write</button>
-                  <button onClick={() => setMobileTab('preview')} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium", mobileTab === 'preview' ? "bg-white/10 text-ink" : "text-ink-muted")}>Preview</button>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 h-[55vh]">
+              <div className="flex flex-col h-full">
+                {/* Mobile: Write/Preview tabs (only when the preview pane is on) */}
+                {showPreview && (
+                  <div className="flex sm:hidden items-center gap-1 mb-2 flex-shrink-0">
+                    <button onClick={() => setMobileTab('write')} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium", mobileTab === 'write' ? "bg-white/10 text-ink" : "text-ink-muted")}>Write</button>
+                    <button onClick={() => setMobileTab('preview')} className={cn("px-3 py-1.5 rounded-lg text-xs font-medium", mobileTab === 'preview' ? "bg-white/10 text-ink" : "text-ink-muted")}>Preview</button>
+                  </div>
+                )}
+                <div className={cn("grid gap-3 flex-1 min-h-0", showPreview ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1")}>
                   <textarea
                     ref={taRef}
                     autoFocus
@@ -226,12 +240,14 @@ export function MarkdownValueModal({
                     className={cn(
                       "h-full px-3 py-2.5 rounded-xl bg-black/10 dark:bg-white/5 border border-white/10",
                       "focus:border-accent-lineage/50 outline-none transition-colors text-sm leading-relaxed resize-none custom-scrollbar font-sans",
-                      mobileTab === 'preview' && "hidden sm:block",
+                      showPreview && mobileTab === 'preview' && "hidden sm:block",
                     )}
                   />
-                  <div className={cn(mobileTab === 'write' && "hidden sm:block", "h-full")}>{preview}</div>
+                  {showPreview && (
+                    <div className={cn(mobileTab === 'write' && "hidden sm:block", "h-full min-h-0")}>{preview}</div>
+                  )}
                 </div>
-              </>
+              </div>
             )}
           </div>
 

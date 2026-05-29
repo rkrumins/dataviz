@@ -637,9 +637,12 @@ interface SectionProps {
   icon?: React.ComponentType<{ className?: string }>
   children: React.ReactNode
   action?: React.ReactNode
+  /** Let content extend closer to the drawer edges (title stays aligned).
+   *  Used for the content-dense Properties section. */
+  flush?: boolean
 }
 
-function Section({ title, icon: Icon, children, action }: SectionProps) {
+function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
   return (
     <div className="px-5 py-4">
       <div className="flex items-center justify-between gap-2 mb-3">
@@ -651,7 +654,7 @@ function Section({ title, icon: Icon, children, action }: SectionProps) {
         </div>
         {action}
       </div>
-      {children}
+      {flush ? <div className="-mx-3">{children}</div> : children}
     </div>
   )
 }
@@ -761,7 +764,7 @@ function ViewModeContent({
           `readOnly` keeps the recursive UI navigable (expand, search, copy,
           open-in-modal-to-read) while blocking edits; the same component is
           used (editable) in Edit mode. */}
-      <Section title="Properties" icon={LucideIcons.FileText}>
+      <Section title="Properties" icon={LucideIcons.FileText} flush={hasAdditional}>
         {hasAdditional ? (
           <PanelErrorBoundary resetKeys={[urn]}>
             <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable groupByPath bare />
@@ -1011,15 +1014,17 @@ function EditModeContent({
         <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">
           Properties
         </h4>
-        <PanelErrorBoundary resetKeys={[urn]}>
-          <PropertyEditor
-            value={propertiesBag}
-            onChange={(next) => onPropertiesChange(next as Record<string, any>)}
-            searchable
-            groupByPath
-            bare
-          />
-        </PanelErrorBoundary>
+        <div className="-mx-3">
+          <PanelErrorBoundary resetKeys={[urn]}>
+            <PropertyEditor
+              value={propertiesBag}
+              onChange={(next) => onPropertiesChange(next as Record<string, any>)}
+              searchable
+              groupByPath
+              bare
+            />
+          </PanelErrorBoundary>
+        </div>
       </div>
     </div>
   )

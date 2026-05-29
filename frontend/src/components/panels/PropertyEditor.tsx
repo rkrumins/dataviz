@@ -525,15 +525,15 @@ function PropertyRow({
   return (
     <div className="group">
       <div className={cn(
-        "flex items-start gap-2 py-1.5 px-2 rounded-lg",
+        "flex items-start gap-1.5 py-1.5 px-1 rounded-lg",
         "hover:bg-white/[0.03] transition-colors",
       )}>
         {/* Expand / drag handle */}
-        <div className="flex items-center h-6 w-5 flex-shrink-0">
+        <div className="flex items-center h-6 w-4 flex-shrink-0">
           {isContainer ? (
             <button
               onClick={() => setExpanded(e => !e)}
-              className="w-5 h-5 flex items-center justify-center text-ink-muted hover:text-ink"
+              className="w-4 h-5 flex items-center justify-center text-ink-muted hover:text-ink"
               title={expanded ? 'Collapse' : 'Expand'}
             >
               {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
@@ -541,13 +541,8 @@ function PropertyRow({
           ) : isArrayItem && !readOnly ? (
             <GripVertical className="w-3.5 h-3.5 text-ink-muted/40 cursor-grab" />
           ) : (
-            <span className="w-5" />
+            <span className="w-4" />
           )}
-        </div>
-
-        {/* Type chip */}
-        <div className="h-6 flex items-center flex-shrink-0">
-          <FieldTypeChip fieldType={fieldType} readOnly={readOnly} onChange={readOnly ? undefined : changeType} />
         </div>
 
         {/* Key column — fixed basis so rows align consistently */}
@@ -600,6 +595,15 @@ function PropertyRow({
             />
           )}
         </div>
+
+        {/* Type control — icon-only on the right (edit only); in read-only the
+            formatted value already conveys the type, so the chip is omitted to
+            keep the focus on the property name + value. */}
+        {!readOnly && (
+          <div className="h-6 flex items-center flex-shrink-0">
+            <FieldTypeChip fieldType={fieldType} onChange={changeType} showLabel={false} />
+          </div>
+        )}
 
         {/* Row actions */}
         <div className={cn(
