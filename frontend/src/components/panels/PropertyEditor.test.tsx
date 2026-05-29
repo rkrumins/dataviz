@@ -523,4 +523,14 @@ describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
     await user.click(seeAll)
     expect(await screen.findByPlaceholderText(/Write here/i)).toBeInTheDocument()
   })
+
+  it('renders the modal in a body portal (escapes the drawer containing block)', async () => {
+    const user = userEvent.setup()
+    const { container } = render(<Harness initial={{ note: 'hi' }} />)
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    const editor = await screen.findByPlaceholderText(/Write here/i)
+    // Found document-wide, but NOT inside the component's own container subtree.
+    expect(editor).toBeInTheDocument()
+    expect(container.contains(editor)).toBe(false)
+  })
 })

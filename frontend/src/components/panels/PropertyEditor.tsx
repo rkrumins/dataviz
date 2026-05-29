@@ -12,6 +12,7 @@
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
   ChevronDown,
@@ -1222,7 +1223,7 @@ function RawJsonEditor({
     return <div className="rounded-lg border border-glass-border/40 bg-black/10 dark:bg-white/[0.02] p-3">{body}</div>
   }
 
-  return (
+  return createPortal(
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }}
@@ -1247,7 +1248,8 @@ function RawJsonEditor({
           {body}
         </motion.div>
       </motion.div>
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   )
 }
 

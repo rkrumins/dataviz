@@ -6,6 +6,7 @@
  */
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, lazy, Suspense } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -151,9 +152,9 @@ export function MarkdownValueModal({
   ]
 
   const preview = (
-    <div className="h-full overflow-y-auto custom-scrollbar rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 px-4 py-3">
+    <div className="h-full overflow-auto custom-scrollbar rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 px-4 py-3">
       {draft.trim() ? (
-        <div className="prose-synodic max-w-none text-sm">
+        <div className="prose-synodic max-w-none text-sm break-words [&_pre]:overflow-x-auto">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{draft}</ReactMarkdown>
         </div>
       ) : (
@@ -162,7 +163,7 @@ export function MarkdownValueModal({
     </div>
   )
 
-  return (
+  return createPortal(
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }}
@@ -293,13 +294,13 @@ export function MarkdownValueModal({
                     spellCheck
                     placeholder="Write here… use the toolbar to format."
                     className={cn(
-                      "h-full px-3 py-2.5 rounded-xl bg-black/10 dark:bg-white/5 border border-white/10",
+                      "h-full min-w-0 px-3 py-2.5 rounded-xl bg-black/10 dark:bg-white/5 border border-white/10",
                       "focus:border-accent-lineage/50 outline-none transition-colors text-sm leading-relaxed resize-none custom-scrollbar font-sans",
                       showPreview && mobileTab === 'preview' && "hidden sm:block",
                     )}
                   />
                   {showPreview && (
-                    <div className={cn(mobileTab === 'write' && "hidden sm:block", "h-full min-h-0")}>{preview}</div>
+                    <div className={cn(mobileTab === 'write' && "hidden sm:block", "h-full min-h-0 min-w-0")}>{preview}</div>
                   )}
                 </div>
               </div>
@@ -333,6 +334,7 @@ export function MarkdownValueModal({
           </div>
         </motion.div>
       </motion.div>
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   )
 }
