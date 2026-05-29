@@ -5,7 +5,7 @@
  * Markdown, so storage stays Markdown-only.
  */
 
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, lazy, Suspense } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue, lazy, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
@@ -153,17 +153,20 @@ export function MarkdownValueModal({
     { icon: LinkIcon, title: 'Link (⌘K)', run: () => applyEdit(linkEdit) },
   ]
 
-  const preview = (
+  // Render the (heavy) Markdown preview at low priority so typing stays snappy —
+  // the textarea updates immediately while the preview catches up.
+  const deferredDraft = useDeferredValue(draft)
+  const preview = useMemo(() => (
     <div className="h-full overflow-auto custom-scrollbar rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 px-4 py-3">
-      {draft.trim() ? (
+      {deferredDraft.trim() ? (
         <div className="prose-synodic max-w-none text-sm break-words [&_pre]:overflow-x-auto">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{draft}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{deferredDraft}</ReactMarkdown>
         </div>
       ) : (
         <p className="text-sm text-ink-muted italic">Nothing to preview yet.</p>
       )}
     </div>
-  )
+  ), [deferredDraft])
 
   return createPortal(
     <AnimatePresence>

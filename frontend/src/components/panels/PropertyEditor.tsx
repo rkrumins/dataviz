@@ -11,7 +11,7 @@
  * to a few lines and can be opened in a Markdown editor/preview modal.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, memo, createContext, useContext } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
@@ -493,7 +493,7 @@ interface PropertyRowProps {
   onDelete: () => void
 }
 
-function PropertyRow({
+const PropertyRow = memo(function PropertyRow({
   rowKey,
   value,
   readOnly,
@@ -682,7 +682,7 @@ function PropertyRow({
       )}
     </div>
   )
-}
+})
 
 // ============================================
 // PrimitiveValueEditor — consistent full-width value cell per kind
@@ -1449,16 +1449,20 @@ function GroupedObjectRoot({
   const entries = Object.entries(value)
   const tree = useMemo(() => buildPathTree(entries), [value])
 
+  // Keep `api` identity stable across edits (it reads the latest value/onChange
+  // through a ref) so memoized rows don't all re-render when one value changes.
+  const liveRef = useRef({ value, onChange })
+  liveRef.current = { value, onChange }
   const api: FlatApi = useMemo(() => ({
-    updateValue: (fullKey, v) => onChange(setKeyValue(value, fullKey, v)),
+    updateValue: (fullKey, v) => liveRef.current.onChange(setKeyValue(liveRef.current.value, fullKey, v)),
     renameLeaf: (fullKey, parentPath, newSegment) =>
-      onChange(renameKey(value, fullKey, parentPath ? `${parentPath}${PATH_SEP}${newSegment}` : newSegment)),
-    deleteKey: (fullKey) => onChange(deleteKey(value, fullKey)),
-    renameFolder: (oldPath, newPath) => onChange(renamePrefix(value, oldPath, newPath)),
-    deleteFolder: (path) => onChange(deletePrefix(value, path)),
-    addEntry: (prefix, name, val) => onChange(addEntry(value, prefix, name, val)),
-    existingKeys: () => Object.keys(value),
-  }), [value, onChange])
+      liveRef.current.onChange(renameKey(liveRef.current.value, fullKey, parentPath ? `${parentPath}${PATH_SEP}${newSegment}` : newSegment)),
+    deleteKey: (fullKey) => liveRef.current.onChange(deleteKey(liveRef.current.value, fullKey)),
+    renameFolder: (oldPath, newPath) => liveRef.current.onChange(renamePrefix(liveRef.current.value, oldPath, newPath)),
+    deleteFolder: (path) => liveRef.current.onChange(deletePrefix(liveRef.current.value, path)),
+    addEntry: (prefix, name, val) => liveRef.current.onChange(addEntry(liveRef.current.value, prefix, name, val)),
+    existingKeys: () => Object.keys(liveRef.current.value),
+  }), [])
 
   const q = query.trim().toLowerCase()
   const visible = useMemo(() => (q ? pruneTree(tree.folders, tree.leaves, q) : tree), [tree, q])
@@ -1558,7 +1562,7 @@ function RootAdder({ api, adding, setAdding }: { api: FlatApi; adding: boolean; 
 // LeafRow — a single flat key rendered via PropertyRow, path-aware callbacks
 // ============================================
 
-function LeafRow({
+const LeafRow = memo(function LeafRow({
   leaf,
   parentPath,
   depth,
@@ -1585,7 +1589,16 @@ function LeafRow({
       onDelete={() => api.deleteKey(leaf.fullKey)}
     />
   )
-}
+}, (prev, next) =>
+  // `buildPathTree` (memoized on [value]) hands back equal leaf values for
+  // unchanged keys, so only the edited leaf re-renders.
+  prev.leaf.fullKey === next.leaf.fullKey &&
+  prev.leaf.value === next.leaf.value &&
+  prev.parentPath === next.parentPath &&
+  prev.depth === next.depth &&
+  prev.readOnly === next.readOnly &&
+  prev.query === next.query &&
+  prev.api === next.api)
 
 // ============================================
 // FolderGroup — expandable folder header + recursive children

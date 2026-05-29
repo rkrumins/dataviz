@@ -151,7 +151,6 @@ export function EntityDrawer({
   const handleChange = useCallback((key: string, value: any) => {
     const newData = { ...formData, [key]: value }
     setFormData(newData)
-    setRawJson(JSON.stringify(newData, null, 2))
     setHasChanges(true)
     setJsonError(null)
   }, [formData])
@@ -163,12 +162,18 @@ export function EntityDrawer({
     (nextProperties: Record<string, any>) => {
       const next = { ...formData, properties: nextProperties }
       setFormData(next)
-      setRawJson(JSON.stringify(next, null, 2))
       setHasChanges(true)
       setJsonError(null)
     },
     [formData],
   )
+
+  // `rawJson` is only rendered in the JSON view, so serialize lazily when the
+  // user opens it (not on every keystroke — that pretty-prints the whole entity).
+  const openJsonView = useCallback(() => {
+    setRawJson(JSON.stringify(formData, null, 2))
+    setViewMode('json')
+  }, [formData])
 
   // Handle raw JSON changes
   const handleRawJsonChange = useCallback((value: string) => {
@@ -502,7 +507,7 @@ export function EntityDrawer({
             />
             <ModeTab
               active={viewMode === 'json'}
-              onClick={() => setViewMode('json')}
+              onClick={openJsonView}
               icon={LucideIcons.Code}
               label="JSON"
             />
