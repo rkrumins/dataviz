@@ -2,14 +2,12 @@
  * RichMarkdownEditor — TipTap WYSIWYG that reads/writes Markdown.
  *
  * `value` is Markdown in, `onChange` emits Markdown out (see markdownBridge —
- * `html: false` guarantees Markdown-only storage). Two variants:
- *  - `inline`: compact, no static toolbar; a BubbleMenu appears on selection.
- *  - `full`:   static formatting toolbar; used inside the expand modal.
+ * `html: false` guarantees Markdown-only storage). Used inside the expand modal
+ * with a static formatting toolbar.
  */
 
 import { useEffect, useRef } from 'react'
 import { useEditor, EditorContent } from '@tiptap/react'
-import { BubbleMenu } from '@tiptap/react/menus'
 import type { Editor } from '@tiptap/core'
 import {
   Bold, Italic, Strikethrough, Code, Heading1, Heading2,
@@ -21,10 +19,8 @@ import { buildExtensions, editorToMd } from './markdownBridge'
 interface Props {
   value: string
   onChange: (markdown: string) => void
-  variant?: 'inline' | 'full'
   placeholder?: string
   autoFocus?: boolean
-  onBlur?: () => void
 }
 
 function promptLink(editor: Editor) {
@@ -74,9 +70,12 @@ function Toolbar({ editor }: { editor: Editor }) {
   )
 }
 
-export default function RichMarkdownEditor({ value, onChange, variant = 'inline', placeholder, autoFocus, onBlur }: Props) {
+export default function RichMarkdownEditor({ value, onChange, placeholder, autoFocus }: Props) {
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
+  // Markdown we last emitted — lets the sync effect skip re-serializing the
+  // editor on every keystroke (that round-trip was the source of lag).
+  const lastEmitted = useRef(value)
 
   const editor = useEditor({
     extensions: buildExtensions(placeholder),
@@ -84,51 +83,34 @@ export default function RichMarkdownEditor({ value, onChange, variant = 'inline'
     autofocus: autoFocus ? 'end' : false,
     editorProps: {
       attributes: {
-        class: cn(
-          "prose-synodic max-w-none focus:outline-none",
-          variant === 'inline' ? "text-xs leading-relaxed min-h-[1.5rem]" : "text-sm h-full overflow-y-auto custom-scrollbar px-3 py-2.5",
-        ),
+        class: "prose-synodic max-w-none focus:outline-none text-sm h-full overflow-y-auto custom-scrollbar px-3 py-2.5",
       },
     },
-    onUpdate: ({ editor }) => onChangeRef.current(editorToMd(editor)),
-    onBlur: () => onBlur?.(),
+    onUpdate: ({ editor }) => {
+      const md = editorToMd(editor)
+      lastEmitted.current = md
+      onChangeRef.current(md)
+    },
   })
 
-  // Keep the editor in sync when the value changes from outside (e.g. type change,
-  // external reset) — but not for our own edits (guarded by the equality check).
+  // Sync the editor only when `value` changes from OUTSIDE (not from our own
+  // edits). Compared against the last-emitted Markdown — no per-keystroke serialize.
   useEffect(() => {
     if (!editor) return
-    if (value !== editorToMd(editor)) {
+    if (value !== lastEmitted.current) {
+      lastEmitted.current = value
       editor.commands.setContent(value, { emitUpdate: false })
     }
   }, [value, editor])
 
   if (!editor) return null
 
-  if (variant === 'full') {
-    return (
-      <div className="flex flex-col h-full rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 overflow-hidden">
-        <Toolbar editor={editor} />
-        <div className="flex-1 min-h-0">
-          <EditorContent editor={editor} className="h-full" />
-        </div>
-      </div>
-    )
-  }
-
-  // inline
   return (
-    <>
-      <BubbleMenu editor={editor} className="flex items-center gap-0.5 px-1 py-1 rounded-lg border border-glass-border bg-canvas-elevated shadow-lg">
-        <ToolButton title="Bold" active={editor.isActive('bold')} onClick={() => editor.chain().focus().toggleBold().run()}><Bold className="w-3.5 h-3.5" /></ToolButton>
-        <ToolButton title="Italic" active={editor.isActive('italic')} onClick={() => editor.chain().focus().toggleItalic().run()}><Italic className="w-3.5 h-3.5" /></ToolButton>
-        <ToolButton title="Strikethrough" active={editor.isActive('strike')} onClick={() => editor.chain().focus().toggleStrike().run()}><Strikethrough className="w-3.5 h-3.5" /></ToolButton>
-        <ToolButton title="Inline code" active={editor.isActive('code')} onClick={() => editor.chain().focus().toggleCode().run()}><Code className="w-3.5 h-3.5" /></ToolButton>
-        <ToolButton title="Link" active={editor.isActive('link')} onClick={() => promptLink(editor)}><LinkIcon className="w-3.5 h-3.5" /></ToolButton>
-      </BubbleMenu>
-      <div className="px-2 py-1 rounded-md bg-white/5 border border-white/10 focus-within:border-accent-lineage/50 transition-colors">
-        <EditorContent editor={editor} />
+    <div className="flex flex-col h-full rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 overflow-hidden">
+      <Toolbar editor={editor} />
+      <div className="flex-1 min-h-0">
+        <EditorContent editor={editor} className="h-full" />
       </div>
-    </>
+    </div>
   )
 }

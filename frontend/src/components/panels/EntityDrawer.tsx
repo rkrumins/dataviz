@@ -101,9 +101,24 @@ export function EntityDrawer({
   const [isPinned, setIsPinned] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
+  // Unsaved-changes guard: confirm before closing or switching nodes.
+  const [confirmClose, setConfirmClose] = useState(false)
+  const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null)
+  const prevIdRef = useRef<string | null>(null)
+  const bypassGuardRef = useRef(false)
 
-  // Reset state when selection changes
+  // Reset state when selection changes — but if there are unsaved edits, hold on
+  // the current node and ask the user first (revert the selection meanwhile).
   useEffect(() => {
+    const id = selectedNode?.id ?? null
+    if (id === prevIdRef.current) return
+    if (!bypassGuardRef.current && hasChanges && prevIdRef.current && id) {
+      setPendingSwitchId(id)
+      useCanvasStore.getState().openNodeDrawer(prevIdRef.current) // revert; stay put
+      return
+    }
+    bypassGuardRef.current = false
+    prevIdRef.current = id
     if (selectedNode) {
       const data = selectedNode.data as Record<string, any>
       setFormData({ ...data })
@@ -112,7 +127,7 @@ export function EntityDrawer({
       setJsonError(null)
       setViewMode('view')
     }
-  }, [selectedNode?.id])
+  }, [selectedNode?.id, hasChanges])
 
   // Get entity type info from schema
   const entityType = useMemo(() => {
@@ -281,11 +296,31 @@ export function EntityDrawer({
   // sticky: clicking other entities or the canvas background never closes
   // it, it only swaps the data shown inside.
   const handleClose = useCallback(() => {
-    if (!isPinned) {
+    if (isPinned) return
+    if (hasChanges) { setConfirmClose(true); return }
+    closeNodeDrawer()
+    clearSelection()
+  }, [closeNodeDrawer, clearSelection, isPinned, hasChanges])
+
+  // Resolve the unsaved-changes prompt (shared by close + node-switch).
+  const discardAndProceed = useCallback(() => {
+    bypassGuardRef.current = true
+    setHasChanges(false)
+    if (pendingSwitchId) {
+      const target = pendingSwitchId
+      setPendingSwitchId(null)
+      useCanvasStore.getState().openNodeDrawer(target)
+    } else if (confirmClose) {
+      setConfirmClose(false)
       closeNodeDrawer()
       clearSelection()
     }
-  }, [closeNodeDrawer, clearSelection, isPinned])
+  }, [pendingSwitchId, confirmClose, closeNodeDrawer, clearSelection])
+
+  const keepEditing = useCallback(() => {
+    setPendingSwitchId(null)
+    setConfirmClose(false)
+  }, [])
 
   // Get external URL
   const externalUrl = useMemo(() => {
@@ -321,6 +356,25 @@ export function EntityDrawer({
         )}
       >
         <div className="w-[clamp(420px,32vw,560px)] h-full flex flex-col overflow-hidden">
+        {/* Unsaved-changes guard */}
+        {(confirmClose || pendingSwitchId) && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
+            <div className="w-full max-w-xs rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl p-5">
+              <h4 className="text-sm font-semibold text-ink">Unsaved changes</h4>
+              <p className="text-xs text-ink-muted mt-1.5">
+                You have unsaved property changes. {pendingSwitchId ? 'Switch entity' : 'Close'} and discard them?
+              </p>
+              <div className="flex items-center justify-end gap-2 mt-4">
+                <button onClick={keepEditing} className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
+                  Keep editing
+                </button>
+                <button onClick={discardAndProceed} className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:brightness-110 transition-all">
+                  Discard
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Header */}
         <div
           className="flex-shrink-0 p-5 border-b border-glass-border/50"

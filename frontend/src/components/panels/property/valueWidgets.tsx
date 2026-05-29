@@ -230,6 +230,77 @@ export function InlineMarkdown({ text }: { text: string }) {
 }
 
 // ============================================
+// ClampedText — value-cell display that clamps heavy content + opens the modal
+// ============================================
+
+const CLAMP_CHARS = 120
+
+export function ClampedText({
+  text,
+  source,
+  onOpen,
+  editable,
+}: {
+  text: string
+  /** Show raw Markdown source instead of formatted. */
+  source?: boolean
+  /** Open the full editor/viewer modal. */
+  onOpen?: () => void
+  /** Edit mode — the cell is click-to-edit. */
+  editable?: boolean
+}) {
+  const empty = text === ''
+  const isLong = text.includes('\n') || text.length > CLAMP_CHARS
+
+  const content = empty ? (
+    <span className="text-xs italic text-ink-muted">{editable ? 'Empty — click to add' : 'empty'}</span>
+  ) : source ? (
+    <span className="text-xs font-mono text-ink whitespace-pre-wrap break-words">{text}</span>
+  ) : (
+    <InlineMarkdown text={text} />
+  )
+
+  const inner = (
+    <div className={cn("relative", isLong && "max-h-[4.2rem] overflow-hidden")}>
+      {content}
+      {isLong && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-canvas-elevated to-transparent" />
+      )}
+    </div>
+  )
+
+  if (editable) {
+    return (
+      <div>
+        <div
+          onClick={onOpen}
+          className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-white/[0.04] transition-colors"
+          title="Click to edit"
+        >
+          {inner}
+        </div>
+        {isLong && (
+          <button onClick={onOpen} className="mt-0.5 text-2xs font-medium text-accent-lineage hover:underline">
+            See all
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {inner}
+      {isLong && onOpen && (
+        <button onClick={onOpen} className="mt-0.5 text-2xs font-medium text-accent-lineage hover:underline">
+          See all
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ============================================
 // Formatted read-only renderers for non-text types
 // ============================================
 

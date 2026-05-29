@@ -11,7 +11,7 @@
  * to a few lines and can be opened in a Markdown editor/preview modal.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext, lazy, Suspense } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import {
   ChevronDown,
@@ -46,7 +46,7 @@ import {
   DateField,
   UrlField,
   TagInput,
-  InlineMarkdown,
+  ClampedText,
   FormattedDate,
   FormattedLink,
   FormattedTags,
@@ -69,9 +69,6 @@ const DisplayModeContext = createContext<DisplayMode>('source')
 type EditTextMode = 'rich' | 'source'
 const EditTextModeContext = createContext<EditTextMode>('rich')
 
-// Lazy so TipTap (ProseMirror) code-splits out of the main bundle.
-const RichMarkdownEditor = lazy(() => import('./property/RichMarkdownEditor'))
-
 export interface PropertyEditorProps {
   value: unknown
   onChange: (next: unknown) => void
@@ -91,8 +88,6 @@ export interface PropertyEditorProps {
 }
 
 const MAX_DEPTH = 6
-/** A string longer than this (or containing newlines) gets the expand affordance. */
-const LONG_VALUE_THRESHOLD = 120
 /** Separator that turns a flat key into a folder path. */
 const PATH_SEP = '/'
 
@@ -750,7 +745,8 @@ function PrimitiveValueEditor({
     } else if (fieldType === 'url') {
       body = <FormattedLink value={s} />
     } else {
-      body = s === '' ? <span className="text-xs italic text-ink-muted">empty</span> : <InlineMarkdown text={s} />
+      // formatted text — clamp heavy values with a "See all" → modal viewer
+      body = <ClampedText text={s} onOpen={() => setModalOpen(true)} />
     }
     return (
       <>
@@ -798,34 +794,20 @@ function PrimitiveValueEditor({
     return <TagInput value={value as string[]} onChange={onChange} />
   }
 
-  // text — WYSIWYG by default (Markdown in/out); raw textarea in Source mode.
+  // text — click-to-edit: the cell is a clamped preview; the rich editor lives
+  // in the modal (no per-row editors → the list stays snappy).
   const stringValue = value === null || value === undefined ? '' : String(value)
-  const lineCount = stringValue === '' ? 1 : stringValue.split('\n').length
-  const rows = stringValue.includes('\n')
-    ? Math.min(3, Math.max(1, lineCount))
-    : stringValue.length > LONG_VALUE_THRESHOLD ? 3 : 1
   return (
     <>
       <div className="flex items-start gap-1">
-        {editTextMode === 'rich' ? (
-          <div className="flex-1 min-w-0">
-            <Suspense fallback={<div className="text-xs text-ink-muted px-2 py-1">…</div>}>
-              <RichMarkdownEditor variant="inline" value={stringValue} onChange={onChange} placeholder="Empty — type, or ⤢ to expand" />
-            </Suspense>
-          </div>
-        ) : (
-          <textarea
-            value={stringValue}
-            onChange={(e) => onChange(e.target.value)}
-            rows={rows}
-            placeholder="Empty — type a value, or ⤢ to open the editor"
-            className={cn(
-              "flex-1 min-w-0 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
-              "placeholder:text-ink-muted/50",
-              "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors resize-none custom-scrollbar leading-relaxed",
-            )}
+        <div className="flex-1 min-w-0">
+          <ClampedText
+            text={stringValue}
+            source={editTextMode === 'source'}
+            editable
+            onOpen={() => setModalOpen(true)}
           />
-        )}
+        </div>
         <div className="flex items-start">
           {stringValue !== '' && <CopyButton text={stringValue} />}
           {expandButton}
@@ -835,6 +817,7 @@ function PrimitiveValueEditor({
         <MarkdownValueModal
           fieldLabel={fieldLabel}
           value={stringValue}
+          initialMode={editTextMode}
           onSave={(next) => { onChange(next); setModalOpen(false) }}
           onClose={() => setModalOpen(false)}
         />

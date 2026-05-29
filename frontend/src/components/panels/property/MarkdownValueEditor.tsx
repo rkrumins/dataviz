@@ -26,6 +26,8 @@ import {
   Link as LinkIcon,
   Eye,
   EyeOff,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { markdownComponents } from '@/components/docs/MarkdownComponents'
@@ -72,24 +74,35 @@ export function MarkdownValueModal({
   fieldLabel,
   value,
   readOnly,
+  initialMode = 'rich',
   onSave,
   onClose,
 }: {
   fieldLabel?: string
   value: string
   readOnly?: boolean
+  initialMode?: 'rich' | 'source'
   onSave: (next: string) => void
   onClose: () => void
 }) {
   const [draft, setDraft] = useState(value)
   const [copied, setCopied] = useState(false)
-  const [mode, setMode] = useState<'rich' | 'source'>('rich')
+  const [mode, setMode] = useState<'rich' | 'source'>(initialMode)
+  const [maximized, setMaximized] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
   const [mobileTab, setMobileTab] = useState<'write' | 'preview'>('write')
   const [showPreview, setShowPreview] = useState(true)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const pendingSel = useRef<[number, number] | null>(null)
 
   const wordCount = draft.trim() ? draft.trim().split(/\s+/).length : 0
+  const dirty = !readOnly && draft !== value
+
+  // Close request — guard unsaved edits behind a discard confirmation.
+  const requestClose = useCallback(() => {
+    if (dirty) { setConfirmDiscard(true); return }
+    onClose()
+  }, [dirty, onClose])
 
   // Restore caret/selection after a toolbar edit re-renders the textarea.
   useLayoutEffect(() => {
@@ -102,10 +115,10 @@ export function MarkdownValueModal({
   }, [draft])
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') requestClose() }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [requestClose])
 
   const applyEdit = useCallback((fn: (v: string, s: number, e: number) => Edit) => {
     const ta = taRef.current
@@ -156,14 +169,19 @@ export function MarkdownValueModal({
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6"
-        onClick={onClose}
+        onClick={requestClose}
       >
         <motion.div
           initial={{ scale: 0.96, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.96, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="w-[92vw] max-w-[1200px] h-[90vh] flex flex-col rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl"
+          className={cn(
+            "flex flex-col border border-glass-border bg-canvas-elevated shadow-xl",
+            maximized
+              ? "fixed inset-3 w-auto h-auto max-w-none rounded-xl"
+              : "w-[92vw] max-w-[1200px] h-[90vh] rounded-2xl",
+          )}
         >
           {/* Header */}
           <div className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-glass-border/50">
@@ -201,7 +219,15 @@ export function MarkdownValueModal({
                   {copied ? 'Copied' : 'Copy'}
                 </button>
               )}
-              <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/10" title="Close">
+              <button
+                onClick={() => setMaximized((m) => !m)}
+                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/10"
+                title={maximized ? 'Restore' : 'Maximize'}
+                aria-label={maximized ? 'Restore' : 'Maximize'}
+              >
+                {maximized ? <Minimize2 className="w-4 h-4 text-ink-muted" /> : <Maximize2 className="w-4 h-4 text-ink-muted" />}
+              </button>
+              <button onClick={requestClose} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/10" title="Close">
                 <XIcon className="w-4 h-4 text-ink-muted" />
               </button>
             </div>
@@ -246,7 +272,7 @@ export function MarkdownValueModal({
               <div className="h-full">{preview}</div>
             ) : mode === 'rich' ? (
               <Suspense fallback={<div className="h-full flex items-center justify-center text-xs text-ink-muted">Loading editor…</div>}>
-                <RichMarkdownEditor variant="full" value={draft} onChange={setDraft} autoFocus placeholder="Write here…" />
+                <RichMarkdownEditor value={draft} onChange={setDraft} autoFocus placeholder="Write here…" />
               </Suspense>
             ) : (
               <div className="flex flex-col h-full">
@@ -282,13 +308,27 @@ export function MarkdownValueModal({
 
           {/* Footer */}
           <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-glass-border/50">
-            <button onClick={onClose} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
-              {readOnly ? 'Close' : 'Cancel'}
-            </button>
-            {!readOnly && (
-              <button onClick={() => onSave(draft)} className="px-5 py-2 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25 transition-all">
-                Save
-              </button>
+            {confirmDiscard ? (
+              <>
+                <span className="mr-auto text-xs text-ink-muted">Discard unsaved changes?</span>
+                <button onClick={() => setConfirmDiscard(false)} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
+                  Keep editing
+                </button>
+                <button onClick={onClose} className="px-5 py-2 rounded-xl text-sm font-semibold bg-red-500 text-white hover:brightness-110 transition-all">
+                  Discard
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={requestClose} className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
+                  {readOnly ? 'Close' : 'Cancel'}
+                </button>
+                {!readOnly && (
+                  <button onClick={() => onSave(draft)} className="px-5 py-2 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 shadow-lg shadow-accent-lineage/25 transition-all">
+                    Save
+                  </button>
+                )}
+              </>
             )}
           </div>
         </motion.div>

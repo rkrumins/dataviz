@@ -109,11 +109,11 @@ const LONG = 'Lorem ipsum dolor sit amet, '.repeat(8) // > 120 chars
 // ---------------------------------------------------------------------------
 
 describe('PropertyEditor', () => {
-  it('renders keys and values for an object bag', async () => {
+  it('renders keys and values for an object bag', () => {
     render(<Harness initial={{ owner: 'analytics', rows: 42, active: true }} />)
     expect(screen.getByText('owner')).toBeInTheDocument()
-    // text value edits in the (lazy) rich editor stub
-    expect(await screen.findByDisplayValue('analytics')).toBeInTheDocument()
+    // text value shows a clamped formatted preview (click-to-edit in the modal)
+    expect(screen.getByText('analytics')).toBeInTheDocument()
     expect(screen.getByDisplayValue('42')).toBeInTheDocument()
     // boolean renders as a friendly Yes/No toggle
     expect(screen.getByText('Yes')).toBeInTheDocument()
@@ -139,10 +139,12 @@ describe('PropertyEditor', () => {
     const user = userEvent.setup()
     render(<Harness initial={{ notes: LONG }} />)
     await user.click(screen.getByTitle('Open editor (Markdown)'))
-    // Preview pane lives in Source mode; switch to it first.
+    // Preview pane lives in Source mode; switch to it first. (The list cell also
+    // renders markdown, so assert the preview ADDS a render.)
+    const before = screen.queryAllByTestId('md').length
     await user.click(screen.getByRole('button', { name: 'source' }))
     await user.click(screen.getByRole('button', { name: 'Preview' }))
-    expect(screen.getByTestId('md')).toBeInTheDocument()
+    expect(screen.getAllByTestId('md').length).toBeGreaterThan(before)
   })
 
   it('filters rows by key and by value, with an empty state', async () => {
@@ -344,10 +346,10 @@ describe('PropertyEditor — path grouping', () => {
     render(<Harness initial={{ Technical: 't', 'Technical/Path': 'p' }} groupByPath />)
     // Folder header "Technical" + its inline own-value row share the label
     expect(screen.getAllByText('Technical').length).toBeGreaterThanOrEqual(1)
-    // Its own value renders inline, plus the nested leaf
-    expect(screen.getByDisplayValue('t')).toBeInTheDocument()
+    // Its own value renders as a clamped preview, plus the nested leaf
+    expect(screen.getByText('t')).toBeInTheDocument()
     expect(screen.getByText('Path')).toBeInTheDocument()
-    expect(screen.getByDisplayValue('p')).toBeInTheDocument()
+    expect(screen.getByText('p')).toBeInTheDocument()
   })
 
   it('nests folders arbitrarily deep (expanding each level)', async () => {
@@ -472,5 +474,53 @@ describe('PropertyEditor — business field types & formatting', () => {
     await user.click(screen.getByRole('button', { name: 'Markdown' }))
     expect(screen.queryByTestId('md')).not.toBeInTheDocument()
     expect(screen.getByText('**bold**')).toBeInTheDocument()
+  })
+})
+
+describe('PropertyEditor — editor modal save/cancel/guard & clamping', () => {
+  it('modal Save commits the edited Markdown', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    const ed = await screen.findByPlaceholderText(/Write here/i)
+    await user.clear(ed)
+    await user.type(ed, 'hello world')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(onChange).toHaveBeenCalledWith({ note: 'hello world' })
+  })
+
+  it('modal Cancel with no changes closes without committing', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    await screen.findByPlaceholderText(/Write here/i)
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByPlaceholderText(/Write here/i)).not.toBeInTheDocument()
+  })
+
+  it('modal warns before discarding unsaved changes', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{ note: 'hi' }} onChange={onChange} />)
+    await user.click(screen.getByTitle('Open editor (Markdown)'))
+    const ed = await screen.findByPlaceholderText(/Write here/i)
+    await user.type(ed, ' there')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    // Discard confirmation appears instead of closing
+    expect(screen.getByText(/Discard unsaved changes/i)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Discard' }))
+    expect(onChange).not.toHaveBeenCalled()
+    expect(screen.queryByPlaceholderText(/Write here/i)).not.toBeInTheDocument()
+  })
+
+  it('clamps long values with a "See all" that opens the modal', async () => {
+    const user = userEvent.setup()
+    render(<Harness initial={{ note: LONG }} />)
+    const seeAll = screen.getByRole('button', { name: /See all/i })
+    await user.click(seeAll)
+    expect(await screen.findByPlaceholderText(/Write here/i)).toBeInTheDocument()
   })
 })
