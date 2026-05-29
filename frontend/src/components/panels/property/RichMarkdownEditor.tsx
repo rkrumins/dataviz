@@ -84,6 +84,12 @@ export default function RichMarkdownEditor({ value, onChange, placeholder, autoF
     editorProps: {
       attributes: {
         class: "prose-synodic max-w-none focus:outline-none text-sm h-full overflow-y-auto custom-scrollbar px-3 py-2.5",
+        // Disable native spellcheck on this (potentially very large) contenteditable —
+        // the browser otherwise re-checks and repaints squiggles on text revealed during
+        // scroll, which is the main cause of scroll lag on long documents.
+        spellcheck: 'false',
+        autocorrect: 'off',
+        autocapitalize: 'off',
       },
     },
     onUpdate: ({ editor }) => {
