@@ -342,6 +342,31 @@ describe('PropertyEditor — path grouping', () => {
     expect(onChange).toHaveBeenCalledWith({ 'A/x1': 1 })
   })
 
+  it('adds the FIRST property to an empty grouped bag and shows it', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{}} groupByPath searchable onChange={onChange} />)
+    await user.click(screen.getByRole('button', { name: /Add property/i }))
+    await user.type(screen.getByPlaceholderText('Property name'), 'abc')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(onChange).toHaveBeenCalledWith({ abc: '' })
+    expect(screen.getByText('abc')).toBeInTheDocument()
+  })
+
+  it('adds two properties in sequence (stable api stays fresh)', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(<Harness initial={{}} groupByPath searchable onChange={onChange} />)
+    await user.click(screen.getByRole('button', { name: /Add property/i }))
+    await user.type(screen.getByPlaceholderText('Property name'), 'one')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    // second add must see the first key already present
+    await user.click(screen.getByRole('button', { name: /Add property/i }))
+    await user.type(screen.getByPlaceholderText('Property name'), 'two')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(onChange).toHaveBeenLastCalledWith({ one: '', two: '' })
+  })
+
   it('handles a key that is both a leaf and a folder (collision) without data loss', () => {
     render(<Harness initial={{ Technical: 't', 'Technical/Path': 'p' }} groupByPath />)
     // Folder header "Technical" + its inline own-value row share the label

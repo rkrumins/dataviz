@@ -77,17 +77,25 @@ export function EntityDrawer({
   onLocateMany,
   getExternalUrl,
 }: EntityDrawerProps) {
-  const { drawerNodeId, nodes, updateNode, clearSelection, closeNodeDrawer } = useCanvasStore()
-  const { schema } = useSchemaStore()
+  // Subscribe with narrow selectors so the (heavy) drawer only re-renders when
+  // its own node / actions change — NOT on every unrelated canvas store mutation
+  // (selection, hover, node drags, layout ticks), which otherwise re-renders the
+  // whole drawer continuously and makes everything in it feel laggy.
+  const updateNode = useCanvasStore((s) => s.updateNode)
+  const clearSelection = useCanvasStore((s) => s.clearSelection)
+  const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
   // until explicitly closed via the X button.
   // Logical nodes (id starts with "logical:") are virtual groupings, not physical entities.
-  const selectedNode = drawerNodeId && !drawerNodeId.startsWith('logical:')
-    ? nodes.find(n => n.id === drawerNodeId)
-    : null
+  const selectedNode = useCanvasStore((s) =>
+    s.drawerNodeId && !s.drawerNodeId.startsWith('logical:')
+      ? s.nodes.find((n) => n.id === s.drawerNodeId) ?? null
+      : null,
+  )
 
   const isOpen = !!selectedNode
 
