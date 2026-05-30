@@ -13,6 +13,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
+import { useDisplayRuleTags } from '@/store/displayRuleMatchStore'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -153,6 +154,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ancestorBreakdown: ancestorMatchBreakdown,
     isSpotlightDim,
   } = useSearchHighlight(urnOrId, { isSelected })
+  // Property Manager display-rule tags — chips for every enabled rule
+  // whose criteria match this node. Keyed by URN (the rule engine works
+  // in URN space); falls back to id for nodes without a URN.
+  const displayRuleTags = useDisplayRuleTags(node.urn ?? node.id)
   // In trace mode, useTraceFilteredHierarchy already prunes node.children to
   // the trace context, so children.length reflects what the user will see on
   // expand. The graph-wide childCount would mislead them with siblings the
@@ -465,6 +470,29 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             />
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
+        )}
+        {/* Display-rule tags — chips for each Property Manager rule that
+            matches this node. Cap at 3 + overflow, mirroring the entity
+            tag-pill treatment on GenericNode so the canvas reads
+            consistently across views. */}
+        {displayRuleTags.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 mt-1">
+            {displayRuleTags.slice(0, 3).map((tag) => (
+              <span
+                key={tag.id}
+                className="px-1.5 py-0.5 rounded text-[9px] font-medium leading-none"
+                style={{ backgroundColor: `${tag.color}26`, color: tag.color }}
+                title={tag.name}
+              >
+                {tag.name}
+              </span>
+            ))}
+            {displayRuleTags.length > 3 && (
+              <span className="text-[9px] text-ink-muted/70">
+                +{displayRuleTags.length - 3}
+              </span>
+            )}
+          </div>
         )}
       </div>
 

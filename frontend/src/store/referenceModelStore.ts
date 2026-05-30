@@ -16,7 +16,7 @@
 
 import { create, type StateCreator } from 'zustand'
 import { generateId } from '@/lib/utils'
-import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, AssignmentConflict, ScopeEdgeConfig } from '@/types/schema'
+import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, AssignmentConflict, ScopeEdgeConfig, DisplayRuleConfig } from '@/types/schema'
 import type {
     GraphEdge,
     EntityAssignment,
@@ -60,6 +60,12 @@ interface ReferenceModelState {
 
     // ===== Scope Filter =====
     scopeFilter: ScopeFilterConfig | null
+
+    // ===== Display Rules (Property Manager tag overlay) =====
+    /** Saved display rules — predicate + tag label/color decorating
+     *  matched canvas nodes. Part of the blueprint; persisted via the
+     *  Save Blueprint flow. */
+    displayRules: DisplayRuleConfig[]
 
     // ===== Assignments (SINGLE SOURCE OF TRUTH) =====
     /** All entity assignments - canvas reads only from here */
@@ -140,6 +146,13 @@ interface ReferenceModelState {
     // ===== Scope Filter =====
     setScopeFilter: (filter: ScopeFilterConfig | null) => void
 
+    // ===== Display Rule Actions =====
+    setDisplayRules: (rules: DisplayRuleConfig[]) => void
+    addDisplayRule: (rule: DisplayRuleConfig) => void
+    updateDisplayRule: (id: string, updates: Partial<DisplayRuleConfig>) => void
+    removeDisplayRule: (id: string) => void
+    toggleDisplayRule: (id: string) => void
+
     // ===== Observer Pattern =====
     onLayerChange: (callback: LayerChangeCallback) => UnsubscribeFn
 
@@ -207,6 +220,7 @@ interface ReferenceModelState {
 
 const BLUEPRINT_KEYS: ReadonlySet<string> = new Set([
     'layers', 'layerSequence', 'scopeFilter', 'scopeEdgeConfig', 'instanceAssignments',
+    'displayRules',
 ])
 
 const autoDirty: (
@@ -249,6 +263,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             layers: [],
             layerSequence: [],
             scopeFilter: null,
+            displayRules: [],
             effectiveAssignments: new Map(),
             parentMap: new Map(),
             preservedEdges: [],
@@ -289,6 +304,10 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         effectiveAssignments: new Map(),
                         assignmentConflicts: [],
                         assignmentStatus: 'idle',
+                        // Display rules are view-scoped; drop them on a view
+                        // switch so one view's tags don't leak into another.
+                        // The new view's rules hydrate via loadFromBackend.
+                        displayRules: [],
                     })
                 } else {
                     set({
@@ -405,6 +424,37 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             // ===== Scope Filter =====
             setScopeFilter: (filter) => {
                 set({ scopeFilter: filter })
+            },
+
+            // ===== Display Rule Actions =====
+            setDisplayRules: (rules) => {
+                set({ displayRules: rules })
+            },
+
+            addDisplayRule: (rule) => {
+                set((s) => ({ displayRules: [...s.displayRules, rule] }))
+            },
+
+            updateDisplayRule: (id, updates) => {
+                set((s) => ({
+                    displayRules: s.displayRules.map((r) =>
+                        r.id === id ? { ...r, ...updates } : r,
+                    ),
+                }))
+            },
+
+            removeDisplayRule: (id) => {
+                set((s) => ({
+                    displayRules: s.displayRules.filter((r) => r.id !== id),
+                }))
+            },
+
+            toggleDisplayRule: (id) => {
+                set((s) => ({
+                    displayRules: s.displayRules.map((r) =>
+                        r.id === id ? { ...r, enabled: !r.enabled } : r,
+                    ),
+                }))
             },
 
             // ===== Assignment Actions (Backend-Ready) =====
@@ -998,6 +1048,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                                 scopeFilter: state.scopeFilter,
                                 instanceAssignments,
                                 scopeEdgeConfig: state.scopeEdgeConfig,
+                                displayRulesConfig: state.displayRules,
                             }
                         )
                         set({
@@ -1012,6 +1063,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                             scopeFilter: state.scopeFilter,
                             instanceAssignments,
                             scopeEdgeConfig: state.scopeEdgeConfig,
+                            displayRulesConfig: state.displayRules,
                         })
                         set({
                             activeContextModelId: created.id,
@@ -1051,6 +1103,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         instanceAssignments: instanceMap,
                         scopeFilter: (model.scopeFilter as ScopeFilterConfig) ?? null,
                         scopeEdgeConfig: (model.scopeEdgeConfig as ScopeEdgeConfig) ?? null,
+                        displayRules: (model.displayRulesConfig as DisplayRuleConfig[]) ?? [],
                         syncStatus: 'synced' as SyncStatus,
                         assignmentConflicts: [],
                     })
@@ -1077,6 +1130,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         instanceAssignments: new Map(),
                         scopeFilter: (model.scopeFilter as ScopeFilterConfig) ?? null,
                         scopeEdgeConfig: (model.scopeEdgeConfig as ScopeEdgeConfig) ?? null,
+                        displayRules: (model.displayRulesConfig as DisplayRuleConfig[]) ?? [],
                         syncStatus: 'synced' as SyncStatus,
                         assignmentConflicts: [],
                     })
@@ -1104,6 +1158,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 export const useLayers = () => useReferenceModelStore(s => s.layers)
 export const useLayerSequence = () => useReferenceModelStore(s => s.layerSequence)
 export const useScopeFilter = () => useReferenceModelStore(s => s.scopeFilter)
+export const useDisplayRules = () => useReferenceModelStore(s => s.displayRules)
 export const useEffectiveAssignments = () => useReferenceModelStore(s => s.effectiveAssignments)
 export const usePreservedEdges = () => useReferenceModelStore(s => s.preservedEdges)
 export const useAssignmentStatus = () => useReferenceModelStore(s => s.assignmentStatus)

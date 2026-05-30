@@ -348,6 +348,34 @@ export interface AssignmentConflict {
 
 
 
+/**
+ * A saved "display rule" for the Property Manager.
+ *
+ * Each rule pairs a reused Advanced-Search predicate (the criteria that
+ * finds matching entities) with a presentation-layer tag — a label +
+ * color rendered as a chip on every matched canvas node. Rules are part
+ * of the view blueprint, so they persist + sync via the Save Blueprint
+ * flow (referenceModelStore → context-models API).
+ *
+ * `predicate` is typed as `unknown` here to avoid coupling the schema
+ * module to the generated search types; the Property Manager casts it to
+ * `Predicate` (from `@/types/search`) at the boundary. The shape stored
+ * on disk is exactly the Advanced-Search predicate tree.
+ */
+export interface DisplayRuleConfig {
+  id: string;
+  /** Chip label shown on matched nodes. */
+  name: string;
+  /** Chip color (hex). Drives the tinted pill background + text color. */
+  color: string;
+  /** Reused Advanced-Search predicate tree (see `@/types/search` `Predicate`). */
+  predicate: unknown;
+  /** When false, the rule is kept but neither evaluated nor rendered. */
+  enabled: boolean;
+  /** ISO timestamp — set at creation, used for stable list ordering. */
+  createdAt: string;
+}
+
 export interface LogicalNodeConfig {
   id: string;
   name: string;

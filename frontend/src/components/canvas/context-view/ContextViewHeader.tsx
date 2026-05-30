@@ -79,6 +79,12 @@ export interface ContextViewHeaderProps {
   onOpenAdvancedSearch?: (seedQuery?: string) => void
   advancedSearchOpen?: boolean
 
+  // Property Manager — opens the reusable right-side drawer for browsing
+  // properties and authoring display-rule tags. Optional so canvases that
+  // don't wire it simply omit the button.
+  onTogglePropertyManager?: () => void
+  propertyManagerOpen?: boolean
+
   // Title — actual view name + entity-type count, shown in the header.
   // Replaces the previous hardcoded "Context View / Data Flow Blueprint".
   viewName?: string
@@ -134,6 +140,8 @@ export function ContextViewHeader({
   onAddEntity,
   onOpenAdvancedSearch,
   advancedSearchOpen = false,
+  onTogglePropertyManager,
+  propertyManagerOpen = false,
   viewName,
   entityTypeCount,
   activeWorkspaceId,
@@ -433,6 +441,27 @@ export function ContextViewHeader({
             >
               <LucideIcons.Sparkles className="w-4 h-4" strokeWidth={2.4} />
               <span>Advanced Search</span>
+            </button>
+          )}
+
+          {/* Property Manager — opens the right-side drawer to browse
+              properties and roll out display-rule tags onto matched
+              entities. Sibling to Advanced Search (shares its discovery +
+              criteria builder); kept as a focused icon button so the
+              toolbar stays uncluttered. */}
+          {onTogglePropertyManager && (
+            <button
+              onClick={onTogglePropertyManager}
+              title="Property Manager — browse properties and tag matched entities"
+              className={cn(
+                "flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+                propertyManagerOpen
+                  ? "bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20"
+                  : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
+              )}
+            >
+              <LucideIcons.SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
+              <span>Properties</span>
             </button>
           )}
 

@@ -38,6 +38,7 @@ def _to_response(row: ContextModelORM) -> ContextModelResponse:
         scopeFilter=json.loads(row.scope_filter) if row.scope_filter else None,
         instanceAssignments=json.loads(row.instance_assignments or "{}"),
         scopeEdgeConfig=json.loads(row.scope_edge_config) if row.scope_edge_config else None,
+        displayRulesConfig=json.loads(row.display_rules_config) if row.display_rules_config else None,
         isActive=bool(row.is_active),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
@@ -93,6 +94,7 @@ async def create_context_model(
         scope_filter=json.dumps(req.scope_filter) if req.scope_filter else None,
         instance_assignments=json.dumps(req.instance_assignments),
         scope_edge_config=json.dumps(req.scope_edge_config) if req.scope_edge_config else None,
+        display_rules_config=json.dumps(req.display_rules_config) if req.display_rules_config else None,
     )
     session.add(row)
     await session.flush()
@@ -123,6 +125,8 @@ async def update_context_model(
         row.instance_assignments = json.dumps(req.instance_assignments)
     if req.scope_edge_config is not None:
         row.scope_edge_config = json.dumps(req.scope_edge_config)
+    if req.display_rules_config is not None:
+        row.display_rules_config = json.dumps(req.display_rules_config)
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
@@ -167,6 +171,7 @@ async def instantiate_template(
         scope_filter=template.scope_filter,
         instance_assignments="{}",  # Fresh — no entity assignments from template
         scope_edge_config=template.scope_edge_config,
+        display_rules_config=template.display_rules_config,
     )
     session.add(row)
     await session.flush()
