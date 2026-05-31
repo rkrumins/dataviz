@@ -25,6 +25,8 @@ export interface DisplayRuleTag {
     id: string
     name: string
     color: string
+    /** Optional Lucide icon name rendered on the chip. */
+    icon?: string
 }
 
 
@@ -80,7 +82,7 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
         set({
             ruleMeta: rules
                 .filter((r) => r.enabled)
-                .map((r) => ({ id: r.id, name: r.name, color: r.color })),
+                .map((r) => ({ id: r.id, name: r.name, color: r.color, icon: r.icon })),
         })
     },
 

@@ -368,6 +368,8 @@ export interface DisplayRuleConfig {
   name: string;
   /** Chip color (hex). Drives the tinted pill background + text color. */
   color: string;
+  /** Optional Lucide icon name rendered on the chip (via DynamicIcon). */
+  icon?: string;
   /** Reused Advanced-Search predicate tree (see `@/types/search` `Predicate`). */
   predicate: unknown;
   /** When false, the rule is kept but neither evaluated nor rendered. */
