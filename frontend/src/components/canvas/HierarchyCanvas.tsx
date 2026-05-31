@@ -36,6 +36,9 @@ import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
+import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
+import { DisplayRuleTagChips } from './property-manager/DisplayRuleTagChips'
+import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { TraceToolbar } from './TraceToolbar'
@@ -87,8 +90,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Advanced search (Map + Builder + Power tools + Ask) — same surface
   // mounted on ContextView and Graph canvases.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+  const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
+  // Property Manager display-rule engine — publishes match sets so the
+  // HierarchyContainer rows render tag chips.
+  useDisplayRuleEngine(activeView?.id ?? null)
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
   // Edit Mode State (shared across canvases)
@@ -335,7 +342,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
       {/* Editor Toolbar - Unified with LineageCanvas */}
-      <div className="absolute top-4 left-4 z-30">
+      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
           onSave={handleSave}
@@ -343,6 +350,23 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
         />
+        {/* Property Manager toggle — browse properties + author
+            display-rule tags. Mirrors the Context View affordance. */}
+        {activeView?.id && (
+          <button
+            onClick={() => setPropertyManagerOpen((v) => !v)}
+            title="Property Manager — browse properties and tag matched entities"
+            className={cn(
+              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+              propertyManagerOpen
+                ? 'bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20'
+                : 'bg-canvas-elevated/95 backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
+            )}
+          >
+            <LucideIcons.SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
+            <span>Properties</span>
+          </button>
+        )}
       </div>
 
       {/* Node Palette - Drag and drop entity creation */}
@@ -526,6 +550,18 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             onRevealNode={(urn, ancestorPath) =>
               revealSearchHit(urn, ancestorPath)
             }
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Property Manager — display-rule tag overlay drawer. */}
+      <AnimatePresence>
+        {activeView?.id && (
+          <PropertyManagerDrawer
+            key="property-manager-drawer"
+            viewId={activeView.id}
+            open={propertyManagerOpen}
+            onClose={() => setPropertyManagerOpen(false)}
           />
         )}
       </AnimatePresence>
@@ -811,6 +847,10 @@ function HierarchyContainer({
               ))}
             </div>
           )}
+
+          {/* Display-rule tags — shared premium chip cluster (same as the
+              other canvases). */}
+          <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
 
           {/* Expand indicator */}
           {hasChildren && !isExpanded && (

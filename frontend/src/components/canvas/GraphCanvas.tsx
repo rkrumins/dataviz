@@ -34,7 +34,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
-import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
+import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn, SlidersHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
 
@@ -47,6 +47,8 @@ import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
+import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
+import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
@@ -138,7 +140,12 @@ export function GraphCanvas({ className }: { className?: string }) {
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+  // Property Manager — display-rule tag overlay. Mounted as a flex-sibling
+  // drawer (parity with ContextViewCanvas); the engine recomputes match
+  // sets so GenericNode renders the tag chips.
+  const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
+  useDisplayRuleEngine(activeView?.id ?? null)
 
   // Viewport-aware node filtering for large graphs
   const [viewportBounds, setViewportBounds] = useState<{ x: number; y: number; zoom: number } | null>(null)
@@ -1266,7 +1273,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   return (
     <div className={cn('w-full h-full relative flex flex-col', className)}>
       {/* Editor Toolbar */}
-      <div className="absolute top-4 left-4 z-30">
+      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
           onSave={handleSave}
@@ -1274,6 +1281,23 @@ export function GraphCanvas({ className }: { className?: string }) {
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
         />
+        {/* Property Manager toggle — browse properties + author
+            display-rule tags. Mirrors the Context View affordance. */}
+        {activeView?.id && (
+          <button
+            onClick={() => setPropertyManagerOpen((v) => !v)}
+            title="Property Manager — browse properties and tag matched entities"
+            className={cn(
+              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+              propertyManagerOpen
+                ? 'bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20'
+                : 'bg-canvas-elevated/95 backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
+            )}
+          >
+            <SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
+            <span>Properties</span>
+          </button>
+        )}
       </div>
 
       {/* Node Palette */}
@@ -1522,6 +1546,19 @@ export function GraphCanvas({ className }: { className?: string }) {
             onRevealNode={(urn, ancestorPath) =>
               revealSearchHit(urn, ancestorPath)
             }
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Property Manager — display-rule tag overlay drawer. */}
+      <AnimatePresence>
+        {activeView?.id && (
+          <PropertyManagerDrawer
+            key="property-manager-drawer"
+            viewId={activeView.id}
+            open={propertyManagerOpen}
+            onClose={() => setPropertyManagerOpen(false)}
+            knownEntityTypes={schemaEntityTypes.map((et) => et.id)}
           />
         )}
       </AnimatePresence>
