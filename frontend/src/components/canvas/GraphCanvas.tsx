@@ -34,7 +34,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { AnimatePresence } from 'framer-motion'
-import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn, SlidersHorizontal } from 'lucide-react'
+import { ArrowRight, ArrowDown, Loader2, GitBranch, ZoomIn } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateColorFromType } from '@/lib/type-visuals'
 
@@ -48,6 +48,7 @@ import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
+import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
@@ -1284,19 +1285,10 @@ export function GraphCanvas({ className }: { className?: string }) {
         {/* Property Manager toggle — browse properties + author
             display-rule tags. Mirrors the Context View affordance. */}
         {activeView?.id && (
-          <button
-            onClick={() => setPropertyManagerOpen((v) => !v)}
-            title="Property Manager — browse properties and tag matched entities"
-            className={cn(
-              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
-              propertyManagerOpen
-                ? 'bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20'
-                : 'bg-canvas-elevated/95 backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
-            )}
-          >
-            <SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
-            <span>Properties</span>
-          </button>
+          <PropertyManagerButton
+            open={propertyManagerOpen}
+            onToggle={() => setPropertyManagerOpen((v) => !v)}
+          />
         )}
       </div>
 

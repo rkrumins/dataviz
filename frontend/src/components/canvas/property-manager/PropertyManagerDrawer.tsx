@@ -15,14 +15,17 @@
  * canvases can mount it with just a ``viewId``.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { Layers, SlidersHorizontal, Tags, X } from 'lucide-react'
+import { Save, SlidersHorizontal, Tags, Layers, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useToast } from '@/components/ui/toast'
 import {
     useDisplayRules,
     useReferenceModelStore,
 } from '@/store/referenceModelStore'
+import { useSearchStore } from '@/store/searchStore'
+import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
@@ -62,15 +65,46 @@ export function PropertyManagerDrawer({
     const updateDisplayRule = useReferenceModelStore((s) => s.updateDisplayRule)
     const removeDisplayRule = useReferenceModelStore((s) => s.removeDisplayRule)
     const toggleDisplayRule = useReferenceModelStore((s) => s.toggleDisplayRule)
+    const reorderDisplayRules = useReferenceModelStore((s) => s.reorderDisplayRules)
+    const syncStatus = useReferenceModelStore((s) => s.syncStatus)
+    const { showToast } = useToast()
 
     const handleSaveRule = (rule: DisplayRuleConfig) => {
-        if (rules.some((r) => r.id === rule.id)) {
+        const isUpdate = rules.some((r) => r.id === rule.id)
+        if (isUpdate) {
             updateDisplayRule(rule.id, rule)
         } else {
             addDisplayRule(rule)
         }
         setEditor({ mode: 'closed' })
+        // Premium feedback: confirm the rule applied. The engine recomputes
+        // the match set asynchronously; the toast reassures the user the
+        // tag is now live on the canvas.
+        showToast('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
     }
+
+    /** Reveal a rule's matched nodes on the canvas by publishing them
+     *  through the shared search-highlight channel (same mechanism the
+     *  Advanced Search panel uses). Spotlights the matches; the user can
+     *  clear via the canvas's existing search-clear affordance. */
+    const handleRevealRule = (rule: DisplayRuleConfig) => {
+        const urns = useDisplayRuleMatchStore.getState().matchUrnsByRule.get(rule.id)
+        if (!urns || urns.size === 0) {
+            showToast('info', `“${rule.name}” has no matches on the canvas yet`)
+            return
+        }
+        useSearchStore.getState().setResult({
+            viewId,
+            matchUrns: urns,
+            queryHash: `display-rule:${rule.id}`,
+        })
+        showToast('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
+    }
+
+    // Names of OTHER rules — feeds the editor's duplicate-name guard.
+    const otherNames = rules
+        .filter((r) => (editor.mode === 'edit' ? r.id !== editor.rule.id : true))
+        .map((r) => r.name)
 
     const handleCreateFromPredicate = (predicate: Predicate, suggestedName: string) => {
         setTab('rules')
@@ -144,9 +178,19 @@ export function PropertyManagerDrawer({
                                     label="Properties"
                                 />
                             </div>
+
+                            {/* Unsaved-rules nudge — rules auto-dirty the
+                                blueprint; remind the user to persist them so
+                                they survive a reload. */}
+                            {syncStatus === 'dirty' && rules.length > 0 && (
+                                <div className="mt-2.5 flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200/90">
+                                    <Save className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                                    <span>Unsaved changes — use <span className="font-semibold text-amber-100">Save Blueprint</span> to keep these rules.</span>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Body */}
+                        {/* Body — animated list ⇄ editor transition. */}
                         <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
                             {tab === 'properties' && (
                                 <PropertyBrowser
@@ -155,24 +199,45 @@ export function PropertyManagerDrawer({
                                 />
                             )}
                             {tab === 'rules' && (
-                                editor.mode === 'closed' ? (
-                                    <DisplayRuleList
-                                        rules={rules}
-                                        onNew={() => setEditor({ mode: 'new' })}
-                                        onEdit={(rule) => setEditor({ mode: 'edit', rule })}
-                                        onToggle={toggleDisplayRule}
-                                        onDelete={removeDisplayRule}
-                                    />
-                                ) : (
-                                    <DisplayRuleEditor
-                                        viewId={viewId}
-                                        knownEntityTypes={knownEntityTypes}
-                                        knownLayers={knownLayers}
-                                        rule={editor.mode === 'edit' ? editor.rule : editor.seed}
-                                        onSave={handleSaveRule}
-                                        onCancel={() => setEditor({ mode: 'closed' })}
-                                    />
-                                )
+                                <AnimatePresence mode="wait" initial={false}>
+                                    {editor.mode === 'closed' ? (
+                                        <motion.div
+                                            key="rule-list"
+                                            initial={{ opacity: 0, x: -8 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: -8 }}
+                                            transition={{ duration: 0.16 }}
+                                        >
+                                            <DisplayRuleList
+                                                rules={rules}
+                                                onNew={() => setEditor({ mode: 'new' })}
+                                                onEdit={(rule) => setEditor({ mode: 'edit', rule })}
+                                                onToggle={toggleDisplayRule}
+                                                onDelete={removeDisplayRule}
+                                                onReorder={reorderDisplayRules}
+                                                onReveal={handleRevealRule}
+                                            />
+                                        </motion.div>
+                                    ) : (
+                                        <motion.div
+                                            key="rule-editor"
+                                            initial={{ opacity: 0, x: 8 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: 8 }}
+                                            transition={{ duration: 0.16 }}
+                                        >
+                                            <DisplayRuleEditor
+                                                viewId={viewId}
+                                                knownEntityTypes={knownEntityTypes}
+                                                knownLayers={knownLayers}
+                                                rule={editor.mode === 'edit' ? editor.rule : editor.seed}
+                                                existingNames={otherNames}
+                                                onSave={handleSaveRule}
+                                                onCancel={() => setEditor({ mode: 'closed' })}
+                                            />
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
                             )}
                         </div>
                     </div>
