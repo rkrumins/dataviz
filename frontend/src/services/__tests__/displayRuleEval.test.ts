@@ -5,7 +5,7 @@ import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
-import type { Predicate, SearchQuery, SearchResultPage } from '@/types/search'
+import type { GroupPredicate, Predicate, SearchQuery, SearchResultPage } from '@/types/search'
 
 
 function makeResult(over: Partial<SearchResultPage> = {}): SearchResultPage {
@@ -84,7 +84,7 @@ describe('evaluateDisplayRule', () => {
         // Leaf predicate must be normalised to group{ and: [leaf] } so the
         // backend compiler handles it correctly.
         expect(captured!.predicate.kind).toBe('group')
-        const group = captured!.predicate as Extract<Predicate, { kind: 'group' }>
+        const group = captured!.predicate as GroupPredicate
         expect(group.op).toBe('and')
         expect(group.children).toHaveLength(1)
         expect(group.children[0]).toMatchObject({ kind: 'tag' })
@@ -101,7 +101,7 @@ describe('evaluateDisplayRule', () => {
         const grouped: Predicate = { kind: 'group', op: 'or', children: [TAG_PREDICATE] }
         await evaluateDisplayRule(provider, 'view-1', grouped)
 
-        const group = captured!.predicate as Extract<Predicate, { kind: 'group' }>
+        const group = captured!.predicate as GroupPredicate
         // Not re-wrapped — the existing OR group is preserved.
         expect(group.op).toBe('or')
         expect(group.children).toHaveLength(1)
