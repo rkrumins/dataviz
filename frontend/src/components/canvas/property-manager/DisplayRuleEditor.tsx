@@ -3,12 +3,12 @@
  * optional icon) plus the search criteria that selects which entities get
  * the tag.
  *
- * The criteria builder REUSES the Advanced-Search visual builder at the
- * store-decoupled boundary: ``useBuilderReducer`` (local tree state) +
- * ``GroupRow`` (recursive renderer) + ``useDiscovery`` (property / value
- * / tag autocomplete). It deliberately does NOT use ``PredicateBuilder``,
- * which is wired to the singleton ``searchStore`` and would collide with
- * the live Advanced-Search panel.
+ * The criteria builder REUSES the Advanced-Search flat-filter builder
+ * verbatim via the store-decoupled ``VisualQueryBuilder`` — the exact
+ * same "Add filter" palette + ConditionRow cards + "What this means"
+ * summary the Advanced-Search QueryCard renders — driven by local
+ * predicate state instead of the singleton ``searchStore``. This keeps
+ * the two surfaces pixel-identical and prevents drift.
  *
  * Premium UX:
  *   - live preview-as-you-build (debounced match count) + an explicit
@@ -26,11 +26,11 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 
-import { GroupRow } from '../search/builder/GroupRow'
-import { useBuilderReducer } from '../search/builder/useBuilderReducer'
 import { useDiscovery } from '../search/builder/useDiscovery'
-import type { EditorContext } from '../search/builder/editors'
 import { fieldClass } from '../search/builder/editors/shared'
+import { isRowIncomplete } from '../search/panel/ConditionRow'
+import { topLevelConditions } from '../search/panel/predicateComposition'
+import { VisualQueryBuilder } from '../search/panel/VisualQueryBuilder'
 import { evaluateDisplayRule } from '@/services/displayRuleEval'
 
 
@@ -83,23 +83,22 @@ export function DisplayRuleEditor({
     const [isPreviewing, setIsPreviewing] = useState(false)
     const [previewError, setPreviewError] = useState<string | null>(null)
 
-    const reducer = useBuilderReducer((rule?.predicate as Predicate) ?? undefined)
+    // Local predicate state seeded from the rule. The flat-filter
+    // VisualQueryBuilder mutates it via onSeed/onCommit; we don't need
+    // undo history here, so both write straight to setState.
+    const [predicate, setPredicate] = useState<Predicate | null>(
+        (rule?.predicate as Predicate | null) ?? null,
+    )
 
     const {
         allKeys, keysByEntityType, tagValues, getValueSamples,
-        edgeTypes, keysByEdgeType, getEdgeValueSamples,
     } = useDiscovery(viewId)
 
-    const ctx: EditorContext = useMemo(() => ({
-        keysByEntityType, allKeys, knownEntityTypes, knownLayers,
-        tagValues, getValueSamples, edgeTypes, keysByEdgeType, getEdgeValueSamples,
-    }), [
-        keysByEntityType, allKeys, knownEntityTypes, knownLayers,
-        tagValues, getValueSamples, edgeTypes, keysByEdgeType, getEdgeValueSamples,
-    ])
-
-    const predicate = reducer.state.tree
-    const isEmpty = predicate.children.length === 0
+    const conditions = useMemo(() => topLevelConditions(predicate), [predicate])
+    const isEmpty = conditions.length === 0
+    // No backend Cypher exists for an incomplete row (empty value /
+    // missing key); block preview + save until every row is complete.
+    const hasIncomplete = conditions.some((c) => isRowIncomplete(c))
 
     // Duplicate-name guard — case-insensitive against OTHER rules.
     const trimmedName = name.trim()
@@ -107,16 +106,16 @@ export function DisplayRuleEditor({
         () => existingNames.some((n) => n.toLowerCase() === trimmedName.toLowerCase()),
         [existingNames, trimmedName],
     )
-    const canSave = trimmedName.length > 0 && !isEmpty && !reducer.hasErrors && !isDuplicate
+    const canSave = trimmedName.length > 0 && !isEmpty && !hasIncomplete && !isDuplicate
 
     // ── Live preview-as-you-build ────────────────────────────────────
-    // Re-evaluate the predicate (debounced) whenever the tree changes so
-    // the user sees the match count update while authoring. The explicit
+    // Re-evaluate the predicate (debounced) whenever it changes so the
+    // user sees the match count update while authoring. The explicit
     // "Refresh" button forces an immediate re-run.
     const treeKey = JSON.stringify(predicate)
     const runPreview = useMemo(() => {
         return async (signal?: AbortSignal) => {
-            if (predicate.children.length === 0 || reducer.hasErrors) {
+            if (!predicate || isEmpty || hasIncomplete) {
                 setPreviewCount(null)
                 return
             }
@@ -135,7 +134,7 @@ export function DisplayRuleEditor({
             }
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [provider, viewId, treeKey, reducer.hasErrors])
+    }, [provider, viewId, treeKey, isEmpty, hasIncomplete])
 
     useEffect(() => {
         const controller = new AbortController()
@@ -144,15 +143,19 @@ export function DisplayRuleEditor({
     }, [runPreview])
 
     const handleSave = () => {
-        if (!canSave) return
+        if (!canSave || !predicate) return
         onSave({
-            // Empty id ⇒ a seeded "new" rule from the Properties tab; mint
-            // a fresh id so the drawer's save path treats it as an add.
+            // Empty id ⇒ a seeded "new" rule from the Properties tab (or
+            // the Advanced-Search "Create rule" flow); mint a fresh id so
+            // the save path treats it as an add.
             id: rule?.id || generateId('rule'),
             name: trimmedName,
             color,
             icon,
-            predicate,
+            // Strip the FE-only ``uiScope`` hint that the flat builder
+            // attaches to ``descendantOf`` rows so it never leaks into
+            // the persisted blueprint.
+            predicate: stripUiScope(predicate),
             enabled: rule?.enabled ?? true,
             createdAt: rule?.createdAt ?? new Date().toISOString(),
         })
@@ -247,22 +250,32 @@ export function DisplayRuleEditor({
                 </div>
             </div>
 
-            {/* Criteria builder — reused Advanced-Search tree */}
+            {/* Criteria builder — the SAME flat-filter builder as the
+                Advanced-Search panel, driven by local predicate state. */}
             <div className="flex flex-col gap-2">
                 <label className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
                     Apply this tag to entities where…
                 </label>
-                <GroupRow
-                    path={[]}
-                    group={predicate}
-                    ctx={ctx}
-                    issues={reducer.state.issues}
-                    isRoot
-                    onAddLeaf={reducer.addLeaf}
-                    onAddGroup={reducer.addGroup}
-                    onRemoveAt={reducer.removeAt}
-                    onUpdateLeaf={reducer.updateLeaf}
-                    onToggleGroupOp={reducer.toggleGroupOp}
+                <VisualQueryBuilder
+                    predicate={predicate}
+                    onSeed={setPredicate}
+                    onCommit={setPredicate}
+                    discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples }}
+                    counts={{
+                        entityTypes: knownEntityTypes.length,
+                        tags: tagValues.length,
+                        propertyKeys: allKeys.length,
+                        layers: knownLayers.length,
+                    }}
+                    samples={{
+                        entityTypes: knownEntityTypes.slice(0, 8),
+                        tags: tagValues.slice(0, 8),
+                        propertyKeys: allKeys.slice(0, 8),
+                        layers: knownLayers.slice(0, 8),
+                    }}
+                    knownEntityTypes={knownEntityTypes}
+                    discoveredLayers={knownLayers.map((l) => ({ value: l, label: l }))}
+                    onSubmit={() => void runPreview()}
                 />
             </div>
 
@@ -289,10 +302,10 @@ export function DisplayRuleEditor({
                 <button
                     type="button"
                     onClick={() => void runPreview()}
-                    disabled={isEmpty || reducer.hasErrors || isPreviewing}
+                    disabled={isEmpty || hasIncomplete || isPreviewing}
                     className={cn(
                         'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors shrink-0',
-                        (isEmpty || reducer.hasErrors)
+                        (isEmpty || hasIncomplete)
                             ? 'text-ink-muted/40 cursor-not-allowed'
                             : 'text-accent-lineage hover:bg-accent-lineage/15',
                     )}
@@ -327,4 +340,23 @@ export function DisplayRuleEditor({
             </div>
         </div>
     )
+}
+
+
+/**
+ * Recursively drop the FE-only ``uiScope`` hint that the flat builder
+ * attaches to ``descendantOf`` rows (it routes the roots-only vs
+ * any-node picker). The wire / persisted predicate should be plain
+ * ``descendantOf`` so the saved blueprint carries no UI-only fields.
+ */
+function stripUiScope(p: Predicate): Predicate {
+    if (p.kind === 'group') {
+        return { ...p, children: p.children.map(stripUiScope) }
+    }
+    if (p.kind === 'descendantOf') {
+        const rest = { ...p } as Predicate & { uiScope?: unknown }
+        delete rest.uiScope
+        return rest as Predicate
+    }
+    return p
 }

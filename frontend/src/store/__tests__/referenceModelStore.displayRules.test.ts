@@ -75,4 +75,22 @@ describe('referenceModelStore — display rules', () => {
         s.reorderDisplayRules(['ghost', 'b', 'a'])
         expect(useReferenceModelStore.getState().displayRules.map((r) => r.id)).toEqual(['b', 'a'])
     })
+
+    it('create-from-query: addDisplayRule stores the seed predicate verbatim and dirties', () => {
+        // Mirrors the Advanced-Search "Create rule" flow: a rule built
+        // from a live query carries that query's predicate unchanged.
+        const queryPredicate = {
+            kind: 'group', op: 'and', children: [
+                { kind: 'tag', op: 'hasAny', values: ['PII'] },
+                { kind: 'entityType', op: 'in', values: ['dataset'] },
+            ],
+        }
+        useReferenceModelStore.getState().addDisplayRule(
+            rule('from-query', { name: 'PII datasets', predicate: queryPredicate }),
+        )
+        const s = useReferenceModelStore.getState()
+        const saved = s.displayRules.find((r) => r.id === 'from-query')!
+        expect(saved.predicate).toEqual(queryPredicate)
+        expect(s.syncStatus).toBe('dirty')
+    })
 })
