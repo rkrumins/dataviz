@@ -60,6 +60,7 @@ import {
 } from 'lucide-react'
 import {
     type FC,
+    memo,
     useCallback,
     useEffect,
     useLayoutEffect,
@@ -198,7 +199,7 @@ interface PaletteEntry {
 }
 
 
-export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
+const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     counts, samples, onAdd, onAddMany, onOpenAdvanced, onOpenCode, disabled,
 }) => {
     const [open, setOpen] = useState(false)
@@ -808,6 +809,14 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
         </div>
     )
 }
+
+
+/**
+ * Memoised so the palette (which rebuilds its category catalogue + a
+ * portal) doesn't re-render on every keystroke in a sibling filter row.
+ * VisualQueryBuilder passes referentially stable counts/samples/callbacks.
+ */
+export const AddFilterPalette = memo(AddFilterPaletteImpl)
 
 
 /**

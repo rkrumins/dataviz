@@ -17,7 +17,7 @@
  */
 import { AnimatePresence, motion } from 'framer-motion'
 import { Sparkles, X } from 'lucide-react'
-import { type FC } from 'react'
+import { type FC, memo } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useSearchStore } from '@/store/searchStore'
@@ -79,7 +79,7 @@ export interface NestedGroupCardProps {
 }
 
 
-export const NestedGroupCard: FC<NestedGroupCardProps> = ({
+const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
     group, depth = 0,
     onChange, onRemove, onWrap, onDuplicate, onOpenAdvanced, onSubmit, disabled,
     discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
@@ -342,6 +342,14 @@ export const NestedGroupCard: FC<NestedGroupCardProps> = ({
         </RowCard>
     )
 }
+
+
+/**
+ * Memoised so a keystroke in one branch doesn't re-render sibling groups /
+ * rows. VisualQueryBuilder feeds stable props; the recursive child render
+ * below routes through this memoised export too.
+ */
+export const NestedGroupCard = memo(NestedGroupCardImpl)
 
 
 function EmptyGroupState({ op }: { op: OpTone }) {
