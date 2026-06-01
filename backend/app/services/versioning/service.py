@@ -623,6 +623,83 @@ class GraphVersioningService:
                 (edges if _is_edge_payload(p) else nodes)[eid] = p
             return {"nodes": nodes, "edges": edges}
 
+    async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
+        """Read freshness for a graph's FalkorDB projection — attached to reads so
+        a client knows whether it's seeing the latest committed `main`."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            committed = graph.main_head_commit_seq if graph else 0
+            projected = ps.projected_commit_seq if ps else 0
+            return {
+                "committed": committed,
+                "projected": projected,
+                "target": ps.target_commit_seq if ps else 0,
+                "status": ps.status if ps else "idle",
+                "falkor_graph_name": ps.falkor_graph_name if ps else None,
+                "fresh": projected >= committed,
+            }
+
+    async def neighbors_from_state(
+        self, *, graph_id: str, urn: str, depth: int = 1,
+        direction: str = "both", edge_types: Optional[Sequence[str]] = None,
+        limit: int = 500,
+    ) -> Dict[str, List[dict]]:
+        """Bounded neighborhood of a node on `main`, served from Postgres — the
+        fallback for the FalkorDB traversal when the projection lags/evicts.
+
+        Reader-compatible shapes (GraphNode/GraphEdge by alias). NOTE: this
+        composes full `main` state to build adjacency (O(graph) setup); the FalkorDB
+        path is the hot path. A bounded as-of SQL BFS is the later optimisation.
+        """
+        et = set(edge_types) if edge_types else None
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            state = await self._composed_state(s, graph_id, main_id)
+        nodes = {eid: p for eid, p in state.items() if p is not None and not _is_edge_payload(p)}
+        edges = {eid: p for eid, p in state.items() if p is not None and _is_edge_payload(p)}
+        urn_of = {eid: (p.get("urn") or f"gv:{eid}") for eid, p in nodes.items()}
+        eid_of = {u: eid for eid, u in urn_of.items()}
+
+        start = eid_of.get(urn) or (urn[3:] if urn.startswith("gv:") and urn[3:] in nodes else None)
+        if start is None:
+            return {"nodes": [], "edges": []}
+
+        seen_nodes = {start}
+        seen_edges: set = set()
+        frontier = {start}
+        for _ in range(max(1, depth)):
+            nxt: set = set()
+            for eid, p in edges.items():
+                if eid in seen_edges:
+                    continue
+                if et is not None and (p.get("edgeType") not in et):
+                    continue
+                src, tgt = _edge_src_tgt(p)
+                hit = None
+                if direction in ("out", "both") and src in frontier:
+                    hit = tgt
+                elif direction in ("in", "both") and tgt in frontier:
+                    hit = src
+                if hit is None or hit not in nodes:
+                    continue
+                seen_edges.add(eid)
+                if hit not in seen_nodes:
+                    if len(seen_nodes) >= limit:
+                        continue
+                    seen_nodes.add(hit)
+                    nxt.add(hit)
+            if not nxt:
+                break
+            frontier = nxt
+
+        out_nodes = [_graphnode_dict(eid, urn_of[eid], nodes[eid]) for eid in seen_nodes]
+        out_edges = [
+            _graphedge_dict(eid, edges[eid], urn_of) for eid in seen_edges
+            if _edge_src_tgt(edges[eid])[0] in seen_nodes and _edge_src_tgt(edges[eid])[1] in seen_nodes
+        ]
+        return {"nodes": out_nodes, "edges": out_edges}
+
     async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
         """Full revision timeline of one entity (plan §7 tier 1)."""
         async with self._session() as s:
@@ -987,6 +1064,37 @@ def _is_edge_payload(payload: Mapping) -> bool:
     has_src = "sourceEntityId" in payload or "source_entity_id" in payload
     has_tgt = "targetEntityId" in payload or "target_entity_id" in payload
     return has_src and has_tgt
+
+
+def _edge_src_tgt(p: Mapping) -> Tuple[str, str]:
+    return (p.get("sourceEntityId") or p.get("source_entity_id") or "",
+            p.get("targetEntityId") or p.get("target_entity_id") or "")
+
+
+def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
+    """Reader-compatible GraphNode shape (by alias) from a version payload."""
+    return {
+        "urn": urn,
+        "entityId": entity_id,
+        "entityType": payload.get("entityType"),
+        "displayName": payload.get("displayName") or "",
+        "qualifiedName": payload.get("qualifiedName"),
+        "description": payload.get("description"),
+        "properties": payload.get("properties") or {},
+        "tags": payload.get("tags") or [],
+    }
+
+
+def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
+    src, tgt = _edge_src_tgt(payload)
+    return {
+        "id": entity_id,
+        "sourceUrn": urn_of.get(src, f"gv:{src}"),
+        "targetUrn": urn_of.get(tgt, f"gv:{tgt}"),
+        "edgeType": payload.get("edgeType"),
+        "confidence": payload.get("confidence"),
+        "properties": payload.get("properties") or {},
+    }
 
 
 def _delta_stats(deltas: List[Delta]) -> dict:

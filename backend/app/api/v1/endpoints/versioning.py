@@ -21,6 +21,8 @@ Boundary policy
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import contextmanager
 from typing import Dict, List, Optional
 
@@ -29,12 +31,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.auth.dependencies import requires
 from backend.auth_service.interface import User
+from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     ConcurrencyError,
     GraphVersioningService,
     MergeConflict,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -52,6 +57,23 @@ _service = GraphVersioningService()
 def get_versioning_service() -> GraphVersioningService:
     """Injectable service handle (overridable in tests)."""
     return _service
+
+
+_read_factory = None  # lazily built FalkorDB read-client factory (name -> graph)
+
+
+def get_falkor_read_factory():
+    """FalkorDB read-client factory for the hot traversal path (overridable in
+    tests; returns ``None`` → reads fall back to Postgres)."""
+    global _read_factory
+    if _read_factory is None:
+        try:
+            from backend.app.services.versioning.projection import make_falkor_graph_factory
+            _read_factory = make_falkor_graph_factory()
+        except Exception as exc:   # pragma: no cover - infra
+            logger.warning("FalkorDB read factory unavailable, reads use Postgres: %s", exc)
+            _read_factory = False   # sentinel: tried and failed
+    return _read_factory or None
 
 
 async def graph_in_workspace(
@@ -201,9 +223,23 @@ class CommitResponse(_ApiModel):
     commit_id: str = Field(alias="commitId")
 
 
+class WatermarkModel(_ApiModel):
+    committed: int       # main_head_commit_seq
+    projected: int       # projection_state.projected_commit_seq
+    fresh: bool          # projected >= committed
+
+
 class StateResponse(_ApiModel):
     nodes: Dict[str, dict]
     edges: Dict[str, dict]
+    watermark: Optional[WatermarkModel] = None
+
+
+class GraphReadResponse(_ApiModel):
+    source: str                       # "falkordb" | "postgres"
+    watermark: WatermarkModel
+    nodes: List[dict]
+    edges: List[dict]
 
 
 class MergePreviewResponse(_ApiModel):
@@ -372,7 +408,10 @@ async def get_state(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return await svc.materialize_state(graph_id=graph_id, branch_id=branch_id)
+    state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id)
+    wm = await svc.projection_watermark(graph_id)
+    return {"nodes": state["nodes"], "edges": state["edges"],
+            "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
 
 
 @router.get("/graphs/{graph_id}/entities/{entity_id}/history", response_model=EntityHistoryResponse)
@@ -395,6 +434,87 @@ async def get_diff(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     return await svc.diff_commits(graph_id=graph_id, branch_id=branch_id, from_seq=from_seq, to_seq=to_seq)
+
+
+@router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)
+async def graph_neighbors(
+    ws_id: str, graph_id: str,
+    urn: str = Query(..., description="seed node urn"),
+    depth: int = Query(1, ge=1, le=20),
+    direction: str = Query("both", pattern="^(out|in|both)$"),
+    edge_types: Optional[str] = Query(None, alias="edgeTypes", description="comma-separated"),
+    limit: int = Query(500, ge=1, le=5000),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    read_factory=Depends(get_falkor_read_factory),
+):
+    """Bounded neighborhood of a published-`main` node — FalkorDB-first (when the
+    projection is caught up), Postgres fallback otherwise; every response carries
+    the freshness watermark."""
+    ets = [e for e in edge_types.split(",") if e] if edge_types else None
+    return await _serve_neighbors(
+        svc, read_factory, graph_id, urn=urn, depth=depth,
+        direction=direction, edge_types=ets, limit=limit,
+    )
+
+
+async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction, edge_types, limit):
+    wm = await svc.projection_watermark(graph_id)
+    wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
+    can_falkor = bool(
+        read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
+        and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
+    )
+    if can_falkor:
+        try:
+            result = await _falkor_neighbors(
+                read_factory(wm["falkor_graph_name"]), urn=urn, depth=depth,
+                direction=direction, edge_types=edge_types, limit=limit,
+            )
+            return {"source": "falkordb", "watermark": wm_out, **result}
+        except Exception as exc:
+            logger.warning("FalkorDB neighbors read failed for %s, PG fallback: %s", graph_id, exc)
+    result = await svc.neighbors_from_state(
+        graph_id=graph_id, urn=urn, depth=depth, direction=direction,
+        edge_types=edge_types, limit=limit,
+    )
+    return {"source": "postgres", "watermark": wm_out, **result}
+
+
+async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
+    """Bounded neighborhood from the FalkorDB projection (validated against a real
+    FalkorDB in the P6 integration tests)."""
+    from backend.app.providers.falkordb_provider import _edge_from_row, _node_from_props
+    d = int(depth)
+    pat = {"out": f"(s)-[r*1..{d}]->(n)", "in": f"(s)<-[r*1..{d}]-(n)"}.get(direction, f"(s)-[r*1..{d}]-(n)")
+    params = {"urn": urn, "limit": int(limit)}
+    where = ""
+    if edge_types:
+        where = "WHERE ALL(rel IN r WHERE type(rel) IN $ets) "
+        params["ets"] = list(edge_types)
+    cypher = (
+        f"MATCH (s {{urn:$urn}}) OPTIONAL MATCH path = {pat} {where}"
+        f"WITH s, collect(DISTINCT n) AS ns WITH [s] + ns AS alln "
+        f"UNWIND alln AS x WITH DISTINCT x WHERE x IS NOT NULL LIMIT $limit RETURN x"
+    )
+    res = await asyncio.wait_for(graph.query(cypher, params=params), timeout=10.0)
+    nodes, node_urns = [], set()
+    for row in (getattr(res, "result_set", None) or []):
+        props = dict(row[0].properties)
+        gn = _node_from_props(props)
+        if gn is not None:
+            nodes.append(gn.model_dump(by_alias=True))
+            if props.get("urn"):
+                node_urns.add(props["urn"])
+    edges = []
+    if node_urns:
+        er = await asyncio.wait_for(graph.query(
+            "MATCH (a)-[r]->(b) WHERE a.urn IN $urns AND b.urn IN $urns "
+            "RETURN a.urn, b.urn, type(r), r", params={"urns": list(node_urns)}), timeout=10.0)
+        for row in (getattr(er, "result_set", None) or []):
+            edges.append(_edge_from_row(row[0], row[1], row[2], dict(row[3].properties)).model_dump(by_alias=True))
+    return {"nodes": nodes, "edges": edges}
 
 
 # --------------------------------------------------------------------------- #
