@@ -6,6 +6,7 @@ from .endpoints import (
     insights, me,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
+    versioning,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -143,6 +144,15 @@ api_router.include_router(
 # ── Top-level views (first-class, cross-workspace) ─────────────────
 api_router.include_router(
     views.router, prefix="/views", tags=["views"],
+)
+
+# ── Versioned graph editing ──────────────────────────────────────────
+# The ONLY path between the frontend and the graphver Postgres store; the
+# browser never touches the DB directly. NOTE: when the app boots it must
+# override the actor dependency with real auth, e.g.
+#   app.dependency_overrides[versioning.current_actor] = <auth user-id dep>
+api_router.include_router(
+    versioning.router, prefix="/versioning", tags=["versioning"],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────
