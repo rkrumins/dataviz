@@ -24,11 +24,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.auth.dependencies import requires
 from backend.auth_service.interface import User
+from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     ConcurrencyError,
     GraphVersioningService,
@@ -347,6 +348,7 @@ async def merge_preview(
 @router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=CommitResponse)
 async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
+    background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -356,6 +358,7 @@ async def publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
         )
+    background.add_task(nudge_projection, graph_id)   # post-commit, best-effort
     return {"commit_id": commit_id}
 
 
@@ -458,6 +461,7 @@ async def preview_pull_request(
 @router.post("/pulls/{pr_id}/merge", response_model=CommitResponse)
 async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
+    background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # only manage may merge into base
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -466,4 +470,5 @@ async def merge_pull_request(
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
+    background.add_task(nudge_projection, str(_pr["target_graph_id"]))   # base graph got the commit
     return {"commit_id": commit_id}

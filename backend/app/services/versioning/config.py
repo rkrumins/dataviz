@@ -108,6 +108,14 @@ POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_POOL_TIMEOUT_SECS", "10"))
 INGEST_BATCH_SIZE: int = int(os.getenv("GRAPHVER_INGEST_BATCH_SIZE", "5000"))
 PROJECTION_BATCH_SIZE: int = int(os.getenv("GRAPHVER_PROJECTION_BATCH_SIZE", "5000"))
 
+# Projection worker: poll cadence for the reconciling loop, read freshness
+# tolerance (a read serves from FalkorDB while projected >= committed - lag),
+# the worker's health port, and whether the web process also runs the poll loop.
+PROJECTION_POLL_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_POLL_SECS", "5"))
+READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
+WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
+PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
+
 # Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days.
 DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 
