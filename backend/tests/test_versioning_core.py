@@ -6,6 +6,12 @@ invariants are also exercised by each module's ``_selftest()`` (run directly via
 the full test stack installed.
 """
 from backend.app.services.versioning import ids
+from backend.app.services.versioning.changeset import (
+    diff_states,
+    field_diff,
+    materialize,
+    net_delta,
+)
 from backend.app.services.versioning.merge import (
     Conflict,
     find_dangling_edges,
@@ -117,3 +123,42 @@ def test_ulid_is_sortable_and_unique():
 def test_prefixed_id_shape():
     pid = ids.prefixed_id("cmt")
     assert pid.startswith("cmt_") and len(pid) == 4 + 26
+
+
+# --------------------------------------------------------------------------- #
+# changeset (squash / diff)                                                    #
+# --------------------------------------------------------------------------- #
+def test_materialize_collapses_ops_last_write_wins():
+    base = {"a": {"n": "A"}, "b": {"n": "B"}}
+    head = materialize(
+        base,
+        [
+            {"entity_id": "b", "op": "update", "payload": {"n": "B2"}},
+            {"entity_id": "c", "op": "create", "payload": {"n": "C"}},
+            {"entity_id": "a", "op": "delete", "payload": None},
+            {"entity_id": "d", "op": "create", "payload": {"n": "D"}},
+            {"entity_id": "d", "op": "delete", "payload": None},
+        ],
+    )
+    assert head == {"a": None, "b": {"n": "B2"}, "c": {"n": "C"}, "d": None}
+
+
+def test_net_delta_squashes_and_dedups():
+    base = {"a": {"n": "A"}, "b": {"n": "B"}}
+    head = {"a": None, "b": {"n": "B2"}, "c": {"n": "C"}, "d": None}
+    by_id = {d.entity_id: d.op for d in net_delta(base, head)}
+    # 'd' (created then deleted within the draft) contributes nothing.
+    assert by_id == {"a": "delete", "b": "update", "c": "create"}
+
+
+def test_net_delta_noop_edit_produces_nothing():
+    base = {"a": {"n": "A"}}
+    head = materialize(base, [{"entity_id": "a", "op": "update", "payload": {"n": "A"}}])
+    assert net_delta(base, head) == []
+
+
+def test_field_diff_and_diff_states():
+    assert field_diff({"x": 1, "y": 2}, {"x": 1, "y": 3, "z": 4}) == {"y": (2, 3), "z": (None, 4)}
+    d = diff_states({"a": {"n": "A"}, "b": {"n": "B"}}, {"a": None, "b": {"n": "B2"}, "c": {"n": "C"}})
+    assert d["added"] == ["c"] and d["removed"] == ["a"]
+    assert d["modified"] == {"b": {"n": ("B", "B2")}}
