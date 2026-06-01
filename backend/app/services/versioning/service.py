@@ -38,6 +38,7 @@ from .models import (
     EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
+    MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
     WorkingChangeORM,
@@ -228,7 +229,6 @@ class GraphVersioningService:
             branch = await s.get(BranchORM, branch_id)
             if branch is None or branch.graph_id != graph_id:
                 raise ValueError("unknown branch")
-            main_id = await self._main_branch_id(s, graph_id)
 
             changes = (
                 await s.execute(
@@ -247,8 +247,12 @@ class GraphVersioningService:
             kind_by_entity = {c.entity_id: c.entity_kind for c in changes}
             touched = list(kind_by_entity)
 
-            # Base = current effective head payload per touched entity (draft over main).
-            base_state = await self._effective_payloads(s, graph_id, branch_id, main_id, touched)
+            # Base = the draft's current effective state for each touched entity,
+            # fork-aware (draft over this graph's main over any fork parent), so a
+            # checkpoint on a fork classifies edits to inherited entities as
+            # updates (not creates) and keeps hash continuity intact.
+            composed = await self._composed_state(s, graph_id, branch_id)
+            base_state = {eid: composed.get(eid) for eid in touched}
             ops = [
                 {"entity_id": c.entity_id, "op": c.op, "payload": c.payload}
                 for c in changes
@@ -274,7 +278,7 @@ class GraphVersioningService:
             )
 
             # Merkle root over the branch's full effective live state.
-            commit.merkle_root = await self._merkle_root(s, graph_id, branch_id, main_id)
+            commit.merkle_root = await self._merkle_root(s, graph_id, branch_id)
             commit.stats = _delta_stats(deltas)
 
             for c in changes:
@@ -348,14 +352,16 @@ class GraphVersioningService:
             s.add(squash)
             await s.flush()
 
-            kind_by_entity = await self._all_entity_kind_map(s, graph_id, [branch_id, main_id])
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, branch_id), (graph_id, main_id)]
+            )
             await self._write_deltas(s, graph_id, main_id, squash, deltas, kind_by_entity, actor)
 
-            squash.merkle_root = await self._merkle_root(s, graph_id, main_id, main_id)
-            squash.stats = _delta_stats(deltas)
             main.head_commit_id = squash.id
-            graph.main_head_commit_seq = new_seq
+            graph.main_head_commit_seq = new_seq       # advance head before merkle
             graph.updated_at = _now()
+            squash.merkle_root = await self._merkle_root(s, graph_id, main_id)
+            squash.stats = _delta_stats(deltas)
             draft.status = "merged"
             draft.base_commit_seq = new_seq            # rebased onto new main
 
@@ -383,6 +389,209 @@ class GraphVersioningService:
             }
 
     # ------------------------------------------------------------------ #
+    # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
+    # ------------------------------------------------------------------ #
+    async def fork_graph(
+        self,
+        *,
+        parent_graph_id: str,
+        workspace_id: str,
+        actor: str,
+        data_source_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Copy-on-write fork: a new graph whose ``main`` inherits the parent's
+        state at its current head **without copying any rows**.  Divergence accrues
+        only as the fork's own commits; reads compose parent@fork_base + own (plan
+        §8 cross-team flow)."""
+        async with self._session() as s:
+            parent = await s.get(GraphORM, parent_graph_id)
+            if parent is None:
+                raise ValueError(f"unknown parent graph {parent_graph_id}")
+            base_seq = parent.main_head_commit_seq
+            parent_main = await self._main_branch_id(s, parent_graph_id)
+            fork = GraphORM(
+                data_source_id=data_source_id or prefixed_id("dsfork"),
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                kind=parent.kind,
+                base_ontology_id=parent.base_ontology_id,
+                base_ontology_version_id=parent.base_ontology_version_id,
+                fork_parent_graph_id=parent_graph_id,
+                fork_base_commit_seq=base_seq,
+                main_head_commit_seq=base_seq,
+                created_by=actor,
+            )
+            s.add(fork)
+            await s.flush()
+            main = BranchORM(graph_id=fork.id, kind="main", name="main", created_by=actor)
+            s.add(main)
+            await s.flush()
+            # Fork-point commit carries the parent's state hash; no version rows.
+            fork_point = CommitORM(
+                graph_id=fork.id, branch_id=main.id, commit_seq=base_seq,
+                kind="genesis", message=f"fork of {parent_graph_id}@{base_seq}",
+                actor=actor, source_branch_id=parent_main,
+                merkle_root=await self._merkle_root(s, parent_graph_id, parent_main),
+                stats={},
+            )
+            s.add(fork_point)
+            main.head_commit_id = fork_point.id
+            s.add(ProjectionStateORM(
+                graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
+            ))
+            return {
+                "graph_id": fork.id,
+                "main_branch_id": main.id,
+                "fork_base_commit_seq": base_seq,
+            }
+
+    async def open_pr(
+        self, *, source_graph_id: str, actor: str, title: Optional[str] = None,
+    ) -> str:
+        """Open a PR from a fork's ``main`` back to its parent's ``main``,
+        recording the current mergeability/conflict set (plan §12.5)."""
+        async with self._session() as s:
+            fork = await s.get(GraphORM, source_graph_id)
+            if fork is None or not fork.fork_parent_graph_id:
+                raise ValueError("source graph is not a fork")
+            fork_main = await self._main_branch_id(s, source_graph_id)
+            merged, conflicts, _theirs = await self._compute_fork_merge(s, fork, {})
+            pr = MergeRequestORM(
+                graph_id=source_graph_id,
+                source_branch_id=fork_main,
+                target_graph_id=fork.fork_parent_graph_id,
+                target_branch="main",
+                base_commit_seq=fork.fork_base_commit_seq,
+                status="conflicts" if conflicts else "mergeable",
+                conflicts=conflicts or None,
+                actor=actor,
+            )
+            s.add(pr)
+            await s.flush()
+            return pr.id
+
+    async def preview_pr(self, *, pr_id: str) -> Dict[str, object]:
+        """Dry-run a fork PR's merge into the parent (conflicts + change counts)."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            fork = await s.get(GraphORM, pr.graph_id)
+            merged, conflicts, theirs = await self._compute_fork_merge(s, fork, {})
+            return {
+                "clean": not conflicts,
+                "conflicts": conflicts,
+                "changes": _delta_stats(net_delta(theirs, merged)),
+            }
+
+    async def merge_pr(
+        self,
+        *,
+        pr_id: str,
+        actor: str,
+        message: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+    ) -> str:
+        """Squash-merge a fork PR into the parent's ``main`` — the same 3-way
+        semantics as draft publish, across graphs (plan §8, §12.5).
+
+        Non-overlapping edits auto-merge; genuine conflicts raise
+        :class:`MergeConflict` (resubmit with ``resolutions``).  Already-merged
+        divergence nets to zero on any later PR, so the fork keeps its base and
+        can keep diverging."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            fork = await s.get(GraphORM, pr.graph_id)
+            parent = await s.get(GraphORM, pr.target_graph_id)
+            if fork is None or parent is None:
+                raise ValueError("pr endpoints missing")
+            parent_main = await self._main_branch_id(s, parent.id)
+            fork_main = await self._main_branch_id(s, fork.id)
+
+            merged, conflicts, theirs = await self._compute_fork_merge(
+                s, fork, dict(resolutions or {})
+            )
+            if conflicts:
+                pr.status = "conflicts"
+                pr.conflicts = conflicts
+                raise MergeConflict(conflicts)
+            self._assert_referential_integrity(merged)
+
+            deltas = net_delta(theirs, merged)
+            if not deltas:
+                pr.status = "merged"
+                return ""
+
+            new_seq = parent.main_head_commit_seq + 1
+            contributors = await self._branch_contributors(s, fork.id, fork_main)
+            source_commits = await self._branch_commit_ids(s, fork.id, fork_main)
+            main = await s.get(BranchORM, parent_main)
+            squash = CommitORM(
+                graph_id=parent.id, branch_id=parent_main, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="squash_publish",
+                message=message, actor=actor, contributors=contributors,
+                source_branch_id=fork_main, source_commit_ids=source_commits,
+                source_commit_count=len(source_commits),
+            )
+            s.add(squash)
+            await s.flush()
+
+            kind_by_entity = await self._kind_map_multi(
+                s, [(fork.id, fork_main), (parent.id, parent_main)]
+            )
+            await self._write_deltas(s, parent.id, parent_main, squash, deltas, kind_by_entity, actor)
+
+            main.head_commit_id = squash.id
+            parent.main_head_commit_seq = new_seq      # advance head before merkle
+            parent.updated_at = _now()
+            squash.merkle_root = await self._merkle_root(s, parent.id, parent_main)
+            squash.stats = _delta_stats(deltas)
+
+            pr.status = "merged"
+            pr.resulting_commit_id = squash.id
+            pr.updated_at = _now()
+            ps = await s.get(ProjectionStateORM, parent.id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return squash.id
+
+    async def _compute_fork_merge(self, s, fork, resolutions):
+        """3-way merge a fork's divergence into its parent's current main.
+
+        base   = parent main at the fork point (common ancestor)
+        ours   = the fork's current main (parent@fork_base + fork divergence)
+        theirs = the parent's current main
+        Returns ``(merged_state, conflicts, theirs_state)``.
+        """
+        parent = await s.get(GraphORM, fork.fork_parent_graph_id)
+        if parent is None:
+            raise ValueError("fork parent missing")
+        parent_main = await self._main_branch_id(s, parent.id)
+        fork_main = await self._main_branch_id(s, fork.id)
+        base = await self._state_as_of(s, parent.id, parent_main, fork.fork_base_commit_seq or 0)
+        ours = await self._composed_state(s, fork.id, fork_main)
+        theirs = await self._composed_state(s, parent.id, parent_main)
+
+        set_fields = frozenset(config.SET_FIELDS)
+        merged: Dict[str, Optional[dict]] = {}
+        conflicts: List[dict] = []
+        for eid in sorted(set(base) | set(ours) | set(theirs)):
+            if eid in resolutions:
+                merged[eid] = resolutions[eid]
+                continue
+            out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+            merged[eid] = out.merged
+            for c in out.conflicts:
+                conflicts.append({
+                    "entity_id": eid, "path": list(c.path),
+                    "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
+                })
+        return merged, conflicts, theirs
+
+    # ------------------------------------------------------------------ #
     # Reads / audit                                                       #
     # ------------------------------------------------------------------ #
     async def main_branch_id(self, graph_id: str) -> str:
@@ -393,17 +602,18 @@ class GraphVersioningService:
     async def materialize_state(
         self, *, graph_id: str, branch_id: str
     ) -> Dict[str, Dict[str, dict]]:
-        """Current live node/edge payloads for a branch (draft overlaid on main)."""
+        """Current live node/edge payloads for a branch (fork-aware composition).
+
+        Read straight from the version store (the source of truth); the FalkorDB
+        projection is the hot read path and sits behind the same API.
+        """
         async with self._session() as s:
-            main_id = await self._main_branch_id(s, graph_id)
-            entities = await self._all_entity_kinds(s, graph_id, [branch_id, main_id])
-            payloads = await self._effective_payloads(s, graph_id, branch_id, main_id, entities)
-            kinds = await self._all_entity_kind_map(s, graph_id, [branch_id, main_id])
+            state = await self._composed_state(s, graph_id, branch_id)
             nodes, edges = {}, {}
-            for eid, p in payloads.items():
+            for eid, p in state.items():
                 if p is None:
                     continue
-                (nodes if kinds.get(eid) == "node" else edges)[eid] = p
+                (edges if _is_edge_payload(p) else nodes)[eid] = p
             return {"nodes": nodes, "edges": edges}
 
     async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
@@ -499,46 +709,23 @@ class GraphVersioningService:
                 return None if row.is_tombstone else row.content_hash
         return None
 
-    async def _effective_heads(
-        self, s, graph_id: str, branch_id: str, main_id: str
-    ) -> Dict[str, EntityHeadORM]:
-        """Branch heads overlaid on main heads (draft overrides main)."""
-        merged: Dict[str, EntityHeadORM] = {}
-        if branch_id != main_id:
-            merged.update(await self._heads(s, graph_id, main_id))
-        merged.update(await self._heads(s, graph_id, branch_id))
-        return merged
+    async def _composed_state(self, s, graph_id: str, branch_id: str) -> Dict[str, Optional[dict]]:
+        """Live payload state of a branch, fork-aware — the one primitive every
+        read/merge path composes from (so 'current state' has a single definition).
 
-    async def _effective_payloads(
-        self, s, graph_id: str, branch_id: str, main_id: str, entity_ids: Sequence[str]
-    ) -> Dict[str, Optional[dict]]:
-        """``{entity_id: payload | None}`` for *entity_ids* on a branch (draft over main)."""
-        heads = await self._effective_heads(s, graph_id, branch_id, main_id)
-        out: Dict[str, Optional[dict]] = {}
-        version_ids: Dict[str, Tuple[str, str]] = {}  # entity_id -> (kind, head_version_id)
-        for eid in entity_ids:
-            h = heads.get(eid)
-            if h is None or h.is_tombstone:
-                out[eid] = None
-            else:
-                version_ids[eid] = (h.entity_kind, h.head_version_id)
-        # Fetch payloads in two batched queries (nodes / edges).
-        node_ids = [v[1] for v in version_ids.values() if v[0] == "node"]
-        edge_ids = [v[1] for v in version_ids.values() if v[0] == "edge"]
-        payload_by_vid: Dict[str, dict] = {}
-        if node_ids:
-            for r in (await s.execute(select(NodeVersionORM).where(
-                NodeVersionORM.graph_id == graph_id, NodeVersionORM.id.in_(node_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
-        if edge_ids:
-            for r in (await s.execute(select(EdgeVersionORM).where(
-                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(edge_ids)
-            ))).scalars():
-                payload_by_vid[r.id] = r.payload
-        for eid, (_kind, vid) in version_ids.items():
-            out[eid] = payload_by_vid.get(vid)
-        return out
+        * ``main`` → the graph's reconstructed state at its head (a fork's main is
+          seeded copy-on-write from its parent at the fork point).
+        * a draft → the graph's ``main`` at the draft's branch point overlaid with
+          the draft's own staged changes (the 'ours' side of a rebase).
+        """
+        main_id = await self._main_branch_id(s, graph_id)
+        if branch_id == main_id:
+            graph = await s.get(GraphORM, graph_id)
+            return await self._state_as_of(s, graph_id, main_id, graph.main_head_commit_seq)
+        branch = await s.get(BranchORM, branch_id)
+        base = await self._state_as_of(s, graph_id, main_id, branch.base_commit_seq or 0)
+        base.update(await self._branch_own_payloads(s, graph_id, branch_id))
+        return base
 
     async def _branch_own_payloads(
         self, s, graph_id: str, branch_id: str
@@ -598,33 +785,24 @@ class GraphVersioningService:
                 })
         return merged, conflicts, theirs
 
-    async def _all_entity_kinds(self, s, graph_id: str, branch_ids: Sequence[str]) -> List[str]:
-        rows = (
-            await s.execute(
-                select(EntityHeadORM.entity_id)
-                .where(
-                    EntityHeadORM.graph_id == graph_id,
-                    EntityHeadORM.branch_id.in_(branch_ids),
-                )
-                .distinct()
-            )
-        ).scalars().all()
-        return list(rows)
-
-    async def _all_entity_kind_map(self, s, graph_id: str, branch_ids: Sequence[str]) -> Dict[str, str]:
-        rows = (
-            await s.execute(
+    async def _kind_map_multi(self, s, pairs: Sequence[Tuple[str, str]]) -> Dict[str, str]:
+        """``entity_id → kind`` across several ``(graph_id, branch_id)`` head sets
+        (first match wins) — spans a fork and its parent for cross-graph merges."""
+        out: Dict[str, str] = {}
+        for gid, bid in pairs:
+            rows = (await s.execute(
                 select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind).where(
-                    EntityHeadORM.graph_id == graph_id,
-                    EntityHeadORM.branch_id.in_(branch_ids),
+                    EntityHeadORM.graph_id == gid, EntityHeadORM.branch_id == bid,
                 )
-            )
-        ).all()
-        return {eid: kind for eid, kind in rows}
+            )).all()
+            for eid, kind in rows:
+                out.setdefault(eid, kind)
+        return out
 
-    async def _merkle_root(self, s, graph_id: str, branch_id: str, main_id: str) -> str:
-        heads = await self._effective_heads(s, graph_id, branch_id, main_id)
-        live = {eid: h.content_hash for eid, h in heads.items() if not h.is_tombstone}
+    async def _merkle_root(self, s, graph_id: str, branch_id: str) -> str:
+        """Merkle root over a branch's full live state (fork-aware)."""
+        state = await self._composed_state(s, graph_id, branch_id)
+        live = {eid: content_hash(p) for eid, p in state.items() if p is not None}
         return MerkleTree.build(live).root
 
     async def _write_deltas(
@@ -686,8 +864,22 @@ class GraphVersioningService:
         return list(rows)
 
     async def _state_as_of(self, s, graph_id, branch_id, seq: int) -> Dict[str, Optional[dict]]:
-        """Reconstruct branch state at ``commit_seq <= seq`` from version rows."""
+        """Reconstruct a branch's state at ``commit_seq <= seq`` from version rows.
+
+        Copy-on-write fork aware: a fork's ``main`` is seeded from its parent's
+        state at the fork point (recursively, so a fork-of-a-fork resolves) before
+        the fork's own divergence is overlaid — no parent rows are ever copied.
+        """
         state: Dict[str, Optional[dict]] = {}
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            main_id = await self._main_branch_id(s, graph_id)
+            if branch_id == main_id:
+                parent_main = await self._main_branch_id(s, graph.fork_parent_graph_id)
+                state.update(await self._state_as_of(
+                    s, graph.fork_parent_graph_id, parent_main,
+                    graph.fork_base_commit_seq or 0,
+                ))
         for model in (NodeVersionORM, EdgeVersionORM):
             rows = (await s.execute(
                 select(model).where(
@@ -713,6 +905,17 @@ class GraphVersioningService:
                 raise ConcurrencyError(
                     f"edge {eid} would dangle (endpoint tombstoned): {src}->{tgt}"
                 )
+
+
+def _is_edge_payload(payload: Mapping) -> bool:
+    """Edge payloads carry both endpoints; node payloads don't.  Lets a composed
+    state be split into nodes/edges without a second kind lookup (the same
+    heuristic the referential-integrity guard uses)."""
+    if not payload:
+        return False
+    has_src = "sourceEntityId" in payload or "source_entity_id" in payload
+    has_tgt = "targetEntityId" in payload or "target_entity_id" in payload
+    return has_src and has_tgt
 
 
 def _delta_stats(deltas: List[Delta]) -> dict:
