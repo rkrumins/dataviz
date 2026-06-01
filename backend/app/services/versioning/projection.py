@@ -1,37 +1,25 @@
-"""FalkorDB projection worker — derives the hot read graph from the durable
-``graphver`` store (plan §5, §16.5 #9).
+"""FalkorDB projection worker — derives the read graph from the durable graphver store.
 
-Postgres is the source of truth; FalkorDB is a **rebuildable** read cache.  The
-worker advances each graph's ``projection_state`` watermark
-(``projected_commit_seq`` → ``target_commit_seq``) by applying the committed
-``main`` deltas to FalkorDB.
+Postgres is the source of truth; FalkorDB is a **rebuildable read cache** of `main`.
+The projector writes the **same schema the existing reader uses**
+(`falkordb_provider`: urn-keyed nodes labelled by `entityType`, edges typed by
+`edgeType`) into the data source's **real** FalkorDB graph, so the existing
+ContextEngine/UI read versioned data natively (plan §5, §13).
 
 Two invariants make it safe to run unattended:
+* **Idempotent apply** — every write is a `MERGE` (upsert) or `DELETE`, so a
+  crashed/retried projection converges.
+* **Watermark after apply** — `projected_commit_seq` only advances *after* the
+  batch lands in FalkorDB, in a separate transaction (bounded staleness, never
+  corruption).
 
-* **Idempotent apply.** Every write is a ``MERGE`` (upsert) or ``DELETE``, so a
-  crashed/retried projection converges — re-applying a window is a no-op.
-* **Watermark after apply.** ``projected_commit_seq`` only advances *after* the
-  batch lands in FalkorDB, in a separate transaction.  A crash mid-apply leaves
-  the watermark behind, and the next pass re-applies the same (idempotent) window
-  — bounded staleness, never corruption.
-
-Seeding vs incremental:
-
-* First pass (``projected==0``) seeds the graph's **full** live state — which for
-  a fork is its copy-on-write composition (parent@fork_base + divergence).
-* Later passes apply only the rows in ``(projected, target]`` (a fork's own
-  divergence; a fork's view is frozen against its parent until it merges).
-
-The FalkorDB client is injected (``graph_client_factory(name) -> client`` with an
-async ``query(cypher, params)``).  :func:`make_falkor_graph_factory` builds the
-production one from the same async client the rest of the app uses
-(``falkordb.asyncio``); tests inject a fake.
+First pass (`projected==0`) seeds the full live state (fork-aware copy-on-write
+composition); later passes apply only the rows in `(projected, target]`.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
@@ -46,19 +34,44 @@ from .models import (
 )
 from .service import GraphVersioningService, _is_edge_payload
 
+# Reuse the existing reader's schema helpers verbatim so the projection is
+# byte-for-byte reader-compatible (a reader schema change flows through here too).
+from backend.app.providers.falkordb_provider import (  # noqa: E402
+    _compute_searchable_text,
+    _sanitize_label,
+    _split_user_properties,
+)
+
 logger = logging.getLogger(__name__)
 
-# Cypher (idempotent). One label/type keeps the projection generic; the stable
-# entity_id lives in ``eid`` and every payload field becomes a property.
-_UPSERT_NODES = "UNWIND $rows AS r MERGE (n:Entity {eid: r.eid}) SET n += r.props"
-_UPSERT_EDGES = (
-    "UNWIND $rows AS r MATCH (a:Entity {eid: r.src}), (b:Entity {eid: r.tgt}) "
-    "MERGE (a)-[e:REL {eid: r.eid}]->(b) SET e += r.props"
-)
-_DELETE_EDGES = "UNWIND $ids AS x MATCH ()-[e:REL {eid: x}]->() DELETE e"
-_DELETE_NODES = "UNWIND $ids AS x MATCH (n:Entity {eid: x}) DETACH DELETE n"
+NodeUpsert = Tuple[str, str, dict]          # (entity_id, urn, payload)
+EdgeUpsert = Tuple[str, str, str, dict]     # (entity_id, src_urn, tgt_urn, payload)
 
-Upsert = Tuple[str, dict]            # (entity_id, payload)
+
+# --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
+def _node_merge_cypher(label: str) -> str:
+    return (
+        f"UNWIND $batch AS item MERGE (n:{label} {{urn: item.urn}}) "
+        f"SET n.entityId = item.entityId, n.displayName = item.displayName, "
+        f"n.qualifiedName = item.qualifiedName, n.description = item.description, "
+        f"n.tags = item.tags, n.layerAssignment = item.layerAssignment, "
+        f"n.childCount = item.childCount, n.sourceSystem = item.sourceSystem, "
+        f"n.lastSyncedAt = item.lastSyncedAt, n.propertiesRaw = item.propertiesRaw, "
+        f"n.searchableText = item.searchableText, n += item.nativeProps "
+        f"REMOVE n.properties"
+    )
+
+
+def _edge_merge_cypher(rel_type: str) -> str:
+    return (
+        f"UNWIND $batch AS item MATCH (a {{urn: item.src}}) MATCH (b {{urn: item.tgt}}) "
+        f"MERGE (a)-[r:{rel_type}]->(b) "
+        f"SET r.id = item.eid, r.confidence = item.conf, r.properties = item.props"
+    )
+
+
+_DELETE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) DETACH DELETE n"
+_DELETE_EDGES = "UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r"
 
 
 def _batches(seq, n):
@@ -66,22 +79,46 @@ def _batches(seq, n):
         yield seq[i:i + n]
 
 
-def _falkor_props(payload: Optional[dict], *, drop: Tuple[str, ...] = ()) -> dict:
-    """Coerce a payload into FalkorDB-safe properties.
+def _node_urn(entity_id: str, payload: Optional[dict]) -> str:
+    """The node's FalkorDB key — its `urn`, or a stable `gv:<entity_id>` fallback
+    when the manual node has no urn (so the node always has a key)."""
+    if payload:
+        u = payload.get("urn")
+        if u:
+            return str(u)
+    return f"gv:{entity_id}"
 
-    FalkorDB properties must be primitives or arrays of primitives; nested
-    objects/arrays are JSON-encoded (the full doc still lives in Postgres)."""
-    out: dict = {}
-    for k, v in (payload or {}).items():
-        if k in drop:
-            continue
-        if v is None or isinstance(v, (str, int, float, bool)):
-            out[k] = v
-        elif isinstance(v, list) and all(isinstance(x, (str, int, float, bool)) for x in v):
-            out[k] = list(v)
-        else:
-            out[k] = json.dumps(v, sort_keys=True)
-    return out
+
+def _node_item(entity_id: str, urn: str, payload: dict) -> dict:
+    native, residual = _split_user_properties(payload.get("properties"))
+    dn = payload.get("displayName") or ""
+    qn = payload.get("qualifiedName") or ""
+    desc = payload.get("description") or ""
+    return {
+        "urn": urn,
+        "entityId": entity_id,
+        "displayName": dn,
+        "qualifiedName": qn,
+        "description": desc,
+        "nativeProps": native,
+        "propertiesRaw": residual,
+        "tags": json.dumps(payload.get("tags") or []),
+        "layerAssignment": payload.get("layerAssignment") or "",
+        "childCount": payload.get("childCount") or 0,
+        "sourceSystem": payload.get("sourceSystem") or "",
+        "lastSyncedAt": payload.get("lastSyncedAt") or "",
+        "searchableText": _compute_searchable_text(dn, qn, desc, native),
+    }
+
+
+def _edge_item(entity_id: str, src_urn: str, tgt_urn: str, payload: dict) -> dict:
+    return {
+        "src": src_urn,
+        "tgt": tgt_urn,
+        "eid": entity_id,
+        "conf": payload.get("confidence"),
+        "props": json.dumps(payload.get("properties") or {}),
+    }
 
 
 def _edge_endpoints(payload: dict) -> Tuple[str, str]:
@@ -91,7 +128,7 @@ def _edge_endpoints(payload: dict) -> Tuple[str, str]:
 
 
 class FalkorProjector:
-    """Projects committed ``main`` state of a graph into its FalkorDB graph."""
+    """Projects committed `main` state of a graph into its FalkorDB graph."""
 
     def __init__(
         self,
@@ -106,14 +143,12 @@ class FalkorProjector:
 
     @staticmethod
     def default_graph_name(graph_id: str) -> str:
+        # Fallback only — real graphs carry the data source's graph_name on
+        # projection_state.falkor_graph_name (set at create time).
         return f"gv_{graph_id}"
 
     async def project_graph(self, graph_id: str) -> Dict[str, object]:
-        """Catch a graph's FalkorDB projection up to its target watermark.
-
-        Returns ``{projected, applied, noop}``.  Idempotent; safe to call
-        repeatedly (e.g. from a poll loop or a commit/publish hook)."""
-        # 1. Read the watermark + compute the delta window (one read txn).
+        """Catch a graph's FalkorDB projection up to its target watermark."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             if ps is None:
@@ -125,15 +160,13 @@ class FalkorProjector:
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
+            ps.status = "projecting"
             main_id = await self._svc._main_branch_id(s, graph_id)
-            up_nodes, up_edges, del_nodes, del_edges = await self._compute_changes(
-                s, graph, main_id, from_seq, to_seq
-            )
+            changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
 
-        # 2. Apply to FalkorDB outside the txn (network); idempotent.
         client = self._client(name)
         try:
-            await self._apply(client, up_nodes, up_edges, del_nodes, del_edges)
+            await self._apply(client, *changes)
         except Exception as exc:                       # pragma: no cover - infra
             logger.exception("projection apply failed for %s: %s", graph_id, exc)
             async with self._session() as s:
@@ -143,7 +176,6 @@ class FalkorProjector:
                     ps.last_error = str(exc)[:500]
             raise
 
-        # 3. Advance the watermark only after the batch landed (separate txn).
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             ps.projected_commit_seq = to_seq
@@ -152,11 +184,11 @@ class FalkorProjector:
             ps.last_projected_at = _now()
             ps.last_error = None
 
-        applied = len(up_nodes) + len(up_edges) + len(del_nodes) + len(del_edges)
+        applied = sum(len(c) for c in changes)
         return {"projected": to_seq, "applied": applied, "noop": False}
 
     async def project_pending(self, limit: int = 100) -> List[Dict[str, object]]:
-        """Catch up every graph whose projection lags (``projected < target``)."""
+        """Catch up every graph whose projection lags (`projected < target`)."""
         async with self._session() as s:
             ids = (await s.execute(
                 select(ProjectionStateORM.graph_id).where(
@@ -167,22 +199,32 @@ class FalkorProjector:
 
     async def _compute_changes(
         self, s, graph: GraphORM, main_id: str, from_seq: int, to_seq: int
-    ) -> Tuple[List[Upsert], List[Upsert], List[str], List[str]]:
-        up_nodes: List[Upsert] = []
-        up_edges: List[Upsert] = []
-        del_nodes: List[str] = []
-        del_edges: List[str] = []
+    ) -> Tuple[List[NodeUpsert], List[EdgeUpsert], List[str], List[str]]:
+        node_upserts: List[NodeUpsert] = []
+        edge_upserts: List[EdgeUpsert] = []
+        node_deletes: List[str] = []      # urns
+        edge_deletes: List[str] = []      # entity_ids
+        urn_of: Dict[str, str] = {}
 
         if from_seq <= 0:
             # Seed: the full live state (fork-aware copy-on-write composition).
             state = await self._svc._state_as_of(s, graph.id, main_id, to_seq)
-            for eid, payload in state.items():
-                if payload is None:
+            for eid, p in state.items():
+                if p is None or _is_edge_payload(p):
                     continue
-                (up_edges if _is_edge_payload(payload) else up_nodes).append((eid, payload))
-            return up_nodes, up_edges, del_nodes, del_edges
+                urn = _node_urn(eid, p)
+                urn_of[eid] = urn
+                node_upserts.append((eid, urn, p))
+            for eid, p in state.items():
+                if p is None or not _is_edge_payload(p):
+                    continue
+                src, tgt = _edge_endpoints(p)
+                su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
+                tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
+                edge_upserts.append((eid, su, tu, p))
+            return node_upserts, edge_upserts, node_deletes, edge_deletes
 
-        # Incremental: net of each entity's rows in (from_seq, to_seq], kind from table.
+        # Incremental: net of each entity's rows in (from_seq, to_seq].
         last: Dict[str, Tuple[str, str, Optional[dict]]] = {}
         for model, kind in ((NodeVersionORM, "node"), (EdgeVersionORM, "edge")):
             rows = (await s.execute(
@@ -193,42 +235,78 @@ class FalkorProjector:
             )).scalars().all()
             for r in rows:
                 last[r.entity_id] = (kind, r.op, r.payload)
-        for eid, (kind, op, payload) in last.items():
+        for eid, (kind, op, p) in last.items():
+            if kind != "node":
+                continue
             if op == "delete":
-                (del_edges if kind == "edge" else del_nodes).append(eid)
+                node_deletes.append(await self._urn_for(s, graph, main_id, eid))
             else:
-                (up_edges if kind == "edge" else up_nodes).append((eid, payload))
-        return up_nodes, up_edges, del_nodes, del_edges
-
-    async def _apply(self, client, up_nodes, up_edges, del_nodes, del_edges) -> None:
-        # Order matters for convergence: nodes in, edges in, edges out, nodes out.
-        for chunk in _batches(up_nodes, self._batch):
-            await client.query(_UPSERT_NODES, params={
-                "rows": [{"eid": eid, "props": _falkor_props(p)} for eid, p in chunk],
-            })
-        for chunk in _batches(up_edges, self._batch):
-            rows = []
-            for eid, p in chunk:
+                urn = _node_urn(eid, p)
+                urn_of[eid] = urn
+                node_upserts.append((eid, urn, p))
+        for eid, (kind, op, p) in last.items():
+            if kind != "edge":
+                continue
+            if op == "delete":
+                edge_deletes.append(eid)
+            else:
                 src, tgt = _edge_endpoints(p)
-                rows.append({"eid": eid, "src": src, "tgt": tgt,
-                             "props": _falkor_props(p, drop=(
-                                 "sourceEntityId", "source_entity_id",
-                                 "targetEntityId", "target_entity_id"))})
-            await client.query(_UPSERT_EDGES, params={"rows": rows})
-        for chunk in _batches(del_edges, self._batch):
+                su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
+                tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
+                edge_upserts.append((eid, su, tu, p))
+        return node_upserts, edge_upserts, node_deletes, edge_deletes
+
+    async def _urn_for(self, s, graph: GraphORM, main_id: str, entity_id: str) -> str:
+        """Latest non-null urn for an entity on `main` (fork-aware), else gv:<eid>."""
+        row = (await s.execute(
+            select(NodeVersionORM.urn).where(
+                NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
+                NodeVersionORM.entity_id == entity_id, NodeVersionORM.urn.is_not(None),
+            ).order_by(NodeVersionORM.commit_seq.desc()).limit(1)
+        )).scalar_one_or_none()
+        if row:
+            return str(row)
+        if graph.fork_parent_graph_id:
+            parent = await s.get(GraphORM, graph.fork_parent_graph_id)
+            if parent is not None:
+                pmain = await self._svc._main_branch_id(s, parent.id)
+                return await self._urn_for(s, parent, pmain, entity_id)
+        return f"gv:{entity_id}"
+
+    async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes) -> None:
+        # Nodes in (grouped by label), edges in (grouped by type), edges out, nodes out.
+        by_label: Dict[str, list] = {}
+        for eid, urn, p in node_upserts:
+            by_label.setdefault(_sanitize_label(p.get("entityType") or "Entity"), []).append(
+                _node_item(eid, urn, p)
+            )
+        for label, items in by_label.items():
+            for chunk in _batches(items, self._batch):
+                await client.query(_node_merge_cypher(label), params={"batch": chunk})
+
+        by_rel: Dict[str, list] = {}
+        for eid, su, tu, p in edge_upserts:
+            by_rel.setdefault(_sanitize_label(p.get("edgeType") or "REL"), []).append(
+                _edge_item(eid, su, tu, p)
+            )
+        for rel, items in by_rel.items():
+            for chunk in _batches(items, self._batch):
+                await client.query(_edge_merge_cypher(rel), params={"batch": chunk})
+
+        for chunk in _batches(edge_deletes, self._batch):
             await client.query(_DELETE_EDGES, params={"ids": list(chunk)})
-        for chunk in _batches(del_nodes, self._batch):
-            await client.query(_DELETE_NODES, params={"ids": list(chunk)})
+        for chunk in _batches(node_deletes, self._batch):
+            await client.query(_DELETE_NODES, params={"urns": list(chunk)})
 
 
 def make_falkor_graph_factory() -> Callable[[str], object]:
     """Production client factory — one async FalkorDB handle, a graph per name.
 
-    Mirrors the app's FalkorDB access (``falkordb.asyncio`` over a redis pool).
     Config: ``FALKORDB_HOST`` / ``FALKORDB_PORT`` / ``FALKORDB_POOL_SIZE``.
     """
     from redis.asyncio import ConnectionPool          # pragma: no cover - infra
     from falkordb.asyncio import FalkorDB              # pragma: no cover - infra
+    import os
 
     pool = ConnectionPool(
         host=os.getenv("FALKORDB_HOST", "localhost"),

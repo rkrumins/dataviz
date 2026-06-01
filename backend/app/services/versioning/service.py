@@ -92,6 +92,7 @@ class GraphVersioningService:
         actor: Optional[str] = None,
         base_ontology_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        falkor_graph_name: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
         genesis commit + projection state.  Returns ids and the genesis seq."""
@@ -129,7 +130,8 @@ class GraphVersioningService:
             main.head_commit_id = genesis.id
             s.add(
                 ProjectionStateORM(
-                    graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1
+                    graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1,
+                    falkor_graph_name=falkor_graph_name,   # the data source's real graph
                 )
             )
             return {"graph_id": graph.id, "main_branch_id": main.id, "genesis_commit_id": genesis.id}
@@ -439,8 +441,11 @@ class GraphVersioningService:
             s.add(fork_point)
             await s.flush()                      # materialise fork_point.id before linking
             main.head_commit_id = fork_point.id
+            parent_ps = await s.get(ProjectionStateORM, parent_graph_id)
+            parent_name = (parent_ps.falkor_graph_name if parent_ps else None) or f"gv_{parent_graph_id}"
             s.add(ProjectionStateORM(
                 graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
+                falkor_graph_name=f"{parent_name}__fork_{fork.id}",   # forks get their own graph
             ))
             return {
                 "graph_id": fork.id,

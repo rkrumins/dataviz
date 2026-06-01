@@ -108,6 +108,9 @@ class CreateGraphRequest(_ApiModel):
     kind: str = "manual"
     base_ontology_id: Optional[str] = Field(default=None, alias="baseOntologyId")
     tenant_id: Optional[str] = Field(default=None, alias="tenantId")
+    # The data source's real FalkorDB graph name (so the existing reader sees
+    # versioned data); omit to use a synthetic gv_<id> fallback.
+    falkor_graph_name: Optional[str] = Field(default=None, alias="falkorGraphName")
 
 
 class OpenDraftRequest(_ApiModel):
@@ -259,6 +262,7 @@ async def create_graph(
     return await svc.create_graph(
         data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
         base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
+        falkor_graph_name=body.falkor_graph_name,
     )
 
 
