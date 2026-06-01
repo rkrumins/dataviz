@@ -190,11 +190,18 @@ export function PropertyManagerDrawer({
                             )}
                         </div>
 
-                        {/* Body — animated list ⇄ editor transition. */}
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+                        {/* Body — animated list ⇄ editor transition.
+                            ``min-h-0`` lets this flex child shrink below its
+                            content so ``overflow-y-auto`` actually scrolls
+                            (without it the body grows past the overflow-hidden
+                            shell and clips — the Properties tab "won't scroll"
+                            bug). */}
+                        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4">
                             {tab === 'properties' && (
                                 <PropertyBrowser
                                     viewId={viewId}
+                                    knownEntityTypes={knownEntityTypes}
+                                    knownLayers={knownLayers}
                                     onCreateRuleFromPredicate={handleCreateFromPredicate}
                                 />
                             )}

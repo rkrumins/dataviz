@@ -58,11 +58,17 @@ function collectMatchUrns(result: SearchResultPage): string[] {
 
 
 /**
- * Build the view-scoped SearchQuery for a display-rule predicate.
- * Reads live canvas + schema + layer state via ``getState()`` (no
- * hooks) so it can run from anywhere — including outside React.
+ * Build a view-scoped SearchQuery for an arbitrary predicate + options.
+ * Reads live canvas + schema + layer state via ``getState()`` (no hooks)
+ * so it can run from anywhere — including outside React. Shared by the
+ * display-rule evaluator and the property-insights service so both scope
+ * identically.
  */
-function buildRuleQuery(viewId: string, predicate: Predicate): SearchQuery {
+export function buildViewScopedQuery(
+    viewId: string,
+    predicate: Predicate,
+    options: SearchQuery['options'],
+): SearchQuery {
     const canvas = useCanvasStore.getState()
     const schema = useSchemaStore.getState().schema
 
@@ -98,15 +104,19 @@ function buildRuleQuery(viewId: string, predicate: Predicate): SearchQuery {
         ? predicate
         : { kind: 'group', op: 'and', children: [predicate] }
 
-    return {
-        predicate: wrapped,
-        scope,
-        options: {
-            results: 'hits',
-            pageSize: RULE_PAGE_SIZE,
-            includeAncestorPath: false,
-        },
-    }
+    return { predicate: wrapped, scope, options }
+}
+
+
+/**
+ * Build the view-scoped SearchQuery for a display-rule predicate.
+ */
+function buildRuleQuery(viewId: string, predicate: Predicate): SearchQuery {
+    return buildViewScopedQuery(viewId, predicate, {
+        results: 'hits',
+        pageSize: RULE_PAGE_SIZE,
+        includeAncestorPath: false,
+    })
 }
 
 
