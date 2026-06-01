@@ -15,7 +15,11 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.service import ConcurrencyError, GraphVersioningService
+from backend.app.services.versioning.service import (
+    ConcurrencyError,
+    GraphVersioningService,
+    MergeConflict,
+)
 
 
 async def _run_flow() -> None:
@@ -64,18 +68,19 @@ async def _run_flow() -> None:
     diff = await svc.diff_commits(graph_id=gid, branch_id=main, from_seq=1, to_seq=2)
     assert set(diff["added"]) == {"A", "B", "C", "E1"}
 
-    # stale-publish concurrency guard
+    # stale draft auto-rebases onto an advanced main (non-overlapping → no conflict)
     g2 = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
     gid2 = g2["graph_id"]
     da = await svc.open_draft(graph_id=gid2, owner="alice")
     dbob = await svc.open_draft(graph_id=gid2, owner="bob")  # both based on seq 1
     await svc.stage_changes(graph_id=gid2, branch_id=da, actor="alice", ops=[{"op": "create", "entity_kind": "node", "entity_id": "X", "payload": {"displayName": "X"}}])
     await svc.checkpoint(graph_id=gid2, branch_id=da, actor="alice")
-    await svc.publish(graph_id=gid2, branch_id=da, actor="alice", message="A wins")
+    await svc.publish(graph_id=gid2, branch_id=da, actor="alice", message="A adds X")   # main -> 2
     await svc.stage_changes(graph_id=gid2, branch_id=dbob, actor="bob", ops=[{"op": "create", "entity_kind": "node", "entity_id": "Y", "payload": {"displayName": "Y"}}])
     await svc.checkpoint(graph_id=gid2, branch_id=dbob, actor="bob")
-    with pytest.raises(ConcurrencyError):
-        await svc.publish(graph_id=gid2, branch_id=dbob, actor="bob", message="too late")
+    await svc.publish(graph_id=gid2, branch_id=dbob, actor="bob", message="B rebases, adds Y")
+    rebased = await svc.materialize_state(graph_id=gid2, branch_id=await svc.main_branch_id(gid2))
+    assert set(rebased["nodes"]) == {"X", "Y"}, rebased
 
     # referential-integrity guard (delete a node an edge still points at)
     g3 = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
@@ -93,6 +98,48 @@ async def _run_flow() -> None:
     await svc.checkpoint(graph_id=gid3, branch_id=d3b, actor="alice")
     with pytest.raises(ConcurrencyError):
         await svc.publish(graph_id=gid3, branch_id=d3b, actor="alice", message="orphan edge")
+
+    # rebase auto-merge: two drafts from the same base edit DIFFERENT fields.
+    g4 = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
+    gid4 = g4["graph_id"]
+    main4 = await svc.main_branch_id(gid4)
+    seed = await svc.open_draft(graph_id=gid4, owner="alice")
+    await svc.stage_changes(graph_id=gid4, branch_id=seed, actor="alice", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 1, "f2": 1}}])
+    await svc.checkpoint(graph_id=gid4, branch_id=seed, actor="alice")
+    await svc.publish(graph_id=gid4, branch_id=seed, actor="alice", message="seed A")     # main 2
+    d1 = await svc.open_draft(graph_id=gid4, owner="alice")
+    d2 = await svc.open_draft(graph_id=gid4, owner="bob")                                  # both based on seq 2
+    await svc.stage_changes(graph_id=gid4, branch_id=d1, actor="alice", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 2, "f2": 1}}])
+    await svc.checkpoint(graph_id=gid4, branch_id=d1, actor="alice")
+    await svc.publish(graph_id=gid4, branch_id=d1, actor="alice", message="d1 sets f1")    # main 3
+    await svc.stage_changes(graph_id=gid4, branch_id=d2, actor="bob", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 1, "f2": 9}}])
+    await svc.checkpoint(graph_id=gid4, branch_id=d2, actor="bob")
+    assert (await svc.preview_merge(graph_id=gid4, branch_id=d2))["clean"] is True
+    await svc.publish(graph_id=gid4, branch_id=d2, actor="bob", message="d2 sets f2 (rebased)")  # main 4
+    A = (await svc.materialize_state(graph_id=gid4, branch_id=main4))["nodes"]["A"]
+    assert A["f1"] == 2 and A["f2"] == 9, A           # both non-overlapping edits survived
+
+    # conflict on the SAME field → surfaced, then resolved.
+    e1 = await svc.open_draft(graph_id=gid4, owner="alice")
+    e2 = await svc.open_draft(graph_id=gid4, owner="bob")             # both based on seq 4
+    await svc.stage_changes(graph_id=gid4, branch_id=e1, actor="alice", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 10, "f2": 9}}])
+    await svc.checkpoint(graph_id=gid4, branch_id=e1, actor="alice")
+    await svc.publish(graph_id=gid4, branch_id=e1, actor="alice", message="e1 f1=10")      # main 5
+    await svc.stage_changes(graph_id=gid4, branch_id=e2, actor="bob", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 20, "f2": 9}}])
+    await svc.checkpoint(graph_id=gid4, branch_id=e2, actor="bob")
+    prev = await svc.preview_merge(graph_id=gid4, branch_id=e2)
+    assert prev["clean"] is False and prev["conflicts"][0]["path"] == ["f1"], prev
+    with pytest.raises(MergeConflict):
+        await svc.publish(graph_id=gid4, branch_id=e2, actor="bob", message="e2 f1=20")
+    await svc.publish(graph_id=gid4, branch_id=e2, actor="bob", message="resolved",
+                      resolutions={"A": {"displayName": "A", "f1": 99, "f2": 9}})          # main 6
+    A2 = (await svc.materialize_state(graph_id=gid4, branch_id=main4))["nodes"]["A"]
+    assert A2["f1"] == 99, A2
 
     await db.dispose_engine()
 

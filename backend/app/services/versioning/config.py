@@ -117,6 +117,12 @@ DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only"
 # Default ontology enforcement for new graphs: strict | permissive.
 DEFAULT_ONTOLOGY_ENFORCEMENT: str = os.getenv("GRAPHVER_ONTOLOGY_ENFORCEMENT", "strict")
 
+# Payload fields merged as unordered sets in 3-way merge (e.g. tags). Comma-
+# separated; the ontology can extend this per-graph later.
+SET_FIELDS = frozenset(
+    f.strip() for f in os.getenv("GRAPHVER_SET_FIELDS", "tags").split(",") if f.strip()
+)
+
 # Ephemeral analysis/time-travel projection pool (plan decision #3).
 EPHEMERAL_POOL_MAX_GRAPHS: int = int(os.getenv("GRAPHVER_EPHEMERAL_MAX_GRAPHS", "32"))
 EPHEMERAL_TTL_SECS: int = int(os.getenv("GRAPHVER_EPHEMERAL_TTL_SECS", "900"))

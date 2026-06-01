@@ -27,9 +27,10 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from . import db
+from . import config, db
 from .changeset import Delta, materialize, net_delta, diff_states
 from .ids import prefixed_id
+from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .models import (
     BranchORM,
@@ -53,7 +54,22 @@ _NODE_DENORM = {
 
 
 class ConcurrencyError(RuntimeError):
-    """Raised when main advanced under a draft and a rebase is required."""
+    """Raised when a publish would violate referential integrity (e.g. a
+    surviving edge points at a node the merge tombstoned). A stale base is *not*
+    an error — it is auto-rebased; only genuine conflicts block a publish."""
+
+
+class MergeConflict(RuntimeError):
+    """Raised when a 3-way rebase/merge has unresolved field-level conflicts.
+
+    ``.conflicts`` is a JSON-able list of ``{entity_id, path, base, ours, theirs,
+    kind}`` for the UI to resolve; resubmit ``publish(..., resolutions=...)`` with
+    the chosen payloads to land the merge.
+    """
+
+    def __init__(self, conflicts):
+        super().__init__(f"{len(conflicts)} unresolved merge conflict(s)")
+        self.conflicts = conflicts
 
 
 class GraphVersioningService:
@@ -277,12 +293,16 @@ class GraphVersioningService:
         branch_id: str,
         actor: str,
         message: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
     ) -> str:
-        """Squash a draft into a single ``main`` commit (plan §8).
+        """Squash a draft into a single ``main`` commit, rebasing onto current
+        main with a field-level 3-way merge (plan §8).
 
-        Detects concurrent advance of ``main`` and raises
-        :class:`ConcurrencyError` (field-level rebase via :mod:`merge` is the
-        next increment) so we never silently mis-merge.
+        If ``main`` advanced under the draft, non-overlapping field edits
+        auto-merge; genuine same-field conflicts raise :class:`MergeConflict`
+        (resubmit with ``resolutions={entity_id: payload|None}``).  The same path
+        covers the no-advance case (then base == theirs, so the merge reduces to
+        the draft's own delta).
         """
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
@@ -291,34 +311,30 @@ class GraphVersioningService:
                 raise ValueError("unknown graph/branch")
             main_id = await self._main_branch_id(s, graph_id)
 
-            if graph.main_head_commit_seq != draft.base_commit_seq:
-                raise ConcurrencyError(
-                    f"main advanced to seq {graph.main_head_commit_seq}; draft based on "
-                    f"{draft.base_commit_seq}. Pull/rebase required before publish."
-                )
+            merged_state, conflicts, theirs = await self._compute_merge(
+                s, graph_id, graph, draft, main_id, dict(resolutions or {})
+            )
+            if conflicts:
+                raise MergeConflict(conflicts)
 
-            # Net delta of the draft vs its base (= current main, since not advanced).
-            all_entities = await self._all_entity_kinds(s, graph_id, [branch_id, main_id])
-            base_state = await self._effective_payloads(s, graph_id, main_id, main_id, all_entities)
-            draft_state = await self._effective_payloads(s, graph_id, branch_id, main_id, all_entities)
-            deltas = net_delta(base_state, draft_state)
+            # No surviving edge may point at a tombstone (cross-entity conflict
+            # the per-entity merge can't see — §16.5 #8).
+            self._assert_referential_integrity(merged_state)
+
+            deltas = net_delta(theirs, merged_state)   # what publish adds to main
+            new_seq = graph.main_head_commit_seq + 1
             if not deltas:
                 draft.status = "merged"
+                draft.base_commit_seq = graph.main_head_commit_seq
                 return draft.head_commit_id or ""
-
-            # Referential integrity: no surviving edge may point at a tombstone
-            # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
-            self._assert_referential_integrity(draft_state)
 
             contributors = await self._branch_contributors(s, graph_id, branch_id)
             source_commits = await self._branch_commit_ids(s, graph_id, branch_id)
-
             main = await s.get(BranchORM, main_id)
-            seq = graph.main_head_commit_seq + 1
             squash = CommitORM(
                 graph_id=graph_id,
                 branch_id=main_id,
-                commit_seq=seq,
+                commit_seq=new_seq,
                 parent_commit_id=main.head_commit_id,
                 kind="squash_publish",
                 message=message,
@@ -338,14 +354,33 @@ class GraphVersioningService:
             squash.merkle_root = await self._merkle_root(s, graph_id, main_id, main_id)
             squash.stats = _delta_stats(deltas)
             main.head_commit_id = squash.id
-            graph.main_head_commit_seq = seq
+            graph.main_head_commit_seq = new_seq
             graph.updated_at = _now()
             draft.status = "merged"
+            draft.base_commit_seq = new_seq            # rebased onto new main
 
             ps = await s.get(ProjectionStateORM, graph_id)
             if ps is not None:
-                ps.target_commit_seq = seq
+                ps.target_commit_seq = new_seq
             return squash.id
+
+    async def preview_merge(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+        """Dry-run the publish merge: report conflicts + change counts without
+        committing, so the UI can resolve before publishing."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            draft = await s.get(BranchORM, branch_id)
+            if graph is None or draft is None:
+                raise ValueError("unknown graph/branch")
+            main_id = await self._main_branch_id(s, graph_id)
+            merged_state, conflicts, theirs = await self._compute_merge(
+                s, graph_id, graph, draft, main_id, {}
+            )
+            return {
+                "clean": not conflicts,
+                "conflicts": conflicts,
+                "changes": _delta_stats(net_delta(theirs, merged_state)),
+            }
 
     # ------------------------------------------------------------------ #
     # Reads / audit                                                       #
@@ -504,6 +539,64 @@ class GraphVersioningService:
         for eid, (_kind, vid) in version_ids.items():
             out[eid] = payload_by_vid.get(vid)
         return out
+
+    async def _branch_own_payloads(
+        self, s, graph_id: str, branch_id: str
+    ) -> Dict[str, Optional[dict]]:
+        """Payloads for entities THIS branch itself changed (its own heads only);
+        tombstone → None.  Used as the 'ours' side of a rebase merge."""
+        heads = await self._heads(s, graph_id, branch_id)
+        out: Dict[str, Optional[dict]] = {}
+        node_ids, edge_ids, kindvid = [], [], {}
+        for eid, h in heads.items():
+            if h.is_tombstone:
+                out[eid] = None
+            else:
+                kindvid[eid] = h.head_version_id
+                (node_ids if h.entity_kind == "node" else edge_ids).append(h.head_version_id)
+        payload_by_vid: Dict[str, dict] = {}
+        if node_ids:
+            for r in (await s.execute(select(NodeVersionORM).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.id.in_(node_ids)
+            ))).scalars():
+                payload_by_vid[r.id] = r.payload
+        if edge_ids:
+            for r in (await s.execute(select(EdgeVersionORM).where(
+                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(edge_ids)
+            ))).scalars():
+                payload_by_vid[r.id] = r.payload
+        for eid, vid in kindvid.items():
+            out[eid] = payload_by_vid.get(vid)
+        return out
+
+    async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions):
+        """3-way merge a draft onto current main.
+
+        base   = main state at the draft's branch point (common ancestor)
+        ours   = base + the draft's own changes
+        theirs = current main state
+        Returns ``(merged_state, conflicts, theirs_state)``.
+        """
+        base = await self._state_as_of(s, graph_id, main_id, draft.base_commit_seq or 0)
+        theirs = await self._state_as_of(s, graph_id, main_id, graph.main_head_commit_seq)
+        ours = dict(base)
+        ours.update(await self._branch_own_payloads(s, graph_id, draft.id))
+
+        set_fields = frozenset(config.SET_FIELDS)
+        merged: Dict[str, Optional[dict]] = {}
+        conflicts: List[dict] = []
+        for eid in sorted(set(base) | set(theirs) | set(ours)):
+            if eid in resolutions:
+                merged[eid] = resolutions[eid]
+                continue
+            out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+            merged[eid] = out.merged
+            for c in out.conflicts:
+                conflicts.append({
+                    "entity_id": eid, "path": list(c.path),
+                    "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
+                })
+        return merged, conflicts, theirs
 
     async def _all_entity_kinds(self, s, graph_id: str, branch_ids: Sequence[str]) -> List[str]:
         rows = (
