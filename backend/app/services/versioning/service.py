@@ -1,0 +1,629 @@
+"""Graph versioning write path — Postgres-first, the durable source of truth.
+
+Implements the core flow (plan §3, §8, §11):
+
+  create_graph → open_draft → stage_changes → checkpoint → publish (squash to main)
+
+plus the read/audit helpers ``materialize_state``, ``entity_history`` and
+``diff_commits``.  Everything writes the ``graphver`` store first; FalkorDB
+projection (plan §5) is a separate worker that consumes committed state — it is
+NOT on this path, so writes are durable regardless of projection lag.
+
+Design choices honoured here:
+
+* Append-only version tables; "latest" tracked via the :class:`EntityHeadORM`
+  pointer (no ``is_head`` churn — plan §16.5 #4).
+* A checkpoint folds the durable ``working_changes`` buffer into version rows,
+  squash-deduping no-op edits via :mod:`changeset`.
+* A draft has its own linear ``commit_seq``; publishing squashes the whole draft
+  into one ``main`` commit carrying contributor attribution (plan §8).
+* Concurrent advance of ``main`` is detected (OCC) and surfaced rather than
+  silently mis-merged; field-level rebase reuses :mod:`merge` (wired next).
+"""
+from __future__ import annotations
+
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+
+from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from . import db
+from .changeset import Delta, materialize, net_delta, diff_states
+from .ids import prefixed_id
+from .merkle import MerkleTree, content_hash
+from .models import (
+    BranchORM,
+    CommitORM,
+    EdgeVersionORM,
+    EntityHeadORM,
+    GraphORM,
+    NodeVersionORM,
+    ProjectionStateORM,
+    WorkingChangeORM,
+    _now,
+)
+
+# Keys read out of a payload into denormalised, queryable version columns.
+_NODE_DENORM = {
+    "urn": "urn",
+    "entityType": "entity_type",
+    "displayName": "display_name",
+    "qualifiedName": "qualified_name",
+}
+
+
+class ConcurrencyError(RuntimeError):
+    """Raised when main advanced under a draft and a rebase is required."""
+
+
+class GraphVersioningService:
+    """Service over the ``graphver`` store.  Each public method is one
+    transaction (via :func:`db.graphver_session`) unless a session is passed."""
+
+    def __init__(self, session_factory=db.graphver_session):
+        self._session = session_factory
+
+    # ------------------------------------------------------------------ #
+    # Graph + branch lifecycle                                            #
+    # ------------------------------------------------------------------ #
+    async def create_graph(
+        self,
+        *,
+        data_source_id: str,
+        workspace_id: str,
+        kind: str = "manual",
+        actor: Optional[str] = None,
+        base_ontology_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Create a blank versioned graph: graph row + ``main`` branch + empty
+        genesis commit + projection state.  Returns ids and the genesis seq."""
+        async with self._session() as s:
+            graph = GraphORM(
+                data_source_id=data_source_id,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                kind=kind,
+                base_ontology_id=base_ontology_id,
+                created_by=actor,
+                main_head_commit_seq=1,
+            )
+            s.add(graph)
+            await s.flush()
+
+            main = BranchORM(
+                graph_id=graph.id, kind="main", name="main", created_by=actor
+            )
+            s.add(main)
+            await s.flush()
+
+            genesis = CommitORM(
+                graph_id=graph.id,
+                branch_id=main.id,
+                commit_seq=1,
+                kind="genesis",
+                message="genesis",
+                actor=actor,
+                merkle_root=MerkleTree.build({}).root,
+                stats={"nodes": 0, "edges": 0},
+            )
+            s.add(genesis)
+            main.head_commit_id = genesis.id
+            s.add(
+                ProjectionStateORM(
+                    graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1
+                )
+            )
+            return {"graph_id": graph.id, "main_branch_id": main.id, "genesis_commit_id": genesis.id}
+
+    async def open_draft(
+        self,
+        *,
+        graph_id: str,
+        owner: str,
+        name: Optional[str] = None,
+        originating_view_id: Optional[str] = None,
+    ) -> str:
+        """Open a per-user draft based on the graph's current ``main`` head."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            draft = BranchORM(
+                graph_id=graph_id,
+                kind="draft",
+                name=name,
+                owner=owner,
+                base_commit_seq=graph.main_head_commit_seq,
+                base_ontology_version_id=graph.base_ontology_version_id,
+                originating_view_id=originating_view_id,
+                created_by=owner,
+            )
+            s.add(draft)
+            await s.flush()
+            return draft.id
+
+    # ------------------------------------------------------------------ #
+    # Staging + checkpoint                                                #
+    # ------------------------------------------------------------------ #
+    async def stage_changes(
+        self,
+        *,
+        graph_id: str,
+        branch_id: str,
+        ops: Sequence[Mapping],
+        actor: str,
+    ) -> Dict[str, str]:
+        """Bulk-append working changes to a draft (plan decision #10).
+
+        Each op: ``{ref?, op, entity_kind, entity_id?, payload, change_reason?}``.
+        For ``create`` without an ``entity_id`` a stable ULID is minted.  Returns
+        ``{ref_or_entity_id: entity_id}`` so the client can reconcile.
+        """
+        assigned: Dict[str, str] = {}
+        async with self._session() as s:
+            start = (
+                await s.execute(
+                    select(func.coalesce(func.max(WorkingChangeORM.seq), 0)).where(
+                        WorkingChangeORM.graph_id == graph_id,
+                        WorkingChangeORM.branch_id == branch_id,
+                    )
+                )
+            ).scalar_one()
+            seq = int(start)
+            for op in ops:
+                seq += 1
+                entity_id = op.get("entity_id") or prefixed_id("ent")
+                ref = op.get("ref", entity_id)
+                assigned[ref] = entity_id
+                payload = op.get("payload")
+                base_hash = None
+                if op["op"] != "create":
+                    base_hash = await self._effective_head_hash(
+                        s, graph_id, branch_id, entity_id
+                    )
+                s.add(
+                    WorkingChangeORM(
+                        graph_id=graph_id,
+                        branch_id=branch_id,
+                        seq=seq,
+                        op=op["op"],
+                        entity_kind=op["entity_kind"],
+                        entity_id=entity_id,
+                        payload=payload,
+                        base_content_hash=base_hash,
+                        actor=actor,
+                        change_reason=op.get("change_reason"),
+                    )
+                )
+            return assigned
+
+    async def checkpoint(
+        self,
+        *,
+        graph_id: str,
+        branch_id: str,
+        actor: str,
+        message: Optional[str] = None,
+    ) -> Optional[str]:
+        """Fold uncommitted working changes into version rows under a new draft
+        commit.  Returns the commit id, or ``None`` if nothing was staged."""
+        async with self._session() as s:
+            branch = await s.get(BranchORM, branch_id)
+            if branch is None or branch.graph_id != graph_id:
+                raise ValueError("unknown branch")
+            main_id = await self._main_branch_id(s, graph_id)
+
+            changes = (
+                await s.execute(
+                    select(WorkingChangeORM)
+                    .where(
+                        WorkingChangeORM.graph_id == graph_id,
+                        WorkingChangeORM.branch_id == branch_id,
+                        WorkingChangeORM.committed_into_commit_id.is_(None),
+                    )
+                    .order_by(WorkingChangeORM.seq)
+                )
+            ).scalars().all()
+            if not changes:
+                return None
+
+            kind_by_entity = {c.entity_id: c.entity_kind for c in changes}
+            touched = list(kind_by_entity)
+
+            # Base = current effective head payload per touched entity (draft over main).
+            base_state = await self._effective_payloads(s, graph_id, branch_id, main_id, touched)
+            ops = [
+                {"entity_id": c.entity_id, "op": c.op, "payload": c.payload}
+                for c in changes
+            ]
+            head_state = materialize(base_state, ops)
+            deltas = net_delta(base_state, head_state)
+
+            commit_seq = await self._next_seq(s, graph_id, branch_id)
+            commit = CommitORM(
+                graph_id=graph_id,
+                branch_id=branch_id,
+                commit_seq=commit_seq,
+                parent_commit_id=branch.head_commit_id,
+                kind="checkpoint" if branch.head_commit_id else "edit",
+                message=message or f"checkpoint by {actor}",
+                actor=actor,
+            )
+            s.add(commit)
+            await s.flush()
+
+            await self._write_deltas(
+                s, graph_id, branch_id, commit, deltas, kind_by_entity, actor
+            )
+
+            # Merkle root over the branch's full effective live state.
+            commit.merkle_root = await self._merkle_root(s, graph_id, branch_id, main_id)
+            commit.stats = _delta_stats(deltas)
+
+            for c in changes:
+                c.committed_into_commit_id = commit.id
+            branch.head_commit_id = commit.id
+            branch.updated_at = _now()
+            return commit.id
+
+    # ------------------------------------------------------------------ #
+    # Publish (squash draft → main)                                       #
+    # ------------------------------------------------------------------ #
+    async def publish(
+        self,
+        *,
+        graph_id: str,
+        branch_id: str,
+        actor: str,
+        message: str,
+    ) -> str:
+        """Squash a draft into a single ``main`` commit (plan §8).
+
+        Detects concurrent advance of ``main`` and raises
+        :class:`ConcurrencyError` (field-level rebase via :mod:`merge` is the
+        next increment) so we never silently mis-merge.
+        """
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            draft = await s.get(BranchORM, branch_id)
+            if graph is None or draft is None or draft.graph_id != graph_id:
+                raise ValueError("unknown graph/branch")
+            main_id = await self._main_branch_id(s, graph_id)
+
+            if graph.main_head_commit_seq != draft.base_commit_seq:
+                raise ConcurrencyError(
+                    f"main advanced to seq {graph.main_head_commit_seq}; draft based on "
+                    f"{draft.base_commit_seq}. Pull/rebase required before publish."
+                )
+
+            # Net delta of the draft vs its base (= current main, since not advanced).
+            all_entities = await self._all_entity_kinds(s, graph_id, [branch_id, main_id])
+            base_state = await self._effective_payloads(s, graph_id, main_id, main_id, all_entities)
+            draft_state = await self._effective_payloads(s, graph_id, branch_id, main_id, all_entities)
+            deltas = net_delta(base_state, draft_state)
+            if not deltas:
+                draft.status = "merged"
+                return draft.head_commit_id or ""
+
+            # Referential integrity: no surviving edge may point at a tombstone
+            # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
+            self._assert_referential_integrity(draft_state)
+
+            contributors = await self._branch_contributors(s, graph_id, branch_id)
+            source_commits = await self._branch_commit_ids(s, graph_id, branch_id)
+
+            main = await s.get(BranchORM, main_id)
+            seq = graph.main_head_commit_seq + 1
+            squash = CommitORM(
+                graph_id=graph_id,
+                branch_id=main_id,
+                commit_seq=seq,
+                parent_commit_id=main.head_commit_id,
+                kind="squash_publish",
+                message=message,
+                actor=actor,
+                contributors=contributors,
+                source_branch_id=branch_id,
+                source_commit_ids=source_commits,
+                source_commit_count=len(source_commits),
+                originating_view_id=draft.originating_view_id,
+            )
+            s.add(squash)
+            await s.flush()
+
+            kind_by_entity = await self._all_entity_kind_map(s, graph_id, [branch_id, main_id])
+            await self._write_deltas(s, graph_id, main_id, squash, deltas, kind_by_entity, actor)
+
+            squash.merkle_root = await self._merkle_root(s, graph_id, main_id, main_id)
+            squash.stats = _delta_stats(deltas)
+            main.head_commit_id = squash.id
+            graph.main_head_commit_seq = seq
+            graph.updated_at = _now()
+            draft.status = "merged"
+
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is not None:
+                ps.target_commit_seq = seq
+            return squash.id
+
+    # ------------------------------------------------------------------ #
+    # Reads / audit                                                       #
+    # ------------------------------------------------------------------ #
+    async def main_branch_id(self, graph_id: str) -> str:
+        """Public accessor for a graph's ``main`` branch id."""
+        async with self._session() as s:
+            return await self._main_branch_id(s, graph_id)
+
+    async def materialize_state(
+        self, *, graph_id: str, branch_id: str
+    ) -> Dict[str, Dict[str, dict]]:
+        """Current live node/edge payloads for a branch (draft overlaid on main)."""
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            entities = await self._all_entity_kinds(s, graph_id, [branch_id, main_id])
+            payloads = await self._effective_payloads(s, graph_id, branch_id, main_id, entities)
+            kinds = await self._all_entity_kind_map(s, graph_id, [branch_id, main_id])
+            nodes, edges = {}, {}
+            for eid, p in payloads.items():
+                if p is None:
+                    continue
+                (nodes if kinds.get(eid) == "node" else edges)[eid] = p
+            return {"nodes": nodes, "edges": edges}
+
+    async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
+        """Full revision timeline of one entity (plan §7 tier 1)."""
+        async with self._session() as s:
+            rows = (
+                await s.execute(
+                    select(NodeVersionORM)
+                    .where(
+                        NodeVersionORM.graph_id == graph_id,
+                        NodeVersionORM.entity_id == entity_id,
+                    )
+                    .order_by(NodeVersionORM.commit_seq, NodeVersionORM.created_at)
+                )
+            ).scalars().all()
+            if not rows:
+                rows = (
+                    await s.execute(
+                        select(EdgeVersionORM)
+                        .where(
+                            EdgeVersionORM.graph_id == graph_id,
+                            EdgeVersionORM.entity_id == entity_id,
+                        )
+                        .order_by(EdgeVersionORM.commit_seq, EdgeVersionORM.created_at)
+                    )
+                ).scalars().all()
+            return [
+                {
+                    "commit_id": r.commit_id,
+                    "commit_seq": r.commit_seq,
+                    "branch_id": r.branch_id,
+                    "op": r.op,
+                    "content_hash": r.content_hash,
+                    "prev_content_hash": r.prev_content_hash,
+                    "actor": r.actor,
+                    "change_reason": r.change_reason,
+                    "payload": r.payload,
+                    "created_at": r.created_at,
+                }
+                for r in rows
+            ]
+
+    async def diff_commits(
+        self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int
+    ) -> Dict[str, object]:
+        """Diff two points of a branch's history (plan §7) by reconstructing the
+        as-of state at each and computing a field-level diff."""
+        async with self._session() as s:
+            a = await self._state_as_of(s, graph_id, branch_id, from_seq)
+            b = await self._state_as_of(s, graph_id, branch_id, to_seq)
+            return diff_states(a, b)
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+    async def _main_branch_id(self, s, graph_id: str) -> str:
+        return (
+            await s.execute(
+                select(BranchORM.id).where(
+                    BranchORM.graph_id == graph_id, BranchORM.kind == "main"
+                )
+            )
+        ).scalar_one()
+
+    async def _next_seq(self, s, graph_id: str, branch_id: str) -> int:
+        cur = (
+            await s.execute(
+                select(func.coalesce(func.max(CommitORM.commit_seq), 0)).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id
+                )
+            )
+        ).scalar_one()
+        return int(cur) + 1
+
+    async def _heads(self, s, graph_id: str, branch_id: str) -> Dict[str, EntityHeadORM]:
+        rows = (
+            await s.execute(
+                select(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id,
+                    EntityHeadORM.branch_id == branch_id,
+                )
+            )
+        ).scalars().all()
+        return {r.entity_id: r for r in rows}
+
+    async def _effective_head_hash(
+        self, s, graph_id: str, branch_id: str, entity_id: str
+    ) -> Optional[str]:
+        main_id = await self._main_branch_id(s, graph_id)
+        for bid in (branch_id, main_id):
+            row = await s.get(EntityHeadORM, (graph_id, bid, entity_id))
+            if row is not None:
+                return None if row.is_tombstone else row.content_hash
+        return None
+
+    async def _effective_heads(
+        self, s, graph_id: str, branch_id: str, main_id: str
+    ) -> Dict[str, EntityHeadORM]:
+        """Branch heads overlaid on main heads (draft overrides main)."""
+        merged: Dict[str, EntityHeadORM] = {}
+        if branch_id != main_id:
+            merged.update(await self._heads(s, graph_id, main_id))
+        merged.update(await self._heads(s, graph_id, branch_id))
+        return merged
+
+    async def _effective_payloads(
+        self, s, graph_id: str, branch_id: str, main_id: str, entity_ids: Sequence[str]
+    ) -> Dict[str, Optional[dict]]:
+        """``{entity_id: payload | None}`` for *entity_ids* on a branch (draft over main)."""
+        heads = await self._effective_heads(s, graph_id, branch_id, main_id)
+        out: Dict[str, Optional[dict]] = {}
+        version_ids: Dict[str, Tuple[str, str]] = {}  # entity_id -> (kind, head_version_id)
+        for eid in entity_ids:
+            h = heads.get(eid)
+            if h is None or h.is_tombstone:
+                out[eid] = None
+            else:
+                version_ids[eid] = (h.entity_kind, h.head_version_id)
+        # Fetch payloads in two batched queries (nodes / edges).
+        node_ids = [v[1] for v in version_ids.values() if v[0] == "node"]
+        edge_ids = [v[1] for v in version_ids.values() if v[0] == "edge"]
+        payload_by_vid: Dict[str, dict] = {}
+        if node_ids:
+            for r in (await s.execute(select(NodeVersionORM).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.id.in_(node_ids)
+            ))).scalars():
+                payload_by_vid[r.id] = r.payload
+        if edge_ids:
+            for r in (await s.execute(select(EdgeVersionORM).where(
+                EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(edge_ids)
+            ))).scalars():
+                payload_by_vid[r.id] = r.payload
+        for eid, (_kind, vid) in version_ids.items():
+            out[eid] = payload_by_vid.get(vid)
+        return out
+
+    async def _all_entity_kinds(self, s, graph_id: str, branch_ids: Sequence[str]) -> List[str]:
+        rows = (
+            await s.execute(
+                select(EntityHeadORM.entity_id)
+                .where(
+                    EntityHeadORM.graph_id == graph_id,
+                    EntityHeadORM.branch_id.in_(branch_ids),
+                )
+                .distinct()
+            )
+        ).scalars().all()
+        return list(rows)
+
+    async def _all_entity_kind_map(self, s, graph_id: str, branch_ids: Sequence[str]) -> Dict[str, str]:
+        rows = (
+            await s.execute(
+                select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind).where(
+                    EntityHeadORM.graph_id == graph_id,
+                    EntityHeadORM.branch_id.in_(branch_ids),
+                )
+            )
+        ).all()
+        return {eid: kind for eid, kind in rows}
+
+    async def _merkle_root(self, s, graph_id: str, branch_id: str, main_id: str) -> str:
+        heads = await self._effective_heads(s, graph_id, branch_id, main_id)
+        live = {eid: h.content_hash for eid, h in heads.items() if not h.is_tombstone}
+        return MerkleTree.build(live).root
+
+    async def _write_deltas(
+        self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor
+    ) -> None:
+        for d in deltas:
+            kind = kind_by_entity.get(d.entity_id, "node")
+            if kind == "node":
+                vid = prefixed_id("nv")
+                p = d.payload or {}
+                s.add(NodeVersionORM(
+                    graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
+                    commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
+                    content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
+                    payload=d.payload, actor=actor,
+                    urn=p.get("urn"), entity_type=p.get("entityType"),
+                    display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"),
+                ))
+            else:
+                vid = prefixed_id("ev")
+                p = d.payload or {}
+                s.add(EdgeVersionORM(
+                    graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
+                    commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
+                    content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
+                    payload=d.payload, actor=actor,
+                    source_entity_id=p.get("sourceEntityId") or p.get("source_entity_id") or "",
+                    target_entity_id=p.get("targetEntityId") or p.get("target_entity_id") or "",
+                    edge_type=p.get("edgeType"), confidence=p.get("confidence"),
+                    discriminator=p.get("discriminator"),
+                ))
+            # Upsert the head pointer (keeps version tables append-only).
+            stmt = pg_insert(EntityHeadORM).values(
+                graph_id=graph_id, branch_id=branch_id, entity_id=d.entity_id,
+                entity_kind=kind, head_version_id=vid, content_hash=d.content_hash,
+                is_tombstone=(d.op == "delete"), updated_at=_now(),
+            ).on_conflict_do_update(
+                index_elements=["graph_id", "branch_id", "entity_id"],
+                set_={"head_version_id": vid, "content_hash": d.content_hash,
+                      "is_tombstone": (d.op == "delete"), "updated_at": _now()},
+            )
+            await s.execute(stmt)
+
+    async def _branch_contributors(self, s, graph_id, branch_id) -> List[str]:
+        rows = (await s.execute(
+            select(CommitORM.actor).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+                CommitORM.actor.is_not(None),
+            ).distinct()
+        )).scalars().all()
+        return sorted(set(rows))
+
+    async def _branch_commit_ids(self, s, graph_id, branch_id) -> List[str]:
+        rows = (await s.execute(
+            select(CommitORM.id).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+            ).order_by(CommitORM.commit_seq)
+        )).scalars().all()
+        return list(rows)
+
+    async def _state_as_of(self, s, graph_id, branch_id, seq: int) -> Dict[str, Optional[dict]]:
+        """Reconstruct branch state at ``commit_seq <= seq`` from version rows."""
+        state: Dict[str, Optional[dict]] = {}
+        for model in (NodeVersionORM, EdgeVersionORM):
+            rows = (await s.execute(
+                select(model).where(
+                    model.graph_id == graph_id, model.branch_id == branch_id,
+                    model.commit_seq <= seq,
+                ).order_by(model.commit_seq, model.created_at)
+            )).scalars().all()
+            for r in rows:
+                state[r.entity_id] = None if r.op == "delete" else r.payload
+        return state
+
+    @staticmethod
+    def _assert_referential_integrity(state: Mapping[str, Optional[dict]]) -> None:
+        live = {eid for eid, p in state.items() if p is not None}
+        for eid, p in state.items():
+            if p is None:
+                continue
+            src = p.get("sourceEntityId") or p.get("source_entity_id")
+            tgt = p.get("targetEntityId") or p.get("target_entity_id")
+            if src is None and tgt is None:
+                continue  # a node
+            if src not in live or tgt not in live:
+                raise ConcurrencyError(
+                    f"edge {eid} would dangle (endpoint tombstoned): {src}->{tgt}"
+                )
+
+
+def _delta_stats(deltas: List[Delta]) -> dict:
+    out = {"create": 0, "update": 0, "delete": 0}
+    for d in deltas:
+        out[d.op] += 1
+    return out
