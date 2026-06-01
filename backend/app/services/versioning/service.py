@@ -125,6 +125,7 @@ class GraphVersioningService:
                 stats={"nodes": 0, "edges": 0},
             )
             s.add(genesis)
+            await s.flush()                      # materialise genesis.id before linking
             main.head_commit_id = genesis.id
             s.add(
                 ProjectionStateORM(
@@ -436,6 +437,7 @@ class GraphVersioningService:
                 stats={},
             )
             s.add(fork_point)
+            await s.flush()                      # materialise fork_point.id before linking
             main.head_commit_id = fork_point.id
             s.add(ProjectionStateORM(
                 graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
@@ -665,6 +667,70 @@ class GraphVersioningService:
             a = await self._state_as_of(s, graph_id, branch_id, from_seq)
             b = await self._state_as_of(s, graph_id, branch_id, to_seq)
             return diff_states(a, b)
+
+    async def get_graph(self, graph_id: str) -> Optional[Dict[str, object]]:
+        """Graph metadata (or ``None``) — also the API's tenant-isolation guard."""
+        async with self._session() as s:
+            g = await s.get(GraphORM, graph_id)
+            return None if g is None else self._graph_meta(g)
+
+    async def list_branches(
+        self, *, graph_id: str, limit: int = 100, offset: int = 0
+    ) -> List[dict]:
+        """Branches of a graph (``main`` + drafts/forks), oldest first."""
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(BranchORM).where(BranchORM.graph_id == graph_id)
+                .order_by(BranchORM.created_at).limit(limit).offset(offset)
+            )).scalars().all()
+            return [self._branch_meta(b) for b in rows]
+
+    async def get_pr(self, pr_id: str) -> Optional[dict]:
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            return None if pr is None else self._pr_meta(pr)
+
+    async def list_pulls(
+        self, *, target_graph_id: str, limit: int = 100, offset: int = 0
+    ) -> List[dict]:
+        """PRs targeting a graph's ``main`` (the base owner's review queue), newest first."""
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(MergeRequestORM)
+                .where(MergeRequestORM.target_graph_id == target_graph_id)
+                .order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
+            )).scalars().all()
+            return [self._pr_meta(pr) for pr in rows]
+
+    @staticmethod
+    def _graph_meta(g: GraphORM) -> Dict[str, object]:
+        return {
+            "graph_id": g.id, "workspace_id": g.workspace_id, "tenant_id": g.tenant_id,
+            "kind": g.kind, "base_ontology_id": g.base_ontology_id,
+            "fork_parent_graph_id": g.fork_parent_graph_id,
+            "fork_base_commit_seq": g.fork_base_commit_seq,
+            "main_head_commit_seq": g.main_head_commit_seq,
+            "created_by": g.created_by, "created_at": g.created_at,
+        }
+
+    @staticmethod
+    def _branch_meta(b: BranchORM) -> dict:
+        return {
+            "branch_id": b.id, "kind": b.kind, "name": b.name, "owner": b.owner,
+            "status": b.status, "base_commit_seq": b.base_commit_seq,
+            "head_commit_id": b.head_commit_id, "originating_view_id": b.originating_view_id,
+            "created_by": b.created_by, "created_at": b.created_at, "updated_at": b.updated_at,
+        }
+
+    @staticmethod
+    def _pr_meta(pr: MergeRequestORM) -> dict:
+        return {
+            "pr_id": pr.id, "graph_id": pr.graph_id, "source_branch_id": pr.source_branch_id,
+            "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
+            "base_commit_seq": pr.base_commit_seq, "status": pr.status,
+            "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
+            "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
+        }
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #

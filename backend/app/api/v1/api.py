@@ -146,13 +146,13 @@ api_router.include_router(
     views.router, prefix="/views", tags=["views"],
 )
 
-# ── Versioned graph editing ──────────────────────────────────────────
+# ── Versioned graph editing (workspace-scoped) ───────────────────────
 # The ONLY path between the frontend and the graphver Postgres store; the
-# browser never touches the DB directly. NOTE: when the app boots it must
-# override the actor dependency with real auth, e.g.
-#   app.dependency_overrides[versioning.current_actor] = <auth user-id dep>
+# browser never touches the DB directly. Authenticated + RBAC-gated on the
+# data-source permissions (a graph is 1:1 with a data source), and every
+# graph id is checked to belong to {ws_id} for tenant isolation.
 api_router.include_router(
-    versioning.router, prefix="/versioning", tags=["versioning"],
+    versioning.router, prefix="/{ws_id}/versioning", tags=["versioning:workspace"],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────
