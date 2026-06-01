@@ -601,6 +601,18 @@ class ContextModelCreateRequest(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
+    # Template-specific metadata. Ignored when is_template=False.
+    icon: Optional[str] = None
+    accent_color: Optional[str] = Field(None, alias="accentColor")
+    maintainer: Optional[str] = None
+    about_markdown: Optional[str] = Field(None, alias="aboutMarkdown")
+    tags: Optional[List[str]] = None
+    visibility: Optional[str] = None
+    is_pinned: Optional[bool] = Field(None, alias="isPinned")
+    # Optional workspace scope for templates (null = global). Used by the
+    # /context-model-templates router; the workspace-scoped router ignores
+    # this field and uses the path-derived workspace_id instead.
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
 
     class Config:
         populate_by_name = True
@@ -613,6 +625,14 @@ class ContextModelUpdateRequest(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Optional[Dict[str, Any]] = Field(None, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
+    category: Optional[str] = None
+    icon: Optional[str] = None
+    accent_color: Optional[str] = Field(None, alias="accentColor")
+    maintainer: Optional[str] = None
+    about_markdown: Optional[str] = Field(None, alias="aboutMarkdown")
+    tags: Optional[List[str]] = None
+    visibility: Optional[str] = None
+    is_pinned: Optional[bool] = Field(None, alias="isPinned")
 
     class Config:
         populate_by_name = True
@@ -631,6 +651,19 @@ class ContextModelResponse(BaseModel):
     instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
     is_active: bool = Field(alias="isActive")
+    # Template metadata (read-only on responses).
+    icon: Optional[str] = None
+    accent_color: Optional[str] = Field(None, alias="accentColor")
+    maintainer: Optional[str] = None
+    about_markdown: Optional[str] = Field(None, alias="aboutMarkdown")
+    tags: List[str] = Field(default_factory=list)
+    visibility: str = "private"
+    is_pinned: bool = Field(False, alias="isPinned")
+    instantiation_count: int = Field(0, alias="instantiationCount")
+    last_used_at: Optional[str] = Field(None, alias="lastUsedAt")
+    instantiated_from_id: Optional[str] = Field(None, alias="instantiatedFromId")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
 
@@ -641,6 +674,31 @@ class ContextModelResponse(BaseModel):
 class InstantiateTemplateRequest(BaseModel):
     template_id: str = Field(alias="templateId")
     name: str
+
+    class Config:
+        populate_by_name = True
+
+
+class TemplateDuplicateRequest(BaseModel):
+    name: str
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+
+    class Config:
+        populate_by_name = True
+
+
+class TemplateImportRequest(BaseModel):
+    payload: ContextModelCreateRequest
+
+    class Config:
+        populate_by_name = True
+
+
+class TemplateUsageStats(BaseModel):
+    template_id: str = Field(alias="templateId")
+    instantiation_count: int = Field(alias="instantiationCount")
+    last_used_at: Optional[str] = Field(None, alias="lastUsedAt")
+    instances_by_workspace: Dict[str, int] = Field(default_factory=dict, alias="instancesByWorkspace")
 
     class Config:
         populate_by_name = True

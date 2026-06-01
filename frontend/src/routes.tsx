@@ -24,6 +24,7 @@ const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ 
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
+const TemplatesPage = lazy(() => import('@/pages/TemplatesPage').then(m => ({ default: m.TemplatesPage })))
 
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
@@ -81,6 +82,11 @@ export const router = createBrowserRouter([
       // are view-driven — see /views and /explorer; there is no standalone canvas.
       { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
+
+      // ContextViewCanvas Template management — gallery + CRUD over reusable
+      // blueprints. Independent of any one workspace; the page itself filters
+      // by scope (global / workspace) via URL params.
+      { path: 'templates', element: <Lazy><TemplatesPage /></Lazy> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },

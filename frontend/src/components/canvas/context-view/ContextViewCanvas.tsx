@@ -80,6 +80,7 @@ import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
+import { SaveAsTemplateDialog } from '@/components/templates/dialogs/SaveAsTemplateDialog'
 
 // Re-export for backward compatibility
 export { defaultReferenceModelLayers } from './constants'
@@ -508,6 +509,7 @@ export function ContextViewCanvas({
 
   // Edit Mode State (shared across canvases)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
+  const [isSaveAsTemplateOpen, setSaveAsTemplateOpen] = useState(false)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useViewRelationshipTypes()
 
@@ -1956,6 +1958,15 @@ export function ContextViewCanvas({
         subtleCanvasTreeLines={subtleCanvasTreeLines}
         onToggleSubtleCanvasTreeLines={toggleSubtleCanvasTreeLines}
         onResetCanvasDisplaySettings={resetCanvasDisplaySettings}
+        onSaveAsTemplate={sortedLayers.length > 0 ? () => setSaveAsTemplateOpen(true) : undefined}
+      />
+
+      <SaveAsTemplateDialog
+        isOpen={isSaveAsTemplateOpen}
+        onClose={() => setSaveAsTemplateOpen(false)}
+        layers={sortedLayers}
+        activeWorkspaceId={activeWorkspaceId}
+        defaultName={activeContextModelName ? `${activeContextModelName} Template` : ''}
       />
 
       <div data-canvas-body className="flex-1 w-full h-full relative overflow-hidden bg-canvas flex flex-col">

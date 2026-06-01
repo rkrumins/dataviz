@@ -23,6 +23,11 @@ TEMPLATES = [
         description="Classic data engineering pipeline: Source → Staging → Transform → Warehouse → Report",
         is_template=True,
         category="data-engineering",
+        icon="Workflow",
+        accent_color="#6366f1",
+        maintainer="Data Platform Team",
+        about_markdown="Use this template when modelling a conventional ELT/ETL pipeline with discrete staging, transformation, and serving layers. Each layer is pre-wired with the entity types you'd expect from dbt + a warehouse + a BI layer.",
+        tags=["etl", "lineage", "warehouse"],
         layers_config=[
             {
                 "id": "source",
@@ -96,6 +101,11 @@ TEMPLATES = [
         description="Analytics data flow: Raw → Curated → Aggregated → Dashboard",
         is_template=True,
         category="analytics",
+        icon="BarChart3",
+        accent_color="#06b6d4",
+        maintainer="Analytics Engineering",
+        about_markdown="A four-stage analytics layout that maps cleanly to a medallion architecture (raw → curated → aggregated → consumption). Drop in your BI/dashboard tools at the right-most layer.",
+        tags=["analytics", "bi", "medallion"],
         layers_config=[
             {
                 "id": "raw",
@@ -148,6 +158,11 @@ TEMPLATES = [
         description="Domain-oriented data product architecture",
         is_template=True,
         category="data-mesh",
+        icon="Boxes",
+        accent_color="#7c3aed",
+        maintainer="Federated Governance",
+        about_markdown="Models a domain-oriented mesh: domain teams own their **data products**, which downstream consumers discover and bind to. Useful for federated, decentralised ownership.",
+        tags=["mesh", "governance", "products"],
         layers_config=[
             {
                 "id": "domain",
@@ -194,6 +209,11 @@ TEMPLATES = [
         description="Traditional Extract → Transform → Load pattern",
         is_template=True,
         category="data-engineering",
+        icon="GitBranch",
+        accent_color="#f59e0b",
+        maintainer="Data Platform Team",
+        about_markdown="The minimal three-stage ETL: extract from sources, transform, and load into target systems. A good starting point for greenfield models.",
+        tags=["etl", "classic"],
         layers_config=[
             {
                 "id": "extract",

@@ -1,6 +1,13 @@
 import { create } from 'zustand'
 
-export type NavigationTab = 'dashboard' | 'explore' | 'workspaces' | 'ingestion' | 'schema' | 'admin'
+export type NavigationTab =
+    | 'dashboard'
+    | 'explore'
+    | 'workspaces'
+    | 'ingestion'
+    | 'schema'
+    | 'templates'
+    | 'admin'
 
 interface NavigationState {
     activeTab: NavigationTab

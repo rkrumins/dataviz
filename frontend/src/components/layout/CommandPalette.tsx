@@ -116,13 +116,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         navigate(`/schema/${hit.ontology.id}`)
         break
       case 'Template':
-        // Templates have no dedicated detail route — land the user on the
-        // dashboard where the templates section lives, then scroll into view.
-        navigate('/dashboard')
-        requestAnimationFrame(() => {
-          document.getElementById('dashboard-templates')
-            ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        })
+        // Land on the templates gallery with `focus={id}` so the page opens
+        // the detail drawer for the selected template.
+        navigate(`/templates?focus=${encodeURIComponent(hit.template.id)}`)
         break
     }
     close()
@@ -359,6 +355,22 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 />
               </Command.Group>
 
+              {/* Templates — always shown */}
+              <Command.Group heading="Templates">
+                <CommandItem
+                  icon={LayoutTemplate}
+                  label="New template"
+                  description="Build a reusable canvas blueprint from scratch"
+                  onSelect={() => handleAction('navigate:/templates?new=1')}
+                />
+                <CommandItem
+                  icon={LayoutTemplate}
+                  label="Import template from JSON"
+                  description="Restore a previously-exported template payload"
+                  onSelect={() => handleAction('navigate:/templates?import=1')}
+                />
+              </Command.Group>
+
               {/* Navigation — always shown */}
               <Command.Group heading="Navigation">
                 <CommandItem
@@ -372,6 +384,12 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   label="Browse Views"
                   description="Discover and explore all views"
                   onSelect={() => handleAction('navigate:/explorer')}
+                />
+                <CommandItem
+                  icon={LayoutTemplate}
+                  label="Browse Templates"
+                  description="Open the template gallery"
+                  onSelect={() => handleAction('navigate:/templates')}
                 />
               </Command.Group>
 

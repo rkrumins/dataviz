@@ -110,6 +110,11 @@ export interface ContextViewHeaderProps {
   subtleCanvasTreeLines: boolean
   onToggleSubtleCanvasTreeLines: () => void
   onResetCanvasDisplaySettings: () => void
+
+  // Save-as-template — opens the dialog that captures the current canvas
+  // as a reusable ContextViewCanvas template. Optional; when undefined the
+  // button is hidden.
+  onSaveAsTemplate?: () => void
 }
 
 export function ContextViewHeader({
@@ -155,6 +160,7 @@ export function ContextViewHeader({
   subtleCanvasTreeLines,
   onToggleSubtleCanvasTreeLines,
   onResetCanvasDisplaySettings,
+  onSaveAsTemplate,
 }: ContextViewHeaderProps) {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const { showToast } = useToast()
@@ -582,6 +588,18 @@ export function ContextViewHeader({
               </span>
               <span className="text-[12px] font-bold tabular-nums leading-none">{pendingChangeCount}</span>
               <span className="text-[10.5px] uppercase tracking-[0.08em] font-bold leading-none">Pending</span>
+            </button>
+          )}
+
+          {/* Save as Template */}
+          {onSaveAsTemplate && (
+            <button
+              onClick={onSaveAsTemplate}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-300 bg-gradient-to-r from-violet-500/15 to-purple-500/[0.08] text-violet-700 border border-violet-500/40 hover:from-violet-500/25 hover:to-purple-500/15 hover:border-violet-500/60 dark:from-violet-500/20 dark:to-purple-500/10 dark:text-violet-300 dark:border-violet-500/30 dark:hover:shadow-lg dark:hover:shadow-violet-500/20"
+              title="Capture the current canvas as a reusable template"
+            >
+              <LucideIcons.LayoutTemplate className="w-4 h-4" />
+              <span>Save as Template</span>
             </button>
           )}
 

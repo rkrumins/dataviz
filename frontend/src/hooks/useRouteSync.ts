@@ -27,6 +27,8 @@ export function useRouteSync() {
       nextTab = 'workspaces'
     } else if (path.startsWith('/schema')) {
       nextTab = 'schema'
+    } else if (path.startsWith('/templates')) {
+      nextTab = 'templates'
     } else if (path.startsWith('/admin')) {
       nextTab = 'admin'
     }

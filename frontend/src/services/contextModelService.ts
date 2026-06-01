@@ -4,9 +4,10 @@
  * Context models define HOW to organize graph data (layers, assignments, scope).
  * Views (visual rendering) are handled by viewApiService.ts.
  *
- * Two API scopes:
+ * API surface:
  * - Workspace-scoped: /api/v1/{wsId}/context-models  (blueprint CRUD)
- * - Admin templates:  /api/v1/admin/context-model-templates
+ * - Templates:        /api/v1/context-model-templates  (workspace + global)
+ *   (Legacy alias still mounted at /api/v1/admin/context-model-templates.)
  */
 import type {
     ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, ScopeEdgeConfig,
@@ -30,6 +31,19 @@ export interface ContextModel {
     instanceAssignments: Record<string, EntityAssignmentConfig>
     scopeEdgeConfig?: ScopeEdgeConfig
     isActive: boolean
+    // Template metadata (populated for is_template=true; null/0 for instances).
+    icon?: string
+    accentColor?: string
+    maintainer?: string
+    aboutMarkdown?: string
+    tags: string[]
+    visibility: 'private' | 'workspace' | 'enterprise'
+    isPinned: boolean
+    instantiationCount: number
+    lastUsedAt?: string
+    instantiatedFromId?: string
+    createdBy?: string
+    deletedAt?: string
     createdAt: string
     updatedAt: string
 }
@@ -43,6 +57,16 @@ export interface ContextModelCreateRequest {
     scopeFilter?: ScopeFilterConfig | null
     instanceAssignments?: Record<string, EntityAssignmentConfig>
     scopeEdgeConfig?: ScopeEdgeConfig | null
+    // Template-only fields (ignored when isTemplate=false).
+    icon?: string
+    accentColor?: string
+    maintainer?: string
+    aboutMarkdown?: string
+    tags?: string[]
+    visibility?: 'private' | 'workspace' | 'enterprise'
+    isPinned?: boolean
+    /** Scope for new templates created via the template endpoint. Null = global. */
+    workspaceId?: string | null
 }
 
 export interface ContextModelUpdateRequest {
@@ -52,11 +76,38 @@ export interface ContextModelUpdateRequest {
     scopeFilter?: ScopeFilterConfig | null
     instanceAssignments?: Record<string, EntityAssignmentConfig>
     scopeEdgeConfig?: ScopeEdgeConfig | null
+    category?: string
+    icon?: string
+    accentColor?: string
+    maintainer?: string
+    aboutMarkdown?: string
+    tags?: string[]
+    visibility?: 'private' | 'workspace' | 'enterprise'
+    isPinned?: boolean
+}
+
+export interface TemplateListFilter {
+    scope?: 'all' | 'global' | 'workspace'
+    workspaceId?: string
+    category?: string
+    tag?: string
+    search?: string
+    sort?: 'popular' | 'recent' | 'name'
+    includeDeleted?: boolean
+}
+
+export interface TemplateUsageStats {
+    templateId: string
+    instantiationCount: number
+    lastUsedAt?: string
+    instancesByWorkspace: Record<string, number>
 }
 
 // ============================================
 // API Client
 // ============================================
+
+const TEMPLATES_BASE = '/api/v1/context-model-templates'
 
 async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
     const response = await fetchWithTimeout(url, {
@@ -69,6 +120,15 @@ async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
     }
     if (response.status === 204) return undefined as T
     return response.json()
+}
+
+function buildQuery(params: Record<string, unknown>): string {
+    const pairs: string[] = []
+    for (const [k, v] of Object.entries(params)) {
+        if (v == null || v === '') continue
+        pairs.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    }
+    return pairs.length ? `?${pairs.join('&')}` : ''
 }
 
 // ============================================
@@ -126,21 +186,89 @@ export async function instantiateTemplate(
 }
 
 // ============================================
-// Global Template Operations (Admin)
+// Template Operations
 // ============================================
 
-/** List all Quick Start Templates */
-export async function listTemplates(category?: string): Promise<ContextModel[]> {
-    const params = category ? `?category=${encodeURIComponent(category)}` : ''
-    return apiFetch<ContextModel[]>(`/api/v1/admin/context-model-templates${params}`)
+/** List Quick Start Templates with rich filtering. */
+export async function listAllTemplates(filter: TemplateListFilter = {}): Promise<ContextModel[]> {
+    const query = buildQuery({
+        scope: filter.scope,
+        workspaceId: filter.workspaceId,
+        category: filter.category,
+        tag: filter.tag,
+        search: filter.search,
+        sort: filter.sort,
+        includeDeleted: filter.includeDeleted,
+    })
+    return apiFetch<ContextModel[]>(`${TEMPLATES_BASE}${query}`)
 }
 
-/** Create a Quick Start Template */
+/**
+ * Legacy alias — kept for the dashboard's existing call site.
+ * New code should use `listAllTemplates`.
+ */
+export async function listTemplates(category?: string): Promise<ContextModel[]> {
+    return listAllTemplates({ category })
+}
+
+/** Fetch a single template by id. */
+export async function getTemplate(id: string): Promise<ContextModel> {
+    return apiFetch<ContextModel>(`${TEMPLATES_BASE}/${id}`)
+}
+
+/** Create a template. `workspaceId` null = global. */
 export async function createTemplate(data: ContextModelCreateRequest): Promise<ContextModel> {
-    return apiFetch<ContextModel>('/api/v1/admin/context-model-templates', {
+    return apiFetch<ContextModel>(TEMPLATES_BASE, {
         method: 'POST',
         body: JSON.stringify({ ...data, isTemplate: true }),
     })
+}
+
+/** Update a template's metadata or configuration. */
+export async function updateTemplate(
+    id: string,
+    data: ContextModelUpdateRequest,
+): Promise<ContextModel> {
+    return apiFetch<ContextModel>(`${TEMPLATES_BASE}/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+    })
+}
+
+/** Delete a template. Soft delete by default; pass `permanent` for hard delete. */
+export async function deleteTemplate(
+    id: string,
+    opts: { permanent?: boolean } = {},
+): Promise<void> {
+    const query = opts.permanent ? '?permanent=true' : ''
+    return apiFetch<void>(`${TEMPLATES_BASE}/${id}${query}`, { method: 'DELETE' })
+}
+
+/** Duplicate an existing template, optionally targeting a workspace scope. */
+export async function duplicateTemplate(
+    id: string,
+    name: string,
+    workspaceId?: string | null,
+): Promise<ContextModel> {
+    return apiFetch<ContextModel>(`${TEMPLATES_BASE}/${id}/duplicate`, {
+        method: 'POST',
+        body: JSON.stringify({ name, workspaceId: workspaceId ?? null }),
+    })
+}
+
+/** Create a template from a previously-exported payload. */
+export async function importTemplate(
+    payload: ContextModelCreateRequest,
+): Promise<ContextModel> {
+    return apiFetch<ContextModel>(`${TEMPLATES_BASE}/import`, {
+        method: 'POST',
+        body: JSON.stringify({ payload: { ...payload, isTemplate: true } }),
+    })
+}
+
+/** Aggregated usage stats for a template. */
+export async function getTemplateUsage(id: string): Promise<TemplateUsageStats> {
+    return apiFetch<TemplateUsageStats>(`${TEMPLATES_BASE}/${id}/usage`)
 }
 
 // ============================================
