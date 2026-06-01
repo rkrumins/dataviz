@@ -7,14 +7,24 @@
  * - Raw JSON mode: Advanced editing for power users
  * - Quick actions: Trace, Pin, External links
  *
+ * Property values are plain JSON (Text/Date/Link→string, Number→number,
+ * Yes/No→bool, Tags→string[], Group→object); friendly field types are INFERRED
+ * from the value on read (see property/fieldTypes.ts), so nothing extra is
+ * persisted. FalkorDB already stores arbitrary JSON property bags (scalars +
+ * flat scalar-lists as native node props, complex values in a `propertiesRaw`
+ * JSON blob — see falkordb_provider._split_user_properties), so these values
+ * round-trip as-is once the write path below lands.
+ *
  * TODO(backend): Drawer edits currently stage as `update_entity` with a no-op
- * apply hook. To persist edits to the backend we need:
+ * apply hook. To persist edits, mirror the existing edge PATCH pattern:
  *   1. `PATCH /api/v1/{wsId}/graph/nodes/{urn}` route in
- *      backend/app/api/v1/endpoints/graph.py
- *   2. `GraphDataProvider.update_node(urn, properties)` ABC method in
- *      backend/common/interfaces/provider.py
- *   3. Implementations in FalkorDB / Neo4j / Spanner providers
- * Wire the apply hook in `handleSave` once the endpoint exists.
+ *      backend/app/api/v1/endpoints/graph.py (mirror PATCH /edges/{id})
+ *   2. `GraphDataProvider.update_node(urn, payload)` (mirror `update_edge`),
+ *      implemented for FalkorDB (Neo4j/Spanner can follow).
+ *   3. `RemoteGraphProvider.updateNode` + replace the `apply` console.warn
+ *      below with the call.
+ * Payload persists the editable surface: `properties` + descriptive fields
+ * (displayName, description, qualifiedName, sourceSystem, layerAssignment, tags).
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
@@ -26,6 +36,7 @@ import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
+import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { cn } from '@/lib/utils'
 
@@ -66,17 +77,25 @@ export function EntityDrawer({
   onLocateMany,
   getExternalUrl,
 }: EntityDrawerProps) {
-  const { drawerNodeId, nodes, updateNode, clearSelection, closeNodeDrawer } = useCanvasStore()
-  const { schema } = useSchemaStore()
+  // Subscribe with narrow selectors so the (heavy) drawer only re-renders when
+  // its own node / actions change — NOT on every unrelated canvas store mutation
+  // (selection, hover, node drags, layout ticks), which otherwise re-renders the
+  // whole drawer continuously and makes everything in it feel laggy.
+  const updateNode = useCanvasStore((s) => s.updateNode)
+  const clearSelection = useCanvasStore((s) => s.clearSelection)
+  const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
+  const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
   // until explicitly closed via the X button.
   // Logical nodes (id starts with "logical:") are virtual groupings, not physical entities.
-  const selectedNode = drawerNodeId && !drawerNodeId.startsWith('logical:')
-    ? nodes.find(n => n.id === drawerNodeId)
-    : null
+  const selectedNode = useCanvasStore((s) =>
+    s.drawerNodeId && !s.drawerNodeId.startsWith('logical:')
+      ? s.nodes.find((n) => n.id === s.drawerNodeId) ?? null
+      : null,
+  )
 
   const isOpen = !!selectedNode
 
@@ -90,9 +109,24 @@ export function EntityDrawer({
   const [isPinned, setIsPinned] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
+  // Unsaved-changes guard: confirm before closing or switching nodes.
+  const [confirmClose, setConfirmClose] = useState(false)
+  const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null)
+  const prevIdRef = useRef<string | null>(null)
+  const bypassGuardRef = useRef(false)
 
-  // Reset state when selection changes
+  // Reset state when selection changes — but if there are unsaved edits, hold on
+  // the current node and ask the user first (revert the selection meanwhile).
   useEffect(() => {
+    const id = selectedNode?.id ?? null
+    if (id === prevIdRef.current) return
+    if (!bypassGuardRef.current && hasChanges && prevIdRef.current && id) {
+      setPendingSwitchId(id)
+      useCanvasStore.getState().openNodeDrawer(prevIdRef.current) // revert; stay put
+      return
+    }
+    bypassGuardRef.current = false
+    prevIdRef.current = id
     if (selectedNode) {
       const data = selectedNode.data as Record<string, any>
       setFormData({ ...data })
@@ -101,7 +135,7 @@ export function EntityDrawer({
       setJsonError(null)
       setViewMode('view')
     }
-  }, [selectedNode?.id])
+  }, [selectedNode?.id, hasChanges])
 
   // Get entity type info from schema
   const entityType = useMemo(() => {
@@ -125,7 +159,6 @@ export function EntityDrawer({
   const handleChange = useCallback((key: string, value: any) => {
     const newData = { ...formData, [key]: value }
     setFormData(newData)
-    setRawJson(JSON.stringify(newData, null, 2))
     setHasChanges(true)
     setJsonError(null)
   }, [formData])
@@ -137,12 +170,18 @@ export function EntityDrawer({
     (nextProperties: Record<string, any>) => {
       const next = { ...formData, properties: nextProperties }
       setFormData(next)
-      setRawJson(JSON.stringify(next, null, 2))
       setHasChanges(true)
       setJsonError(null)
     },
     [formData],
   )
+
+  // `rawJson` is only rendered in the JSON view, so serialize lazily when the
+  // user opens it (not on every keystroke — that pretty-prints the whole entity).
+  const openJsonView = useCallback(() => {
+    setRawJson(JSON.stringify(formData, null, 2))
+    setViewMode('json')
+  }, [formData])
 
   // Handle raw JSON changes
   const handleRawJsonChange = useCallback((value: string) => {
@@ -270,11 +309,31 @@ export function EntityDrawer({
   // sticky: clicking other entities or the canvas background never closes
   // it, it only swaps the data shown inside.
   const handleClose = useCallback(() => {
-    if (!isPinned) {
+    if (isPinned) return
+    if (hasChanges) { setConfirmClose(true); return }
+    closeNodeDrawer()
+    clearSelection()
+  }, [closeNodeDrawer, clearSelection, isPinned, hasChanges])
+
+  // Resolve the unsaved-changes prompt (shared by close + node-switch).
+  const discardAndProceed = useCallback(() => {
+    bypassGuardRef.current = true
+    setHasChanges(false)
+    if (pendingSwitchId) {
+      const target = pendingSwitchId
+      setPendingSwitchId(null)
+      useCanvasStore.getState().openNodeDrawer(target)
+    } else if (confirmClose) {
+      setConfirmClose(false)
       closeNodeDrawer()
       clearSelection()
     }
-  }, [closeNodeDrawer, clearSelection, isPinned])
+  }, [pendingSwitchId, confirmClose, closeNodeDrawer, clearSelection])
+
+  const keepEditing = useCallback(() => {
+    setPendingSwitchId(null)
+    setConfirmClose(false)
+  }, [])
 
   // Get external URL
   const externalUrl = useMemo(() => {
@@ -310,6 +369,25 @@ export function EntityDrawer({
         )}
       >
         <div className="w-[clamp(420px,32vw,560px)] h-full flex flex-col overflow-hidden">
+        {/* Unsaved-changes guard */}
+        {(confirmClose || pendingSwitchId) && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 backdrop-blur-sm p-6">
+            <div className="w-full max-w-xs rounded-2xl border border-glass-border bg-canvas-elevated shadow-xl p-5">
+              <h4 className="text-sm font-semibold text-ink">Unsaved changes</h4>
+              <p className="text-xs text-ink-muted mt-1.5">
+                You have unsaved property changes. {pendingSwitchId ? 'Switch entity' : 'Close'} and discard them?
+              </p>
+              <div className="flex items-center justify-end gap-2 mt-4">
+                <button onClick={keepEditing} className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:text-ink hover:bg-white/5 transition-colors">
+                  Keep editing
+                </button>
+                <button onClick={discardAndProceed} className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:brightness-110 transition-all">
+                  Discard
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Header */}
         <div
           className="flex-shrink-0 p-5 border-b border-glass-border/50"
@@ -437,7 +515,7 @@ export function EntityDrawer({
             />
             <ModeTab
               active={viewMode === 'json'}
-              onClick={() => setViewMode('json')}
+              onClick={openJsonView}
               icon={LucideIcons.Code}
               label="JSON"
             />
@@ -626,9 +704,12 @@ interface SectionProps {
   icon?: React.ComponentType<{ className?: string }>
   children: React.ReactNode
   action?: React.ReactNode
+  /** Let content extend closer to the drawer edges (title stays aligned).
+   *  Used for the content-dense Properties section. */
+  flush?: boolean
 }
 
-function Section({ title, icon: Icon, children, action }: SectionProps) {
+function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
   return (
     <div className="px-5 py-4">
       <div className="flex items-center justify-between gap-2 mb-3">
@@ -640,7 +721,7 @@ function Section({ title, icon: Icon, children, action }: SectionProps) {
         </div>
         {action}
       </div>
-      {children}
+      {flush ? <div className="-mx-3">{children}</div> : children}
     </div>
   )
 }
@@ -747,15 +828,20 @@ function ViewModeContent({
       <DetailsList formData={formData} />
 
       {/* Properties — nested-JSON tree rendered read-only via PropertyEditor.
-          pointer-events-none keeps the recursive UI from accepting edits in
-          View mode; the same component is used (editable) in Edit mode. */}
-      {hasAdditional && (
-        <Section title="Properties" icon={LucideIcons.FileText}>
-          <div className="pointer-events-none opacity-95">
-            <PropertyEditor value={propertiesBag} onChange={() => {}} bare />
-          </div>
-        </Section>
-      )}
+          `readOnly` keeps the recursive UI navigable (expand, search, copy,
+          open-in-modal-to-read) while blocking edits; the same component is
+          used (editable) in Edit mode. */}
+      <Section title="Properties" icon={LucideIcons.FileText} flush={hasAdditional}>
+        {hasAdditional ? (
+          <PanelErrorBoundary resetKeys={[urn]}>
+            <PropertyEditor value={propertiesBag} onChange={() => {}} readOnly searchable groupByPath bare />
+          </PanelErrorBoundary>
+        ) : (
+          <p className="text-xs text-ink-muted italic">
+            No properties yet. Switch to Edit to add metadata.
+          </p>
+        )}
+      </Section>
 
       {/* Classifications */}
       {formData.classifications && Array.isArray(formData.classifications) && formData.classifications.length > 0 && (
@@ -995,11 +1081,17 @@ function EditModeContent({
         <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4">
           Properties
         </h4>
-        <PropertyEditor
-          value={propertiesBag}
-          onChange={(next) => onPropertiesChange(next as Record<string, any>)}
-          bare
-        />
+        <div className="-mx-3">
+          <PanelErrorBoundary resetKeys={[urn]}>
+            <PropertyEditor
+              value={propertiesBag}
+              onChange={(next) => onPropertiesChange(next as Record<string, any>)}
+              searchable
+              groupByPath
+              bare
+            />
+          </PanelErrorBoundary>
+        </div>
       </div>
     </div>
   )
