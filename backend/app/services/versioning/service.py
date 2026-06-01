@@ -743,11 +743,23 @@ class GraphVersioningService:
     async def diff_commits(
         self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int
     ) -> Dict[str, object]:
-        """Diff two points of a branch's history (plan §7) by reconstructing the
-        as-of state at each and computing a field-level diff."""
+        """Field-level diff between two commits of a branch (plan §7), **O(changed)**:
+        scans only the version rows in ``(from_seq, to_seq]`` (a commit writes rows
+        only for changed entities), then resolves each changed entity's value at
+        each endpoint. Never reconstructs full graph state."""
         async with self._session() as s:
-            a = await self._state_as_of(s, graph_id, branch_id, from_seq)
-            b = await self._state_as_of(s, graph_id, branch_id, to_seq)
+            changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
+            if not changed:
+                return {"added": [], "removed": [], "modified": {}}
+            a = await self._values_at(s, graph_id, branch_id, changed, from_seq)
+            b = await self._values_at(s, graph_id, branch_id, changed, to_seq)
+            graph = await s.get(GraphORM, graph_id)
+            if graph is not None and graph.fork_parent_graph_id:
+                for eid in changed:                  # fork CoW: inherited 'before' value
+                    if eid not in a:
+                        v = await self._entity_value_at(s, graph_id, branch_id, eid, from_seq)
+                        if v is not None:
+                            a[eid] = v
             return diff_states(a, b)
 
     async def get_graph(self, graph_id: str) -> Optional[Dict[str, object]]:
@@ -1038,6 +1050,56 @@ class GraphVersioningService:
             for r in rows:
                 state[r.entity_id] = None if r.op == "delete" else r.payload
         return state
+
+    async def _changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> set:
+        """Entity ids touched by commits in ``(from_seq, to_seq]`` — O(changed),
+        index-backed by ``ix_*_branch_changeset`` (a commit writes rows only for
+        the entities it changed)."""
+        changed: set = set()
+        for model in (NodeVersionORM, EdgeVersionORM):
+            rows = (await s.execute(
+                select(model.entity_id).where(
+                    model.graph_id == graph_id, model.branch_id == branch_id,
+                    model.commit_seq > from_seq, model.commit_seq <= to_seq,
+                ).distinct()
+            )).scalars().all()
+            changed.update(rows)
+        return changed
+
+    async def _values_at(self, s, graph_id, branch_id, ids, seq) -> Dict[str, Optional[dict]]:
+        """Latest value (``commit_seq <= seq``) per entity in *ids* — O(ids) via
+        DISTINCT ON (``ix_*_entity_hist``). Deleted → ``None``; absent ids omitted."""
+        out: Dict[str, Optional[dict]] = {}
+        if not ids:
+            return out
+        for model in (NodeVersionORM, EdgeVersionORM):
+            stmt = (
+                select(model.entity_id, model.op, model.payload)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.entity_id.in_(list(ids)), model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )
+            for eid, op, payload in (await s.execute(stmt)).all():
+                out[eid] = None if op == "delete" else payload
+        return out
+
+    async def _entity_value_at(self, s, graph_id, branch_id, entity_id, seq) -> Optional[dict]:
+        """One entity's value at ``seq`` (fork-aware): this graph, else the parent
+        at the fork point (recursively)."""
+        vals = await self._values_at(s, graph_id, branch_id, [entity_id], seq)
+        if entity_id in vals:
+            return vals[entity_id]
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            main_id = await self._main_branch_id(s, graph_id)
+            if branch_id == main_id:
+                pmain = await self._main_branch_id(s, graph.fork_parent_graph_id)
+                return await self._entity_value_at(
+                    s, graph.fork_parent_graph_id, pmain, entity_id,
+                    min(seq, graph.fork_base_commit_seq or 0),
+                )
+        return None
 
     @staticmethod
     def _assert_referential_integrity(state: Mapping[str, Optional[dict]]) -> None:
