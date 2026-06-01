@@ -94,6 +94,13 @@ export function DisplayRuleEditor({
         allKeys, keysByEntityType, tagValues, getValueSamples,
     } = useDiscovery(viewId)
 
+    // Layer names → picker options. Memoised so the builder's row props stay
+    // referentially stable across keystrokes.
+    const layerOptions = useMemo(
+        () => knownLayers.map((l) => ({ value: l, label: l })),
+        [knownLayers],
+    )
+
     const conditions = useMemo(() => topLevelConditions(predicate), [predicate])
     const isEmpty = conditions.length === 0
     // No backend Cypher exists for an incomplete row (empty value /
@@ -261,20 +268,8 @@ export function DisplayRuleEditor({
                     onSeed={setPredicate}
                     onCommit={setPredicate}
                     discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples }}
-                    counts={{
-                        entityTypes: knownEntityTypes.length,
-                        tags: tagValues.length,
-                        propertyKeys: allKeys.length,
-                        layers: knownLayers.length,
-                    }}
-                    samples={{
-                        entityTypes: knownEntityTypes.slice(0, 8),
-                        tags: tagValues.slice(0, 8),
-                        propertyKeys: allKeys.slice(0, 8),
-                        layers: knownLayers.slice(0, 8),
-                    }}
                     knownEntityTypes={knownEntityTypes}
-                    discoveredLayers={knownLayers.map((l) => ({ value: l, label: l }))}
+                    discoveredLayers={layerOptions}
                     onSubmit={() => void runPreview()}
                 />
             </div>

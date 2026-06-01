@@ -55,7 +55,6 @@ function baseProps(over: Partial<React.ComponentProps<typeof VisualQueryBuilder>
             allKeys: [], keysByEntityType: {}, tagValues: ['PII'],
             getValueSamples: () => [],
         },
-        counts: { entityTypes: 1, tags: 1, propertyKeys: 0, layers: 0 },
         knownEntityTypes: ['dataset'],
         discoveredLayers: [],
         ...over,
