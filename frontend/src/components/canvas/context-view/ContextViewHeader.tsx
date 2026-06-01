@@ -20,6 +20,7 @@ import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { LineageDisplayPopover } from './LineageDisplayPopover'
 import { DisplaySettingsPopover } from './DisplaySettingsPopover'
 import { TraceDepthControl } from './TraceDepthControl'
+import { PropertyManagerButton } from '../property-manager/PropertyManagerButton'
 
 export interface ContextViewHeaderProps {
   // Search
@@ -79,6 +80,12 @@ export interface ContextViewHeaderProps {
   onOpenAdvancedSearch?: (seedQuery?: string) => void
   advancedSearchOpen?: boolean
 
+  // Property Manager — opens the reusable right-side drawer for browsing
+  // properties and authoring display-rule tags. Optional so canvases that
+  // don't wire it simply omit the button.
+  onTogglePropertyManager?: () => void
+  propertyManagerOpen?: boolean
+
   // Title — actual view name + entity-type count, shown in the header.
   // Replaces the previous hardcoded "Context View / Data Flow Blueprint".
   viewName?: string
@@ -134,6 +141,8 @@ export function ContextViewHeader({
   onAddEntity,
   onOpenAdvancedSearch,
   advancedSearchOpen = false,
+  onTogglePropertyManager,
+  propertyManagerOpen = false,
   viewName,
   entityTypeCount,
   activeWorkspaceId,
@@ -434,6 +443,17 @@ export function ContextViewHeader({
               <LucideIcons.Sparkles className="w-4 h-4" strokeWidth={2.4} />
               <span>Advanced Search</span>
             </button>
+          )}
+
+          {/* Property Manager — opens the right-side drawer to browse
+              properties and roll out display-rule tags onto matched
+              entities. Shared button carries the first-run coachmark so
+              the affordance is consistent across all canvases. */}
+          {onTogglePropertyManager && (
+            <PropertyManagerButton
+              open={propertyManagerOpen}
+              onToggle={onTogglePropertyManager}
+            />
           )}
 
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />

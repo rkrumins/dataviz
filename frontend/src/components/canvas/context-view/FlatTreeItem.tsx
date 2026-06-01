@@ -13,6 +13,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
+import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -466,6 +467,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
         )}
+        {/* Display-rule tags — shared chip cluster (premium chips +
+            overflow popover) so all canvases render identically. */}
+        <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" className="mt-1" />
       </div>
 
       {/* Right-side metadata cluster — descendant count + search

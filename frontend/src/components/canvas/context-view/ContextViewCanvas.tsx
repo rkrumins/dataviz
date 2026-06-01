@@ -76,6 +76,8 @@ import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverl
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { SearchMapPanel } from '../search/SearchMapPanel'
+import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
+import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
@@ -514,6 +516,12 @@ export function ContextViewCanvas({
   // Advanced Search — production panel for template-driven exploration,
   // visual predicate builder, raw JSON (Power tools), and Ask (NL2Query).
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+
+  // Property Manager — right-side drawer to browse properties + author
+  // display-rule tags. The engine recomputes which nodes each enabled
+  // rule matches and publishes them so FlatTreeItem can render chips.
+  const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
+  useDisplayRuleEngine(activeView?.id ?? null)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -1935,6 +1943,8 @@ export function ContextViewCanvas({
           setAdvancedSearchOpen((open) => !open)
         }}
         advancedSearchOpen={advancedSearchOpen}
+        onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
+        propertyManagerOpen={propertyManagerOpen}
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
         activeWorkspaceId={activeWorkspaceId}
@@ -2222,6 +2232,18 @@ export function ContextViewCanvas({
             }}
           />
         )}
+        {/* Property Manager — independent right-rail panel. Unlike the
+            selection-driven panels above it isn't mutually exclusive: it
+            sits to the right of whichever inspector is open so the user
+            can author display rules while a node is selected. */}
+        <PropertyManagerDrawer
+          key="property-manager-drawer"
+          viewId={activeView?.id ?? ''}
+          open={propertyManagerOpen}
+          onClose={() => setPropertyManagerOpen(false)}
+          knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+          knownLayers={storeLayers.map((l) => l.name)}
+        />
       </AnimatePresence>
       </div>{/* end flex-row wrapper */}
 

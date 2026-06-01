@@ -22,7 +22,6 @@
  */
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    AlertTriangle,
     Code2,
     Eye,
     Loader2,
@@ -41,6 +40,7 @@ import {
     FileCode,
     Save as SaveIcon,
     SquarePen,
+    Tags,
     Undo2,
     Redo2,
     Star,
@@ -71,28 +71,14 @@ import type { Predicate, SearchQuery } from '@/types/search'
 
 import { useDiscovery } from '../builder/useDiscovery'
 
-import { AddFilterPalette } from './AddFilterPalette'
-import { OperatorPill } from './builder-atoms/OperatorPill'
-import { RowJoiner } from './builder-atoms/RowJoiner'
-import type { OpTone } from './builder-atoms/tones'
-import { ConditionRow, isRowIncomplete } from './ConditionRow'
+import { isRowIncomplete } from './ConditionRow'
+import { CreateRuleModal } from './CreateRuleModal'
 import type { LayerOption } from './layerOptions'
-import { NestedGroupCard } from './NestedGroupCard'
-import {
-    appendCondition,
-    duplicateConditionAt,
-    removeConditionAt,
-    replaceConditionAt,
-    rootGroupOp,
-    setRootGroupOp,
-    topLevelConditions,
-    wrapConditionAt,
-    type RootGroupOp,
-} from './predicateComposition'
+import { topLevelConditions } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SaveQueryDialog } from './SaveQueryDialog'
-import { WhatThisMeansDisclosure } from './WhatThisMeansDisclosure'
+import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
 export interface QueryCardProps {
@@ -201,11 +187,6 @@ export const QueryCard: FC<QueryCardProps> = ({
         commitDraft(next)
         setMode('code')
     }, [commitDraft])
-    // Identifies the most recently inserted condition kind so the
-    // corresponding row's first editor gets autofocus on mount. Cleared
-    // on a microtask so subsequent edits don't re-trigger focus.
-    const [freshKind, setFreshKind] = useState<string | null>(null)
-
     // ─── Run mode (auto vs manual) + dispatch ──────────────────────
     // Auto: dispatch a debounced run on every complete draft change
     //       (snappy, original behaviour — the default).
@@ -247,68 +228,14 @@ export const QueryCard: FC<QueryCardProps> = ({
         return () => clearTimeout(t)
     }, [runnable, runMode, hasPendingChanges, lastRunHash, clearSearchResults, dispatchRun])
 
-    // ─── Row mutations ─────────────────────────────────────────────
+    // Top-level conditions drive the header summary + the empty-hero
+    // gate. The row mutation handlers themselves now live inside
+    // VisualQueryBuilder (shared with the rule editor); QueryCard only
+    // needs the count here.
     const conditions = useMemo(
         () => (draftPredicate ? topLevelConditions(draftPredicate) : []),
         [draftPredicate],
     )
-    const activeEntityTypes = useMemo<string[]>(() => {
-        const et = conditions.find((c) => c.kind === 'entityType')
-        return et && et.kind === 'entityType' ? et.values : []
-    }, [conditions])
-
-    const handleRowChange = useCallback((index: number, next: Predicate) => {
-        // Index-based replace preserves the root group op (AND vs OR)
-        // and tolerates duplicate kinds — two TextPredicates with
-        // different values, etc.
-        const updated = replaceConditionAt(draftPredicate, index, next)
-        seedDraftPredicate(updated)
-    }, [draftPredicate, seedDraftPredicate])
-
-    const handleRowRemove = useCallback((index: number) => {
-        const updated = removeConditionAt(draftPredicate, index)
-        commitDraft(updated)
-    }, [draftPredicate, commitDraft])
-
-    const handleAddOne = useCallback((p: Predicate) => {
-        // Append, not replace: the user can now add multiple same-kind
-        // predicates (e.g. two TextPredicates for "t2" AND "opp").
-        const next = appendCondition(draftPredicate, p)
-        commitDraft(next)
-        setFreshKind(p.kind ?? null)
-        // Clear shortly so future edits don't keep stealing focus.
-        setTimeout(() => setFreshKind(null), 150)
-    }, [draftPredicate, commitDraft])
-
-    const handleAddMany = useCallback((preds: Predicate[]) => {
-        let next = draftPredicate
-        for (const p of preds) next = appendCondition(next, p)
-        commitDraft(next)
-        // Focus the last inserted kind so the user is on the last row
-        // of a paste.
-        const last = preds[preds.length - 1]
-        if (last) {
-            setFreshKind(last.kind ?? null)
-            setTimeout(() => setFreshKind(null), 150)
-        }
-    }, [draftPredicate, commitDraft])
-
-    const handleRootOpChange = useCallback((op: RootGroupOp) => {
-        const next = setRootGroupOp(draftPredicate, op)
-        commitDraft(next)
-    }, [draftPredicate, commitDraft])
-
-    const handleRowWrap = useCallback((index: number, op: OpTone) => {
-        const next = wrapConditionAt(draftPredicate, index, op)
-        commitDraft(next)
-    }, [draftPredicate, commitDraft])
-
-    const handleRowDuplicate = useCallback((index: number) => {
-        const next = duplicateConditionAt(draftPredicate, index)
-        commitDraft(next)
-    }, [draftPredicate, commitDraft])
-
-    const currentRootOp = rootGroupOp(draftPredicate)
 
     const handleClearAll = useCallback(() => {
         commitDraft(null)
@@ -354,6 +281,15 @@ export const QueryCard: FC<QueryCardProps> = ({
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
     }, [commitDraft])
+
+    // Create a display rule from the current query — opens the shared
+    // DisplayRuleEditor (in a portal modal) seeded with the runnable
+    // predicate so the criteria are pre-filled. Enabled whenever the
+    // query is runnable (same gate as Save).
+    const [ruleModalOpen, setRuleModalOpen] = useState(false)
+    const handleOpenCreateRule = useCallback(() => {
+        if (runnable) setRuleModalOpen(true)
+    }, [runnable])
 
     // ─── Header summary ────────────────────────────────────────────
     const completeCount = conditions.filter((c) => !isRowIncomplete(c)).length
@@ -435,6 +371,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                             onClear={handleClearAll}
                             canSave={runnable !== null}
                             onSave={handleOpenSave}
+                            canCreateRule={runnable !== null}
+                            onCreateRule={handleOpenCreateRule}
                             runMode={runMode}
                             onRunModeChange={setRunMode}
                             canRun={runnable !== null}
@@ -469,120 +407,42 @@ export const QueryCard: FC<QueryCardProps> = ({
                             onRemoveRecent={removeRecent}
                         />
                     ) : (
-                        <>
-                            <WhatThisMeansDisclosure />
-                            {conditions.length >= 2 && (
-                                <RootMatchHeader
-                                    op={currentRootOp}
-                                    onChange={handleRootOpChange}
-                                    disabled={isRunning}
-                                />
-                            )}
-                            <AnimatePresence initial={false}>
-                                {conditions.map((cond, i) => (
-                                    <motion.div
-                                        key={`${cond.kind}-${i}`}
-                                        initial={{ opacity: 0, y: -4 }}
-                                        animate={{ opacity: 1, y: 0 }}
-                                        exit={{ opacity: 0, y: -4 }}
-                                        transition={{ duration: 0.12 }}
-                                    >
-                                        {i > 0 && (
-                                            <RowJoiner
-                                                op={currentRootOp}
-                                                onChange={(next) => handleRootOpChange(next)}
-                                                disabled={isRunning}
-                                            />
-                                        )}
-                                        {cond.kind === 'group' ? (
-                                            <NestedGroupCard
-                                                group={cond}
-                                                onChange={(next) => {
-                                                    if (next === null) handleRowRemove(i)
-                                                    else handleRowChange(i, next)
-                                                }}
-                                                onRemove={() => handleRowRemove(i)}
-                                                onWrap={(w) => handleRowWrap(i, w)}
-                                                onDuplicate={() => handleRowDuplicate(i)}
-                                                onOpenAdvanced={onOpenAdvanced}
-                                                onSubmit={dispatchRun}
-                                                disabled={isRunning}
-                                                discovery={{
-                                                    allKeys: discovery.allKeys,
-                                                    keysByEntityType: discovery.keysByEntityType,
-                                                    tagValues: discovery.tagValues,
-                                                    getValueSamples: discovery.getValueSamples,
-                                                }}
-                                                knownEntityTypes={knownEntityTypes}
-                                                activeEntityTypes={activeEntityTypes}
-                                                discoveredLayers={discoveredLayers}
-                                                parentPath=""
-                                                index={i}
-                                            />
-                                        ) : (
-                                            <ConditionRow
-                                                value={cond}
-                                                discovery={{
-                                                    allKeys: discovery.allKeys,
-                                                    keysByEntityType: discovery.keysByEntityType,
-                                                    tagValues: discovery.tagValues,
-                                                    getValueSamples: discovery.getValueSamples,
-                                                }}
-                                                knownEntityTypes={knownEntityTypes}
-                                                activeEntityTypes={activeEntityTypes}
-                                                discoveredLayers={discoveredLayers}
-                                                isRunning={isRunning}
-                                                autoFocus={cond.kind === freshKind}
-                                                onChange={(next) => handleRowChange(i, next)}
-                                                onRemove={() => handleRowRemove(i)}
-                                                onWrap={(w) => handleRowWrap(i, w)}
-                                                onDuplicate={() => handleRowDuplicate(i)}
-                                                onOpenAdvanced={onOpenAdvanced}
-                                                onSubmit={dispatchRun}
-                                                parentPath=""
-                                                index={i}
-                                            />
-                                        )}
-                                    </motion.div>
-                                ))}
-                            </AnimatePresence>
-                            <ExpensiveQueryNotice predicate={draftPredicate} />
-                            <div className="flex items-center gap-2 pt-1 flex-wrap">
-                                <AddFilterPalette
-                                    counts={{
-                                        entityTypes: knownEntityTypes.length,
-                                        tags: discovery.tagValues.length,
-                                        propertyKeys: discovery.allKeys.length,
-                                        layers: discoveredLayers.length,
-                                    }}
-                                    samples={{
-                                        // Discovery already orders these
-                                        // by frequency; pass the head so
-                                        // the palette previews the
-                                        // highest-signal candidates first
-                                        // (the SampleChips component
-                                        // additionally caps at 4 visible
-                                        // + a "+N" overflow chip).
-                                        entityTypes: knownEntityTypes.slice(0, 8),
-                                        tags: discovery.tagValues.slice(0, 8),
-                                        propertyKeys: discovery.allKeys.slice(0, 8),
-                                        layers: discoveredLayers.slice(0, 8).map((o) => o.label),
-                                    }}
-                                    onAdd={handleAddOne}
-                                    onAddMany={handleAddMany}
-                                    onOpenAdvanced={onOpenAdvanced}
-                                    onOpenCode={handleOpenCode}
-                                    disabled={isRunning}
-                                />
-                                <DiscoveryTelemetry
-                                    loading={discovery.isInitialLoading}
-                                    error={discovery.error}
-                                    tags={discovery.tagValues.length}
-                                    keys={discovery.allKeys.length}
-                                    types={knownEntityTypes.length}
-                                />
-                            </div>
-                        </>
+                        <VisualQueryBuilder
+                            predicate={draftPredicate}
+                            onSeed={seedDraftPredicate}
+                            onCommit={commitDraft}
+                            discovery={{
+                                allKeys: discovery.allKeys,
+                                keysByEntityType: discovery.keysByEntityType,
+                                tagValues: discovery.tagValues,
+                                getValueSamples: discovery.getValueSamples,
+                            }}
+                            counts={{
+                                entityTypes: knownEntityTypes.length,
+                                tags: discovery.tagValues.length,
+                                propertyKeys: discovery.allKeys.length,
+                                layers: discoveredLayers.length,
+                            }}
+                            samples={{
+                                // Discovery already orders these by
+                                // frequency; pass the head so the palette
+                                // previews the highest-signal candidates
+                                // first (SampleChips caps at 4 + "+N").
+                                entityTypes: knownEntityTypes.slice(0, 8),
+                                tags: discovery.tagValues.slice(0, 8),
+                                propertyKeys: discovery.allKeys.slice(0, 8),
+                                layers: discoveredLayers.slice(0, 8).map((o) => o.label),
+                            }}
+                            knownEntityTypes={knownEntityTypes}
+                            discoveredLayers={discoveredLayers}
+                            isRunning={isRunning}
+                            discoveryLoading={discovery.isInitialLoading}
+                            discoveryError={discovery.error}
+                            onSubmit={dispatchRun}
+                            onOpenAdvanced={onOpenAdvanced}
+                            onOpenCode={handleOpenCode}
+                            enableRowSelection
+                        />
                     )
                 ) : (
                     <CodeMode
@@ -613,84 +473,21 @@ export const QueryCard: FC<QueryCardProps> = ({
                     }}
                 />
             )}
-        </div>
-    )
-}
 
-
-// ---------------------------------------------------------------------------
-// Expensive-query warning (W2 / regression follow-up)
-// ---------------------------------------------------------------------------
-
-/**
- * Inspect the current draft for predicate shapes that historically
- * cost the FalkorDB planner the most: topology probes (isOrphan /
- * isRoot / isLeaf) without any narrowing leaf next to them, plus
- * unscoped degree-zero filters. Surfaces a visible warning above
- * the Run controls so the user knows BEFORE clicking Run that the
- * query may take longer.
- */
-function detectExpensiveShape(p: Predicate | null): string | null {
-    if (!p) return null
-    // Top-level orphan / root / leaf with no other leaf at the same
-    // level: this walks every node in scope to check the absence of
-    // incoming or outgoing edges. With the default ontology-bounded
-    // scan it's bounded but still touches the full label set.
-    const topology = new Set([
-        'isOrphan', 'isRoot', 'isLeaf', 'hasIncoming', 'hasOutgoing',
-    ])
-    const collectLeafKinds = (node: Predicate, out: string[]) => {
-        if (node.kind === 'group') {
-            for (const c of node.children) collectLeafKinds(c, out)
-        } else if (node.kind) {
-            out.push(node.kind)
-        }
-    }
-    const leaves: string[] = []
-    collectLeafKinds(p, leaves)
-    const hasTopology = leaves.some((k) => topology.has(k))
-    const otherLeafCount = leaves.filter(
-        (k) => !topology.has(k) && k !== 'text',
-    ).length
-    if (hasTopology && otherLeafCount === 0) {
-        return (
-            'Topology-only query (isRoot / isLeaf / isOrphan / hasIncoming / ' +
-            'hasOutgoing) — runs a full scan against the bounded ontology. ' +
-            'On large graphs this may take 10-30 seconds. Add a tag, ' +
-            'entity type, or layer filter to narrow the candidate set.'
-        )
-    }
-    if (leaves.length === 0) {
-        return 'Empty predicate — every node in scope will be returned.'
-    }
-    return null
-}
-
-
-function ExpensiveQueryNotice({ predicate }: { predicate: Predicate | null }) {
-    const reason = detectExpensiveShape(predicate)
-    if (!reason) return null
-    return (
-        <div className={cn(
-            'flex items-start gap-2.5 px-3 py-2.5 rounded-lg mt-1',
-            'border-l-4 border-l-amber-400 border border-amber-400/50',
-            'bg-amber-500/[0.18] dark:bg-amber-500/[0.14]',
-            'shadow-[0_0_18px_-4px_rgba(245,158,11,0.35)]',
-        )}>
-            <div className={cn(
-                'shrink-0 w-6 h-6 rounded-md flex items-center justify-center',
-                'bg-amber-400/30 border border-amber-400/60',
-            )}>
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-700 dark:text-amber-200" strokeWidth={2.6} />
-            </div>
-            <div className="flex-1 min-w-0 text-[12px] leading-snug">
-                <div className="font-display font-semibold text-amber-900 dark:text-amber-100">
-                    This query may be expensive
-                </div>
-                <div className="mt-0.5 text-amber-900/85 dark:text-amber-100/90">
-                    {reason}
-                </div>
-            </div>
+            {/* Create-display-rule modal — hosts the shared
+                DisplayRuleEditor seeded with the current query so the
+                user can tag every match with one click. Portal-mounted
+                (inside CreateRuleModal) for the same stacking reason as
+                SaveQueryDialog. */}
+            {ruleModalOpen && runnable && (
+                <CreateRuleModal
+                    viewId={viewId}
+                    seedPredicate={runnable.predicate}
+                    knownEntityTypes={knownEntityTypes}
+                    knownLayers={discoveredLayers.map((o) => o.label)}
+                    onClose={() => setRuleModalOpen(false)}
+                />
+            )}
         </div>
     )
 }
@@ -1528,6 +1325,7 @@ function HeaderActions({
     canUndo, canRedo, onUndo, onRedo,
     canClear, onClear,
     canSave, onSave,
+    canCreateRule, onCreateRule,
     runMode, onRunModeChange,
     canRun, hasPendingChanges, isRunning, onRunNow,
 }: {
@@ -1539,6 +1337,8 @@ function HeaderActions({
     onClear: () => void
     canSave: boolean
     onSave: () => void
+    canCreateRule: boolean
+    onCreateRule: () => void
     runMode: 'auto' | 'manual'
     onRunModeChange: (next: 'auto' | 'manual') => void
     canRun: boolean
@@ -1585,6 +1385,10 @@ function HeaderActions({
                     <SaveQueryButton
                         onSave={onSave}
                         disabled={!canSave || isRunning}
+                    />
+                    <CreateRuleButton
+                        onCreateRule={onCreateRule}
+                        disabled={!canCreateRule || isRunning}
                     />
                 </div>
                 <RunButton
@@ -1692,6 +1496,48 @@ function SaveQueryButton({
         >
             <SaveIcon className="w-3.5 h-3.5" />
             Save
+        </button>
+    )
+}
+
+
+/**
+ * "Create rule" — turn the current query into a Property Manager
+ * display rule (tags every match with a colored chip on the canvas).
+ * Opens the shared DisplayRuleEditor seeded with the query. Disabled
+ * when there's no runnable draft (same gate as Save).
+ */
+function CreateRuleButton({
+    onCreateRule, disabled,
+}: {
+    onCreateRule: () => void
+    disabled?: boolean
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onCreateRule}
+            disabled={disabled}
+            title={disabled
+                ? 'Add at least one complete filter to tag matches'
+                : 'Create a display rule from this query'}
+            aria-label="Create display rule"
+            className={cn(
+                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
+                'text-[11px] font-medium border transition-colors',
+                disabled
+                    ? cn(
+                        'border-transparent text-ink-muted/40 cursor-not-allowed',
+                    )
+                    : cn(
+                        'border-slate-200 dark:border-glass-border/60',
+                        'text-ink-secondary hover:text-accent-lineage',
+                        'hover:bg-accent-lineage/10 hover:border-accent-lineage/40',
+                    ),
+            )}
+        >
+            <Tags className="w-3.5 h-3.5" />
+            Tag
         </button>
     )
 }
@@ -1908,44 +1754,6 @@ function useRunMode(): [RunMode, (next: RunMode) => void] {
  */
 
 
-/**
- * Header rendered above the conditions list whenever 2+ filters exist.
- * Surfaces the root group operator (ALL = AND, ANY = OR) as a paired
- * pill toggle. Without this the user had no idea how their filters
- * combined — the DSL has always supported both ops, the UI just
- * hid it.
- */
-function RootMatchHeader({
-    op, onChange, disabled,
-}: {
-    op: RootGroupOp
-    onChange: (next: RootGroupOp) => void
-    disabled?: boolean
-}) {
-    return (
-        <div className={cn(
-            'flex items-center gap-2.5 mb-1 px-1',
-            'text-[10.5px] font-semibold uppercase tracking-[0.12em]',
-            'text-ink-muted',
-        )}>
-            <span>Match</span>
-            <OperatorPill
-                value={op}
-                onChange={onChange}
-                segments="three"
-                size="md"
-                disabled={disabled}
-            />
-            <span className="text-ink-muted/60 normal-case tracking-normal">
-                {op === 'not'
-                    ? 'inverts the entire query'
-                    : 'of the filters below'}
-            </span>
-        </div>
-    )
-}
-
-
 function ToggleBtn({
     active, onClick, children,
 }: {
@@ -1965,39 +1773,6 @@ function ToggleBtn({
         >
             {children}
         </button>
-    )
-}
-
-
-function DiscoveryTelemetry({
-    loading, error, tags, keys, types,
-}: {
-    loading: boolean
-    error: Error | null
-    tags: number
-    keys: number
-    types: number
-}) {
-    if (loading) {
-        return (
-            <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Loading discovery…
-            </span>
-        )
-    }
-    if (error) {
-        return (
-            <span className="inline-flex items-center gap-1 text-[10px] text-rose-300" title={error.message}>
-                <AlertCircle className="w-3 h-3" />
-                Discovery failed
-            </span>
-        )
-    }
-    return (
-        <span className="text-[10px] text-ink-muted tabular-nums">
-            {types} types · {tags} tags · {keys} property keys
-        </span>
     )
 }
 
