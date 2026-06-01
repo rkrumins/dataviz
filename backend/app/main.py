@@ -633,6 +633,27 @@ async def lifespan(_app: FastAPI):
         name="event-loop-monitor",
     )
 
+    # Versioning projection worker (in-process; dev / single-node). In
+    # production the standalone `python -m backend.app.services.versioning`
+    # runs instead. Gated by GRAPHVER_PROJECTION_INPROCESS; never blocks boot.
+    _app.state._versioning_worker = None
+    _app.state._versioning_worker_task = None
+    try:
+        from .services.versioning import config as _vcfg
+        if _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.projection import (
+                FalkorProjector, make_falkor_graph_factory,
+            )
+            from .services.versioning.worker import ProjectionWorker
+            _vw = ProjectionWorker(FalkorProjector(make_falkor_graph_factory()))
+            _app.state._versioning_worker = _vw
+            _app.state._versioning_worker_task = asyncio.create_task(
+                _vw.run(), name="versioning-projection-worker",
+            )
+            logger.info("In-process versioning projection worker started")
+    except Exception as exc:
+        logger.warning("Versioning projection worker not started: %s", exc)
+
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
     # returns 503 + Retry-After: 5. Setting this AFTER all sync init
@@ -696,6 +717,21 @@ async def lifespan(_app: FastAPI):
             _reconciler_task.cancel()
             try:
                 await _reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the in-process versioning projection worker.
+    _vw = getattr(_app.state, "_versioning_worker", None)
+    _vw_task = getattr(_app.state, "_versioning_worker_task", None)
+    if _vw is not None:
+        _vw.stop()
+    if _vw_task is not None and not _vw_task.done():
+        try:
+            await asyncio.wait_for(_vw_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _vw_task.cancel()
+            try:
+                await _vw_task
             except (asyncio.CancelledError, Exception):
                 pass
 
