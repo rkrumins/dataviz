@@ -645,7 +645,11 @@ async def lifespan(_app: FastAPI):
                 FalkorProjector, make_falkor_graph_factory,
             )
             from .services.versioning.worker import ProjectionWorker
-            _vw = ProjectionWorker(FalkorProjector(make_falkor_graph_factory()))
+            from .services.versioning.service import GraphVersioningService
+            _vw = ProjectionWorker(
+                FalkorProjector(make_falkor_graph_factory()),
+                versioning=GraphVersioningService(),
+            )
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
                 _vw.run(), name="versioning-projection-worker",

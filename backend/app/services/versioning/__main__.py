@@ -17,6 +17,7 @@ import signal
 from . import config, db, models
 from .messaging import close_broker_redis
 from .projection import FalkorProjector, make_falkor_graph_factory
+from .service import GraphVersioningService
 from .worker import ProjectionWorker
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,10 @@ logger = logging.getLogger(__name__)
 async def _amain() -> None:
     await models.create_schema_and_partitions()
     projector = FalkorProjector(make_falkor_graph_factory())
-    worker = ProjectionWorker(projector, consumer_name=os.getenv("HOSTNAME", "proj-1"))
+    worker = ProjectionWorker(
+        projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
+        versioning=GraphVersioningService(),
+    )
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

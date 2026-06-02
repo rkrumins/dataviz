@@ -121,8 +121,10 @@ PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lowe
 REBUILD_LOCK_TTL: int = int(os.getenv("GRAPHVER_REBUILD_LOCK_TTL", "120"))
 LEASE_TTL: int = int(os.getenv("GRAPHVER_LEASE_TTL", "60"))
 
-# Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days.
+# Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days, swept by
+# the worker every DRAFT_SWEEP_SECS (default daily).
 DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
+DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

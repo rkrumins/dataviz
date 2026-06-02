@@ -22,9 +22,10 @@ Design choices honoured here:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from . import config, db
@@ -525,6 +526,28 @@ class GraphVersioningService:
             branch.status = "abandoned"
             branch.updated_at = _now()
             return self._branch_meta(branch)
+
+    async def sweep_idle_drafts(
+        self, *, now: Optional[datetime] = None, ttl_days: Optional[int] = None,
+    ) -> List[str]:
+        """Auto-abandon open drafts idle past the TTL (plan §17 #8) and return the
+        ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic. Only ``open``
+        drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
+        ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon)."""
+        ttl = config.DRAFT_TTL_DAYS if ttl_days is None else ttl_days
+        cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl)).isoformat()
+        async with self._session() as s:
+            swept = (await s.execute(
+                update(BranchORM)
+                .where(
+                    BranchORM.kind.in_(("draft", "fork_draft")),
+                    BranchORM.status == "open",
+                    BranchORM.updated_at < cutoff,
+                )
+                .values(status="abandoned", updated_at=_now())
+                .returning(BranchORM.id)
+            )).scalars().all()
+            return list(swept)
 
     async def preview_merge(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """Dry-run the publish merge: report conflicts + change counts without

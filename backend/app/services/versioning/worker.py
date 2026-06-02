@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Set
+from typing import Optional, Set, TYPE_CHECKING
 
 from . import config
 from .messaging import (
@@ -26,6 +26,9 @@ from .messaging import (
     get_broker_redis,
 )
 from .projection import FalkorProjector
+
+if TYPE_CHECKING:
+    from .service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,8 @@ class ProjectionWorker:
         *,
         poll_secs: Optional[int] = None,
         consumer_name: str = "proj-1",
+        versioning: Optional["GraphVersioningService"] = None,
+        sweep_secs: Optional[int] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -44,6 +49,8 @@ class ProjectionWorker:
         self._inflight: Set[str] = set()
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
+        self._versioning = versioning            # enables the idle-draft sweep loop
+        self._sweep_secs = sweep_secs or config.DRAFT_SWEEP_SECS
 
     def stop(self) -> None:
         self._stop.set()
@@ -63,10 +70,19 @@ class ProjectionWorker:
         """One pass of the durable backstop: project every lagging graph."""
         return await self._proj.project_pending()
 
+    async def sweep_once(self):
+        """One pass of the idle-draft janitor (plan §17 #8); no-op without a service."""
+        if self._versioning is None:
+            return []
+        return await self._versioning.sweep_idle_drafts()
+
     async def run(self) -> None:
         await ensure_consumer_group()
         await self._reclaim_pending()
-        await asyncio.gather(self._poll_loop(), self._stream_loop())
+        loops = [self._poll_loop(), self._stream_loop()]
+        if self._versioning is not None:
+            loops.append(self._sweep_loop())
+        await asyncio.gather(*loops)
 
     async def _poll_loop(self) -> None:
         while not self._stop.is_set():
@@ -76,6 +92,19 @@ class ProjectionWorker:
                 logger.exception("projection poll loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._poll)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _sweep_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                swept = await self.sweep_once()
+                if swept:
+                    logger.info("auto-abandoned %d idle draft(s)", len(swept))
+            except Exception:
+                logger.exception("draft sweep loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._sweep_secs)
             except asyncio.TimeoutError:
                 pass
 
