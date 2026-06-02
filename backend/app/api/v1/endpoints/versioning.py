@@ -37,6 +37,7 @@ from backend.app.services.versioning.cache_manager import acquire_lease, release
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
+    ApprovalRequired,
     ConcurrencyError,
     GraphVersioningService,
     MergeConflict,
@@ -120,6 +121,8 @@ def _domain_errors():
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except AccessDenied as exc:
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
+    except ApprovalRequired as exc:
+        raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
@@ -284,6 +287,10 @@ class ForkResponse(_ApiModel):
     fork_base_commit_seq: int = Field(alias="forkBaseCommitSeq")
 
 
+class OpenPrRequest(_ApiModel):
+    reviewers: Optional[List[str]] = None
+
+
 class OpenPrResponse(_ApiModel):
     pr_id: str = Field(alias="prId")
 
@@ -298,6 +305,10 @@ class PrResponse(_ApiModel):
     status: str
     conflicts: Optional[List[dict]] = None
     resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
+    reviewers: Optional[List[str]] = None
+    approved_by: Optional[List[str]] = Field(default=None, alias="approvedBy")
+    approval_status: Optional[str] = Field(default=None, alias="approvalStatus")
+    checks_status: Optional[dict] = Field(default=None, alias="checksStatus")
     actor: Optional[str] = None
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
@@ -645,12 +656,16 @@ async def fork_graph(
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)
 async def open_pull_request(
     ws_id: str, graph_id: str,
+    body: Optional[OpenPrRequest] = None,
     user: User = Depends(requires(_READ, workspace="ws_id")),       # read can propose
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        pr_id = await svc.open_pr(source_graph_id=graph_id, actor=user.id)
+        pr_id = await svc.open_pr(
+            source_graph_id=graph_id, actor=user.id,
+            reviewers=body.reviewers if body else None,
+        )
     return {"pr_id": pr_id}
 
 
@@ -684,6 +699,17 @@ async def preview_pull_request(
 ):
     with _domain_errors():
         return await svc.preview_pr(pr_id=pr_id)
+
+
+@router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
+async def approve_pull_request(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager approves
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.approve_pr(pr_id=pr_id, actor=user.id)
 
 
 @router.post("/pulls/{pr_id}/merge", response_model=CommitResponse)

@@ -89,6 +89,15 @@ class AccessDenied(RuntimeError):
     """Actor lacks the branch role required for an operation on a shared draft."""
 
 
+class ApprovalRequired(RuntimeError):
+    """A PR's required reviewers haven't all approved yet — merge is blocked."""
+
+    def __init__(self, pr_id: str, pending):
+        super().__init__(f"pr {pr_id} needs approval from {pending}")
+        self.pr_id = pr_id
+        self.pending = list(pending)
+
+
 #: editor and maintainer may edit; only maintainer (and the owner) may manage/publish.
 ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 
@@ -573,15 +582,20 @@ class GraphVersioningService:
 
     async def open_pr(
         self, *, source_graph_id: str, actor: str, title: Optional[str] = None,
+        reviewers: Optional[Sequence[str]] = None,
     ) -> str:
         """Open a PR from a fork's ``main`` back to its parent's ``main``,
-        recording the current mergeability/conflict set (plan §12.5)."""
+        recording the current mergeability/conflict set (plan §12.5).
+
+        ``reviewers`` makes approval a merge precondition: every listed reviewer
+        must :meth:`approve_pr` before the PR can merge (plan §17 #5)."""
         async with self._session() as s:
             fork = await s.get(GraphORM, source_graph_id)
             if fork is None or not fork.fork_parent_graph_id:
                 raise ValueError("source graph is not a fork")
             fork_main = await self._main_branch_id(s, source_graph_id)
             merged, conflicts, _theirs = await self._compute_fork_merge(s, fork, {})
+            revs = list(dict.fromkeys(reviewers or []))      # dedup, keep order
             pr = MergeRequestORM(
                 graph_id=source_graph_id,
                 source_branch_id=fork_main,
@@ -590,11 +604,46 @@ class GraphVersioningService:
                 base_commit_seq=fork.fork_base_commit_seq,
                 status="conflicts" if conflicts else "mergeable",
                 conflicts=conflicts or None,
+                reviewers=revs or None,
+                approval_status="pending" if revs else None,
                 actor=actor,
             )
             s.add(pr)
             await s.flush()
             return pr.id
+
+    async def approve_pr(self, *, pr_id: str, actor: str) -> dict:
+        """Record ``actor``'s approval of a PR. The author can't approve their own
+        PR; once every requested reviewer has approved, ``approval_status`` flips
+        to ``approved`` (and an otherwise-mergeable PR to status ``approved``)."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            if pr.status in ("merged", "closed"):
+                raise ValueError(f"pr {pr_id} is {pr.status}")
+            if actor == pr.actor:
+                raise AccessDenied("author cannot approve their own PR")
+            approved = list(dict.fromkeys((pr.approved_by or []) + [actor]))
+            pr.approved_by = approved
+            reviewers = set(pr.reviewers or [])
+            pr.approval_status = "approved" if reviewers <= set(approved) else "pending"
+            if pr.approval_status == "approved" and pr.status == "mergeable":
+                pr.status = "approved"
+            pr.updated_at = _now()
+            return self._pr_meta(pr)
+
+    @staticmethod
+    def _pr_ontology_check(parent: GraphORM, deltas, kind_by_entity) -> dict:
+        """Re-validate a PR's merged result against the *target* graph's ontology
+        (the PR checks gate, §16.5 #6).  ``ok`` is false only under ``strict``
+        enforcement with violations; ``permissive`` records warnings but passes."""
+        ontology = Ontology.from_spec(parent.ontology_spec)
+        violations = validate_entities(
+            [(d.entity_id, kind_by_entity.get(d.entity_id, "node"), d.payload)
+             for d in deltas if d.op != "delete"], ontology)
+        ok = not violations or parent.ontology_enforcement != "strict"
+        return {"ontology": {"ok": ok, "violations": violations}}
 
     async def preview_pr(self, *, pr_id: str) -> Dict[str, object]:
         """Dry-run a fork PR's merge into the parent (conflicts + change counts)."""
@@ -650,6 +699,20 @@ class GraphVersioningService:
                 pr.status = "merged"
                 return ""
 
+            # PR gates (P8): re-validate the merged result against the target's
+            # ontology, then require every requested reviewer's approval — both
+            # checked before any write to main.
+            kind_by_entity = await self._kind_map_multi(
+                s, [(fork.id, fork_main), (parent.id, parent_main)]
+            )
+            checks = self._pr_ontology_check(parent, deltas, kind_by_entity)
+            pr.checks_status = checks
+            if not checks["ontology"]["ok"]:
+                raise OntologyViolation(checks["ontology"]["violations"])
+            reviewers = set(pr.reviewers or [])
+            if reviewers and pr.approval_status != "approved":
+                raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
+
             new_seq = parent.main_head_commit_seq + 1
             contributors = await self._branch_contributors(s, fork.id, fork_main)
             source_commits = await self._branch_commit_ids(s, fork.id, fork_main)
@@ -664,9 +727,6 @@ class GraphVersioningService:
             s.add(squash)
             await s.flush()
 
-            kind_by_entity = await self._kind_map_multi(
-                s, [(fork.id, fork_main), (parent.id, parent_main)]
-            )
             await self._write_deltas(s, parent.id, parent_main, squash, deltas, kind_by_entity, actor)
 
             main.head_commit_id = squash.id
@@ -941,6 +1001,8 @@ class GraphVersioningService:
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
             "base_commit_seq": pr.base_commit_seq, "status": pr.status,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
+            "reviewers": pr.reviewers, "approved_by": pr.approved_by,
+            "approval_status": pr.approval_status, "checks_status": pr.checks_status,
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
         }
 
