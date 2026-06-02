@@ -12,16 +12,17 @@
  * ``fixed inset-0`` overlay escapes the drawer's framer-motion transform.
  */
 import { motion } from 'framer-motion'
-import { Database, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Database, Loader2, Trash2, X } from 'lucide-react'
 import {
     type FC, useEffect, useMemo, useState,
 } from 'react'
 import { createPortal } from 'react-dom'
 
 import { useToast } from '@/components/ui/toast'
+import { useAffectedSample, useValueDistribution } from '@/hooks/usePropertyInsights'
 import { cn, generateId } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { countMatches } from '@/services/propertyInsights'
+import { countMatches, countPropertyUsageWithinTarget } from '@/services/propertyInsights'
 import {
     usePropertyDraftStore,
     type PropertyOpKind,
@@ -83,6 +84,9 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
 
     const [count, setCount] = useState<number | null>(null)
     const [counting, setCounting] = useState(false)
+    // For a Set op: how many of the targeted entities already carry the key
+    // (those values get overwritten). Drives the overwrite guidance.
+    const [alreadySet, setAlreadySet] = useState<number | null>(null)
 
     const allowedKinds: PropertyOpKind[] = mode === 'remove'
         ? ['remove']
@@ -132,6 +136,26 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
         }
         return valueText
     }
+
+    // Existing values to suggest as quick-picks (known keys only).
+    const dist = useValueDistribution(viewId, trimmedKey, needsValue && trimmedKey.length > 0)
+    const valueSuggestions = dist.data?.values.slice(0, 8) ?? []
+
+    // A sample of the entities this op will touch.
+    const affected = useAffectedSample(viewId, predicate, predicateReady)
+
+    // Overwrite guidance for Set: how many targets already have the key.
+    useEffect(() => {
+        if (kind !== 'set' || !predicateReady || !predicate || !trimmedKey) { setAlreadySet(null); return }
+        const controller = new AbortController()
+        const t = setTimeout(() => {
+            countPropertyUsageWithinTarget(provider, viewId, trimmedKey, predicate, controller.signal)
+                .then((n) => { if (!controller.signal.aborted) setAlreadySet(n) })
+                .catch(() => { if (!controller.signal.aborted) setAlreadySet(null) })
+        }, PREVIEW_DEBOUNCE_MS)
+        return () => { controller.abort(); clearTimeout(t) }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [provider, viewId, predicateKey, predicateReady, kind, trimmedKey])
 
     // Plain function (not memoised) so it always reads the latest field
     // state — a stale-closure here silently staged the wrong value.
@@ -293,6 +317,24 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                                     />
                                 )}
                             </div>
+                            {/* Existing-value quick picks */}
+                            {valueType === 'string' && valueSuggestions.length > 0 && (
+                                <div className="flex flex-wrap items-center gap-1">
+                                    <span className="text-[10px] text-ink-muted/70 mr-0.5">Existing:</span>
+                                    {valueSuggestions.map((s) => (
+                                        <button
+                                            key={s.value}
+                                            type="button"
+                                            onClick={() => setValueText(s.value)}
+                                            title={`${s.count} ${s.count === 1 ? 'entity' : 'entities'}`}
+                                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-mono bg-glass/40 text-ink-muted hover:bg-accent-lineage/15 hover:text-accent-lineage transition-colors"
+                                        >
+                                            {s.value || '∅'}
+                                            <span className="tabular-nums opacity-60">{s.count}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -326,6 +368,39 @@ export const PropertyOperationDialog: FC<PropertyOperationDialogProps> = ({
                             discoveredLayers={discoveredLayers}
                         />
                     </div>
+
+                    {/* Impact preview */}
+                    {predicateReady && (
+                        <div className="flex flex-col gap-2 rounded-xl border border-glass-border/60 bg-canvas-base/20 p-2.5">
+                            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">Impact</span>
+                            {/* Overwrite warning for Set */}
+                            {kind === 'set' && alreadySet !== null && alreadySet > 0 && (
+                                <div className="flex items-start gap-1.5 text-[11px] text-amber-300">
+                                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                                    <span><span className="font-semibold tabular-nums">{alreadySet}</span> of {count ?? '…'} already have <span className="font-mono">{trimmedKey}</span> — its value will be overwritten. Use <span className="font-semibold">Fill if empty</span> to keep existing values.</span>
+                                </div>
+                            )}
+                            {/* Affected sample */}
+                            {affected.loading ? (
+                                <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted"><Loader2 className="w-3 h-3 animate-spin" /> Loading affected entities…</span>
+                            ) : affected.data && affected.data.entities.length > 0 ? (
+                                <div className="flex flex-col gap-1">
+                                    <span className="text-[11px] text-ink-muted">Affects e.g.</span>
+                                    <div className="flex flex-wrap gap-1">
+                                        {affected.data.entities.map((e) => (
+                                            <span key={e.urn} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] bg-glass/40 max-w-[160px]" title={`${e.displayName} · ${e.entityType}`}>
+                                                <span className="truncate text-ink">{e.displayName}</span>
+                                                {e.entityType && <span className="text-ink-muted/70 shrink-0">{e.entityType}</span>}
+                                            </span>
+                                        ))}
+                                        {affected.data.truncated && <span className="text-[10px] text-ink-muted/70 self-center">+ more</span>}
+                                    </div>
+                                </div>
+                            ) : affected.data ? (
+                                <span className="text-[11px] text-ink-muted/60">No entities match yet.</span>
+                            ) : null}
+                        </div>
+                    )}
                 </div>
 
                 {/* Footer */}

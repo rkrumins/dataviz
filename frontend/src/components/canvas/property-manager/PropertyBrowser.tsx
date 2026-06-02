@@ -1,20 +1,25 @@
 /**
- * PropertyBrowser — the Properties tab: a property-management surface, not
- * just a catalogue. It lists every property key in use (from discovery)
- * with live usage insights, and lets the user create / update / remove
- * properties in bulk across a matched set of entities.
+ * PropertyBrowser — the Properties tab: a premium property-management
+ * surface. It opens with an insights overview, lists every property key in
+ * use with type badges + lazy usage/value-distribution analytics, and lets
+ * the user create / update / remove properties in bulk across a matched set
+ * of entities.
  *
  * Lifecycle operations are staged IN-SESSION (``propertyDraftStore``) and
  * surfaced optimistically over the catalogue — there is no backend
- * node-property write yet, so a banner makes clear nothing is persisted.
+ * node-property write yet, so the copy makes clear nothing is persisted.
  */
+import { motion } from 'framer-motion'
 import {
-    ChevronRight, Database, Layers, Loader2, Pencil, Plus, Search, Tag, Trash2, Undo2,
+    ArrowDownWideNarrow, ChevronRight, Database, Layers, Loader2, Pencil, Plus,
+    Search, Sparkles, Tag, Trash2, Undo2,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { MiniBar, coverageBarClass } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 import { usePropertyUsage } from '@/hooks/usePropertyUsage'
+import { useValueDistribution } from '@/hooks/usePropertyInsights'
 import {
     usePropertyCatalogOverlay, usePropertyDraftStore, usePropertyOps,
     type CatalogOverlayEntry, type PropertyOp,
@@ -24,6 +29,7 @@ import type { Predicate } from '@/types/search'
 import { useDiscovery } from '../search/builder/useDiscovery'
 import { fieldClass } from '../search/builder/editors/shared'
 
+import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyOperationDialog, type PropertyDialogMode } from './PropertyOperationDialog'
 
 
@@ -31,20 +37,21 @@ export interface PropertyBrowserProps {
     viewId: string
     knownEntityTypes: string[]
     knownLayers: string[]
-    /** Seed a new display rule from a discovered property / tag. */
     onCreateRuleFromPredicate: (predicate: Predicate, suggestedName: string) => void
 }
 
 type DialogState = { mode: PropertyDialogMode; key?: string } | null
+type SortMode = 'name' | 'coverage'
+type ValueType = 'string' | 'number' | 'boolean' | null
 
 
 export function PropertyBrowser({
     viewId, knownEntityTypes, knownLayers, onCreateRuleFromPredicate,
 }: PropertyBrowserProps) {
-    const {
-        allKeys, keysByEntityType, tagValues, getValueSamples, isInitialLoading, error,
-    } = useDiscovery(viewId)
+    const disc = useDiscovery(viewId)
+    const { allKeys, keysByEntityType, tagValues, getValueSamples, isInitialLoading, error } = disc
     const [query, setQuery] = useState('')
+    const [sort, setSort] = useState<SortMode>('name')
     const [dialog, setDialog] = useState<DialogState>(null)
 
     const pendingOps = usePropertyOps()
@@ -61,7 +68,6 @@ export function PropertyBrowser({
         return out
     }, [keysByEntityType])
 
-    // Staged-new keys: in the overlay but not (yet) discovered.
     const discoveredSet = useMemo(() => new Set(allKeys), [allKeys])
     const pendingNewKeys = useMemo(
         () => [...overlay.keys()].filter(
@@ -70,11 +76,27 @@ export function PropertyBrowser({
         [overlay, discoveredSet],
     )
 
+    // Catalogue-level guidance from discovery (0-cost).
+    const warnings = useMemo(() => {
+        const raw = disc.discovery
+        const out: string[] = []
+        if (!raw) return out
+        if (raw.missingContainment) out.push('No containment edges — hierarchy insights limited')
+        const blob = raw.blobOnlyLabels ?? []
+        if (blob.length > 0) out.push(`${blob.length} type${blob.length === 1 ? '' : 's'} not yet migrated — limited analytics`)
+        const truncated = Object.values(raw.labels ?? {}).some((l) => l?.truncatedProperties)
+        if (truncated) out.push('Some rare properties may be sampled out')
+        return out
+    }, [disc.discovery])
+
     const q = query.trim().toLowerCase()
-    const filteredKeys = useMemo(
-        () => (q ? allKeys.filter((k) => k.toLowerCase().includes(q)) : allKeys),
-        [allKeys, q],
-    )
+    const sortKeys = useMemo(() => {
+        const base = q ? allKeys.filter((k) => k.toLowerCase().includes(q)) : allKeys
+        if (sort === 'coverage') {
+            return [...base].sort((a, b) => (typesByKey[b]?.length ?? 0) - (typesByKey[a]?.length ?? 0) || a.localeCompare(b))
+        }
+        return base
+    }, [allKeys, q, sort, typesByKey])
     const filteredNewKeys = useMemo(
         () => (q ? pendingNewKeys.filter((k) => k.toLowerCase().includes(q)) : pendingNewKeys),
         [pendingNewKeys, q],
@@ -113,12 +135,29 @@ export function PropertyBrowser({
 
     const nothingDiscovered = allKeys.length === 0 && tagValues.length === 0 && pendingNewKeys.length === 0
 
+    if (nothingDiscovered) {
+        return (
+            <div className="flex flex-col gap-3">
+                {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
+                <EmptyHero onNew={() => setDialog({ mode: 'create' })} />
+                {dialogEl}
+            </div>
+        )
+    }
+
     return (
         <div className="flex flex-col gap-3">
-            {/* Pending changes banner */}
+            <PropertyInsightsHeader
+                viewId={viewId}
+                propertyCount={allKeys.length}
+                tagCount={tagValues.length}
+                entityTypeCount={Object.keys(keysByEntityType).length}
+                warnings={warnings}
+            />
+
             {pendingOps.length > 0 && <PendingChanges ops={pendingOps} />}
 
-            {/* Toolbar: filter + New property */}
+            {/* Toolbar: filter + sort + New */}
             <div className="flex items-center gap-2">
                 <div className="relative flex-1 min-w-0">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-ink-muted/60" />
@@ -130,6 +169,7 @@ export function PropertyBrowser({
                         className={cn(fieldClass, 'pl-9')}
                     />
                 </div>
+                <SortToggle sort={sort} onChange={setSort} />
                 <button
                     type="button"
                     onClick={() => setDialog({ mode: 'create' })}
@@ -140,17 +180,11 @@ export function PropertyBrowser({
                 </button>
             </div>
 
-            {nothingDiscovered && (
-                <div className="px-3 py-6 text-center text-[11px] text-ink-muted">
-                    No queryable properties or tags were discovered for this view.
-                </div>
-            )}
-
             {/* Properties */}
-            {(filteredKeys.length > 0 || filteredNewKeys.length > 0) && (
+            {(sortKeys.length > 0 || filteredNewKeys.length > 0) && (
                 <section className="flex flex-col gap-1.5">
                     <h4 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted flex items-center gap-1.5">
-                        <Database className="w-3 h-3" /> Properties · {filteredKeys.length + filteredNewKeys.length}
+                        <Database className="w-3 h-3" /> Properties · {sortKeys.length + filteredNewKeys.length}
                     </h4>
                     <div className="flex flex-col gap-1.5">
                         {filteredNewKeys.map((key) => (
@@ -167,7 +201,7 @@ export function PropertyBrowser({
                                 onCreateRule={() => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
                             />
                         ))}
-                        {filteredKeys.map((key) => (
+                        {sortKeys.map((key) => (
                             <PropertyRow
                                 key={key}
                                 viewId={viewId}
@@ -207,7 +241,7 @@ export function PropertyBrowser({
                 </section>
             )}
 
-            {!nothingDiscovered && filteredKeys.length === 0 && filteredNewKeys.length === 0 && filteredTags.length === 0 && (
+            {sortKeys.length === 0 && filteredNewKeys.length === 0 && filteredTags.length === 0 && (
                 <div className="px-3 py-5 text-center text-[11px] text-ink-muted">
                     Nothing matches <span className="font-mono text-ink">{query}</span>.
                 </div>
@@ -220,7 +254,73 @@ export function PropertyBrowser({
 
 
 // ---------------------------------------------------------------------------
-// Pending changes banner
+// Sort toggle (segmented)
+// ---------------------------------------------------------------------------
+
+function SortToggle({ sort, onChange }: { sort: SortMode; onChange: (s: SortMode) => void }) {
+    return (
+        <div className="shrink-0 inline-flex rounded-lg p-0.5 bg-canvas-base/40 border border-glass-border/50">
+            {(['name', 'coverage'] as SortMode[]).map((s) => (
+                <button
+                    key={s}
+                    type="button"
+                    onClick={() => onChange(s)}
+                    title={s === 'name' ? 'Sort A–Z' : 'Sort by how many entity types use it'}
+                    className={cn(
+                        'inline-flex items-center gap-1 px-2 h-8 rounded-md text-[11px] font-medium transition-colors',
+                        sort === s ? 'bg-accent-lineage/20 text-accent-lineage' : 'text-ink-muted hover:text-ink',
+                    )}
+                >
+                    {s === 'name' ? 'A–Z' : <><ArrowDownWideNarrow className="w-3 h-3" /> Usage</>}
+                </button>
+            ))}
+        </div>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// Empty / first-run hero
+// ---------------------------------------------------------------------------
+
+function EmptyHero({ onNew }: { onNew: () => void }) {
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+                'relative overflow-hidden rounded-2xl p-5 flex flex-col items-center text-center gap-3',
+                'bg-gradient-to-br from-accent-lineage/[0.08] via-canvas-elevated/30 to-purple-500/[0.06]',
+                'border border-glass-border/60',
+            )}
+        >
+            <div className="pointer-events-none absolute -top-12 -right-12 w-40 h-40 rounded-full bg-accent-lineage/10 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-16 -left-12 w-44 h-44 rounded-full bg-purple-500/8 blur-3xl" />
+            <div className="relative w-12 h-12 rounded-2xl flex items-center justify-center bg-gradient-to-br from-accent-lineage/35 to-cyan-500/20 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]">
+                <Sparkles className="w-6 h-6 text-accent-lineage" />
+            </div>
+            <div className="relative">
+                <div className="text-[15px] font-display font-semibold text-ink">Manage properties for this view</div>
+                <p className="mt-1 text-[12px] text-ink-muted leading-snug max-w-[280px]">
+                    Define a property and roll it out to every matched entity, audit how existing
+                    ones are used, and clean up in bulk. Changes stage in-session — nothing is saved yet.
+                </p>
+            </div>
+            <button
+                type="button"
+                onClick={onNew}
+                className="relative inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg text-[12.5px] font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors"
+            >
+                <Plus className="w-4 h-4" /> Create your first property
+            </button>
+        </motion.div>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// Pending changes review
 // ---------------------------------------------------------------------------
 
 function opSummary(op: PropertyOp): string {
@@ -237,13 +337,18 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
     const [open, setOpen] = useState(false)
     const removeOp = usePropertyDraftStore((s) => s.removeOp)
     const clearOps = usePropertyDraftStore((s) => s.clearOps)
+
+    const rollup = useMemo(() => {
+        const counts: Record<string, number> = {}
+        let entities = 0
+        for (const op of ops) { counts[op.kind] = (counts[op.kind] ?? 0) + 1; entities += op.targetCount }
+        const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`)
+        return { parts, entities }
+    }, [ops])
+
     return (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 overflow-hidden">
-            <button
-                type="button"
-                onClick={() => setOpen((v) => !v)}
-                className="w-full flex items-center gap-2 px-3 py-2 text-left"
-            >
+            <button type="button" onClick={() => setOpen((v) => !v)} className="w-full flex items-center gap-2 px-3 py-2 text-left">
                 <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                 <span className="flex-1 min-w-0 text-[11.5px] text-amber-100/90 leading-tight">
                     <span className="font-semibold">{ops.length} staged change{ops.length === 1 ? '' : 's'}</span>
@@ -253,6 +358,9 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
             </button>
             {open && (
                 <div className="px-2 pb-2 flex flex-col gap-1 border-t border-amber-500/20 pt-1.5">
+                    <div className="px-2 text-[10px] text-amber-200/70">
+                        Would {rollup.parts.join(' · ')} across ~{rollup.entities} {rollup.entities === 1 ? 'entity' : 'entities'}.
+                    </div>
                     {ops.map((op) => (
                         <div key={op.id} className="group flex items-center gap-2 px-2 py-1 rounded-md hover:bg-amber-500/10">
                             <span className="flex-1 min-w-0 truncate text-[11px] font-mono text-amber-100/90" title={opSummary(op)}>
@@ -268,11 +376,7 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
                             </button>
                         </div>
                     ))}
-                    <button
-                        type="button"
-                        onClick={clearOps}
-                        className="self-end mt-0.5 text-[10.5px] text-amber-300/80 hover:text-amber-100 transition-colors"
-                    >
+                    <button type="button" onClick={clearOps} className="self-end mt-0.5 text-[10.5px] text-amber-300/80 hover:text-amber-100 transition-colors">
                         Discard all
                     </button>
                 </div>
@@ -283,8 +387,16 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
 
 
 // ---------------------------------------------------------------------------
-// Property row (expandable, with usage insights + lifecycle actions)
+// Property row (expandable: usage + value distribution + lifecycle actions)
 // ---------------------------------------------------------------------------
+
+function inferType(samples: unknown[]): ValueType {
+    const v = samples.find((s) => s !== null && s !== undefined)
+    if (typeof v === 'number') return 'number'
+    if (typeof v === 'boolean') return 'boolean'
+    if (typeof v === 'string') return 'string'
+    return null
+}
 
 function PropertyRow({
     viewId, propertyKey, usedBy, samples, overlay, isPendingNew, onUpdate, onRemove, onCreateRule,
@@ -301,12 +413,13 @@ function PropertyRow({
 }) {
     const [expanded, setExpanded] = useState(false)
     const usage = usePropertyUsage(viewId, propertyKey, expanded && !isPendingNew)
+    const dist = useValueDistribution(viewId, propertyKey, expanded && !isPendingNew)
 
+    const valueType = useMemo(() => inferType(samples), [samples])
     const sampleText = useMemo(
         () => samples.slice(0, 4).map((v) => (typeof v === 'string' ? v : JSON.stringify(v))),
         [samples],
     )
-
     const pendingRemove = overlay?.kinds.has('remove')
 
     return (
@@ -320,7 +433,7 @@ function PropertyRow({
                         <button
                             type="button"
                             onClick={() => setExpanded((v) => !v)}
-                            title="Show usage"
+                            title="Show usage & values"
                             className="shrink-0 inline-flex items-center justify-center w-4 h-4 text-ink-muted/70 hover:text-ink"
                         >
                             <ChevronRight className={cn('w-3.5 h-3.5 transition-transform', expanded && 'rotate-90')} />
@@ -329,6 +442,7 @@ function PropertyRow({
                     <span className={cn('font-mono text-[12px] truncate', pendingRemove ? 'text-rose-300 line-through' : 'text-ink')} title={propertyKey}>
                         {propertyKey}
                     </span>
+                    {valueType && <TypeBadge type={valueType} />}
                     {isPendingNew && <PendingBadge label="new" tone="emerald" />}
                     {overlay && !isPendingNew && (
                         <PendingBadge
@@ -336,7 +450,6 @@ function PropertyRow({
                             tone={pendingRemove ? 'rose' : 'amber'}
                         />
                     )}
-                    {/* Actions */}
                     <div className="ml-auto shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                         <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} />
                         <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger />
@@ -345,32 +458,33 @@ function PropertyRow({
                 </div>
 
                 {usedBy.length > 0 && (
-                    <div className="mt-1 pl-6 text-[10px] text-ink-muted/80 truncate">
-                        Used by: {usedBy.join(', ')}
-                    </div>
+                    <div className="mt-1 pl-6 text-[10px] text-ink-muted/80 truncate">Used by: {usedBy.join(', ')}</div>
                 )}
                 {sampleText.length > 0 && (
                     <div className="mt-1 pl-6 flex flex-wrap gap-1">
                         {sampleText.map((v, i) => (
-                            <span key={i} className="px-1.5 py-0.5 rounded bg-glass/40 text-[10px] text-ink-muted font-mono truncate max-w-[140px]" title={v}>
-                                {v}
-                            </span>
+                            <span key={i} className="px-1.5 py-0.5 rounded bg-glass/40 text-[10px] text-ink-muted font-mono truncate max-w-[140px]" title={v}>{v}</span>
                         ))}
                     </div>
                 )}
             </div>
 
-            {/* Usage insights (lazy) */}
             {expanded && !isPendingNew && (
-                <div className="px-3 pb-2.5 pl-9 border-t border-glass-border/40 pt-2">
+                <div className="px-3 pb-2.5 pl-9 border-t border-glass-border/40 pt-2 flex flex-col gap-2.5">
+                    {/* Usage */}
                     {usage.loading ? (
-                        <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted">
-                            <Loader2 className="w-3 h-3 animate-spin" /> Counting usage…
-                        </span>
+                        <Skel label="Counting usage…" />
                     ) : usage.error ? (
                         <span className="text-[11px] text-rose-400">Couldn't load usage — {usage.error}</span>
                     ) : usage.data ? (
                         <UsageBreakdown total={usage.data.total} byEntityType={usage.data.byEntityType} />
+                    ) : null}
+
+                    {/* Value distribution */}
+                    {dist.loading ? (
+                        <Skel label="Analysing values…" />
+                    ) : dist.data && dist.data.values.length > 0 ? (
+                        <ValueDistributionView values={dist.data.values} truncated={dist.data.truncated} />
                     ) : null}
                 </div>
             )}
@@ -379,20 +493,41 @@ function PropertyRow({
 }
 
 
+function Skel({ label }: { label: string }) {
+    return (
+        <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted">
+            <Loader2 className="w-3 h-3 animate-spin" /> {label}
+        </span>
+    )
+}
+
 function UsageBreakdown({ total, byEntityType }: { total: number; byEntityType: { type: string; count: number }[] }) {
-    if (total === 0) {
-        return <span className="text-[11px] text-ink-muted/70">Not used by any entity in this view.</span>
-    }
-    const max = byEntityType[0]?.count ?? 1
+    if (total === 0) return <span className="text-[11px] text-ink-muted/70">Not used by any entity in this view.</span>
     return (
         <div className="flex flex-col gap-1.5">
             <div className="text-[11px] text-ink">
                 <span className="font-semibold tabular-nums">{total}</span> {total === 1 ? 'entity uses' : 'entities use'} this property
             </div>
             <div className="flex flex-col gap-1">
-                {byEntityType.slice(0, 8).map((b) => (
-                    <div key={b.type} className="flex items-center gap-2 text-[10.5px]">
-                        <span className="w-24 shrink-0 truncate text-ink-muted" title={b.type}>{b.type}</span>
+                {byEntityType.slice(0, 6).map((b) => (
+                    <MiniBar key={b.type} covered={b.count} total={total} label={b.type} colorClass={coverageBarClass(Math.round((b.count / total) * 100))} />
+                ))}
+            </div>
+        </div>
+    )
+}
+
+function ValueDistributionView({ values, truncated }: { values: { value: string; count: number }[]; truncated: boolean }) {
+    const max = values[0]?.count ?? 1
+    return (
+        <div className="flex flex-col gap-1.5">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
+                Top values{truncated ? ' (sampled)' : ''}
+            </div>
+            <div className="flex flex-col gap-1">
+                {values.slice(0, 6).map((b) => (
+                    <div key={b.value} className="flex items-center gap-2 text-[10.5px]">
+                        <span className="w-24 shrink-0 truncate font-mono text-ink" title={b.value}>{b.value || '∅'}</span>
                         <div className="flex-1 h-1.5 rounded-full bg-glass/30 overflow-hidden">
                             <div className="h-full rounded-full bg-accent-lineage/60" style={{ width: `${Math.max(4, (b.count / max) * 100)}%` }} />
                         </div>
@@ -404,6 +539,19 @@ function UsageBreakdown({ total, byEntityType }: { total: number; byEntityType: 
     )
 }
 
+const TYPE_TONES: Record<NonNullable<ValueType>, string> = {
+    string: 'bg-sky-500/12 text-sky-300 border-sky-500/25',
+    number: 'bg-violet-500/12 text-violet-300 border-violet-500/25',
+    boolean: 'bg-emerald-500/12 text-emerald-300 border-emerald-500/25',
+}
+
+function TypeBadge({ type }: { type: NonNullable<ValueType> }) {
+    return (
+        <span className={cn('shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold border', TYPE_TONES[type])} title={`Inferred type: ${type}`}>
+            {type === 'string' ? 'str' : type === 'number' ? 'num' : 'bool'}
+        </span>
+    )
+}
 
 function PendingBadge({ label, tone }: { label: string; tone: 'emerald' | 'amber' | 'rose' }) {
     const tones = {
@@ -412,12 +560,9 @@ function PendingBadge({ label, tone }: { label: string; tone: 'emerald' | 'amber
         rose: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
     }
     return (
-        <span className={cn('shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border', tones[tone])}>
-            {label}
-        </span>
+        <span className={cn('shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide border', tones[tone])}>{label}</span>
     )
 }
-
 
 function RowAction({ icon, label, onClick, danger }: { icon: React.ReactNode; label: string; onClick: () => void; danger?: boolean }) {
     return (

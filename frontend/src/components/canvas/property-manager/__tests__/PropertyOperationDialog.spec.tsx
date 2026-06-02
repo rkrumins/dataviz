@@ -53,6 +53,9 @@ vi.mock('@/providers/GraphProviderContext', () => {
 
 vi.mock('@/services/propertyInsights', () => ({
     countMatches: vi.fn(async () => 5),
+    countPropertyUsageWithinTarget: vi.fn(async () => 0),
+    getValueDistribution: vi.fn(async () => ({ values: [], truncated: false })),
+    getAffectedSample: vi.fn(async () => ({ entities: [], truncated: false })),
 }))
 
 beforeEach(() => usePropertyDraftStore.setState({ pendingOps: [] }))

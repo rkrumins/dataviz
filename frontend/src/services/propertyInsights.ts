@@ -101,3 +101,132 @@ export async function countMatches(
     const usage = await aggregateByEntityType(provider, viewId, predicate, signal)
     return usage.total
 }
+
+
+// ---------------------------------------------------------------------------
+// Value distribution — top values of a property key + their counts
+// ---------------------------------------------------------------------------
+
+export interface ValueBucket { value: string; count: number }
+export interface ValueDistribution {
+    values: ValueBucket[]
+    /** True when there are likely more distinct values than ``limit``. */
+    truncated: boolean
+}
+
+const EMPTY_DISTRIBUTION: ValueDistribution = { values: [], truncated: false }
+
+/**
+ * Distribution of a property's values: ``by:'property'`` buckets the
+ * candidate set (nodes that have the key) by ``n.<key>`` value. For a
+ * property facet the bucket's ``ancestorDisplayName`` holds the VALUE and
+ * ``matchCount`` the number of entities with it (backend-confirmed). One
+ * read-only round-trip; lazy on row expand.
+ */
+export async function getValueDistribution(
+    provider: GraphDataProvider,
+    viewId: string,
+    key: string,
+    limit = 12,
+    signal?: AbortSignal,
+): Promise<ValueDistribution> {
+    if (!(provider instanceof RemoteGraphProvider) || !viewId || !key) return EMPTY_DISTRIBUTION
+    const query = buildViewScopedQuery(
+        viewId,
+        { kind: 'hasProperty', key, negate: false } as Predicate,
+        {
+            results: 'aggregates',
+            pageSize: 1,
+            aggregations: [{ by: 'property', propertyKey: key, maxBuckets: limit }],
+        },
+    )
+    const result = await provider.searchAdvanced(query)
+    if (signal?.aborted) return EMPTY_DISTRIBUTION
+    const buckets = result.aggregates?.[0] ?? []
+    const values = buckets
+        .map((b) => ({ value: String(b.ancestorDisplayName ?? ''), count: b.matchCount ?? 0 }))
+        .filter((v) => v.count > 0)
+    return { values, truncated: buckets.length >= limit }
+}
+
+
+// ---------------------------------------------------------------------------
+// Affected-entity sample — preview which entities a bulk op will touch
+// ---------------------------------------------------------------------------
+
+export interface AffectedEntity { urn: string; displayName: string; entityType: string }
+export interface AffectedSample { entities: AffectedEntity[]; truncated: boolean }
+
+const EMPTY_SAMPLE: AffectedSample = { entities: [], truncated: false }
+
+/**
+ * A small sample of entities matched by ``predicate`` (the target set of a
+ * bulk property op), for the dialog preview. Requests hit rows directly.
+ */
+export async function getAffectedSample(
+    provider: GraphDataProvider,
+    viewId: string,
+    predicate: Predicate,
+    limit = 8,
+    signal?: AbortSignal,
+): Promise<AffectedSample> {
+    if (!(provider instanceof RemoteGraphProvider) || !viewId) return EMPTY_SAMPLE
+    const query = buildViewScopedQuery(viewId, predicate, {
+        results: 'hits',
+        pageSize: limit + 1,
+        includeAncestorPath: false,
+    })
+    const result = await provider.searchAdvanced(query)
+    if (signal?.aborted) return EMPTY_SAMPLE
+    const hits = result.hits ?? []
+    const entities = hits.slice(0, limit).map((h) => ({
+        urn: h.node?.urn ?? '',
+        displayName: h.node?.displayName || h.node?.urn || '(unnamed)',
+        entityType: h.node?.entityType ?? '',
+    }))
+    return { entities, truncated: hits.length > limit }
+}
+
+
+// ---------------------------------------------------------------------------
+// Catalogue overview — eager, one call for the insights header
+// ---------------------------------------------------------------------------
+
+export interface CatalogOverview {
+    totalEntities: number
+    byEntityType: { type: string; count: number }[]
+}
+
+/** Total entity count + per-entity-type breakdown for the whole view. */
+export async function getCatalogOverview(
+    provider: GraphDataProvider,
+    viewId: string,
+    signal?: AbortSignal,
+): Promise<CatalogOverview> {
+    const usage = await aggregateByEntityType(
+        provider,
+        viewId,
+        { kind: 'group', op: 'and', children: [] } as Predicate,
+        signal,
+    )
+    return { totalEntities: usage.total, byEntityType: usage.byEntityType }
+}
+
+
+/**
+ * How many entities in the target set ALREADY carry the key — drives the
+ * "M of N will be overwritten" guidance for a Set op.
+ */
+export function countPropertyUsageWithinTarget(
+    provider: GraphDataProvider,
+    viewId: string,
+    key: string,
+    targetPredicate: Predicate,
+    signal?: AbortSignal,
+): Promise<number> {
+    const combined: Predicate = {
+        kind: 'group', op: 'and',
+        children: [targetPredicate, { kind: 'hasProperty', key, negate: false } as Predicate],
+    }
+    return countMatches(provider, viewId, combined, signal)
+}
