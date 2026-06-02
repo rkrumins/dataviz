@@ -116,6 +116,11 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 
+# Evictable/rebuildable FalkorDB cache (plan §5, §16.5 #9-10): single-flight
+# rebuild lock TTL and read-lease (refcount) TTL, both seconds.
+REBUILD_LOCK_TTL: int = int(os.getenv("GRAPHVER_REBUILD_LOCK_TTL", "120"))
+LEASE_TTL: int = int(os.getenv("GRAPHVER_LEASE_TTL", "60"))
+
 # Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days.
 DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 

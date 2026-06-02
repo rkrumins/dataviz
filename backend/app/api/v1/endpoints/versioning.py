@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.auth.dependencies import requires
 from backend.auth_service.interface import User
 from backend.app.services.versioning import config as vconfig
+from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     ConcurrencyError,
@@ -467,6 +468,7 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
         and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
     )
     if can_falkor:
+        await acquire_lease(graph_id)            # pin so an eviction sweep can't drop it mid-read
         try:
             result = await _falkor_neighbors(
                 read_factory(wm["falkor_graph_name"]), urn=urn, depth=depth,
@@ -475,6 +477,8 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
             return {"source": "falkordb", "watermark": wm_out, **result}
         except Exception as exc:
             logger.warning("FalkorDB neighbors read failed for %s, PG fallback: %s", graph_id, exc)
+        finally:
+            await release_lease(graph_id)
     result = await svc.neighbors_from_state(
         graph_id=graph_id, urn=urn, depth=depth, direction=direction,
         edge_types=edge_types, limit=limit,
