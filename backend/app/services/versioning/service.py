@@ -723,6 +723,21 @@ class GraphVersioningService:
             pr.updated_at = _now()
             return self._pr_meta(pr)
 
+    async def close_pr(self, *, pr_id: str) -> dict:
+        """Close a PR without merging — terminal: approve_pr and merge_pr both
+        reject a closed PR. Idempotent; an already-merged PR cannot be closed."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            if pr.status == "closed":
+                return self._pr_meta(pr)              # idempotent
+            if pr.status == "merged":
+                raise ValueError(f"pr {pr_id} is merged")
+            pr.status = "closed"
+            pr.updated_at = _now()
+            return self._pr_meta(pr)
+
     @staticmethod
     def _pr_ontology_check(parent: GraphORM, deltas, kind_by_entity) -> dict:
         """Re-validate a PR's merged result against the *target* graph's ontology
@@ -768,6 +783,8 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
+            if pr.status in ("merged", "closed"):
+                raise ValueError(f"pr {pr_id} is {pr.status}")
             fork = await s.get(GraphORM, pr.graph_id)
             parent = await s.get(GraphORM, pr.target_graph_id)
             if fork is None or parent is None:

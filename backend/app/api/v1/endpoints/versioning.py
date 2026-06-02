@@ -759,6 +759,17 @@ async def approve_pull_request(
         return await svc.approve_pr(pr_id=pr_id, actor=user.id)
 
 
+@router.post("/pulls/{pr_id}/close", response_model=PrResponse)
+async def close_pull_request(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),    # a manager rejects/closes
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.close_pr(pr_id=pr_id)
+
+
 @router.post("/pulls/{pr_id}/merge", response_model=CommitResponse)
 async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
