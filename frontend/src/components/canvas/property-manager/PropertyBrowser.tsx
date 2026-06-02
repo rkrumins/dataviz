@@ -31,6 +31,8 @@ import { fieldClass } from '../search/builder/editors/shared'
 
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyOperationDialog, type PropertyDialogMode } from './PropertyOperationDialog'
+import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
+import { inferType } from './propertyValueTypes'
 
 
 export interface PropertyBrowserProps {
@@ -42,7 +44,6 @@ export interface PropertyBrowserProps {
 
 type DialogState = { mode: PropertyDialogMode; key?: string } | null
 type SortMode = 'name' | 'coverage'
-type ValueType = 'string' | 'number' | 'boolean' | null
 
 
 export function PropertyBrowser({
@@ -75,6 +76,16 @@ export function PropertyBrowser({
         ).sort(),
         [overlay, discoveredSet],
     )
+    // The value a staged-new property will be set to (for its preview chip).
+    const stagedValueByKey = useMemo(() => {
+        const m = new Map<string, string>()
+        for (const op of pendingOps) {
+            if ((op.kind === 'set' || op.kind === 'fillEmpty') && op.value !== undefined && !m.has(op.key)) {
+                m.set(op.key, String(op.value))
+            }
+        }
+        return m
+    }, [pendingOps])
 
     // Catalogue-level guidance from discovery (0-cost).
     const warnings = useMemo(() => {
@@ -196,6 +207,7 @@ export function PropertyBrowser({
                                 samples={[]}
                                 overlay={overlay.get(key)}
                                 isPendingNew
+                                stagedValue={stagedValueByKey.get(key)}
                                 onUpdate={() => setDialog({ mode: 'update', key })}
                                 onRemove={() => setDialog({ mode: 'remove', key })}
                                 onCreateRule={() => onCreateRuleFromPredicate({ kind: 'hasProperty', key, negate: false }, key)}
@@ -390,16 +402,8 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
 // Property row (expandable: usage + value distribution + lifecycle actions)
 // ---------------------------------------------------------------------------
 
-function inferType(samples: unknown[]): ValueType {
-    const v = samples.find((s) => s !== null && s !== undefined)
-    if (typeof v === 'number') return 'number'
-    if (typeof v === 'boolean') return 'boolean'
-    if (typeof v === 'string') return 'string'
-    return null
-}
-
 function PropertyRow({
-    viewId, propertyKey, usedBy, samples, overlay, isPendingNew, onUpdate, onRemove, onCreateRule,
+    viewId, propertyKey, usedBy, samples, overlay, isPendingNew, stagedValue, onUpdate, onRemove, onCreateRule,
 }: {
     viewId: string
     propertyKey: string
@@ -407,6 +411,7 @@ function PropertyRow({
     samples: unknown[]
     overlay?: CatalogOverlayEntry
     isPendingNew?: boolean
+    stagedValue?: string
     onUpdate: () => void
     onRemove: () => void
     onCreateRule: () => void
@@ -417,61 +422,72 @@ function PropertyRow({
 
     const valueType = useMemo(() => inferType(samples), [samples])
     const sampleText = useMemo(
-        () => samples.slice(0, 4).map((v) => (typeof v === 'string' ? v : JSON.stringify(v))),
+        () => samples.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).filter((s) => s.length > 0),
         [samples],
     )
     const pendingRemove = overlay?.kinds.has('remove')
+    const accent: 'emerald' | 'rose' | undefined = isPendingNew ? 'emerald' : pendingRemove ? 'rose' : undefined
+
+    const toggle = () => { if (!isPendingNew) setExpanded((v) => !v) }
 
     return (
         <div className={cn(
-            'group rounded-lg border bg-canvas-base/20 transition-colors',
-            pendingRemove ? 'border-rose-500/40' : 'border-glass-border/60 hover:border-glass-border',
+            'group rounded-xl border bg-canvas-base/30 transition-all',
+            pendingRemove ? 'border-rose-500/40'
+                : isPendingNew ? 'border-emerald-500/40'
+                    : 'border-glass-border/60 hover:border-accent-lineage/30 hover:bg-canvas-base/50 hover:shadow-[0_2px_12px_-6px_rgba(99,102,241,0.4)]',
         )}>
-            <div className="px-3 py-2">
-                <div className="flex items-center gap-2">
-                    {!isPendingNew && (
-                        <button
-                            type="button"
-                            onClick={() => setExpanded((v) => !v)}
-                            title="Show usage & values"
-                            className="shrink-0 inline-flex items-center justify-center w-4 h-4 text-ink-muted/70 hover:text-ink"
-                        >
-                            <ChevronRight className={cn('w-3.5 h-3.5 transition-transform', expanded && 'rotate-90')} />
-                        </button>
-                    )}
-                    <span className={cn('font-mono text-[12px] truncate', pendingRemove ? 'text-rose-300 line-through' : 'text-ink')} title={propertyKey}>
-                        {propertyKey}
-                    </span>
-                    {valueType && <TypeBadge type={valueType} />}
-                    {isPendingNew && <PendingBadge label="new" tone="emerald" />}
-                    {overlay && !isPendingNew && (
-                        <PendingBadge
-                            label={pendingRemove ? 'remove' : overlay.kinds.has('rename') ? 'rename' : 'edit'}
-                            tone={pendingRemove ? 'rose' : 'amber'}
-                        />
-                    )}
-                    <div className="ml-auto shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} />
-                        <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger />
-                        <RowAction icon={<Plus className="w-3 h-3" />} label="Rule" onClick={onCreateRule} />
+            <div
+                role={isPendingNew ? undefined : 'button'}
+                tabIndex={isPendingNew ? undefined : 0}
+                onClick={toggle}
+                onKeyDown={(e) => { if (!isPendingNew && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggle() } }}
+                className={cn('flex items-start gap-2.5 px-3 py-2.5', !isPendingNew && 'cursor-pointer')}
+            >
+                <TypeTile type={valueType} accent={accent} />
+                <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                    {/* Title */}
+                    <div className="flex items-center gap-2">
+                        <span className={cn('font-mono text-[12.5px] truncate', pendingRemove ? 'text-rose-300 line-through' : 'text-ink')} title={propertyKey}>
+                            {propertyKey}
+                        </span>
+                        {isPendingNew && <PendingBadge label="new" tone="emerald" />}
+                        {overlay && !isPendingNew && (
+                            <PendingBadge
+                                label={pendingRemove ? 'remove' : overlay.kinds.has('rename') ? 'rename' : 'edit'}
+                                tone={pendingRemove ? 'rose' : 'amber'}
+                            />
+                        )}
+                        <div className="ml-auto shrink-0 flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <RowAction icon={<Pencil className="w-3 h-3" />} label="Update" onClick={onUpdate} />
+                                <RowAction icon={<Trash2 className="w-3 h-3" />} label="Remove" onClick={onRemove} danger />
+                                <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
+                            </div>
+                            {!isPendingNew && (
+                                <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform', expanded && 'rotate-90')} />
+                            )}
+                        </div>
                     </div>
-                </div>
 
-                {usedBy.length > 0 && (
-                    <div className="mt-1 pl-6 text-[10px] text-ink-muted/80 truncate">Used by: {usedBy.join(', ')}</div>
-                )}
-                {sampleText.length > 0 && (
-                    <div className="mt-1 pl-6 flex flex-wrap gap-1">
-                        {sampleText.map((v, i) => (
-                            <span key={i} className="px-1.5 py-0.5 rounded bg-glass/40 text-[10px] text-ink-muted font-mono truncate max-w-[140px]" title={v}>{v}</span>
-                        ))}
-                    </div>
-                )}
+                    {/* Used by */}
+                    {usedBy.length > 0 && (
+                        <div className="flex items-center gap-1.5 text-[10px] text-ink-muted/80 min-w-0">
+                            <span className="shrink-0">Used by</span>
+                            <EntityTypeChips types={usedBy} />
+                        </div>
+                    )}
+
+                    {/* Sample values */}
+                    {sampleText.length > 0 && <SampleValueChips values={sampleText} />}
+                    {isPendingNew && stagedValue !== undefined && stagedValue !== '' && (
+                        <SampleValueChips values={[stagedValue]} />
+                    )}
+                </div>
             </div>
 
             {expanded && !isPendingNew && (
-                <div className="px-3 pb-2.5 pl-9 border-t border-glass-border/40 pt-2 flex flex-col gap-2.5">
-                    {/* Usage */}
+                <div className="px-3 pb-2.5 pl-[3.25rem] border-t border-glass-border/40 pt-2 flex flex-col gap-2.5">
                     {usage.loading ? (
                         <Skel label="Counting usage…" />
                     ) : usage.error ? (
@@ -479,8 +495,6 @@ function PropertyRow({
                     ) : usage.data ? (
                         <UsageBreakdown total={usage.data.total} byEntityType={usage.data.byEntityType} />
                     ) : null}
-
-                    {/* Value distribution */}
                     {dist.loading ? (
                         <Skel label="Analysing values…" />
                     ) : dist.data && dist.data.values.length > 0 ? (
@@ -536,20 +550,6 @@ function ValueDistributionView({ values, truncated }: { values: { value: string;
                 ))}
             </div>
         </div>
-    )
-}
-
-const TYPE_TONES: Record<NonNullable<ValueType>, string> = {
-    string: 'bg-sky-500/12 text-sky-300 border-sky-500/25',
-    number: 'bg-violet-500/12 text-violet-300 border-violet-500/25',
-    boolean: 'bg-emerald-500/12 text-emerald-300 border-emerald-500/25',
-}
-
-function TypeBadge({ type }: { type: NonNullable<ValueType> }) {
-    return (
-        <span className={cn('shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold border', TYPE_TONES[type])} title={`Inferred type: ${type}`}>
-            {type === 'string' ? 'str' : type === 'number' ? 'num' : 'bool'}
-        </span>
     )
 }
 
