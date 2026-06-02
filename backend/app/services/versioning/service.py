@@ -32,6 +32,7 @@ from .changeset import Delta, materialize, net_delta, diff_states
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
+from .merkle_store import MerkleStore
 from .models import (
     BranchORM,
     CommitORM,
@@ -79,6 +80,7 @@ class GraphVersioningService:
 
     def __init__(self, session_factory=db.graphver_session):
         self._session = session_factory
+        self._merkle = MerkleStore()
 
     # ------------------------------------------------------------------ #
     # Graph + branch lifecycle                                            #
@@ -362,8 +364,8 @@ class GraphVersioningService:
 
             main.head_commit_id = squash.id
             graph.main_head_commit_seq = new_seq       # advance head before merkle
+            squash.merkle_root = await self._commit_merkle(s, graph_id, main_id, squash, deltas)
             graph.updated_at = _now()
-            squash.merkle_root = await self._merkle_root(s, graph_id, main_id)
             squash.stats = _delta_stats(deltas)
             draft.status = "merged"
             draft.base_commit_seq = new_seq            # rebased onto new main
@@ -554,7 +556,7 @@ class GraphVersioningService:
             main.head_commit_id = squash.id
             parent.main_head_commit_seq = new_seq      # advance head before merkle
             parent.updated_at = _now()
-            squash.merkle_root = await self._merkle_root(s, parent.id, parent_main)
+            squash.merkle_root = await self._commit_merkle(s, parent.id, parent_main, squash, deltas)
             squash.stats = _delta_stats(deltas)
 
             pr.status = "merged"
@@ -960,10 +962,26 @@ class GraphVersioningService:
         return out
 
     async def _merkle_root(self, s, graph_id: str, branch_id: str) -> str:
-        """Merkle root over a branch's full live state (fork-aware)."""
+        """Merkle root over a branch's full live state (fork-aware) — the O(graph)
+        full build, used for draft checkpoints and fork mains (cross-branch CoW is
+        a later step)."""
         state = await self._composed_state(s, graph_id, branch_id)
         live = {eid: content_hash(p) for eid, p in state.items() if p is not None}
         return MerkleTree.build(live).root
+
+    async def _commit_merkle(self, s, graph_id: str, branch_id: str, commit, deltas: List[Delta]) -> str:
+        """Merkle root for a commit. For a **non-fork `main`** (linear, long-lived)
+        this is the incremental persisted CoW build — O(changed·depth), writing
+        only changed-path rows. Forks fall back to the full build."""
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            return await self._merkle_root(s, graph_id, branch_id)
+        changes: Dict[str, Optional[str]] = {
+            d.entity_id: (None if d.op == "delete" else d.content_hash) for d in deltas
+        }
+        return await self._merkle.commit_tree(
+            s, graph_id, branch_id, commit.id, commit.commit_seq, changes
+        )
 
     async def _write_deltas(
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor

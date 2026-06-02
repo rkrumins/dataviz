@@ -423,20 +423,25 @@ class EntityHeadORM(VersioningBase):
 
 class MerkleNodeORM(VersioningBase):
     """Hierarchical CoW Merkle tree nodes per commit (only changed buckets are
-    materialised; unchanged subtrees inherited from the parent commit)."""
+    materialised; unchanged subtrees inherited from earlier commits via the
+    ``(graph_id, branch_id, path, commit_seq)`` as-of index)."""
 
     __tablename__ = "merkle_nodes"
 
     graph_id = Column(Text, nullable=False)
+    branch_id = Column(Text, nullable=False)
     commit_id = Column(Text, nullable=False)
+    commit_seq = Column(BigInteger, nullable=False)
     path = Column(Text, nullable=False)                   # "" = root, else "a/3/.."
     level = Column(Integer, nullable=False)
     hash = Column(Text, nullable=False)
+    bucket = Column(JSONB, nullable=True)                 # leaf only: {entity_id: content_hash}
     child_count = Column(Integer, nullable=True)
 
     __table_args__ = _partitioned(
         PrimaryKeyConstraint("graph_id", "commit_id", "path", name="pk_merkle_nodes"),
         Index("ix_merkle_commit", "graph_id", "commit_id"),
+        Index("ix_merkle_asof", "graph_id", "branch_id", "path", "commit_seq"),
     )
 
 

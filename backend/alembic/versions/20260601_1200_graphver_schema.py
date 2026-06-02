@@ -46,6 +46,18 @@ def upgrade() -> None:
     # Parent tables (partitioned parents declare ``postgresql_partition_by``, so
     # this emits the PARTITION BY clause); checkfirst skips anything present.
     VersioningBase.metadata.create_all(bind=bind, checkfirst=True)
+    # merkle_nodes grew branch_id/commit_seq/bucket + an as-of index after its
+    # first cut (persisted CoW Merkle). create_all(checkfirst) won't alter an
+    # existing table, so add idempotently for DBs the dev bootstrap created
+    # earlier (the table was unused, so no backfill needed).
+    mn = f'"{schema}"."merkle_nodes"'
+    bind.execute(sa.text(f'ALTER TABLE {mn} ADD COLUMN IF NOT EXISTS branch_id text'))
+    bind.execute(sa.text(f'ALTER TABLE {mn} ADD COLUMN IF NOT EXISTS commit_seq bigint'))
+    bind.execute(sa.text(f'ALTER TABLE {mn} ADD COLUMN IF NOT EXISTS bucket jsonb'))
+    bind.execute(sa.text(
+        f'CREATE INDEX IF NOT EXISTS ix_merkle_asof ON {mn} '
+        f'(graph_id, branch_id, path, commit_seq)'
+    ))
     # Child hash partitions for the high-cardinality append-only tables.
     n = gv_config.PARTITIONS
     for tname in PARTITIONED_TABLES:
