@@ -985,6 +985,30 @@ class GraphVersioningService:
                 for r in rows
             ]
 
+    @staticmethod
+    def _commit_meta(c: "CommitORM") -> dict:
+        return {
+            "commit_id": c.id, "commit_seq": c.commit_seq,
+            "parent_commit_id": c.parent_commit_id, "kind": c.kind,
+            "message": c.message, "actor": c.actor, "contributors": c.contributors,
+            "source_branch_id": c.source_branch_id,
+            "source_commit_count": c.source_commit_count,
+            "merkle_root": c.merkle_root, "stats": c.stats, "created_at": c.created_at,
+        }
+
+    async def commit_log(
+        self, *, graph_id: str, limit: int = 100, offset: int = 0,
+    ) -> List[dict]:
+        """Newest-first commit log for a graph's ``main`` branch (plan §7). A fork's
+        log holds only its own divergence — inherited history lives on the parent."""
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            rows = (await s.execute(
+                select(CommitORM).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                ).order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
+            )).scalars().all()
+            return [self._commit_meta(r) for r in rows]
     async def diff_commits(
         self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int
     ) -> Dict[str, object]:

@@ -279,6 +279,10 @@ class EntityHistoryResponse(_ApiModel):
     versions: List[dict]
 
 
+class CommitLogResponse(_ApiModel):
+    commits: List[dict]
+
+
 class DiffResponse(_ApiModel):
     added: List[str]
     removed: List[str]
@@ -515,6 +519,18 @@ async def get_entity_history(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     return {"entity_id": entity_id, "versions": await svc.entity_history(graph_id=graph_id, entity_id=entity_id)}
+
+
+@router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)
+async def get_commit_log(
+    ws_id: str, graph_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    return {"commits": await svc.commit_log(graph_id=graph_id, limit=limit, offset=offset)}
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff", response_model=DiffResponse)
