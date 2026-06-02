@@ -4,7 +4,8 @@
  * the usage gauge (coverage % of view + per-type bars).
  */
 import { render, screen } from '@testing-library/react'
-import { describe, it, expect } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, it, expect, vi } from 'vitest'
 
 import { AnimatedNumber, RankedValueBars, UsageGauge } from '../PropertyInsightCharts'
 
@@ -26,6 +27,14 @@ describe('RankedValueBars', () => {
         expect(screen.getByText('1,234')).toBeInTheDocument()       // toLocaleString
         expect(screen.getByText('82%')).toBeInTheDocument()         // 1234/1500
         expect(screen.queryByText('dev')).not.toBeInTheDocument()   // capped at 2
+    })
+
+    it('becomes clickable when onItemClick is set and fires with the item', async () => {
+        const user = userEvent.setup()
+        const onItemClick = vi.fn()
+        render(<RankedValueBars items={[{ label: 'prod', count: 10 }]} total={10} onItemClick={onItemClick} />)
+        await user.click(screen.getByRole('button', { name: /prod/i }))
+        expect(onItemClick).toHaveBeenCalledWith({ label: 'prod', count: 10 })
     })
 })
 

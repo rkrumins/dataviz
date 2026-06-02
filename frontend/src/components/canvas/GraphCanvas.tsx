@@ -89,6 +89,7 @@ import {
   useViewSchemaIsReady,
 } from '@/hooks/useViewSchema'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
+import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
 
@@ -1551,6 +1552,10 @@ export function GraphCanvas({ className }: { className?: string }) {
             open={propertyManagerOpen}
             onClose={() => setPropertyManagerOpen(false)}
             knownEntityTypes={schemaEntityTypes.map((et) => et.id)}
+            onSearchPredicate={(p) => {
+              useSearchStore.getState().requestSearchRun(p)
+              setAdvancedSearchOpen(true)
+            }}
           />
         )}
       </AnimatePresence>

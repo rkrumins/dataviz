@@ -5,7 +5,7 @@
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 
 import { EntityTypeChips, SampleValueChips } from '../PropertyValueChips'
 
@@ -40,6 +40,23 @@ describe('SampleValueChips', () => {
     it('renders nothing when there are no values', () => {
         const { container } = render(<SampleValueChips values={[]} />)
         expect(container).toBeEmptyDOMElement()
+    })
+})
+
+
+describe('SampleValueChips — clickable', () => {
+    it('fires onValueClick per chip and does NOT bubble to an enclosing handler', async () => {
+        const user = userEvent.setup()
+        const onValueClick = vi.fn()
+        const onParent = vi.fn()
+        render(
+            <div onClick={onParent}>
+                <SampleValueChips values={['balance', 'city']} onValueClick={onValueClick} />
+            </div>,
+        )
+        await user.click(screen.getByRole('button', { name: 'balance' }))
+        expect(onValueClick).toHaveBeenCalledWith('balance')
+        expect(onParent).not.toHaveBeenCalled()   // stopPropagation
     })
 })
 

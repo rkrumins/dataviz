@@ -2243,6 +2243,10 @@ export function ContextViewCanvas({
           onClose={() => setPropertyManagerOpen(false)}
           knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
           knownLayers={storeLayers.map((l) => l.name)}
+          onSearchPredicate={(p) => {
+            useSearchStore.getState().requestSearchRun(p)
+            setAdvancedSearchOpen(true)
+          }}
         />
       </AnimatePresence>
       </div>{/* end flex-row wrapper */}

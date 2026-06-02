@@ -8,6 +8,7 @@
  * that file) and reuses `CoverageRing` from the onboarding wizard.
  */
 import { animate, motion, useMotionValue, useTransform } from 'framer-motion'
+import { ScanSearch } from 'lucide-react'
 import { useEffect } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -39,13 +40,15 @@ export interface RankedItem { label: string; count: number }
  * label's entity-type identity; otherwise the accent gradient.
  */
 export function RankedValueBars({
-    items, total, limit = 6, colorByEntityType = false, showPct = true,
+    items, total, limit = 6, colorByEntityType = false, showPct = true, onItemClick,
 }: {
     items: RankedItem[]
     total: number
     limit?: number
     colorByEntityType?: boolean
     showPct?: boolean
+    /** When set, each row becomes a button that searches for the item. */
+    onItemClick?: (item: RankedItem) => void
 }) {
     const shown = items.slice(0, limit)
     const max = Math.max(...shown.map((i) => i.count), 1)
@@ -57,9 +60,27 @@ export function RankedValueBars({
                     ? entityTypeStyle(it.label).bar
                     : 'from-accent-lineage/70 to-accent-lineage'
                 const pct = total > 0 ? Math.round((it.count / total) * 100) : 0
+                const clickable = !!onItemClick
+                const RowTag = clickable ? 'button' : 'div'
                 return (
-                    <div key={`${it.label}-${idx}`} className="flex items-center gap-2 text-[11px]">
-                        <span className="w-24 shrink-0 truncate font-mono text-ink-secondary" title={it.label || '∅'}>
+                    <RowTag
+                        key={`${it.label}-${idx}`}
+                        {...(clickable
+                            ? {
+                                type: 'button' as const,
+                                onClick: () => onItemClick!(it),
+                                title: `Search ${it.label || '∅'} in Advanced Search`,
+                            }
+                            : {})}
+                        className={cn(
+                            'group/bar flex items-center gap-2 text-[11px] w-full text-left rounded-md',
+                            clickable && 'cursor-pointer -mx-1 px-1 py-0.5 hover:bg-accent-lineage/[0.07] transition-colors',
+                        )}
+                    >
+                        <span className={cn(
+                            'w-24 shrink-0 truncate font-mono text-ink-secondary',
+                            clickable && 'group-hover/bar:text-accent-lineage transition-colors',
+                        )} title={it.label || '∅'}>
                             {it.label || '∅'}
                         </span>
                         <div className="flex-1 h-2 rounded-full bg-black/[0.05] dark:bg-white/[0.06] overflow-hidden">
@@ -70,13 +91,16 @@ export function RankedValueBars({
                                 className={cn('h-full rounded-full bg-gradient-to-r shadow-sm', grad)}
                             />
                         </div>
+                        {clickable && (
+                            <ScanSearch className="w-3 h-3 shrink-0 text-accent-lineage opacity-0 group-hover/bar:opacity-100 transition-opacity" />
+                        )}
                         <span className="w-12 shrink-0 text-right tabular-nums text-ink font-medium">
                             {it.count.toLocaleString()}
                         </span>
                         {showPct && (
                             <span className="w-9 shrink-0 text-right tabular-nums text-ink-muted/70">{pct}%</span>
                         )}
-                    </div>
+                    </RowTag>
                 )
             })}
         </div>
@@ -89,11 +113,13 @@ export function RankedValueBars({
  * the key) + an animated headline count + a per-entity-type ranked bar set.
  */
 export function UsageGauge({
-    total, viewTotal, byEntityType,
+    total, viewTotal, byEntityType, onTypeClick,
 }: {
     total: number
     viewTotal: number
     byEntityType: { type: string; count: number }[]
+    /** When set, clicking a per-type bar searches that type. */
+    onTypeClick?: (type: string) => void
 }) {
     const pct = viewTotal > 0 ? Math.min(100, Math.round((total / viewTotal) * 100)) : 100
     return (
@@ -120,6 +146,7 @@ export function UsageGauge({
                     total={total}
                     colorByEntityType
                     showPct={false}
+                    onItemClick={onTypeClick ? (it) => onTypeClick(it.label) : undefined}
                 />
             )}
         </div>

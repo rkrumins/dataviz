@@ -43,6 +43,10 @@ export interface PropertyManagerDrawerProps {
     knownEntityTypes?: string[]
     /** Layer names from the view config (for the criteria builder). */
     knownLayers?: string[]
+    /** Open the Advanced Search panel seeded + run with a predicate
+     *  (the canvas owns the panel open-state). Powers the Properties
+     *  tab's value clicks / quick actions. */
+    onSearchPredicate?: (predicate: Predicate) => void
 }
 
 type Tab = 'properties' | 'rules'
@@ -55,7 +59,7 @@ type EditorState =
 
 
 export function PropertyManagerDrawer({
-    viewId, open, onClose, knownEntityTypes = [], knownLayers = [],
+    viewId, open, onClose, knownEntityTypes = [], knownLayers = [], onSearchPredicate,
 }: PropertyManagerDrawerProps) {
     const [tab, setTab] = useState<Tab>('rules')
     const [editor, setEditor] = useState<EditorState>({ mode: 'closed' })
@@ -203,6 +207,7 @@ export function PropertyManagerDrawer({
                                     knownEntityTypes={knownEntityTypes}
                                     knownLayers={knownLayers}
                                     onCreateRuleFromPredicate={handleCreateFromPredicate}
+                                    onSearchPredicate={onSearchPredicate}
                                 />
                             )}
                             {tab === 'rules' && (

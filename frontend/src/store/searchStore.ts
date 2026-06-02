@@ -248,6 +248,15 @@ interface SearchStoreState {
     pendingSearchSeed: string | null
 
     /**
+     * A predicate handed to the Advanced Search panel from OUTSIDE it
+     * (e.g. the Property Manager's value clicks / quick actions). The
+     * panel consumes it on mount/change and runs it through the real
+     * search engine, so an external surface can "open + seed + run"
+     * without owning the run pipeline. Cleared on consume.
+     */
+    pendingRunPredicate: Predicate | null
+
+    /**
      * Scope mode for the next search run.
      *
      *   visible    — Only URNs currently rendered on the canvas. Fast
@@ -394,6 +403,12 @@ interface SearchStoreActions {
      *  (or ``null``) and resets the field in the same set so the
      *  seed cannot be replayed by a second consumer. */
     consumePendingSearchSeed: () => string | null
+    /** Load a predicate into the builder AND request the panel run it —
+     *  the "open in Advanced Search + run" bridge used by the Property
+     *  Manager. The caller also opens the panel. */
+    requestSearchRun: (predicate: Predicate) => void
+    /** Atomic read-and-clear of the pending run predicate (panel-side). */
+    consumePendingRun: () => Predicate | null
     /** Persist the scope mode chosen by the user in the panel header.
      *  Applies to every subsequent run until changed. */
     setScopeMode: (mode: 'visible' | 'view' | 'data_source') => void
@@ -590,6 +605,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingSearchSeed: null,
+    pendingRunPredicate: null,
     // Default to 'view' — searches the full descendant set of the
     // view's top-level containers, including subtrees that haven't
     // been expanded yet. Matches the user's "search this view"
@@ -807,6 +823,19 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     consumePendingSearchSeed: () => {
         const current = get().pendingSearchSeed
         if (current !== null) set({ pendingSearchSeed: null })
+        return current
+    },
+
+    requestSearchRun: (predicate) => {
+        // Load into the builder (history-aware, so the user sees + can
+        // edit/undo it), then flag the panel to run it.
+        get().commitDraft(predicate)
+        set({ pendingRunPredicate: predicate })
+    },
+
+    consumePendingRun: () => {
+        const current = get().pendingRunPredicate
+        if (current !== null) set({ pendingRunPredicate: null })
         return current
     },
 

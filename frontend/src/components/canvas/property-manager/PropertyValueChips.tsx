@@ -42,22 +42,41 @@ export function TypeTile({ type, accent }: { type: ValueType; accent?: 'emerald'
  * Readable sample-value chips with an inline "+N" expand. Clicks
  * stopPropagation so expanding values never toggles an enclosing row.
  */
-export function SampleValueChips({ values, max = 4 }: { values: string[]; max?: number }) {
+export function SampleValueChips({
+    values, max = 4, onValueClick,
+}: {
+    values: string[]
+    max?: number
+    /** When set, each chip becomes a button that searches for the value
+     *  (stops propagation so it doesn't toggle an enclosing card). */
+    onValueClick?: (value: string) => void
+}) {
     const [expanded, setExpanded] = useState(false)
     if (values.length === 0) return null
     const shown = expanded ? values : values.slice(0, max)
     const rest = values.length - max
+    const chipBase = 'inline-flex items-center px-2 py-[3px] rounded-md text-[10.5px] font-mono bg-black/[0.04] dark:bg-white/[0.05] text-ink-secondary max-w-[170px] truncate transition-colors'
     return (
         <div className="flex flex-wrap items-center gap-1">
-            {shown.map((v, i) => (
+            {shown.map((v, i) => (onValueClick ? (
+                <button
+                    key={`${v}-${i}`}
+                    type="button"
+                    title={`Search ${v} in Advanced Search`}
+                    onClick={(e) => { e.stopPropagation(); onValueClick(v) }}
+                    className={cn(chipBase, 'hover:bg-accent-lineage/15 hover:text-accent-lineage cursor-pointer')}
+                >
+                    {v}
+                </button>
+            ) : (
                 <span
                     key={`${v}-${i}`}
                     title={v}
-                    className="inline-flex items-center px-2 py-[3px] rounded-md text-[10.5px] font-mono bg-black/[0.04] dark:bg-white/[0.05] text-ink-secondary max-w-[170px] truncate hover:bg-black/[0.07] dark:hover:bg-white/[0.08] transition-colors"
+                    className={cn(chipBase, 'hover:bg-black/[0.07] dark:hover:bg-white/[0.08]')}
                 >
                     {v}
                 </span>
-            ))}
+            )))}
             {!expanded && rest > 0 && (
                 <button
                     type="button"

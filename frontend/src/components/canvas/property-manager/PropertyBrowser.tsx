@@ -11,12 +11,13 @@
  */
 import { motion } from 'framer-motion'
 import {
-    ArrowDownWideNarrow, ChevronRight, Database, Layers, Loader2, Pencil, Plus,
-    Search, Sparkles, Tag, Trash2, Undo2,
+    ArrowDownWideNarrow, ChevronRight, CircleSlash, Database, Layers, Loader2, Pencil, Plus,
+    ScanSearch, Search, Sparkles, Tag, Tags, Trash2, Undo2,
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useToast } from '@/components/ui/toast'
 import { usePropertyUsage } from '@/hooks/usePropertyUsage'
 import { useCatalogOverview, useValueDistribution } from '@/hooks/usePropertyInsights'
 import {
@@ -32,7 +33,7 @@ import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyOperationDialog, type PropertyDialogMode } from './PropertyOperationDialog'
 import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
-import { inferType } from './propertyValueTypes'
+import { inferType, type ValueType } from './propertyValueTypes'
 
 
 export interface PropertyBrowserProps {
@@ -40,15 +41,30 @@ export interface PropertyBrowserProps {
     knownEntityTypes: string[]
     knownLayers: string[]
     onCreateRuleFromPredicate: (predicate: Predicate, suggestedName: string) => void
+    /** Open + run a predicate in the Advanced Search panel (canvas-owned). */
+    onSearchPredicate?: (predicate: Predicate) => void
 }
+
+/** A bound "search this in Advanced Search" callback passed to rows. */
+export type SearchHandler = (predicate: Predicate, label: string) => void
 
 type DialogState = { mode: PropertyDialogMode; key?: string } | null
 type SortMode = 'name' | 'coverage'
 
 
 export function PropertyBrowser({
-    viewId, knownEntityTypes, knownLayers, onCreateRuleFromPredicate,
+    viewId, knownEntityTypes, knownLayers, onCreateRuleFromPredicate, onSearchPredicate,
 }: PropertyBrowserProps) {
+    const { showToast } = useToast()
+    // Open + run a constructed predicate in the real Advanced Search panel.
+    const search: SearchHandler | undefined = useMemo(() => {
+        if (!onSearchPredicate) return undefined
+        return (predicate, label) => {
+            onSearchPredicate(predicate)
+            showToast('info', `Searching ${label} in Advanced Search`)
+        }
+    }, [onSearchPredicate, showToast])
+
     const disc = useDiscovery(viewId)
     const { allKeys, keysByEntityType, tagValues, getValueSamples, isInitialLoading, error } = disc
     const [query, setQuery] = useState('')
@@ -221,6 +237,7 @@ export function PropertyBrowser({
                                 key={key}
                                 viewId={viewId}
                                 viewTotal={viewTotal}
+                                onSearch={search}
                                 propertyKey={key}
                                 usedBy={typesByKey[key] ?? []}
                                 samples={getValueSamples(key)}
@@ -407,7 +424,7 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
 // ---------------------------------------------------------------------------
 
 function PropertyRow({
-    viewId, viewTotal = 0, propertyKey, usedBy, samples, overlay, isPendingNew, stagedValue, onUpdate, onRemove, onCreateRule,
+    viewId, viewTotal = 0, propertyKey, usedBy, samples, overlay, isPendingNew, stagedValue, onUpdate, onRemove, onCreateRule, onSearch,
 }: {
     viewId: string
     viewTotal?: number
@@ -420,12 +437,20 @@ function PropertyRow({
     onUpdate: () => void
     onRemove: () => void
     onCreateRule: () => void
+    onSearch?: SearchHandler
 }) {
     const [expanded, setExpanded] = useState(false)
     const usage = usePropertyUsage(viewId, propertyKey, expanded && !isPendingNew)
     const dist = useValueDistribution(viewId, propertyKey, expanded && !isPendingNew)
 
     const valueType = useMemo(() => inferType(samples), [samples])
+    // Build + run a query in Advanced Search for a clicked value / action.
+    const searchValue = onSearch
+        ? (raw: string) => onSearch(
+            { kind: 'property', key: propertyKey, op: 'eq', value: coerceValue(raw, valueType) } as Predicate,
+            `${propertyKey} = ${raw}`,
+        )
+        : undefined
     const sampleText = useMemo(
         () => samples.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).filter((s) => s.length > 0),
         [samples],
@@ -486,7 +511,7 @@ function PropertyRow({
                     )}
 
                     {/* Sample values */}
-                    {sampleText.length > 0 && <SampleValueChips values={sampleText} />}
+                    {sampleText.length > 0 && <SampleValueChips values={sampleText} onValueClick={searchValue} />}
                     {isPendingNew && stagedValue !== undefined && stagedValue !== '' && (
                         <SampleValueChips values={[stagedValue]} />
                     )}
@@ -495,13 +520,49 @@ function PropertyRow({
 
             {expanded && !isPendingNew && (
                 <div className="px-4 pb-3.5 pl-[3.75rem] border-t border-glass-border/40 pt-3 flex flex-col gap-4">
+                    {/* Quick actions — construct + run a query in Advanced Search,
+                        or tag matches as a display rule. */}
+                    <div className="flex flex-wrap gap-2">
+                        {onSearch && (
+                            <>
+                                <QuickActionCard
+                                    icon={<ScanSearch className="w-3.5 h-3.5" />}
+                                    label="Find all using this"
+                                    onClick={() => onSearch({ kind: 'hasProperty', key: propertyKey, negate: false } as Predicate, `entities using ${propertyKey}`)}
+                                />
+                                <QuickActionCard
+                                    icon={<CircleSlash className="w-3.5 h-3.5" />}
+                                    label="Find missing this"
+                                    onClick={() => onSearch({ kind: 'hasProperty', key: propertyKey, negate: true } as Predicate, `entities missing ${propertyKey}`)}
+                                />
+                            </>
+                        )}
+                        <QuickActionCard
+                            icon={<Tags className="w-3.5 h-3.5" />}
+                            label="Tag matches as rule"
+                            tone="accent"
+                            onClick={onCreateRule}
+                        />
+                    </div>
+
                     {/* Usage gauge */}
                     {usage.loading ? (
                         <Skel label="Counting usage…" />
                     ) : usage.error ? (
                         <span className="text-[11px] text-rose-400">Couldn't load usage — {usage.error}</span>
                     ) : usage.data ? (
-                        <UsageGauge total={usage.data.total} viewTotal={viewTotal} byEntityType={usage.data.byEntityType} />
+                        <UsageGauge
+                            total={usage.data.total}
+                            viewTotal={viewTotal}
+                            byEntityType={usage.data.byEntityType}
+                            onTypeClick={onSearch ? (type) => onSearch(
+                                { kind: 'group', op: 'and', children: [
+                                    { kind: 'hasProperty', key: propertyKey, negate: false },
+                                    { kind: 'entityType', op: 'in', values: [type] },
+                                ] } as Predicate,
+                                `${propertyKey} on ${type}`,
+                            ) : undefined}
+                        />
                     ) : null}
 
                     {/* Top values */}
@@ -515,6 +576,7 @@ function PropertyRow({
                             <RankedValueBars
                                 items={dist.data.values.map((v) => ({ label: v.value, count: v.count }))}
                                 total={usage.data?.total ?? dist.data.values.reduce((s, v) => s + v.count, 0)}
+                                onItemClick={searchValue ? (it) => searchValue(it.label) : undefined}
                             />
                         </div>
                     ) : null}
@@ -557,6 +619,41 @@ function RowAction({ icon, label, onClick, danger }: { icon: React.ReactNode; la
             )}
         >
             {icon}
+        </button>
+    )
+}
+
+
+/** Coerce a string sample value to its inferred type for `property = value`. */
+function coerceValue(raw: string, type: ValueType): string | number | boolean {
+    if (type === 'number') { const n = Number(raw); return Number.isFinite(n) ? n : raw }
+    if (type === 'boolean') return raw === 'true'
+    return raw
+}
+
+
+/** Premium quick-action card in a property's expanded panel. */
+function QuickActionCard({
+    icon, label, onClick, tone,
+}: {
+    icon: React.ReactNode
+    label: string
+    onClick: () => void
+    tone?: 'accent'
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className={cn(
+                'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-[11px] font-medium transition-all',
+                tone === 'accent'
+                    ? 'border-accent-lineage/30 bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20'
+                    : 'border-glass-border/60 bg-canvas-base/30 text-ink-secondary hover:text-ink hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.06]',
+            )}
+        >
+            {icon}
+            {label}
         </button>
     )
 }

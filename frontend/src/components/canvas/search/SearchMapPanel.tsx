@@ -186,6 +186,18 @@ function PanelInner({
         setCanvasFilterMode(persisted, viewId)
     }, [viewId, setCanvasFilterMode])
 
+    // "Open in Advanced Search + run" bridge: an external surface (the
+    // Property Manager value clicks / quick actions) seeds the draft and
+    // sets ``pendingRunPredicate``; the panel consumes it on mount/change
+    // and runs it through the real engine — regardless of run mode — so
+    // the constructed query executes once and spotlights the matches.
+    const pendingRunPredicate = useSearchStore((s) => s.pendingRunPredicate)
+    useEffect(() => {
+        if (!pendingRunPredicate) return
+        const p = useSearchStore.getState().consumePendingRun()
+        if (p) void runPredicate(p, { results: 'hits', pageSize: 5000, includeAncestorPath: true })
+    }, [pendingRunPredicate, runPredicate])
+
     // Count of options that differ from defaults — drives the badge
     // on the Options toolbar chip. Power-user-tuned queries get a
     // visible "someone has set non-default options here" signal
