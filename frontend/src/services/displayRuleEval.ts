@@ -30,10 +30,21 @@ import { computeViewRootUrns } from '@/components/canvas/search/panel/useCanvasV
 /** Backend default scope-root cap (DEEP_SEARCH_SCOPE_ROOT_URNS_CAP). */
 const SAFE_ROOT_URN_CAP = 256
 
-/** Page size for rule evaluation. Display rules want the FULL match set
- *  for the tag overlay, so we ask for a large page in one round-trip
- *  rather than paginating. Bounded by the backend candidate cap. */
-const RULE_PAGE_SIZE = 1000
+/** Page size for rule evaluation — the backend max (5000), so the common
+ *  case (≤5000 matches) needs a single round-trip and larger sets paginate
+ *  in as few pages as possible. */
+const RULE_PAGE_SIZE = 5000
+
+/** Per-request candidate-scan ceiling for rule evaluation. The default
+ *  deployment cap is only 10k; display rules must tag the WHOLE view-scoped
+ *  match set, so we raise it to the backend max (DEEP_SEARCH_CANDIDATE_CAP_MAX,
+ *  default 100k). Cost is proportional to ACTUAL matches, so small rules stay
+ *  cheap; beyond this ceiling tagging is necessarily partial. */
+const RULE_CANDIDATE_CAP = 100_000
+
+/** Safety guard on the pagination loop (RULE_CANDIDATE_CAP / RULE_PAGE_SIZE
+ *  rounded up, with headroom) so a misbehaving cursor can't spin forever. */
+const MAX_RULE_PAGES = 25
 
 
 /** Collect every matched node URN from a result page. Mirrors
@@ -115,15 +126,22 @@ function buildRuleQuery(viewId: string, predicate: Predicate): SearchQuery {
     return buildViewScopedQuery(viewId, predicate, {
         results: 'hits',
         pageSize: RULE_PAGE_SIZE,
+        candidateCap: RULE_CANDIDATE_CAP,
         includeAncestorPath: false,
     })
 }
 
 
 /**
- * Evaluate a single display-rule predicate and return matching node
- * URNs. Resolves to ``[]`` when the active provider isn't the remote
- * backend (advanced search only works against the live API).
+ * Evaluate a single display-rule predicate and return EVERY matching node
+ * URN in the view scope. Resolves to ``[]`` when the active provider isn't
+ * the remote backend (advanced search only works against the live API).
+ *
+ * Cursor-paginates the full result set: the backend returns at most
+ * ``pageSize`` hits per call plus a ``cursor`` when more remain, so a rule
+ * matching more than one page would otherwise tag only the first page.
+ * We loop until the cursor is exhausted (or the safety guard fires),
+ * deduping URNs, so every matched node gets its chip — not just the first.
  */
 export async function evaluateDisplayRule(
     provider: GraphDataProvider,
@@ -133,8 +151,22 @@ export async function evaluateDisplayRule(
 ): Promise<string[]> {
     if (!(provider instanceof RemoteGraphProvider)) return []
     if (!viewId) return []
-    const query = buildRuleQuery(viewId, predicate)
-    const result = await provider.searchAdvanced(query)
     if (signal?.aborted) return []
-    return collectMatchUrns(result)
+
+    const base = buildRuleQuery(viewId, predicate)
+    const seen = new Set<string>()
+    let cursor: string | undefined
+
+    for (let page = 0; page < MAX_RULE_PAGES; page++) {
+        const query: SearchQuery = cursor
+            ? { ...base, options: { ...base.options, cursor } }
+            : base
+        const result = await provider.searchAdvanced(query)
+        if (signal?.aborted) return []
+        for (const urn of collectMatchUrns(result)) seen.add(urn)
+        cursor = result.cursor ?? undefined
+        if (!cursor) break
+    }
+
+    return [...seen]
 }

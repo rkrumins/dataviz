@@ -125,4 +125,40 @@ describe('evaluateDisplayRule', () => {
         const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE)
         expect(urns).toContain('urn:c')
     })
+
+    it('cursor-paginates and unions every page (not just the first)', async () => {
+        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
+        const calls: SearchQuery[] = []
+        vi.spyOn(provider, 'searchAdvanced').mockImplementation(async (q: SearchQuery) => {
+            calls.push(q)
+            if (!q.options?.cursor) {
+                return makeResult({
+                    hits: [{ node: { urn: 'urn:a' } } as never, { node: { urn: 'urn:b' } } as never],
+                    cursor: 'c1',
+                })
+            }
+            return makeResult({ hits: [{ node: { urn: 'urn:c' } } as never], cursor: null })
+        })
+
+        const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE)
+
+        // Full union across both pages — the bug was tagging only page 1.
+        expect([...urns].sort()).toEqual(['urn:a', 'urn:b', 'urn:c'])
+        expect(calls).toHaveLength(2)
+        // Page 1 requests the max page size + a raised candidate cap.
+        expect(calls[0].options?.pageSize).toBe(5000)
+        expect(calls[0].options?.candidateCap).toBe(100000)
+        // Page 2 carries the cursor from page 1.
+        expect(calls[1].options?.cursor).toBe('c1')
+    })
+
+    it('returns [] without scanning when the signal is already aborted', async () => {
+        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
+        const spy = vi.spyOn(provider, 'searchAdvanced')
+        const ac = new AbortController()
+        ac.abort()
+        const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE, ac.signal)
+        expect(urns).toEqual([])
+        expect(spy).not.toHaveBeenCalled()
+    })
 })
