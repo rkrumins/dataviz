@@ -311,6 +311,7 @@ class CommitORM(VersioningBase):
     source_commit_count = Column(Integer, nullable=True)
     stats = Column(JSONB, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
+    idempotency_key = Column(Text, nullable=True)         # dedup bulk ingest / client retries
 
     __table_args__ = _partitioned(
         PrimaryKeyConstraint("graph_id", "id", name="pk_commits"),
@@ -318,6 +319,7 @@ class CommitORM(VersioningBase):
             "graph_id", "branch_id", "commit_seq", name="uq_commits_branch_seq"
         ),
         Index("ix_commits_seq_brin", "commit_seq", postgresql_using="brin"),
+        Index("ix_commits_idem", "graph_id", "idempotency_key"),
         CheckConstraint(
             "kind IN ('genesis','edit','checkpoint','squash_publish','import',"
             "'sync','revert')",

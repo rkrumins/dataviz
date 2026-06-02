@@ -58,6 +58,12 @@ def upgrade() -> None:
         f'CREATE INDEX IF NOT EXISTS ix_merkle_asof ON {mn} '
         f'(graph_id, branch_id, path, commit_seq)'
     ))
+    # commits.idempotency_key (bulk-ingest / retry dedup) — added after first cut.
+    cm = f'"{schema}"."commits"'
+    bind.execute(sa.text(f'ALTER TABLE {cm} ADD COLUMN IF NOT EXISTS idempotency_key text'))
+    bind.execute(sa.text(
+        f'CREATE INDEX IF NOT EXISTS ix_commits_idem ON {cm} (graph_id, idempotency_key)'
+    ))
     # Child hash partitions for the high-cardinality append-only tables.
     n = gv_config.PARTITIONS
     for tname in PARTITIONED_TABLES:

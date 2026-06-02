@@ -22,11 +22,12 @@ Boundary policy
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import contextmanager
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.auth.dependencies import requires
@@ -519,6 +520,49 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
         for row in (getattr(er, "result_set", None) or []):
             edges.append(_edge_from_row(row[0], row[1], row[2], dict(row[3].properties)).model_dump(by_alias=True))
     return {"nodes": nodes, "edges": edges}
+
+
+class BulkIngestResponse(_ApiModel):
+    commit_id: Optional[str] = None
+    commit_seq: Optional[int] = None
+    ingested: int = 0
+    nodes: int = 0
+    edges: int = 0
+    rejected: List[dict] = []
+    idempotent_replay: bool = False
+
+
+@router.post("/graphs/{graph_id}/bulk-ingest", response_model=BulkIngestResponse)
+async def bulk_ingest(
+    ws_id: str, graph_id: str,
+    request: Request,
+    background: BackgroundTasks,
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
+    one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
+    ``idempotencyKey``. (Raw body streams; the object-store upload-URL flow for
+    very large loads plugs in here.)"""
+    rows: List[dict] = []
+    content = await request.body()
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            rows.append({"kind": "__malformed__"})        # rejected by the service
+    with _domain_errors():
+        report = await svc.bulk_ingest(
+            graph_id=graph_id, rows=rows, actor=user.id, idempotency_key=idempotency_key,
+        )
+    if report.get("commit_id"):
+        background.add_task(nudge_projection, graph_id)
+    return report
 
 
 # --------------------------------------------------------------------------- #

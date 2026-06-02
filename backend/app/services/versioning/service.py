@@ -983,6 +983,144 @@ class GraphVersioningService:
             s, graph_id, branch_id, commit.id, commit.commit_seq, changes
         )
 
+    async def bulk_ingest(
+        self, *, graph_id: str, rows, actor: str,
+        idempotency_key: Optional[str] = None, message: str = "bulk import",
+    ) -> Dict[str, object]:
+        """Day-0 / large-delta import (plan §4, §10): validate rows, assign stable
+        entity_ids (urn-keyed for idempotent re-sync), and write ONE ``import``
+        commit on ``main`` via **chunked bulk inserts** — never row-by-row. Invalid
+        rows are skipped and returned in a ``rejected`` report; valid rows still
+        land. Idempotent on ``idempotency_key`` (a retry returns the first commit).
+        """
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+
+            if idempotency_key:
+                prior = await s.scalar(select(CommitORM).where(
+                    CommitORM.graph_id == graph_id,
+                    CommitORM.idempotency_key == idempotency_key,
+                ))
+                if prior is not None:
+                    st = prior.stats or {}
+                    return {"commit_id": prior.id, "commit_seq": prior.commit_seq,
+                            "ingested": st.get("nodes", 0) + st.get("edges", 0),
+                            "rejected": [], "idempotent_replay": True}
+
+            rejected: List[dict] = []
+            node_deltas: List[Delta] = []
+            edge_src: List[tuple] = []
+            urn_to_eid: Dict[str, str] = {}
+
+            for i, row in enumerate(rows):
+                kind = (row or {}).get("kind")
+                if kind == "node":
+                    if not row.get("entityType"):
+                        rejected.append({"row": i, "reason": "node missing entityType"})
+                        continue
+                    eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
+                    payload = {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")}
+                    node_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
+                    if row.get("urn"):
+                        urn_to_eid[row["urn"]] = eid
+                    urn_to_eid.setdefault(row.get("id") or eid, eid)
+                    urn_to_eid[eid] = eid
+                elif kind == "edge":
+                    edge_src.append((i, row))
+                else:
+                    rejected.append({"row": i, "reason": f"unknown kind {kind!r}"})
+
+            edge_deltas: List[Delta] = []
+            for i, row in edge_src:
+                et, src, tgt = row.get("edgeType"), row.get("source"), row.get("target")
+                if not (et and src and tgt):
+                    rejected.append({"row": i, "reason": "edge missing edgeType/source/target"})
+                    continue
+                seid, teid = urn_to_eid.get(src), urn_to_eid.get(tgt)
+                if not (seid and teid):
+                    rejected.append({"row": i, "reason": "edge endpoint not found"})
+                    continue
+                eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
+                payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
+                           **{k: v for k, v in row.items()
+                              if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+                edge_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
+
+            deltas = node_deltas + edge_deltas
+            if not deltas:
+                return {"commit_id": None, "ingested": 0, "rejected": rejected}
+
+            new_seq = graph.main_head_commit_seq + 1
+            main = await s.get(BranchORM, main_id)
+            commit = CommitORM(
+                graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="import", message=message,
+                actor=actor, idempotency_key=idempotency_key,
+                stats={"nodes": len(node_deltas), "edges": len(edge_deltas)},
+            )
+            s.add(commit)
+            await s.flush()
+            await self._bulk_insert_versions(s, graph_id, main_id, commit, node_deltas, edge_deltas, actor)
+            main.head_commit_id = commit.id
+            graph.main_head_commit_seq = new_seq
+            commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
+            graph.updated_at = _now()
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return {"commit_id": commit.id, "commit_seq": new_seq, "ingested": len(deltas),
+                    "nodes": len(node_deltas), "edges": len(edge_deltas), "rejected": rejected}
+
+    async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
+        """Chunked multi-row INSERTs into the version tables + a bulk head upsert
+        (the COPY-style bulk path; never one INSERT per row)."""
+        now = _now()
+        head_rows: List[dict] = []
+        node_dicts: List[dict] = []
+        for d in node_deltas:
+            vid = prefixed_id("nv"); p = d.payload or {}
+            node_dicts.append(dict(
+                graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
+                commit_seq=commit.commit_seq, branch_id=branch_id, op="create",
+                content_hash=d.content_hash, prev_content_hash=None, payload=d.payload,
+                actor=actor, created_at=now, urn=p.get("urn"), entity_type=p.get("entityType"),
+                display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"),
+            ))
+            head_rows.append(dict(graph_id=graph_id, branch_id=branch_id, entity_id=d.entity_id,
+                                  entity_kind="node", head_version_id=vid, content_hash=d.content_hash,
+                                  is_tombstone=False, updated_at=now))
+        edge_dicts: List[dict] = []
+        for d in edge_deltas:
+            vid = prefixed_id("ev"); p = d.payload or {}
+            edge_dicts.append(dict(
+                graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
+                commit_seq=commit.commit_seq, branch_id=branch_id, op="create",
+                content_hash=d.content_hash, prev_content_hash=None, payload=d.payload,
+                actor=actor, created_at=now,
+                source_entity_id=p.get("sourceEntityId") or "", target_entity_id=p.get("targetEntityId") or "",
+                edge_type=p.get("edgeType"), confidence=p.get("confidence"), discriminator=p.get("discriminator"),
+            ))
+            head_rows.append(dict(graph_id=graph_id, branch_id=branch_id, entity_id=d.entity_id,
+                                  entity_kind="edge", head_version_id=vid, content_hash=d.content_hash,
+                                  is_tombstone=False, updated_at=now))
+        for batch in _chunks(node_dicts, config.INGEST_BATCH_SIZE):
+            await s.execute(pg_insert(NodeVersionORM).values(batch))
+        for batch in _chunks(edge_dicts, config.INGEST_BATCH_SIZE):
+            await s.execute(pg_insert(EdgeVersionORM).values(batch))
+        for batch in _chunks(head_rows, config.INGEST_BATCH_SIZE):
+            stmt = pg_insert(EntityHeadORM).values(batch)
+            await s.execute(stmt.on_conflict_do_update(
+                index_elements=["graph_id", "branch_id", "entity_id"],
+                set_={"head_version_id": stmt.excluded.head_version_id,
+                      "content_hash": stmt.excluded.content_hash,
+                      "is_tombstone": stmt.excluded.is_tombstone,
+                      "entity_kind": stmt.excluded.entity_kind,
+                      "updated_at": stmt.excluded.updated_at},
+            ))
+
     async def _write_deltas(
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor
     ) -> None:
@@ -1175,6 +1313,11 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
         "confidence": payload.get("confidence"),
         "properties": payload.get("properties") or {},
     }
+
+
+def _chunks(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
 
 
 def _delta_stats(deltas: List[Delta]) -> dict:
