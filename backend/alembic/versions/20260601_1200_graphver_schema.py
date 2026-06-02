@@ -64,6 +64,10 @@ def upgrade() -> None:
     bind.execute(sa.text(
         f'CREATE INDEX IF NOT EXISTS ix_commits_idem ON {cm} (graph_id, idempotency_key)'
     ))
+    # graphs.ontology_spec (inline vocabulary) — added after first cut.
+    bind.execute(sa.text(
+        f'ALTER TABLE "{schema}"."graphs" ADD COLUMN IF NOT EXISTS ontology_spec jsonb'
+    ))
     # Child hash partitions for the high-cardinality append-only tables.
     n = gv_config.PARTITIONS
     for tname in PARTITIONED_TABLES:

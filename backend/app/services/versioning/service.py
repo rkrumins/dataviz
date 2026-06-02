@@ -33,6 +33,7 @@ from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
+from .ontology import Ontology, validate_entities
 from .models import (
     BranchORM,
     CommitORM,
@@ -74,6 +75,15 @@ class MergeConflict(RuntimeError):
         self.conflicts = conflicts
 
 
+class OntologyViolation(RuntimeError):
+    """Raised when ops/commit entities violate a graph's ontology under ``strict``
+    enforcement. ``.violations`` is a JSON-able ``[{entity_id, kind, reason}]``."""
+
+    def __init__(self, violations):
+        super().__init__(f"{len(violations)} ontology violation(s)")
+        self.violations = violations
+
+
 class GraphVersioningService:
     """Service over the ``graphver`` store.  Each public method is one
     transaction (via :func:`db.graphver_session`) unless a session is passed."""
@@ -95,6 +105,8 @@ class GraphVersioningService:
         base_ontology_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
         falkor_graph_name: Optional[str] = None,
+        ontology_spec: Optional[Mapping] = None,
+        ontology_enforcement: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
         genesis commit + projection state.  Returns ids and the genesis seq."""
@@ -105,8 +117,10 @@ class GraphVersioningService:
                 tenant_id=tenant_id,
                 kind=kind,
                 base_ontology_id=base_ontology_id,
+                ontology_spec=dict(ontology_spec) if ontology_spec else None,
                 created_by=actor,
                 main_head_commit_seq=1,
+                **({"ontology_enforcement": ontology_enforcement} if ontology_enforcement else {}),
             )
             s.add(graph)
             await s.flush()
@@ -184,6 +198,9 @@ class GraphVersioningService:
         """
         assigned: Dict[str, str] = {}
         async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            ontology = Ontology.from_spec(graph.ontology_spec) if graph else None
+            entities: List[tuple] = []
             start = (
                 await s.execute(
                     select(func.coalesce(func.max(WorkingChangeORM.seq), 0)).where(
@@ -199,6 +216,8 @@ class GraphVersioningService:
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
                 payload = op.get("payload")
+                if op["op"] != "delete":
+                    entities.append((entity_id, op["entity_kind"], payload))
                 base_hash = None
                 if op["op"] != "create":
                     base_hash = await self._effective_head_hash(
@@ -218,6 +237,9 @@ class GraphVersioningService:
                         change_reason=op.get("change_reason"),
                     )
                 )
+            violations = validate_entities(entities, ontology)
+            if violations and graph is not None and graph.ontology_enforcement == "strict":
+                raise OntologyViolation(violations)      # rolls back — nothing staged
             return assigned
 
     async def checkpoint(
@@ -360,6 +382,13 @@ class GraphVersioningService:
             kind_by_entity = await self._kind_map_multi(
                 s, [(graph_id, branch_id), (graph_id, main_id)]
             )
+            ontology = Ontology.from_spec(graph.ontology_spec)   # PR re-validation gate (§16.5 #6)
+            if ontology is not None and graph.ontology_enforcement == "strict":
+                viol = validate_entities(
+                    [(d.entity_id, kind_by_entity.get(d.entity_id, "node"), d.payload)
+                     for d in deltas if d.op != "delete"], ontology)
+                if viol:
+                    raise OntologyViolation(viol)
             await self._write_deltas(s, graph_id, main_id, squash, deltas, kind_by_entity, actor)
 
             main.head_commit_id = squash.id

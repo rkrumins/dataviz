@@ -85,6 +85,7 @@ class GraphORM(VersioningBase):
     kind = Column(Text, nullable=False)                    # manual|authoritative|hybrid
     base_ontology_id = Column(Text, nullable=True)
     base_ontology_version_id = Column(Text, nullable=True)
+    ontology_spec = Column(JSONB, nullable=True)           # inline vocab: {entity_types, edge_types}
     ontology_enforcement = Column(
         Text, nullable=False, default=lambda: config.DEFAULT_ONTOLOGY_ENFORCEMENT
     )

@@ -39,6 +39,7 @@ from backend.app.services.versioning.service import (
     ConcurrencyError,
     GraphVersioningService,
     MergeConflict,
+    OntologyViolation,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,8 @@ def _domain_errors():
         yield
     except MergeConflict as exc:
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+    except OntologyViolation as exc:
+        raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
@@ -136,6 +139,9 @@ class CreateGraphRequest(_ApiModel):
     # The data source's real FalkorDB graph name (so the existing reader sees
     # versioned data); omit to use a synthetic gv_<id> fallback.
     falkor_graph_name: Optional[str] = Field(default=None, alias="falkorGraphName")
+    # Inline ontology vocabulary {entityTypes, edgeTypes} + strict|permissive.
+    ontology_spec: Optional[dict] = Field(default=None, alias="ontologySpec")
+    ontology_enforcement: Optional[str] = Field(default=None, alias="ontologyEnforcement")
 
 
 class OpenDraftRequest(_ApiModel):
@@ -302,6 +308,7 @@ async def create_graph(
         data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
         base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
         falkor_graph_name=body.falkor_graph_name,
+        ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
     )
 
 
@@ -351,10 +358,11 @@ async def stage_changes(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    assigned = await svc.stage_changes(
-        graph_id=graph_id, branch_id=branch_id, actor=user.id,
-        ops=[op.model_dump(exclude_none=True) for op in body.ops],
-    )
+    with _domain_errors():
+        assigned = await svc.stage_changes(
+            graph_id=graph_id, branch_id=branch_id, actor=user.id,
+            ops=[op.model_dump(exclude_none=True) for op in body.ops],
+        )
     return {"assigned": assigned, "count": len(body.ops)}
 
 
