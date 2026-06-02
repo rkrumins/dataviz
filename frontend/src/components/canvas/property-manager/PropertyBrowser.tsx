@@ -17,9 +17,8 @@ import {
 import { useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { MiniBar, coverageBarClass } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 import { usePropertyUsage } from '@/hooks/usePropertyUsage'
-import { useValueDistribution } from '@/hooks/usePropertyInsights'
+import { useCatalogOverview, useValueDistribution } from '@/hooks/usePropertyInsights'
 import {
     usePropertyCatalogOverlay, usePropertyDraftStore, usePropertyOps,
     type CatalogOverlayEntry, type PropertyOp,
@@ -31,6 +30,7 @@ import { fieldClass } from '../search/builder/editors/shared'
 
 import { PropertyInsightsHeader } from './PropertyInsightsHeader'
 import { PropertyOperationDialog, type PropertyDialogMode } from './PropertyOperationDialog'
+import { RankedValueBars, UsageGauge } from './PropertyInsightCharts'
 import { EntityTypeChips, SampleValueChips, TypeTile } from './PropertyValueChips'
 import { inferType } from './propertyValueTypes'
 
@@ -57,6 +57,9 @@ export function PropertyBrowser({
 
     const pendingOps = usePropertyOps()
     const overlay = usePropertyCatalogOverlay()
+    // View-wide entity total (cached) — feeds each row's coverage gauge.
+    const overview = useCatalogOverview(viewId)
+    const viewTotal = overview.data?.totalEntities ?? 0
 
     // Reverse the per-entity-type map so each key lists the entity types
     // that use it (the "usage" the brief asks for).
@@ -217,6 +220,7 @@ export function PropertyBrowser({
                             <PropertyRow
                                 key={key}
                                 viewId={viewId}
+                                viewTotal={viewTotal}
                                 propertyKey={key}
                                 usedBy={typesByKey[key] ?? []}
                                 samples={getValueSamples(key)}
@@ -403,9 +407,10 @@ function PendingChanges({ ops }: { ops: PropertyOp[] }) {
 // ---------------------------------------------------------------------------
 
 function PropertyRow({
-    viewId, propertyKey, usedBy, samples, overlay, isPendingNew, stagedValue, onUpdate, onRemove, onCreateRule,
+    viewId, viewTotal = 0, propertyKey, usedBy, samples, overlay, isPendingNew, stagedValue, onUpdate, onRemove, onCreateRule,
 }: {
     viewId: string
+    viewTotal?: number
     propertyKey: string
     usedBy: string[]
     samples: unknown[]
@@ -432,17 +437,17 @@ function PropertyRow({
 
     return (
         <div className={cn(
-            'group rounded-xl border bg-canvas-base/30 transition-all',
-            pendingRemove ? 'border-rose-500/40'
-                : isPendingNew ? 'border-emerald-500/40'
-                    : 'border-glass-border/60 hover:border-accent-lineage/30 hover:bg-canvas-base/50 hover:shadow-[0_2px_12px_-6px_rgba(99,102,241,0.4)]',
+            'group relative rounded-2xl border bg-canvas-elevated/40 backdrop-blur-sm transition-all duration-200',
+            pendingRemove ? 'border-rose-500/40 shadow-sm'
+                : isPendingNew ? 'border-emerald-500/40 shadow-sm'
+                    : 'border-glass-border/50 shadow-sm hover:shadow-md hover:-translate-y-px hover:border-glass-border',
         )}>
             <div
                 role={isPendingNew ? undefined : 'button'}
                 tabIndex={isPendingNew ? undefined : 0}
                 onClick={toggle}
                 onKeyDown={(e) => { if (!isPendingNew && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggle() } }}
-                className={cn('flex items-start gap-2.5 px-3 py-2.5', !isPendingNew && 'cursor-pointer')}
+                className={cn('flex items-start gap-3 px-3.5 py-3', !isPendingNew && 'cursor-pointer')}
             >
                 <TypeTile type={valueType} accent={accent} />
                 <div className="flex-1 min-w-0 flex flex-col gap-1.5">
@@ -465,7 +470,9 @@ function PropertyRow({
                                 <RowAction icon={<Plus className="w-3 h-3" />} label="Create rule" onClick={onCreateRule} />
                             </div>
                             {!isPendingNew && (
-                                <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform', expanded && 'rotate-90')} />
+                                <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg text-ink-muted/60 group-hover:bg-glass/40 transition-colors">
+                                    <ChevronRight className={cn('w-3.5 h-3.5 transition-transform', expanded && 'rotate-90')} />
+                                </span>
                             )}
                         </div>
                     </div>
@@ -487,18 +494,29 @@ function PropertyRow({
             </div>
 
             {expanded && !isPendingNew && (
-                <div className="px-3 pb-2.5 pl-[3.25rem] border-t border-glass-border/40 pt-2 flex flex-col gap-2.5">
+                <div className="px-4 pb-3.5 pl-[3.75rem] border-t border-glass-border/40 pt-3 flex flex-col gap-4">
+                    {/* Usage gauge */}
                     {usage.loading ? (
                         <Skel label="Counting usage…" />
                     ) : usage.error ? (
                         <span className="text-[11px] text-rose-400">Couldn't load usage — {usage.error}</span>
                     ) : usage.data ? (
-                        <UsageBreakdown total={usage.data.total} byEntityType={usage.data.byEntityType} />
+                        <UsageGauge total={usage.data.total} viewTotal={viewTotal} byEntityType={usage.data.byEntityType} />
                     ) : null}
+
+                    {/* Top values */}
                     {dist.loading ? (
                         <Skel label="Analysing values…" />
                     ) : dist.data && dist.data.values.length > 0 ? (
-                        <ValueDistributionView values={dist.data.values} truncated={dist.data.truncated} />
+                        <div className="flex flex-col gap-2">
+                            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
+                                Top values{dist.data.truncated ? ' · sampled' : ''}
+                            </div>
+                            <RankedValueBars
+                                items={dist.data.values.map((v) => ({ label: v.value, count: v.count }))}
+                                total={usage.data?.total ?? dist.data.values.reduce((s, v) => s + v.count, 0)}
+                            />
+                        </div>
                     ) : null}
                 </div>
             )}
@@ -512,44 +530,6 @@ function Skel({ label }: { label: string }) {
         <span className="inline-flex items-center gap-1.5 text-[11px] text-ink-muted">
             <Loader2 className="w-3 h-3 animate-spin" /> {label}
         </span>
-    )
-}
-
-function UsageBreakdown({ total, byEntityType }: { total: number; byEntityType: { type: string; count: number }[] }) {
-    if (total === 0) return <span className="text-[11px] text-ink-muted/70">Not used by any entity in this view.</span>
-    return (
-        <div className="flex flex-col gap-1.5">
-            <div className="text-[11px] text-ink">
-                <span className="font-semibold tabular-nums">{total}</span> {total === 1 ? 'entity uses' : 'entities use'} this property
-            </div>
-            <div className="flex flex-col gap-1">
-                {byEntityType.slice(0, 6).map((b) => (
-                    <MiniBar key={b.type} covered={b.count} total={total} label={b.type} colorClass={coverageBarClass(Math.round((b.count / total) * 100))} />
-                ))}
-            </div>
-        </div>
-    )
-}
-
-function ValueDistributionView({ values, truncated }: { values: { value: string; count: number }[]; truncated: boolean }) {
-    const max = values[0]?.count ?? 1
-    return (
-        <div className="flex flex-col gap-1.5">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted">
-                Top values{truncated ? ' (sampled)' : ''}
-            </div>
-            <div className="flex flex-col gap-1">
-                {values.slice(0, 6).map((b) => (
-                    <div key={b.value} className="flex items-center gap-2 text-[10.5px]">
-                        <span className="w-24 shrink-0 truncate font-mono text-ink" title={b.value}>{b.value || '∅'}</span>
-                        <div className="flex-1 h-1.5 rounded-full bg-glass/30 overflow-hidden">
-                            <div className="h-full rounded-full bg-accent-lineage/60" style={{ width: `${Math.max(4, (b.count / max) * 100)}%` }} />
-                        </div>
-                        <span className="w-8 shrink-0 text-right tabular-nums text-ink-muted">{b.count}</span>
-                    </div>
-                ))}
-            </div>
-        </div>
     )
 }
 

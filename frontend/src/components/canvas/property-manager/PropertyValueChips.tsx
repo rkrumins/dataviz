@@ -10,24 +10,29 @@ import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
 
+import { entityTypeStyle } from './entityTypeStyles'
 import { typeMeta, type ValueType } from './propertyValueTypes'
 
 
-/** A small type-toned icon tile that anchors each property row. */
+/** A premium type-toned icon tile (gradient) that anchors each property row. */
 export function TypeTile({ type, accent }: { type: ValueType; accent?: 'emerald' | 'rose' }) {
     const meta = typeMeta(type)
     const Icon = accent ? Braces : meta.Icon
     const tile = accent === 'emerald'
-        ? 'bg-emerald-500/12 border-emerald-500/25 text-emerald-400'
+        ? 'bg-gradient-to-br from-emerald-500/25 to-teal-500/15 border-emerald-500/20 text-emerald-500 dark:text-emerald-400'
         : accent === 'rose'
-            ? 'bg-rose-500/12 border-rose-500/25 text-rose-400'
+            ? 'bg-gradient-to-br from-rose-500/25 to-pink-500/15 border-rose-500/20 text-rose-500 dark:text-rose-400'
             : meta.tile
     return (
         <div
-            className={cn('shrink-0 w-7 h-7 rounded-lg border flex items-center justify-center', tile)}
+            className={cn(
+                'shrink-0 w-8 h-8 rounded-xl border flex items-center justify-center',
+                'shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]',
+                tile,
+            )}
             title={accent ? undefined : meta.label}
         >
-            <Icon className="w-3.5 h-3.5" />
+            <Icon className="w-4 h-4" strokeWidth={2} />
         </div>
     )
 }
@@ -48,7 +53,7 @@ export function SampleValueChips({ values, max = 4 }: { values: string[]; max?: 
                 <span
                     key={`${v}-${i}`}
                     title={v}
-                    className="inline-flex items-center px-2 py-0.5 rounded-md text-[10.5px] font-mono bg-canvas-elevated/70 border border-glass-border/70 text-ink-secondary max-w-[170px] truncate"
+                    className="inline-flex items-center px-2 py-[3px] rounded-md text-[10.5px] font-mono bg-black/[0.04] dark:bg-white/[0.05] text-ink-secondary max-w-[170px] truncate hover:bg-black/[0.07] dark:hover:bg-white/[0.08] transition-colors"
                 >
                     {v}
                 </span>
@@ -88,7 +93,10 @@ export function EntityTypeChips({ types, max = 3 }: { types: string[]; max?: num
                 <span
                     key={t}
                     title={t}
-                    className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] bg-glass/40 text-ink-secondary border border-glass-border/60 max-w-[120px] truncate"
+                    className={cn(
+                        'inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium border max-w-[120px] truncate',
+                        entityTypeStyle(t).chip,
+                    )}
                 >
                     {t}
                 </span>

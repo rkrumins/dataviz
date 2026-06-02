@@ -9,6 +9,7 @@ import { AlertTriangle, Boxes, Database, Layers, Tag } from 'lucide-react'
 import { type FC, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
+import { compactNum } from '@/components/dashboard/dashboard-constants'
 import { useCatalogOverview } from '@/hooks/usePropertyInsights'
 
 
@@ -72,19 +73,12 @@ function StatTile({ icon, value, label, tone }: {
             <span className={cn('inline-flex items-center justify-center w-6 h-6 rounded-lg bg-canvas-base/50', tone)}>
                 {icon}
             </span>
-            <span className="text-[15px] font-bold tabular-nums leading-none text-ink">
-                {value === null ? <span className="inline-block w-5 h-3.5 rounded skeleton align-middle" /> : compact(value)}
+            <span className="text-[15px] font-bold tabular-nums leading-none text-ink" title={value === null ? undefined : value.toLocaleString()}>
+                {value === null ? <span className="inline-block w-5 h-3.5 rounded skeleton align-middle" /> : compactNum(value)}
             </span>
             <span className="text-[8.5px] font-semibold uppercase tracking-[0.12em] text-ink-muted/80">
                 {label}
             </span>
         </div>
     )
-}
-
-
-function compact(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-    return String(n)
 }
