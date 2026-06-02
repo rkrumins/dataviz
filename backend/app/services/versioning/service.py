@@ -276,6 +276,7 @@ class GraphVersioningService:
         assigned: Dict[str, str] = {}
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
+            self._require_open(branch)
             await self._require_edit(s, branch, actor, actor_groups)
             graph = await s.get(GraphORM, graph_id)
             ontology = Ontology.from_spec(graph.ontology_spec) if graph else None
@@ -341,6 +342,7 @@ class GraphVersioningService:
             branch = await s.get(BranchORM, branch_id)
             if branch is None or branch.graph_id != graph_id:
                 raise ValueError("unknown branch")
+            self._require_open(branch)
             await self._require_edit(s, branch, actor, actor_groups)
 
             changes = (
@@ -434,6 +436,7 @@ class GraphVersioningService:
             draft = await s.get(BranchORM, branch_id)
             if graph is None or draft is None or draft.graph_id != graph_id:
                 raise ValueError("unknown graph/branch")
+            self._require_open(draft)
             if draft.is_shared:                           # publishing a shared draft → maintainer
                 await self._require_manage(s, draft, actor, actor_groups)
             main_id = await self._main_branch_id(s, graph_id)
@@ -501,6 +504,27 @@ class GraphVersioningService:
             if ps is not None:
                 ps.target_commit_seq = new_seq
             return squash.id
+
+    async def abandon_draft(
+        self, *, graph_id: str, branch_id: str, actor: str,
+        actor_groups: Sequence[str] = (),
+    ) -> dict:
+        """Mark an open draft ``abandoned`` (plan §17 #8): it becomes inert — no
+        further stage/checkpoint/publish. Re-abandoning is idempotent; ``main`` and
+        already-merged drafts cannot be abandoned. A shared draft needs a maintainer.
+        Staged rows are left in place for audit (the branch is simply unreachable)."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise ValueError("cannot abandon main")
+            if branch.status == "abandoned":
+                return self._branch_meta(branch)          # idempotent
+            self._require_open(branch)                    # merged/publishing → reject
+            if branch.is_shared:
+                await self._require_manage(s, branch, actor, actor_groups)
+            branch.status = "abandoned"
+            branch.updated_at = _now()
+            return self._branch_meta(branch)
 
     async def preview_merge(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
         """Dry-run the publish merge: report conflicts + change counts without
@@ -1131,6 +1155,13 @@ class GraphVersioningService:
                 if best is None or ROLE_RANK[r.role] > ROLE_RANK[best]:
                     best = r.role
         return best
+
+    @staticmethod
+    def _require_open(branch: BranchORM) -> None:
+        """Edits/checkpoints/publish need an ``open`` draft. Merged or abandoned
+        drafts are inert (plan §17 #8); ``main`` stays open for its lifetime."""
+        if branch.status != "open":
+            raise ValueError(f"branch {branch.id} is {branch.status}")
 
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         if not branch.is_shared:                          # private draft → workspace RBAC governs

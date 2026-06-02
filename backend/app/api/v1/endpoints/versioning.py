@@ -479,6 +479,17 @@ async def publish(
     return {"commit_id": commit_id}
 
 
+@router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)
+async def abandon_draft(
+    ws_id: str, graph_id: str, branch_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+
+
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)
 async def revert_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
