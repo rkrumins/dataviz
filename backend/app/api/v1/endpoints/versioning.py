@@ -185,6 +185,10 @@ class PublishRequest(_ApiModel):
     resolutions: Optional[Dict[str, Optional[dict]]] = None
 
 
+class RevertRequest(_ApiModel):
+    message: Optional[str] = None
+
+
 class ForkRequest(_ApiModel):
     data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
 
@@ -469,6 +473,22 @@ async def publish(
         )
     background.add_task(nudge_projection, graph_id)   # post-commit, best-effort
     return {"commit_id": commit_id}
+
+
+@router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)
+async def revert_commit(
+    ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
+    background: BackgroundTasks,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        new_commit_id = await svc.revert_commit(
+            graph_id=graph_id, commit_id=commit_id, actor=user.id, message=body.message,
+        )
+    background.add_task(nudge_projection, graph_id)
+    return {"commit_id": new_commit_id}
 
 
 # --------------------------------------------------------------------------- #

@@ -444,8 +444,10 @@ class GraphVersioningService:
             if conflicts:
                 raise MergeConflict(conflicts)
 
-            # No surviving edge may point at a tombstone (cross-entity conflict
-            # the per-entity merge can't see — §16.5 #8).
+            # Deleting a node cascades to its incident edges in this same commit;
+            # the guard then only rejects edges to an endpoint that never existed
+            # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
+            self._cascade_incident_edges(merged_state)
             self._assert_referential_integrity(merged_state)
 
             deltas = net_delta(theirs, merged_state)   # what publish adds to main
@@ -517,6 +519,70 @@ class GraphVersioningService:
                 "conflicts": conflicts,
                 "changes": _delta_stats(net_delta(theirs, merged_state)),
             }
+
+    async def revert_commit(
+        self, *, graph_id: str, commit_id: str, actor: str, message: Optional[str] = None,
+    ) -> str:
+        """Apply the inverse of a published commit as a new ``revert`` commit on
+        main (plan §17): restore every entity that commit touched to its
+        pre-commit state. If a later commit also changed one of those entities the
+        revert can't apply cleanly and raises :class:`MergeConflict`. Deleting a
+        node on revert cascades to its incident edges, same as publish."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            target = await s.get(CommitORM, (graph_id, commit_id))
+            if target is None or target.branch_id != main_id:
+                raise ValueError("commit is not on this graph's main")
+            if target.kind == "genesis":
+                raise ValueError("cannot revert the genesis commit")
+
+            k, head_seq = target.commit_seq, graph.main_head_commit_seq
+            before = await self._state_as_of(s, graph_id, main_id, k - 1)
+            after = await self._state_as_of(s, graph_id, main_id, k)
+            cur = await self._state_as_of(s, graph_id, main_id, head_seq)
+            touched = await self._changed_in_window(s, graph_id, main_id, k - 1, k)
+
+            conflicts = [
+                {"entity_id": eid, "path": [], "reason": "modified after the reverted commit"}
+                for eid in sorted(touched)
+                if content_hash(cur.get(eid)) != content_hash(after.get(eid))
+            ]
+            if conflicts:
+                raise MergeConflict(conflicts)
+
+            merged = dict(cur)
+            for eid in touched:
+                merged[eid] = before.get(eid)          # restore (None ⇒ tombstone)
+            self._cascade_incident_edges(merged)
+            self._assert_referential_integrity(merged)
+
+            deltas = net_delta(cur, merged)
+            if not deltas:
+                return ""                              # nothing to undo
+
+            new_seq = head_seq + 1
+            main = await s.get(BranchORM, main_id)
+            revert = CommitORM(
+                graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="revert",
+                message=message or f"revert {commit_id}", actor=actor,
+            )
+            s.add(revert)
+            await s.flush()
+            kind_by_entity = await self._kind_map_multi(s, [(graph_id, main_id)])
+            await self._write_deltas(s, graph_id, main_id, revert, deltas, kind_by_entity, actor)
+            main.head_commit_id = revert.id
+            graph.main_head_commit_seq = new_seq
+            revert.merkle_root = await self._commit_merkle(s, graph_id, main_id, revert, deltas)
+            graph.updated_at = _now()
+            revert.stats = _delta_stats(deltas)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return revert.id
 
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
@@ -692,6 +758,7 @@ class GraphVersioningService:
                 pr.status = "conflicts"
                 pr.conflicts = conflicts
                 raise MergeConflict(conflicts)
+            self._cascade_incident_edges(merged)
             self._assert_referential_integrity(merged)
 
             deltas = net_delta(theirs, merged)
@@ -1469,6 +1536,26 @@ class GraphVersioningService:
                     min(seq, graph.fork_base_commit_seq or 0),
                 )
         return None
+
+    @staticmethod
+    def _cascade_incident_edges(state: Dict[str, Optional[dict]]) -> List[str]:
+        """Tombstone every live edge incident to a tombstoned node so that deleting
+        a node cascades to its edges within the same commit (plan §16.5 #8). Mutates
+        ``state`` in place and returns the cascaded edge ids. Edges pointing at an
+        endpoint that *never existed* are left for the integrity guard to reject."""
+        tomb = {eid for eid, p in state.items() if p is None}
+        if not tomb:
+            return []
+        cascaded = [
+            eid for eid, p in state.items()
+            if p is not None
+            and (p.get("sourceEntityId") or p.get("source_entity_id")) is not None
+            and ((p.get("sourceEntityId") or p.get("source_entity_id")) in tomb
+                 or (p.get("targetEntityId") or p.get("target_entity_id")) in tomb)
+        ]
+        for eid in cascaded:
+            state[eid] = None
+        return cascaded
 
     @staticmethod
     def _assert_referential_integrity(state: Mapping[str, Optional[dict]]) -> None:

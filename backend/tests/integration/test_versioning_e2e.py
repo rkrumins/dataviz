@@ -16,7 +16,6 @@ import pytest
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import (
-    ConcurrencyError,
     GraphVersioningService,
     MergeConflict,
 )
@@ -82,7 +81,7 @@ async def _run_flow() -> None:
     rebased = await svc.materialize_state(graph_id=gid2, branch_id=await svc.main_branch_id(gid2))
     assert set(rebased["nodes"]) == {"X", "Y"}, rebased
 
-    # referential-integrity guard (delete a node an edge still points at)
+    # cascade delete: deleting a node tombstones its incident edges in the same commit
     g3 = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
     gid3 = g3["graph_id"]
     d3 = await svc.open_draft(graph_id=gid3, owner="alice")
@@ -96,8 +95,9 @@ async def _run_flow() -> None:
     d3b = await svc.open_draft(graph_id=gid3, owner="alice")
     await svc.stage_changes(graph_id=gid3, branch_id=d3b, actor="alice", ops=[{"op": "delete", "entity_kind": "node", "entity_id": "B"}])
     await svc.checkpoint(graph_id=gid3, branch_id=d3b, actor="alice")
-    with pytest.raises(ConcurrencyError):
-        await svc.publish(graph_id=gid3, branch_id=d3b, actor="alice", message="orphan edge")
+    await svc.publish(graph_id=gid3, branch_id=d3b, actor="alice", message="delete B")
+    m3 = await svc.materialize_state(graph_id=gid3, branch_id=await svc.main_branch_id(gid3))
+    assert set(m3["nodes"]) == {"A"} and m3["edges"] == {}, m3   # B gone; edge E cascaded
 
     # rebase auto-merge: two drafts from the same base edit DIFFERENT fields.
     g4 = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
