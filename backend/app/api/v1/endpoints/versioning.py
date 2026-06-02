@@ -36,6 +36,7 @@ from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
+    AccessDenied,
     ConcurrencyError,
     GraphVersioningService,
     MergeConflict,
@@ -117,6 +118,8 @@ def _domain_errors():
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
+    except AccessDenied as exc:
+        raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
@@ -147,6 +150,13 @@ class CreateGraphRequest(_ApiModel):
 class OpenDraftRequest(_ApiModel):
     name: Optional[str] = None
     originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
+    shared: bool = False
+
+
+class BranchMemberRequest(_ApiModel):
+    subject_type: str = Field(alias="subjectType", description="user | group")
+    subject_id: str = Field(alias="subjectId")
+    role: str = Field(description="viewer | editor | maintainer")
 
 
 class StageOp(_ApiModel):
@@ -164,6 +174,7 @@ class StageRequest(_ApiModel):
 
 class CheckpointRequest(_ApiModel):
     message: Optional[str] = None
+    resolutions: Optional[Dict[str, Optional[dict]]] = None
 
 
 class PublishRequest(_ApiModel):
@@ -346,9 +357,49 @@ async def open_draft(
     with _domain_errors():
         branch_id = await svc.open_draft(
             graph_id=graph_id, owner=user.id, name=body.name,
-            originating_view_id=body.originating_view_id,
+            originating_view_id=body.originating_view_id, shared=body.shared,
         )
     return {"branch_id": branch_id}
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/members")
+async def list_branch_members(
+    ws_id: str, graph_id: str, branch_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return {"members": await svc.list_branch_members(graph_id=graph_id, branch_id=branch_id)}
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/members")
+async def add_branch_member(
+    ws_id: str, graph_id: str, branch_id: str, body: BranchMemberRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.add_branch_member(
+            graph_id=graph_id, branch_id=branch_id, subject_type=body.subject_type,
+            subject_id=body.subject_id, role=body.role, actor=user.id,
+        )
+
+
+@router.delete("/graphs/{graph_id}/branches/{branch_id}/members/{subject_type}/{subject_id}")
+async def remove_branch_member(
+    ws_id: str, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        await svc.remove_branch_member(
+            graph_id=graph_id, branch_id=branch_id, subject_type=subject_type,
+            subject_id=subject_id, actor=user.id,
+        )
+    return {"removed": True}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/changes", response_model=StageResponse)
@@ -376,6 +427,7 @@ async def checkpoint(
     with _domain_errors():
         commit_id = await svc.checkpoint(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, message=body.message,
+            resolutions=body.resolutions,
         )
     return {"commit_id": commit_id, "staged_changes": commit_id is not None}
 

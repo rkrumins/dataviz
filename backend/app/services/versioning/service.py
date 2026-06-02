@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from . import config, db
@@ -36,6 +36,7 @@ from .merkle_store import MerkleStore
 from .ontology import Ontology, validate_entities
 from .models import (
     BranchORM,
+    BranchMemberORM,
     CommitORM,
     EdgeVersionORM,
     EntityHeadORM,
@@ -82,6 +83,14 @@ class OntologyViolation(RuntimeError):
     def __init__(self, violations):
         super().__init__(f"{len(violations)} ontology violation(s)")
         self.violations = violations
+
+
+class AccessDenied(RuntimeError):
+    """Actor lacks the branch role required for an operation on a shared draft."""
+
+
+#: editor and maintainer may edit; only maintainer (and the owner) may manage/publish.
+ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 
 
 class GraphVersioningService:
@@ -159,8 +168,13 @@ class GraphVersioningService:
         owner: str,
         name: Optional[str] = None,
         originating_view_id: Optional[str] = None,
+        shared: bool = False,
     ) -> str:
-        """Open a per-user draft based on the graph's current ``main`` head."""
+        """Open a per-user draft based on the graph's current ``main`` head.
+
+        ``shared=True`` opens a collaborative draft: other users added via
+        :meth:`add_branch_member` can edit it, and checkpoints field-merge
+        concurrent edits (raising on same-field clashes) instead of clobbering."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
@@ -170,6 +184,7 @@ class GraphVersioningService:
                 kind="draft",
                 name=name,
                 owner=owner,
+                is_shared=shared,
                 base_commit_seq=graph.main_head_commit_seq,
                 base_ontology_version_id=graph.base_ontology_version_id,
                 originating_view_id=originating_view_id,
@@ -178,6 +193,58 @@ class GraphVersioningService:
             s.add(draft)
             await s.flush()
             return draft.id
+
+    # ------------------------------------------------------------------ #
+    # Shared-draft membership (plan §8)                                   #
+    # ------------------------------------------------------------------ #
+    async def add_branch_member(
+        self, *, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
+        role: str, actor: str, actor_groups: Sequence[str] = (),
+    ) -> dict:
+        """Grant a user/group a role on a draft (maintainer/owner only). Adding a
+        member marks the draft shared; re-adding an existing subject updates role."""
+        if role not in ROLE_RANK:
+            raise ValueError(f"unknown role {role!r}")
+        if subject_type not in ("user", "group"):
+            raise ValueError(f"unknown subject_type {subject_type!r}")
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._require_manage(s, branch, actor, actor_groups)
+            row = (await s.execute(select(BranchMemberORM).where(
+                BranchMemberORM.branch_id == branch_id,
+                BranchMemberORM.subject_type == subject_type,
+                BranchMemberORM.subject_id == subject_id,
+            ))).scalar_one_or_none()
+            if row is None:
+                s.add(BranchMemberORM(branch_id=branch_id, subject_type=subject_type,
+                                      subject_id=subject_id, role=role))
+            else:
+                row.role = role
+            if not branch.is_shared:
+                branch.is_shared = True
+            return {"subjectType": subject_type, "subjectId": subject_id, "role": role}
+
+    async def remove_branch_member(
+        self, *, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
+        actor: str, actor_groups: Sequence[str] = (),
+    ) -> None:
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._require_manage(s, branch, actor, actor_groups)
+            await s.execute(delete(BranchMemberORM).where(
+                BranchMemberORM.branch_id == branch_id,
+                BranchMemberORM.subject_type == subject_type,
+                BranchMemberORM.subject_id == subject_id,
+            ))
+
+    async def list_branch_members(self, *, graph_id: str, branch_id: str) -> List[dict]:
+        async with self._session() as s:
+            await self._get_branch(s, graph_id, branch_id)
+            rows = (await s.execute(select(BranchMemberORM).where(
+                BranchMemberORM.branch_id == branch_id
+            ).order_by(BranchMemberORM.created_at))).scalars().all()
+            return [{"subjectType": r.subject_type, "subjectId": r.subject_id, "role": r.role}
+                    for r in rows]
 
     # ------------------------------------------------------------------ #
     # Staging + checkpoint                                                #
@@ -189,6 +256,7 @@ class GraphVersioningService:
         branch_id: str,
         ops: Sequence[Mapping],
         actor: str,
+        actor_groups: Sequence[str] = (),
     ) -> Dict[str, str]:
         """Bulk-append working changes to a draft (plan decision #10).
 
@@ -198,6 +266,8 @@ class GraphVersioningService:
         """
         assigned: Dict[str, str] = {}
         async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._require_edit(s, branch, actor, actor_groups)
             graph = await s.get(GraphORM, graph_id)
             ontology = Ontology.from_spec(graph.ontology_spec) if graph else None
             entities: List[tuple] = []
@@ -249,13 +319,20 @@ class GraphVersioningService:
         branch_id: str,
         actor: str,
         message: Optional[str] = None,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        actor_groups: Sequence[str] = (),
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
-        commit.  Returns the commit id, or ``None`` if nothing was staged."""
+        commit.  Returns the commit id, or ``None`` if nothing was staged.
+
+        On a **shared** draft, concurrent edits from different collaborators are
+        field-merged; a same-field clash raises :class:`MergeConflict` unless a
+        ``resolutions`` payload (``{entity_id: payload|None}``) settles it."""
         async with self._session() as s:
             branch = await s.get(BranchORM, branch_id)
             if branch is None or branch.graph_id != graph_id:
                 raise ValueError("unknown branch")
+            await self._require_edit(s, branch, actor, actor_groups)
 
             changes = (
                 await s.execute(
@@ -280,11 +357,18 @@ class GraphVersioningService:
             # updates (not creates) and keeps hash continuity intact.
             composed = await self._composed_state(s, graph_id, branch_id)
             base_state = {eid: composed.get(eid) for eid in touched}
-            ops = [
-                {"entity_id": c.entity_id, "op": c.op, "payload": c.payload}
-                for c in changes
-            ]
-            head_state = materialize(base_state, ops)
+            if branch.is_shared:
+                head_state, conflicts = _fold_shared(
+                    base_state, changes, frozenset(config.SET_FIELDS), resolutions or {}
+                )
+                if conflicts:
+                    raise MergeConflict(conflicts)       # rolls back — nothing committed
+            else:
+                ops = [
+                    {"entity_id": c.entity_id, "op": c.op, "payload": c.payload}
+                    for c in changes
+                ]
+                head_state = materialize(base_state, ops)
             deltas = net_delta(base_state, head_state)
 
             commit_seq = await self._next_seq(s, graph_id, branch_id)
@@ -325,6 +409,7 @@ class GraphVersioningService:
         actor: str,
         message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        actor_groups: Sequence[str] = (),
     ) -> str:
         """Squash a draft into a single ``main`` commit, rebasing onto current
         main with a field-level 3-way merge (plan §8).
@@ -340,6 +425,8 @@ class GraphVersioningService:
             draft = await s.get(BranchORM, branch_id)
             if graph is None or draft is None or draft.graph_id != graph_id:
                 raise ValueError("unknown graph/branch")
+            if draft.is_shared:                           # publishing a shared draft → maintainer
+                await self._require_manage(s, draft, actor, actor_groups)
             main_id = await self._main_branch_id(s, graph_id)
 
             merged_state, conflicts, theirs = await self._compute_merge(
@@ -869,6 +956,41 @@ class GraphVersioningService:
             )
         ).scalar_one()
 
+    async def _get_branch(self, s, graph_id: str, branch_id: str) -> BranchORM:
+        b = await s.get(BranchORM, branch_id)
+        if b is None or b.graph_id != graph_id:
+            raise ValueError("unknown branch")
+        return b
+
+    async def _branch_role(self, s, branch: BranchORM, actor: str, groups: Sequence[str] = ()):
+        """Effective role of *actor* on *branch*: the owner is an implicit
+        maintainer; otherwise the highest role from matching user/group members
+        (group resolution depends on the caller supplying ``groups``)."""
+        if branch.owner == actor:
+            return "maintainer"
+        rows = (await s.execute(select(BranchMemberORM).where(
+            BranchMemberORM.branch_id == branch.id
+        ))).scalars().all()
+        best = None
+        for r in rows:
+            if (r.subject_type == "user" and r.subject_id == actor) or \
+               (r.subject_type == "group" and r.subject_id in groups):
+                if best is None or ROLE_RANK[r.role] > ROLE_RANK[best]:
+                    best = r.role
+        return best
+
+    async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
+        if not branch.is_shared:                          # private draft → workspace RBAC governs
+            return
+        role = await self._branch_role(s, branch, actor, groups)
+        if role is None or ROLE_RANK[role] < ROLE_RANK["editor"]:
+            raise AccessDenied(f"{actor} lacks editor access to draft {branch.id}")
+
+    async def _require_manage(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
+        role = await self._branch_role(s, branch, actor, groups)
+        if role != "maintainer":
+            raise AccessDenied(f"{actor} lacks maintainer access to draft {branch.id}")
+
     async def _next_seq(self, s, graph_id: str, branch_id: str) -> int:
         cur = (
             await s.execute(
@@ -1300,6 +1422,55 @@ class GraphVersioningService:
                 raise ConcurrencyError(
                     f"edge {eid} would dangle (endpoint tombstoned): {src}->{tgt}"
                 )
+
+
+def _fold_shared(
+    base_state: Mapping[str, Optional[dict]],
+    changes: Sequence["WorkingChangeORM"],
+    set_fields: frozenset,
+    resolutions: Mapping[str, Optional[dict]],
+) -> Tuple[Dict[str, Optional[dict]], List[dict]]:
+    """Fold a shared draft's working changes into head state with per-collaborator
+    3-way field merge (shared-draft OCC, plan §8).
+
+    A single actor's edits to an entity fold by seq order (full replace) — exactly
+    as a private draft would, so behaviour is unchanged when only one person
+    touched it.  When *different* actors touched the same entity, each actor's net
+    payload is 3-way merged over the committed base (``base_state`` — the common
+    ancestor every concurrent edit was staged against, per ``base_content_hash``):
+    disjoint fields union, a same-field clash becomes a conflict unless
+    ``resolutions`` (``{entity_id: payload|None}``) settles it.
+    """
+    head: Dict[str, Optional[dict]] = dict(base_state)
+    conflicts: List[dict] = []
+    by_entity: Dict[str, List["WorkingChangeORM"]] = {}
+    for c in changes:                                    # arrive in seq order
+        by_entity.setdefault(c.entity_id, []).append(c)
+
+    for eid, chs in by_entity.items():
+        if eid in resolutions:                           # caller settled this entity
+            head[eid] = resolutions[eid]
+            continue
+        ancestor = base_state.get(eid)
+        order: List[str] = []                            # actors, first-seen order
+        net: Dict[str, Optional[dict]] = {}
+        for c in chs:
+            if c.actor not in net:
+                order.append(c.actor)
+            net[c.actor] = None if c.op == "delete" else (
+                dict(c.payload) if c.payload is not None else None
+            )
+        merged = net[order[0]]
+        for a in order[1:]:                              # iterative 3-way over one ancestor
+            out = three_way_merge(ancestor, merged, net[a], set_fields)
+            merged = out.merged
+            for cf in out.conflicts:
+                conflicts.append({
+                    "entity_id": eid, "path": list(cf.path),
+                    "base": cf.base, "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind,
+                })
+        head[eid] = merged
+    return head, conflicts
 
 
 def _is_edge_payload(payload: Mapping) -> bool:
