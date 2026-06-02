@@ -498,9 +498,9 @@ async def _falkor_neighbors(graph, *, urn, depth, direction, edge_types, limit):
         where = "WHERE ALL(rel IN r WHERE type(rel) IN $ets) "
         params["ets"] = list(edge_types)
     cypher = (
-        f"MATCH (s {{urn:$urn}}) OPTIONAL MATCH path = {pat} {where}"
-        f"WITH s, collect(DISTINCT n) AS ns WITH [s] + ns AS alln "
-        f"UNWIND alln AS x WITH DISTINCT x WHERE x IS NOT NULL LIMIT $limit RETURN x"
+        f"MATCH (s {{urn:$urn}}) OPTIONAL MATCH {pat} {where}"
+        f"WITH s, collect(DISTINCT n) AS ns "          # collect() drops nulls
+        f"UNWIND ([s] + ns) AS x RETURN DISTINCT x LIMIT $limit"
     )
     res = await asyncio.wait_for(graph.query(cypher, params=params), timeout=10.0)
     nodes, node_urns = [], set()
