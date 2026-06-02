@@ -145,6 +145,9 @@ class CreateGraphRequest(_ApiModel):
     # The data source's real FalkorDB graph name (so the existing reader sees
     # versioned data); omit to use a synthetic gv_<id> fallback.
     falkor_graph_name: Optional[str] = Field(default=None, alias="falkorGraphName")
+    # The FalkorDB provider/instance hosting this graph's cache; scopes per-provider
+    # eviction budgeting. Omit for single-instance deployments (the "default" provider).
+    falkor_provider: Optional[str] = Field(default=None, alias="falkorProvider")
     # Inline ontology vocabulary {entityTypes, edgeTypes} + strict|permissive.
     ontology_spec: Optional[dict] = Field(default=None, alias="ontologySpec")
     ontology_enforcement: Optional[str] = Field(default=None, alias="ontologyEnforcement")
@@ -337,7 +340,7 @@ async def create_graph(
     return await svc.create_graph(
         data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
         base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
-        falkor_graph_name=body.falkor_graph_name,
+        falkor_graph_name=body.falkor_graph_name, falkor_provider=body.falkor_provider,
         ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
     )
 

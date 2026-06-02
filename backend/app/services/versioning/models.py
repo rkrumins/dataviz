@@ -222,6 +222,7 @@ class ProjectionStateORM(VersioningBase):
     target_commit_seq = Column(BigInteger, nullable=False, default=0)
     status = Column(Text, nullable=False, default="idle")  # idle|projecting|rebuilding|evicted
     falkor_graph_name = Column(Text, nullable=True)
+    falkor_provider = Column(Text, nullable=True)   # FalkorDB instance hosting this cache (per-provider eviction)
     shard_map = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)

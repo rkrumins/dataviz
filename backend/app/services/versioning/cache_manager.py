@@ -15,15 +15,15 @@ source of truth, so we can spend RAM lazily:
   counter; eviction **skips a pinned graph** so it is never dropped mid-read.
 
 This is the riskiest scale bet (FalkorDB as volatile cache), so the mechanics are
-proven directly against Postgres + Redis here; the RAM-budget daemon is a thin
-loop over :meth:`lru_candidates`.
+proven directly against Postgres + Redis here; the per-provider RAM-budget daemon
+is a thin loop over :meth:`lru_candidates`.
 """
 from __future__ import annotations
 
 import logging
 from typing import Awaitable, Callable, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from . import config, db
 from .messaging import get_broker_redis
@@ -129,15 +129,41 @@ class CacheManager:
         finally:
             await r.delete(_lock_key(graph_id))
 
-    # ---- LRU policy ------------------------------------------------------- #
-    async def lru_candidates(self, limit: int = 10) -> List[str]:
-        """Coldest resident graphs (oldest ``last_projected_at`` first) — the
-        eviction order for a RAM-budget sweep."""
+    # ---- per-provider RAM budget ----------------------------------------- #
+    @staticmethod
+    def _provider_col():
+        # NULL provider ⇒ the "default" instance, so single-FalkorDB deployments
+        # are simply one provider.
+        return func.coalesce(ProjectionStateORM.falkor_provider, config.DEFAULT_FALKOR_PROVIDER)
+
+    async def resident_providers(self) -> List[str]:
+        """Distinct FalkorDB providers with at least one resident graph."""
         async with self._session() as s:
             rows = (await s.execute(
-                select(ProjectionStateORM.graph_id)
+                select(func.distinct(self._provider_col()))
                 .where(ProjectionStateORM.status == "idle")
-                .order_by(ProjectionStateORM.last_projected_at.asc().nulls_first())
-                .limit(limit)
             )).scalars().all()
+        return list(rows)
+
+    async def resident_count(self, provider: str) -> int:
+        """Resident ``main`` caches on one FalkorDB provider — its evictable set."""
+        async with self._session() as s:
+            return int((await s.execute(
+                select(func.count()).select_from(ProjectionStateORM)
+                .where(ProjectionStateORM.status == "idle")
+                .where(self._provider_col() == provider)
+            )).scalar_one())
+
+    # ---- LRU policy ------------------------------------------------------- #
+    async def lru_candidates(self, provider: Optional[str] = None, limit: int = 10) -> List[str]:
+        """Coldest resident graphs (oldest ``last_projected_at`` first) — the
+        eviction order for a RAM-budget sweep. Scoped to ``provider`` when given."""
+        async with self._session() as s:
+            q = (select(ProjectionStateORM.graph_id)
+                 .where(ProjectionStateORM.status == "idle")
+                 .order_by(ProjectionStateORM.last_projected_at.asc().nulls_first())
+                 .limit(limit))
+            if provider is not None:
+                q = q.where(self._provider_col() == provider)
+            rows = (await s.execute(q)).scalars().all()
         return list(rows)

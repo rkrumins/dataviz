@@ -29,6 +29,7 @@ async def _amain() -> None:
     worker = ProjectionWorker(
         projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
         versioning=GraphVersioningService(),
+        evict_budget=(config.falkor_budget_for if config.falkor_eviction_configured() else None),
     )
 
     loop = asyncio.get_running_loop()

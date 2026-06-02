@@ -124,6 +124,7 @@ class GraphVersioningService:
         base_ontology_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
         falkor_graph_name: Optional[str] = None,
+        falkor_provider: Optional[str] = None,
         ontology_spec: Optional[Mapping] = None,
         ontology_enforcement: Optional[str] = None,
     ) -> Dict[str, str]:
@@ -167,6 +168,7 @@ class GraphVersioningService:
                 ProjectionStateORM(
                     graph_id=graph.id, projected_commit_seq=0, target_commit_seq=1,
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
+                    falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                 )
             )
             return {"graph_id": graph.id, "main_branch_id": main.id, "genesis_commit_id": genesis.id}
@@ -686,6 +688,7 @@ class GraphVersioningService:
             s.add(ProjectionStateORM(
                 graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
                 falkor_graph_name=f"{parent_name}__fork_{fork.id}",   # forks get their own graph
+                falkor_provider=(parent_ps.falkor_provider if parent_ps else None),  # same instance as parent
             ))
             return {
                 "graph_id": fork.id,

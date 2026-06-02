@@ -147,6 +147,11 @@ class FalkorProjector:
         # projection_state.falkor_graph_name (set at create time).
         return f"gv_{graph_id}"
 
+    async def drop_graph(self, name: str) -> None:
+        """``GRAPH.DELETE`` a cache graph's FalkorDB key, freeing its RAM; the next
+        projection re-creates it from Postgres (plan §16.5 #9-10)."""
+        await self._client(name).delete()
+
     async def project_graph(self, graph_id: str) -> Dict[str, object]:
         """Catch a graph's FalkorDB projection up to its target watermark."""
         async with self._session() as s:

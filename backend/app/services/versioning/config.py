@@ -17,6 +17,7 @@ can import it.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 
 # --------------------------------------------------------------------------- #
@@ -120,6 +121,31 @@ PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lowe
 # rebuild lock TTL and read-lease (refcount) TTL, both seconds.
 REBUILD_LOCK_TTL: int = int(os.getenv("GRAPHVER_REBUILD_LOCK_TTL", "120"))
 LEASE_TTL: int = int(os.getenv("GRAPHVER_LEASE_TTL", "60"))
+
+# Per-provider RAM-budget eviction of cold FalkorDB main caches (plan §16.5 #9-10):
+# RAM is a property of a FalkorDB instance, so each provider has its OWN resident
+# budget — not one limit across all graphs globally. The eviction worker takes a
+# provider_id -> budget resolver (injected, so the store stays decoupled from the
+# provider registry); the helpers below are the default env-backed resolver.
+#   GRAPHVER_FALKOR_MAX_RESIDENT  default budget applied to every provider
+#   GRAPHVER_FALKOR_BUDGETS       JSON {provider_id: budget} per-provider overrides
+# A budget of 0 means "unlimited" for that provider (the daemon skips it); the
+# daemon is off entirely unless at least one budget is configured.
+FALKOR_MAX_RESIDENT: int = int(os.getenv("GRAPHVER_FALKOR_MAX_RESIDENT", "0"))
+FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{}")
+DEFAULT_FALKOR_PROVIDER: str = "default"
+EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
+
+
+def falkor_eviction_configured() -> bool:
+    """True when any FalkorDB cache budget is set — gates the eviction daemon."""
+    return FALKOR_MAX_RESIDENT > 0 or bool(FALKOR_BUDGETS)
+
+
+def falkor_budget_for(provider: str) -> int:
+    """Per-provider resident-graph budget: a per-provider override, else the
+    default. 0 ⇒ unlimited for that provider."""
+    return int(FALKOR_BUDGETS.get(provider, FALKOR_MAX_RESIDENT))
 
 # Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days, swept by
 # the worker every DRAFT_SWEEP_SECS (default daily).

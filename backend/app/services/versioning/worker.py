@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Set, TYPE_CHECKING
+from typing import Callable, Optional, Set, TYPE_CHECKING
 
 from . import config
 from .messaging import (
@@ -25,6 +25,7 @@ from .messaging import (
     ensure_consumer_group,
     get_broker_redis,
 )
+from .cache_manager import CacheManager
 from .projection import FalkorProjector
 
 if TYPE_CHECKING:
@@ -42,6 +43,8 @@ class ProjectionWorker:
         consumer_name: str = "proj-1",
         versioning: Optional["GraphVersioningService"] = None,
         sweep_secs: Optional[int] = None,
+        evict_budget: Optional[Callable[[str], int]] = None,
+        evict_secs: Optional[int] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -51,6 +54,9 @@ class ProjectionWorker:
         self._stop = asyncio.Event()
         self._versioning = versioning            # enables the idle-draft sweep loop
         self._sweep_secs = sweep_secs or config.DRAFT_SWEEP_SECS
+        self._evict_budget = evict_budget        # provider_id -> max resident graphs; enables eviction
+        self._evict_secs = evict_secs or config.EVICT_SECS
+        self._cache = CacheManager(projector) if evict_budget is not None else None
 
     def stop(self) -> None:
         self._stop.set()
@@ -76,12 +82,39 @@ class ProjectionWorker:
             return []
         return await self._versioning.sweep_idle_drafts()
 
+    async def evict_once(self):
+        """One pass of the per-provider RAM-budget cache janitor (plan §16.5 #9-10):
+        within each FalkorDB provider, evict the coldest resident graphs above that
+        provider's budget. Pinned/in-flight graphs are skipped (evicting deeper to
+        compensate); no-op without a budget resolver."""
+        if self._cache is None:
+            return []
+        evicted = []
+        for provider in await self._cache.resident_providers():
+            budget = self._evict_budget(provider)
+            if budget <= 0:
+                continue                          # 0 ⇒ unlimited for this provider
+            resident = await self._cache.resident_count(provider)
+            need = resident - budget
+            if need <= 0:
+                continue
+            done = 0
+            for gid in await self._cache.lru_candidates(provider, limit=resident):
+                if done >= need:
+                    break
+                if await self._cache.evict(gid, drop_graph=self._proj.drop_graph):
+                    evicted.append(gid)
+                    done += 1
+        return evicted
+
     async def run(self) -> None:
         await ensure_consumer_group()
         await self._reclaim_pending()
         loops = [self._poll_loop(), self._stream_loop()]
         if self._versioning is not None:
             loops.append(self._sweep_loop())
+        if self._cache is not None:
+            loops.append(self._evict_loop())
         await asyncio.gather(*loops)
 
     async def _poll_loop(self) -> None:
@@ -105,6 +138,19 @@ class ProjectionWorker:
                 logger.exception("draft sweep loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._sweep_secs)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _evict_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                evicted = await self.evict_once()
+                if evicted:
+                    logger.info("evicted %d cold graph(s) from the FalkorDB cache", len(evicted))
+            except Exception:
+                logger.exception("eviction loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._evict_secs)
             except asyncio.TimeoutError:
                 pass
 

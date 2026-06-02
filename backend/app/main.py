@@ -649,6 +649,7 @@ async def lifespan(_app: FastAPI):
             _vw = ProjectionWorker(
                 FalkorProjector(make_falkor_graph_factory()),
                 versioning=GraphVersioningService(),
+                evict_budget=(_vcfg.falkor_budget_for if _vcfg.falkor_eviction_configured() else None),
             )
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
