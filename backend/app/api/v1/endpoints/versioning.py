@@ -29,8 +29,11 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
+from backend.app.db.engine import get_db_session
+from backend.app.db.repositories import data_source_repo
 from backend.auth_service.interface import User
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
@@ -334,13 +337,25 @@ async def create_graph(
     body: CreateGraphRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     if body.workspace_id != ws_id:
         raise HTTPException(status_code=400, detail="workspaceId must match the path workspace")
+    # Default the FalkorDB provider to the data source's so the worker's RAM-budget
+    # eviction scopes per provider; an explicit falkorProvider wins. Best-effort:
+    # provider resolution is a non-critical eviction hint, so a missing data source
+    # or a lookup error falls back to the "default" provider — never fails creation.
+    falkor_provider = body.falkor_provider
+    if falkor_provider is None:
+        try:
+            ds = await data_source_repo.get_data_source_orm(session, body.data_source_id)
+            falkor_provider = ds.provider_id if ds else None
+        except Exception:
+            logger.debug("provider lookup failed for %s; using default", body.data_source_id, exc_info=True)
     return await svc.create_graph(
         data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
         base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
-        falkor_graph_name=body.falkor_graph_name, falkor_provider=body.falkor_provider,
+        falkor_graph_name=body.falkor_graph_name, falkor_provider=falkor_provider,
         ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
     )
 
