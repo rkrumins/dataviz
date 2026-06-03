@@ -530,11 +530,27 @@ async def revert_commit(
 @router.get("/graphs/{graph_id}/branches/{branch_id}/state", response_model=StateResponse)
 async def get_state(
     ws_id: str, graph_id: str, branch_id: str,
+    as_of_seq: Optional[int] = Query(None, ge=0, alias="asOfSeq"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id)
+    state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
+    wm = await svc.projection_watermark(graph_id)
+    return {"nodes": state["nodes"], "edges": state["edges"],
+            "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
+
+
+@router.get("/graphs/{graph_id}/commits/{commit_id}/state", response_model=StateResponse)
+async def get_commit_state(
+    ws_id: str, graph_id: str, commit_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Full graph state as of a specific commit (time-travel by commit id)."""
+    with _domain_errors():
+        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
@@ -553,13 +569,14 @@ async def get_entity_history(
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)
 async def get_commit_log(
     ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return {"commits": await svc.commit_log(graph_id=graph_id, limit=limit, offset=offset)}
+    return {"commits": await svc.commit_log(graph_id=graph_id, branch_id=branch_id, limit=limit, offset=offset)}
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff", response_model=DiffResponse)
@@ -578,6 +595,8 @@ async def get_diff(
 async def graph_neighbors(
     ws_id: str, graph_id: str,
     urn: str = Query(..., description="seed node urn"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    as_of_seq: Optional[int] = Query(None, ge=0, alias="asOfSeq"),
     depth: int = Query(1, ge=1, le=20),
     direction: str = Query("both", pattern="^(out|in|both)$"),
     edge_types: Optional[str] = Query(None, alias="edgeTypes", description="comma-separated"),
@@ -587,21 +606,26 @@ async def graph_neighbors(
     svc: GraphVersioningService = Depends(get_versioning_service),
     read_factory=Depends(get_falkor_read_factory),
 ):
-    """Bounded neighborhood of a published-`main` node — FalkorDB-first (when the
-    projection is caught up), Postgres fallback otherwise; every response carries
-    the freshness watermark."""
+    """Bounded neighborhood of a node — FalkorDB-first only for `main`@head (when the
+    projection is caught up); drafts and as-of reads are served from Postgres. Every
+    response carries the freshness watermark."""
     ets = [e for e in edge_types.split(",") if e] if edge_types else None
     return await _serve_neighbors(
         svc, read_factory, graph_id, urn=urn, depth=depth,
         direction=direction, edge_types=ets, limit=limit,
+        branch_id=branch_id, as_of_seq=as_of_seq,
     )
 
 
-async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction, edge_types, limit):
+async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction,
+                           edge_types, limit, branch_id=None, as_of_seq=None):
     wm = await svc.projection_watermark(graph_id)
     wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
+    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres.
+    is_head_main = as_of_seq is None and (
+        branch_id is None or branch_id == await svc.main_branch_id(graph_id))
     can_falkor = bool(
-        read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
+        is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
         and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
     )
     if can_falkor:
@@ -617,8 +641,8 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
         finally:
             await release_lease(graph_id)
     result = await svc.neighbors_from_state(
-        graph_id=graph_id, urn=urn, depth=depth, direction=direction,
-        edge_types=edge_types, limit=limit,
+        graph_id=graph_id, urn=urn, branch_id=branch_id, as_of_seq=as_of_seq,
+        depth=depth, direction=direction, edge_types=edge_types, limit=limit,
     )
     return {"source": "postgres", "watermark": wm_out, **result}
 

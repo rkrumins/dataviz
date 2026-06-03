@@ -919,21 +919,38 @@ class GraphVersioningService:
             return await self._main_branch_id(s, graph_id)
 
     async def materialize_state(
-        self, *, graph_id: str, branch_id: str
+        self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,
     ) -> Dict[str, Dict[str, dict]]:
-        """Current live node/edge payloads for a branch (fork-aware composition).
+        """Node/edge payloads for a branch (fork-aware composition). ``as_of_seq``
+        reconstructs the state at ``commit_seq <= as_of_seq`` (time-travel); ``None``
+        is the branch's current head.
 
         Read straight from the version store (the source of truth); the FalkorDB
         projection is the hot read path and sits behind the same API.
         """
         async with self._session() as s:
-            state = await self._composed_state(s, graph_id, branch_id)
+            state = (
+                await self._composed_state(s, graph_id, branch_id)
+                if as_of_seq is None
+                else await self._composed_state_as_of(s, graph_id, branch_id, as_of_seq)
+            )
             nodes, edges = {}, {}
             for eid, p in state.items():
                 if p is None:
                     continue
                 (edges if _is_edge_payload(p) else nodes)[eid] = p
             return {"nodes": nodes, "edges": edges}
+
+    async def state_at_commit(
+        self, *, graph_id: str, commit_id: str
+    ) -> Dict[str, Dict[str, dict]]:
+        """Full branch state as of a specific commit (time-travel by commit id)."""
+        async with self._session() as s:
+            c = await s.get(CommitORM, (graph_id, commit_id))
+            if c is None:
+                raise ValueError(f"unknown commit {commit_id}")
+            branch_id, seq = c.branch_id, c.commit_seq
+        return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq)
 
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
@@ -953,21 +970,28 @@ class GraphVersioningService:
             }
 
     async def neighbors_from_state(
-        self, *, graph_id: str, urn: str, depth: int = 1,
+        self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
+        as_of_seq: Optional[int] = None, depth: int = 1,
         direction: str = "both", edge_types: Optional[Sequence[str]] = None,
         limit: int = 500,
     ) -> Dict[str, List[dict]]:
-        """Bounded neighborhood of a node on `main`, served from Postgres — the
-        fallback for the FalkorDB traversal when the projection lags/evicts.
+        """Bounded neighborhood of a node on a branch (default `main`), served from
+        Postgres — the fallback for the FalkorDB traversal when the projection
+        lags/evicts, and the only path for drafts and as-of reads.
 
-        Reader-compatible shapes (GraphNode/GraphEdge by alias). NOTE: this
-        composes full `main` state to build adjacency (O(graph) setup); the FalkorDB
-        path is the hot path. A bounded as-of SQL BFS is the later optimisation.
+        Reader-compatible shapes (GraphNode/GraphEdge by alias). NOTE: this composes
+        full branch state to build adjacency (O(graph) setup); the FalkorDB path is
+        the hot path for `main`@head. A bounded as-of SQL BFS is the later optimisation.
         """
         et = set(edge_types) if edge_types else None
         async with self._session() as s:
-            main_id = await self._main_branch_id(s, graph_id)
-            state = await self._composed_state(s, graph_id, main_id)
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            state = (
+                await self._composed_state(s, graph_id, branch_id)
+                if as_of_seq is None
+                else await self._composed_state_as_of(s, graph_id, branch_id, as_of_seq)
+            )
         nodes = {eid: p for eid, p in state.items() if p is not None and not _is_edge_payload(p)}
         edges = {eid: p for eid, p in state.items() if p is not None and _is_edge_payload(p)}
         urn_of = {eid: (p.get("urn") or f"gv:{eid}") for eid, p in nodes.items()}
@@ -1064,15 +1088,18 @@ class GraphVersioningService:
         }
 
     async def commit_log(
-        self, *, graph_id: str, limit: int = 100, offset: int = 0,
+        self, *, graph_id: str, branch_id: Optional[str] = None,
+        limit: int = 100, offset: int = 0,
     ) -> List[dict]:
-        """Newest-first commit log for a graph's ``main`` branch (plan §7). A fork's
-        log holds only its own divergence — inherited history lives on the parent."""
+        """Newest-first commit log for a branch (default ``main``) of a graph
+        (plan §7). A fork's log holds only its own divergence — inherited history
+        lives on the parent."""
         async with self._session() as s:
-            main_id = await self._main_branch_id(s, graph_id)
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
             rows = (await s.execute(
                 select(CommitORM).where(
-                    CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
                 ).order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
             )).scalars().all()
             return [self._commit_meta(r) for r in rows]
@@ -1265,6 +1292,22 @@ class GraphVersioningService:
         branch = await s.get(BranchORM, branch_id)
         base = await self._state_as_of(s, graph_id, main_id, branch.base_commit_seq or 0)
         base.update(await self._branch_own_payloads(s, graph_id, branch_id))
+        return base
+
+    async def _composed_state_as_of(
+        self, s, graph_id: str, branch_id: str, as_of_seq: int
+    ) -> Dict[str, Optional[dict]]:
+        """As-of analogue of :meth:`_composed_state` — branch state at
+        ``commit_seq <= as_of_seq`` (fork-aware). ``main`` reconstructs at the seq;
+        a draft seeds from ``main`` at its branch point (capped at the seq) overlaid
+        with the draft's own version rows ≤ the seq."""
+        main_id = await self._main_branch_id(s, graph_id)
+        if branch_id == main_id:
+            return await self._state_as_of(s, graph_id, main_id, as_of_seq)
+        branch = await s.get(BranchORM, branch_id)
+        base_seq = min(as_of_seq, branch.base_commit_seq or 0)
+        base = await self._state_as_of(s, graph_id, main_id, base_seq)
+        base.update(await self._state_as_of(s, graph_id, branch_id, as_of_seq))
         return base
 
     async def _branch_own_payloads(
