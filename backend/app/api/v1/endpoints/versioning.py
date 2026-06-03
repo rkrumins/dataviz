@@ -749,6 +749,14 @@ class BulkIngestResponse(_ApiModel):
     idempotent_replay: bool = False
 
 
+class SyncResponse(_ApiModel):
+    commit_id: Optional[str] = None
+    commit_seq: Optional[int] = None
+    applied: int = 0
+    rejected: List[dict] = []
+    idempotent_replay: bool = False
+
+
 @router.post("/graphs/{graph_id}/bulk-ingest", response_model=BulkIngestResponse)
 async def bulk_ingest(
     ws_id: str, graph_id: str,
@@ -776,6 +784,42 @@ async def bulk_ingest(
     with _domain_errors():
         report = await svc.bulk_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, idempotency_key=idempotency_key,
+        )
+    if report.get("commit_id"):
+        background.add_task(nudge_projection, graph_id)
+    return report
+
+
+@router.post("/graphs/{graph_id}/sync", response_model=SyncResponse)
+async def sync_ingest(
+    ws_id: str, graph_id: str,
+    request: Request,
+    background: BackgroundTasks,
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    strategy: str = Query("merge", pattern="^(merge|external_wins)$"),
+    source: str = Query("external"),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Re-sync an authoritative external snapshot (ndjson, one node/edge per line) into
+    ``main`` as a single ``sync`` commit via 3-way merge: user edits to untouched fields
+    survive; a field both sides changed conflicts (409) under ``strategy=merge`` or takes
+    the external value under ``strategy=external_wins``. Idempotent on ``idempotencyKey``."""
+    rows: List[dict] = []
+    content = await request.body()
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            rows.append({"kind": "__malformed__"})        # rejected by the service
+    with _domain_errors():
+        report = await svc.sync_ingest(
+            graph_id=graph_id, rows=rows, actor=user.id, source=source,
+            idempotency_key=idempotency_key, strategy=strategy,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)

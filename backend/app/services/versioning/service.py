@@ -1669,6 +1669,153 @@ class GraphVersioningService:
             return {"commit_id": commit.id, "commit_seq": new_seq, "ingested": len(deltas),
                     "nodes": len(node_deltas), "edges": len(edge_deltas), "rejected": rejected}
 
+    async def sync_ingest(
+        self, *, graph_id: str, rows, actor: str, source: str = "external",
+        idempotency_key: Optional[str] = None, message: str = "external sync",
+        strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+    ) -> Dict[str, object]:
+        """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
+        commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
+        previous import/sync snapshot, ours = current main (the user's edits since),
+        theirs = the external snapshot. A field both sides changed conflicts under
+        ``strategy='merge'`` (resubmit with ``resolutions``) or takes the external value
+        under ``strategy='external_wins'``. The snapshot is authoritative: an entity it
+        drops is deleted if the user hadn't touched it. Idempotent on ``idempotency_key``."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+
+            if idempotency_key:
+                prior = await s.scalar(select(CommitORM).where(
+                    CommitORM.graph_id == graph_id,
+                    CommitORM.idempotency_key == idempotency_key,
+                ))
+                if prior is not None:
+                    st = prior.stats or {}
+                    return {"commit_id": prior.id, "commit_seq": prior.commit_seq,
+                            "applied": st.get("nodes", 0) + st.get("edges", 0),
+                            "rejected": [], "idempotent_replay": True}
+
+            last_seq = await s.scalar(select(CommitORM.commit_seq).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.kind.in_(("import", "sync")),
+            ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
+            base = await self._state_as_of(s, graph_id, main_id, last_seq)
+            ours = await self._state_as_of(s, graph_id, main_id, graph.main_head_commit_seq)
+            theirs, rejected = self._external_state(rows, ours)
+
+            set_fields = frozenset(config.SET_FIELDS)
+            res = dict(resolutions or {})
+            merged: Dict[str, Optional[dict]] = {}
+            conflicts: List[dict] = []
+            for eid in sorted(set(base) | set(ours) | set(theirs)):
+                if eid in res:
+                    merged[eid] = res[eid]
+                    continue
+                out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+                if out.conflicts and strategy == "external_wins":
+                    merged[eid] = theirs.get(eid)            # external overrides the user edit
+                    continue
+                merged[eid] = out.merged
+                for c in out.conflicts:
+                    conflicts.append({
+                        "entity_id": eid, "path": list(c.path),
+                        "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
+                    })
+            if conflicts:
+                raise MergeConflict(conflicts)
+
+            self._cascade_incident_edges(merged)
+            self._assert_referential_integrity(merged)
+            deltas = net_delta(ours, merged)                 # changes to apply on top of current main
+            if not deltas:
+                return {"commit_id": None, "commit_seq": graph.main_head_commit_seq,
+                        "applied": 0, "rejected": rejected, "idempotent_replay": False}
+
+            kind_by_entity = {eid: ("edge" if _is_edge_payload(p) else "node")
+                              for eid, p in ours.items() if p is not None}
+            kind_by_entity.update({eid: ("edge" if _is_edge_payload(p) else "node")
+                                   for eid, p in merged.items() if p is not None})
+
+            new_seq = graph.main_head_commit_seq + 1
+            main = await s.get(BranchORM, main_id)
+            commit = CommitORM(
+                graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="sync", message=message,
+                actor=actor, idempotency_key=idempotency_key, change_reason=source,
+            )
+            s.add(commit)
+            await s.flush()
+            await self._write_deltas(s, graph_id, main_id, commit, deltas, kind_by_entity, actor)
+            main.head_commit_id = commit.id
+            graph.main_head_commit_seq = new_seq
+            commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
+            graph.updated_at = _now()
+            commit.stats = _delta_stats(deltas)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return {"commit_id": commit.id, "commit_seq": new_seq,
+                    "applied": len(deltas), "rejected": rejected, "idempotent_replay": False}
+
+    @staticmethod
+    def _external_state(rows, ours: Mapping[str, Optional[dict]]):
+        """Parse external rows into a desired ``{entity_id: payload}`` state, matching
+        each row to an EXISTING main entity so a re-sync updates in place rather than
+        duplicating: nodes by ``urn``, edges by ``(source, target, edgeType)``. New
+        external entities get a stable id. Returns ``(state, rejected)``."""
+        urn_index: Dict[str, str] = {}
+        edge_index: Dict[tuple, str] = {}
+        for eid, p in ours.items():
+            if p is None:
+                continue
+            if _is_edge_payload(p):
+                edge_index[(p.get("sourceEntityId"), p.get("targetEntityId"), p.get("edgeType"))] = eid
+            elif p.get("urn"):
+                urn_index[p["urn"]] = eid
+
+        theirs: Dict[str, dict] = {}
+        rejected: List[dict] = []
+        urn_to_eid: Dict[str, str] = {}
+        for i, row in enumerate(rows):
+            if (row or {}).get("kind") != "node":
+                continue
+            if not row.get("entityType"):
+                rejected.append({"row": i, "reason": "node missing entityType"})
+                continue
+            urn = row.get("urn")
+            eid = (urn_index.get(urn) or row.get("entity_id") or row.get("id")
+                   or (f"sync:{urn}" if urn else prefixed_id("ent")))
+            payload = {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")}
+            theirs[eid] = payload
+            if urn:
+                urn_to_eid[urn] = eid
+            if row.get("id"):
+                urn_to_eid[row["id"]] = eid
+            urn_to_eid[eid] = eid
+
+        for i, row in enumerate(rows):
+            if (row or {}).get("kind") != "edge":
+                continue
+            et, src, tgt = row.get("edgeType"), row.get("source"), row.get("target")
+            if not (et and src and tgt):
+                rejected.append({"row": i, "reason": "edge missing edgeType/source/target"})
+                continue
+            seid = urn_to_eid.get(src) or urn_index.get(src)
+            teid = urn_to_eid.get(tgt) or urn_index.get(tgt)
+            if not (seid and teid):
+                rejected.append({"row": i, "reason": "edge endpoint not found"})
+                continue
+            eid = (edge_index.get((seid, teid, et)) or row.get("entity_id")
+                   or row.get("id") or f"sync:e:{seid}->{teid}:{et}")
+            payload = {"edgeType": et, "sourceEntityId": seid, "targetEntityId": teid,
+                       **{k: v for k, v in row.items()
+                          if k not in ("kind", "id", "entity_id", "source", "target", "edgeType")}}
+            theirs[eid] = payload
+        return theirs, rejected
+
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
         """Chunked multi-row INSERTs into the version tables + a bulk head upsert
         (the COPY-style bulk path; never one INSERT per row)."""
