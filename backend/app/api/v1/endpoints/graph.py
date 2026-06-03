@@ -90,6 +90,26 @@ async def get_context_engine(
     )
 
 
+@router.post("/bootstrap")
+async def bootstrap_versioned_graph_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to seed."),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Seed the data source's versioned graph from the provider's current state so branches
+    and history cover the whole graph. Idempotent — safe to re-run as a backfill."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.app.providers.versioned_bootstrap import bootstrap_versioned_graph
+    actor = user.id if user else "system"
+    svc = GraphVersioningService()
+    res = await svc.resolve_graph(
+        data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
+    graph_id = res["graph_id"] if res is not None else (
+        await svc.create_graph(data_source_id=dataSourceId, workspace_id=ws_id, actor=actor))["graph_id"]
+    return await bootstrap_versioned_graph(svc, engine.provider, graph_id, actor=actor)
+
+
 # ------------------------------------------------------------------ #
 # Helper: resolve data source ID from workspace (DB-only, no provider)#
 # ------------------------------------------------------------------ #

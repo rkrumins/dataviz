@@ -66,11 +66,26 @@ class VersionedWriteProvider:
                     res = await self._svc.resolve_graph(
                         data_source_id=self._ds, actor=self._actor,
                         workspace_id=self._ws, open_draft_if_absent=False)
-                    self._gid = res["graph_id"] if res is not None else (
-                        await self._svc.create_graph(
-                            data_source_id=self._ds, workspace_id=self._ws, actor=self._actor)
-                    )["graph_id"]
+                    if res is not None:
+                        self._gid = res["graph_id"]
+                    else:
+                        self._gid = (await self._svc.create_graph(
+                            data_source_id=self._ds, workspace_id=self._ws,
+                            actor=self._actor))["graph_id"]
+                        await self._maybe_bootstrap(self._gid)
         return self._gid
+
+    async def _maybe_bootstrap(self, graph_id: str) -> None:
+        """Seed the new versioned graph from the provider's current state so branches and
+        history cover the WHOLE graph, not just edits — best-effort (ops can re-run the
+        explicit POST /graph/bootstrap if the provider can't be fully read here)."""
+        try:
+            from .versioned_bootstrap import bootstrap_versioned_graph
+            await bootstrap_versioned_graph(self._svc, self._inner, graph_id, actor=self._actor)
+        except Exception:                                # pragma: no cover - provider read varies
+            logger.warning(
+                "versioned-graph bootstrap from provider failed for %s; base may be "
+                "incomplete until POST /graph/bootstrap is run", graph_id, exc_info=True)
 
     async def _record(self, ops: List[dict], message: str) -> None:
         ops = [o for o in ops if o is not None]
