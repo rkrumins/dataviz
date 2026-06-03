@@ -41,6 +41,7 @@ from backend.app.services.stats_cache import (
 )
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
+from backend.app.auth.dependencies import get_optional_user
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -56,6 +57,7 @@ async def get_context_engine(
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
     session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
 ) -> ContextEngine:
     """
     FastAPI dependency that resolves the appropriate ContextEngine.
@@ -74,7 +76,8 @@ async def get_context_engine(
     try:
         if ws_id:
             return await ContextEngine.for_workspace(
-                ws_id, provider_manager, session, data_source_id=dataSourceId
+                ws_id, provider_manager, session, data_source_id=dataSourceId,
+                actor=(user.id if user else None),
             )
         if connectionId:
             return await ContextEngine.for_connection(connectionId, provider_manager, session)

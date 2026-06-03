@@ -1816,6 +1816,63 @@ class GraphVersioningService:
             theirs[eid] = payload
         return theirs, rejected
 
+    async def apply_ops(
+        self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
+        message: str = "edit", branch_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
+        the 'versioned write' primitive behind provider write-through, so an ordinary
+        graph write becomes a durable, attributed commit without a draft round-trip.
+        Each op is ``{op, entity_kind, entity_id, payload}``. Returns the commit id, or
+        ``None`` if the ops are a no-op against current state."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            bid = branch_id or await self._main_branch_id(s, graph_id)
+            cur = await self._composed_state(s, graph_id, bid)
+            new_state: Dict[str, Optional[dict]] = dict(cur)
+            kind_by_entity: Dict[str, str] = {}
+            for op in ops:
+                eid = op["entity_id"]
+                payload = op.get("payload") or {}
+                kind_by_entity[eid] = (op.get("entity_kind")
+                                       or ("edge" if _is_edge_payload(payload) else "node"))
+                new_state[eid] = None if op["op"] == "delete" else dict(payload)
+
+            self._cascade_incident_edges(new_state)
+            self._assert_referential_integrity(new_state)
+            deltas = net_delta(cur, new_state)
+            if not deltas:
+                return None
+            for d in deltas:                                  # kinds for cascaded deletes
+                kind_by_entity.setdefault(
+                    d.entity_id, "edge" if _is_edge_payload(cur.get(d.entity_id) or {}) else "node")
+
+            last = await s.scalar(select(CommitORM.commit_seq).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
+            ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
+            new_seq = last + 1
+            branch = await s.get(BranchORM, bid)
+            commit = CommitORM(
+                graph_id=graph_id, branch_id=bid, commit_seq=new_seq,
+                parent_commit_id=branch.head_commit_id, kind="edit",
+                message=message, actor=actor,
+            )
+            s.add(commit)
+            await s.flush()
+            await self._write_deltas(s, graph_id, bid, commit, deltas, kind_by_entity, actor)
+            branch.head_commit_id = commit.id
+            commit.merkle_root = await self._commit_merkle(s, graph_id, bid, commit, deltas)
+            commit.stats = _delta_stats(deltas)
+            graph.updated_at = _now()
+            if branch.kind == "main":
+                graph.main_head_commit_seq = new_seq
+                ps = await s.get(ProjectionStateORM, graph_id)
+                if ps is not None:
+                    ps.target_commit_seq = new_seq
+            return commit.id
+
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
         """Chunked multi-row INSERTs into the version tables + a bulk head upsert
         (the COPY-style bulk path; never one INSERT per row)."""

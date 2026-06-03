@@ -68,6 +68,7 @@ class ContextEngine:
         registry: Any,  # ProviderRegistry — avoid circular import
         session: "AsyncSession",
         data_source_id: Optional[str] = None,
+        actor: Optional[str] = None,
     ) -> "ContextEngine":
         """
         Create a ContextEngine scoped to a workspace data source.
@@ -103,6 +104,19 @@ class ContextEngine:
                 provider_name=f"ws:{workspace_id}",
                 reason=f"Provider instantiation failed: {exc}",
             ) from exc
+
+        # Out-of-the-box write-through versioning: wrap the provider so every write also
+        # lands as an audited commit on the data source's versioned graph (the audit trail
+        # + branch/version history). Reads delegate unchanged. Opt out with
+        # GRAPHVER_VERSIONED_WRITES=0.
+        from .versioning import config as vconfig
+        if vconfig.VERSIONED_WRITES_ENABLED and data_source_id:
+            from ..providers.versioned_write_provider import VersionedWriteProvider
+            provider = VersionedWriteProvider(
+                provider, workspace_id=workspace_id, data_source_id=data_source_id,
+                actor=actor or "system",
+            )
+
         repo = SQLAlchemyOntologyRepository(session)
         ontology_service = LocalOntologyService(repo)
         engine = cls(provider=provider, ontology_service=ontology_service)

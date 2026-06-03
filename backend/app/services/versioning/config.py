@@ -117,6 +117,11 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 
+# Provider write-through: record every graph write as an audited versioned commit on the
+# data source's versioned graph (the audit trail + branch/version history, on by default).
+# Set GRAPHVER_VERSIONED_WRITES=0 to opt out (writes then hit the provider only).
+VERSIONED_WRITES_ENABLED: bool = os.getenv("GRAPHVER_VERSIONED_WRITES", "1").lower() not in ("0", "false", "no")
+
 # Evictable/rebuildable FalkorDB cache (plan §5, §16.5 #9-10): single-flight
 # rebuild lock TTL and read-lease (refcount) TTL, both seconds.
 REBUILD_LOCK_TTL: int = int(os.getenv("GRAPHVER_REBUILD_LOCK_TTL", "120"))
