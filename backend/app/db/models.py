@@ -497,6 +497,12 @@ class WorkspaceDataSourceORM(Base):
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
+    # ── Versioning source model ───────────────────────────────
+    # None = derive from provider capability (managed if writable & not external).
+    source_mode = Column(Text, nullable=True)              # "managed" | "federated"
+    # Federated only: push our overlay edits back to the external system (opt-in, and only
+    # when the provider is write-capable). Ignored for managed sources.
+    write_back_enabled = Column(Boolean, nullable=False, default=False)
     # ── Aggregation state ─────────────────────────────────────
     aggregation_status = Column(Text, nullable=False, default="none")  # none|pending|running|ready|failed|skipped
     last_aggregated_at = Column(Text, nullable=True)  # ISO timestamp of last successful aggregation
@@ -541,6 +547,10 @@ class WorkspaceDataSourceORM(Base):
         CheckConstraint(
             "projection_mode IS NULL OR projection_mode IN ('in_source', 'dedicated')",
             name="ck_ds_projection_mode",
+        ),
+        CheckConstraint(
+            "source_mode IS NULL OR source_mode IN ('managed', 'federated')",
+            name="ck_ds_source_mode",
         ),
     )
 
