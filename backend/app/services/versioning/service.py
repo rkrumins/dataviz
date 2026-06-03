@@ -1104,60 +1104,56 @@ class GraphVersioningService:
         Postgres — the fallback for the FalkorDB traversal when the projection
         lags/evicts, and the only path for drafts and as-of reads.
 
-        Reader-compatible shapes (GraphNode/GraphEdge by alias). NOTE: this composes
-        full branch state to build adjacency (O(graph) setup); the FalkorDB path is
-        the hot path for `main`@head. A bounded as-of SQL BFS is the later optimisation.
+        Cost is **O(neighborhood)**, not O(graph): a hop-by-hop BFS that resolves only
+        the start node and, per hop, the frontier's incident live edges via
+        ix_ev_source/ix_ev_target (bounded by degree) — never composing full state.
+        Reader-compatible shapes (GraphNode/GraphEdge by alias).
         """
         et = set(edge_types) if edge_types else None
         async with self._session() as s:
             if branch_id is None:
                 branch_id = await self._main_branch_id(s, graph_id)
-            state = (
-                await self._composed_state(s, graph_id, branch_id)
-                if as_of_seq is None
-                else await self._composed_state_as_of(s, graph_id, branch_id, as_of_seq)
-            )
-        nodes = {eid: p for eid, p in state.items() if p is not None and not _is_edge_payload(p)}
-        edges = {eid: p for eid, p in state.items() if p is not None and _is_edge_payload(p)}
-        urn_of = {eid: (p.get("urn") or f"gv:{eid}") for eid, p in nodes.items()}
-        eid_of = {u: eid for eid, u in urn_of.items()}
+            start = await self._eid_for_urn(s, graph_id, branch_id, urn, as_of_seq)
+            if start is None:
+                return {"nodes": [], "edges": []}
 
-        start = eid_of.get(urn) or (urn[3:] if urn.startswith("gv:") and urn[3:] in nodes else None)
-        if start is None:
-            return {"nodes": [], "edges": []}
-
-        seen_nodes = {start}
-        seen_edges: set = set()
-        frontier = {start}
-        for _ in range(max(1, depth)):
-            nxt: set = set()
-            for eid, p in edges.items():
-                if eid in seen_edges:
-                    continue
-                if et is not None and (p.get("edgeType") not in et):
-                    continue
-                src, tgt = _edge_src_tgt(p)
-                hit = None
-                if direction in ("out", "both") and src in frontier:
-                    hit = tgt
-                elif direction in ("in", "both") and tgt in frontier:
-                    hit = src
-                if hit is None or hit not in nodes:
-                    continue
-                seen_edges.add(eid)
-                if hit not in seen_nodes:
-                    if len(seen_nodes) >= limit:
+            seen_nodes = {start}
+            seen_edges: Dict[str, dict] = {}
+            frontier = {start}
+            for _ in range(max(1, depth)):
+                if not frontier or len(seen_nodes) >= limit:
+                    break
+                inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+                nxt: set = set()
+                for eid, p in inc.items():
+                    if eid in seen_edges:
                         continue
-                    seen_nodes.add(hit)
-                    nxt.add(hit)
-            if not nxt:
-                break
-            frontier = nxt
+                    if et is not None and (p.get("edgeType") not in et):
+                        continue
+                    src, tgt = _edge_src_tgt(p)
+                    hit = None
+                    if direction in ("out", "both") and src in frontier:
+                        hit = tgt
+                    elif direction in ("in", "both") and tgt in frontier:
+                        hit = src
+                    if hit is None:
+                        continue
+                    seen_edges[eid] = p
+                    if hit not in seen_nodes:
+                        if len(seen_nodes) >= limit:
+                            continue
+                        seen_nodes.add(hit)
+                        nxt.add(hit)
+                frontier = nxt
 
-        out_nodes = [_graphnode_dict(eid, urn_of[eid], nodes[eid]) for eid in seen_nodes]
+            payloads = await self._current_values(s, graph_id, branch_id, seen_nodes, as_of_seq)
+
+        nodes = {eid: p for eid, p in payloads.items() if p is not None and not _is_edge_payload(p)}
+        urn_of = {eid: (p.get("urn") or f"gv:{eid}") for eid, p in nodes.items()}
+        out_nodes = [_graphnode_dict(eid, urn_of[eid], nodes[eid]) for eid in nodes]
         out_edges = [
-            _graphedge_dict(eid, edges[eid], urn_of) for eid in seen_edges
-            if _edge_src_tgt(edges[eid])[0] in seen_nodes and _edge_src_tgt(edges[eid])[1] in seen_nodes
+            _graphedge_dict(eid, p, urn_of) for eid, p in seen_edges.items()
+            if _edge_src_tgt(p)[0] in nodes and _edge_src_tgt(p)[1] in nodes
         ]
         return {"nodes": out_nodes, "edges": out_edges}
 
@@ -2090,10 +2086,11 @@ class GraphVersioningService:
         return out
 
     async def _current_values(
-        self, s, graph_id: str, branch_id: str, ids,
+        self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,
     ) -> Dict[str, Optional[dict]]:
-        """Current value of each id on a branch, bounded to *ids* (absent ids omitted).
-        ``main`` → values at head; a draft → ``main`` at its branch point overlaid with
+        """Value of each id on a branch, bounded to *ids* (absent ids omitted).
+        ``as_of_seq`` reconstructs the value at that commit (time-travel); ``None`` = head.
+        ``main`` → values at the seq; a draft → ``main`` at its branch point overlaid with
         the draft's own rows. O(ids) via ``_values_at`` — never composes full state."""
         ids = list(ids)
         if not ids:
@@ -2101,14 +2098,19 @@ class GraphVersioningService:
         main_id = await self._main_branch_id(s, graph_id)
         if branch_id == main_id:
             graph = await s.get(GraphORM, graph_id)
-            return await self._values_at(s, graph_id, main_id, ids, graph.main_head_commit_seq)
+            seq = graph.main_head_commit_seq if as_of_seq is None else as_of_seq
+            return await self._values_at(s, graph_id, main_id, ids, seq)
         branch = await s.get(BranchORM, branch_id)
-        out = await self._values_at(s, graph_id, main_id, ids, branch.base_commit_seq or 0)
-        out.update(await self._values_at(s, graph_id, branch_id, ids, 1 << 62))  # all draft-own rows
+        base_seq = branch.base_commit_seq or 0
+        if as_of_seq is not None:
+            base_seq = min(base_seq, as_of_seq)
+        out = await self._values_at(s, graph_id, main_id, ids, base_seq)
+        overlay_seq = (1 << 62) if as_of_seq is None else as_of_seq
+        out.update(await self._values_at(s, graph_id, branch_id, ids, overlay_seq))
         return out
 
     async def _incident_live_edges(
-        self, s, graph_id: str, branch_id: str, node_ids,
+        self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int] = None,
     ) -> Dict[str, dict]:
         """Currently-live edges on a branch incident to any of *node_ids* — bounded by
         node degree via ix_ev_source/ix_ev_target. Returns {edge_entity_id: payload}."""
@@ -2123,8 +2125,28 @@ class GraphVersioningService:
                 ).distinct()
             )).scalars().all()
             cand.update(rows)
-        vals = await self._current_values(s, graph_id, branch_id, cand)
+        vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _eid_for_urn(
+        self, s, graph_id: str, branch_id: str, urn: str, as_of_seq: Optional[int] = None,
+    ) -> Optional[str]:
+        """Resolve a seed urn to its live node's entity_id on a branch (bounded via
+        ix_nv_urn + the ``gv:<eid>`` fast path); ``None`` if absent/tombstoned/not a node."""
+        cand: List[str] = [urn[3:]] if urn.startswith("gv:") else []
+        cand.extend((await s.execute(
+            select(NodeVersionORM.entity_id).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn == urn,
+            ).distinct()
+        )).scalars().all())
+        if not cand:
+            return None
+        vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+        for eid in cand:
+            p = vals.get(eid)
+            if p is not None and not _is_edge_payload(p) and (p.get("urn") == urn or f"gv:{eid}" == urn):
+                return eid
+        return None
 
     async def entity_value(
         self, *, graph_id: str, entity_id: str, branch_id: Optional[str] = None,

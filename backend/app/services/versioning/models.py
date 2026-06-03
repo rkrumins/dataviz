@@ -361,6 +361,7 @@ class NodeVersionORM(VersioningBase):
         Index("ix_nv_branch_changeset", "graph_id", "branch_id", "commit_seq"),
         Index("ix_nv_content_hash", "graph_id", "content_hash"),
         Index("ix_nv_commit", "graph_id", "commit_id"),
+        Index("ix_nv_urn", "graph_id", "urn"),
         Index("ix_nv_seq_brin", "commit_seq", postgresql_using="brin"),
         CheckConstraint("op IN ('create','update','delete')", name="ck_nv_op"),
     )
