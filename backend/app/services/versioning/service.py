@@ -1131,6 +1131,54 @@ class GraphVersioningService:
             g = await s.get(GraphORM, graph_id)
             return None if g is None else self._graph_meta(g)
 
+    async def get_graph_by_data_source(self, data_source_id: str) -> Optional[Dict[str, object]]:
+        """Reverse lookup: the versioned graph backing a data source (1:1 via the
+        ``uq_graphs_data_source`` unique constraint), or ``None``."""
+        async with self._session() as s:
+            g = (await s.execute(
+                select(GraphORM).where(GraphORM.data_source_id == data_source_id)
+            )).scalar_one_or_none()
+            return None if g is None else self._graph_meta(g)
+
+    @staticmethod
+    def _draft_ref(b: BranchORM) -> dict:
+        return {"branch_id": b.id, "head_commit_id": b.head_commit_id,
+                "base_commit_seq": b.base_commit_seq}
+
+    async def resolve_graph(
+        self, *, data_source_id: str, actor: str, workspace_id: Optional[str] = None,
+        open_draft_if_absent: bool = True, originating_view_id: Optional[str] = None,
+    ) -> Optional[Dict[str, object]]:
+        """Resolve a data source to its versioned graph plus the caller's editing
+        draft — the UI's boot lookup. Returns the graph's ``main`` head and the
+        actor's newest open draft (opening one when absent if requested), or ``None``
+        when no versioned graph backs the data source (optionally scoped to a
+        workspace for tenant isolation)."""
+        async with self._session() as s:
+            g = (await s.execute(
+                select(GraphORM).where(GraphORM.data_source_id == data_source_id)
+            )).scalar_one_or_none()
+            if g is None or (workspace_id is not None and g.workspace_id != workspace_id):
+                return None
+            graph_id, main_head = g.id, g.main_head_commit_seq
+            main_id = await self._main_branch_id(s, graph_id)
+            draft = (await s.execute(
+                select(BranchORM).where(
+                    BranchORM.graph_id == graph_id, BranchORM.owner == actor,
+                    BranchORM.kind == "draft", BranchORM.status == "open",
+                ).order_by(BranchORM.created_at.desc())
+            )).scalars().first()
+            my_draft = self._draft_ref(draft) if draft is not None else None
+        if my_draft is None and open_draft_if_absent:
+            branch_id = await self.open_draft(
+                graph_id=graph_id, owner=actor, originating_view_id=originating_view_id)
+            async with self._session() as s:
+                my_draft = self._draft_ref(await s.get(BranchORM, branch_id))
+        return {
+            "graph_id": graph_id, "main_branch_id": main_id,
+            "main_head_commit_seq": main_head, "my_draft": my_draft,
+        }
+
     async def list_branches(
         self, *, graph_id: str, limit: int = 100, offset: int = 0
     ) -> List[dict]:

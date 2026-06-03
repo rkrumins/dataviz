@@ -210,6 +210,24 @@ class CreateGraphResponse(_ApiModel):
     genesis_commit_id: str = Field(alias="genesisCommitId")
 
 
+class ResolveRequest(_ApiModel):
+    data_source_id: str = Field(alias="dataSourceId")
+    originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
+
+
+class DraftRefModel(_ApiModel):
+    branch_id: str = Field(alias="branchId")
+    head_commit_id: Optional[str] = Field(default=None, alias="headCommitId")
+    base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
+
+
+class ResolveResponse(_ApiModel):
+    graph_id: str = Field(alias="graphId")
+    main_branch_id: str = Field(alias="mainBranchId")
+    main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
+    my_draft: Optional[DraftRefModel] = Field(default=None, alias="myDraft")
+
+
 class GraphResponse(_ApiModel):
     graph_id: str = Field(alias="graphId")
     workspace_id: str = Field(alias="workspaceId")
@@ -379,6 +397,40 @@ async def list_branches(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     return await svc.list_branches(graph_id=graph_id, limit=limit, offset=offset)
+
+
+@router.get("/resolve", response_model=ResolveResponse)
+async def resolve_graph_get(
+    ws_id: str,
+    data_source_id: str = Query(..., alias="dataSourceId"),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Resolve (workspace, dataSource) → versioned graph + the caller's open draft, if
+    any. Read-only: never opens a draft. 404 when no versioned graph backs the source."""
+    res = await svc.resolve_graph(
+        data_source_id=data_source_id, actor=user.id, workspace_id=ws_id,
+        open_draft_if_absent=False,
+    )
+    if res is None:
+        raise HTTPException(status_code=404, detail="no versioned graph for data source")
+    return res
+
+
+@router.post("/resolve", response_model=ResolveResponse)
+async def resolve_graph_open(
+    ws_id: str, body: ResolveRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Resolve and ensure the caller has an open draft to edit on (opens one if none)."""
+    res = await svc.resolve_graph(
+        data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
+        open_draft_if_absent=True, originating_view_id=body.originating_view_id,
+    )
+    if res is None:
+        raise HTTPException(status_code=404, detail="no versioned graph for data source")
+    return res
 
 
 # --------------------------------------------------------------------------- #
