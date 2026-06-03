@@ -100,10 +100,37 @@ stores:
 
 # ── DB bootstrap Job (applies roles + schemas to external Postgres) ───
 # Idempotent. The 'aggregation' schema MUST exist before the control plane
-# runs Alembic. Runs as a Helm pre-install/pre-upgrade hook.
+# runs Alembic. Runs as a Helm pre-install/pre-upgrade hook (weight 0).
 dbInit:
   enabled: true
   image: postgres:16.4-alpine
+
+# ── Schema upgrade Job (synodic-upgrade) ──────────────────────────────
+# Standalone image that owns every Alembic operation. Runs as a Helm
+# pre-install/pre-upgrade hook (weight 5, after db-init). Same image is
+# used as a wait-for-schema initContainer on every backend Pod so they
+# fail-closed if schema isn't at head.
+#
+# Rollback workflow (operator-driven, not automatic):
+#   helm upgrade dataviz . \
+#     --set upgrade.command=downgrade \
+#     --set upgrade.targetRevision=<alembic_rev> \
+#     --reuse-values
+#   # Then reset:
+#   helm upgrade dataviz . \
+#     --set upgrade.command=upgrade \
+#     --set upgrade.targetRevision="" \
+#     --reuse-values
+upgrade:
+  enabled: true
+  command: upgrade              # upgrade | downgrade
+  targetRevision: ""            # empty -> "head" for upgrade; required for downgrade
+  checkWaitSecs: 60             # how long each backend Pod's initContainer polls
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
 
 # ── Boot ordering ─────────────────────────────────────────────────────
 # Adds a wait-for-controlplane initContainer to viz/worker/stats so the
@@ -135,36 +162,48 @@ networkPolicy:
     - 0.0.0.0/0
 
 # ── Per-workload settings ─────────────────────────────────────────────
+# skipSchemaCheck: false (default) attaches the wait-for-schema
+# initContainer to the Pod so it fails-closed if the upgrade Job hasn't
+# completed. Set to true only for emergency boot-before-upgrade.
 services:
   viz:
     replicas: 2
+    # Per-pod gunicorn workers. Total processes = replicas * workers.
+    # Tune based on per-pod CPU limits (2 * CPU + 1 is a common formula).
+    workers: 4
+    skipSchemaCheck: false
     resources:
       requests: { cpu: 250m, memory: 512Mi }
       limits: { cpu: "1", memory: 1Gi }
   graph:
     replicas: 2
+    skipSchemaCheck: false
     resources:
       requests: { cpu: 100m, memory: 256Mi }
       limits: { cpu: 500m, memory: 512Mi }
   controlplane:
     replicas: 1
+    skipSchemaCheck: false
     resources:
       requests: { cpu: 250m, memory: 512Mi }
       limits: { cpu: "1", memory: 1Gi }
   worker:
     replicas: 2
+    skipSchemaCheck: false
     terminationGracePeriodSeconds: 120
     resources:
       requests: { cpu: 250m, memory: 256Mi }
       limits: { cpu: "1", memory: 1Gi }
   stats:
     replicas: 1
+    skipSchemaCheck: false
     terminationGracePeriodSeconds: 120
     resources:
       requests: { cpu: 100m, memory: 256Mi }
       limits: { cpu: 500m, memory: 512Mi }
   frontend:
     replicas: 2
+    # frontend has no DB access — schema check is N/A
     resources:
       requests: { cpu: 50m, memory: 64Mi }
       limits: { cpu: 250m, memory: 128Mi }

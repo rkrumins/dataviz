@@ -243,8 +243,15 @@ async def lifespan(_app: FastAPI):
     # 2c. Bootstrap system admin (idempotent — skips if any user exists)
     # Always ensures at least one admin account is present.
     # Customizable via ADMIN_EMAIL / ADMIN_PASSWORD env vars; defaults provided.
+    #
+    # N-worker safety: the (count==0 → create) check is not atomic. With
+    # multiple workers/replicas booting against a fresh DB, several can pass
+    # the count check before any commits. The unique constraint on
+    # users.email funnels them to a single winner; the rest hit
+    # IntegrityError, which we treat as "another worker won the race".
     try:
         import os
+        from sqlalchemy.exc import IntegrityError
         from .db.repositories import user_repo
         from .auth.password import hash_password
         admin_email = os.getenv("ADMIN_EMAIL", "admin@nexuslineage.local")
@@ -252,22 +259,28 @@ async def lifespan(_app: FastAPI):
         async with get_async_session() as session:
             user_count = await user_repo.count_users(session)
             if user_count == 0:
-                user = await user_repo.create_user(
-                    session,
-                    email=admin_email,
-                    password_hash=hash_password(admin_password),
-                    first_name="System",
-                    last_name="Admin",
-                    status="active",
-                )
-                await user_repo.assign_role(session, user.id, "admin")
-                await user_repo.create_approval(
-                    session, user.id, status="approved", approved_by="system",
-                )
-                logger.info(
-                    "System admin created: %s (change password after first login!)",
-                    admin_email,
-                )
+                try:
+                    user = await user_repo.create_user(
+                        session,
+                        email=admin_email,
+                        password_hash=hash_password(admin_password),
+                        first_name="System",
+                        last_name="Admin",
+                        status="active",
+                    )
+                    await user_repo.assign_role(session, user.id, "admin")
+                    await user_repo.create_approval(
+                        session, user.id, status="approved", approved_by="system",
+                    )
+                    logger.info(
+                        "System admin created: %s (change password after first login!)",
+                        admin_email,
+                    )
+                except IntegrityError:
+                    await session.rollback()
+                    logger.info(
+                        "Admin bootstrap: another worker won the race (expected at N>1)"
+                    )
     except Exception as exc:
         logger.warning("Admin bootstrap warning: %s", exc)
 
@@ -1146,7 +1159,8 @@ class _TimeoutMiddleware:
     Tiers (P1.8 — anchored prefix match, ordered most-specific first):
         ANY path in SSE_PATHS                exempt entirely (long-lived)
         prefix /api/v1/health        ->  5s  (probes must be fast)
-        prefix /api/v1/graph         -> 15s  (read queries, per-query bounded)
+        prefix /api/v1/graph         -> 60s  (read queries inc. advanced search;
+                                              per-query bounded by soft deadline)
         prefix /api/v1/aggregation/  -> 45s  (write-heavy operations)
         everything else              -> 30s  (default)
 
@@ -1214,8 +1228,8 @@ class _TimeoutMiddleware:
             ("/api/v1/graph/edges/between",    float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
             ("/api/v1/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
             ("/api/v2/graph/trace",   float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))),
-            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
-            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))),
+            ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
+            ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
             ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
@@ -1380,6 +1394,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-CSRF-Token"],
+    # Custom response headers the frontend reads from JS — must be listed
+    # explicitly because allow_credentials=true forbids the wildcard.
+    expose_headers=["X-Provider-Health", "X-Cache-Status"],
 )
 
 # GZip compression for responses > 1 KB
@@ -1565,19 +1582,24 @@ async def dependency_health():
 @app.get("/api/v1/health/ready", tags=["health"], include_in_schema=False)
 async def readiness_check():
     """
-    Readiness probe — Postgres must be reachable. Provider health is
-    reported informally but does NOT affect the readiness verdict, so
-    non-graph endpoints remain available during provider outages.
+    Readiness probe — Postgres must be reachable AND schema must be at
+    the expected Alembic head. Provider health is reported informally
+    but does NOT affect the readiness verdict, so non-graph endpoints
+    remain available during provider outages.
 
     K8s: use this for readinessProbe; use /health for livenessProbe.
     """
-    from .db.engine import get_engine
+    from .db.engine import get_engine, get_schema_state
     from sqlalchemy import text
 
+    schema_state = get_schema_state()
     result: dict = {
         "status": "ready",
         "version": "0.2.0",
         "postgres": "healthy",
+        "schema_at_head": schema_state["at_head"],
+        "schema_applied": schema_state["applied"],
+        "schema_expected": schema_state["expected"],
         "providers": {},
     }
 
@@ -1592,6 +1614,24 @@ async def readiness_check():
             content={
                 "status": "not_ready",
                 "postgres": f"unhealthy: {exc}",
+                "schema_at_head": schema_state["at_head"],
+                "providers": {},
+            },
+        )
+
+    # Schema must be at head — synodic-upgrade owns this contract.
+    # Returning 503 lets K8s mark the pod not-ready so traffic isn't
+    # routed to an instance running against a stale schema.
+    if not schema_state["at_head"]:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "postgres": "healthy",
+                "schema_at_head": False,
+                "schema_applied": schema_state["applied"],
+                "schema_expected": schema_state["expected"],
+                "reason": "schema_mismatch — run synodic-upgrade",
                 "providers": {},
             },
         )

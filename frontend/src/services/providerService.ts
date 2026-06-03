@@ -133,7 +133,7 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     httpx_not_installed: "Internal: the HTTP client library is not available.",
 }
 
-function friendlyError(raw: string): string {
+export function friendlyError(raw: string): string {
     // Try to extract the "detail" / "reason" fields from JSON responses.
     let detail = raw
     let code: string | null = null

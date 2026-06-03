@@ -12,11 +12,12 @@ import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
-    AlertTriangle, Zap, X, ChevronRight, Plus
+    AlertTriangle, Zap, X, ChevronRight, Plus, WifiOff
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     providerService,
+    friendlyError,
     type ProviderResponse,
     type ProviderImpactResponse,
 } from '@/services/providerService'
@@ -29,7 +30,7 @@ import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
 import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
-import type { Envelope, AssetStatsPayload } from '@/types/insights'
+import type { Envelope, AssetListPayload, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { RefreshControl } from '@/components/insights/RefreshControl'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
@@ -642,6 +643,7 @@ export function RegistryAssets() {
 
     // Per-provider asset state
     const [assets, setAssets] = useState<string[]>([])
+    const [assetsEnvelope, setAssetsEnvelope] = useState<Envelope<AssetListPayload> | null>(null)
     const [existingCatalogs, setExistingCatalogs] = useState<CatalogItemResponse[]>([])
     const [selected, setSelected] = useState<Set<string>>(new Set())
     const [assetsLoading, setAssetsLoading] = useState(false)
@@ -706,10 +708,15 @@ export function RegistryAssets() {
             catalogService.list(selectedProviderId),
         ]).then(([res, existing]) => {
             if (!mounted) return
-            // res is now an Envelope<{ assets: string[] }>. On a cold cache
+            // res is an Envelope<{ assets: string[] }>. On a cold cache
             // (`computing` / `unavailable`) `data` is null; render an empty
             // list and let the user retry — the worker will populate the
             // cache shortly. The "Refresh" button reissues the call.
+            // We also retain the envelope so the panel can surface
+            // ``meta.last_error`` / ``meta.provider_health`` when the
+            // background discovery couldn't reach the provider (e.g.
+            // wrong host / port), instead of showing a silent empty list.
+            setAssetsEnvelope(res)
             const assetList = res.data?.assets ?? []
             setAssets(assetList)
             setExistingCatalogs(existing)
@@ -999,6 +1006,7 @@ export function RegistryAssets() {
                 providerService.listAssets(selectedProviderId),
                 catalogService.list(selectedProviderId),
             ])
+            setAssetsEnvelope(res)
             setAssets(res.data?.assets ?? [])
             setExistingCatalogs(existing)
         } finally {
@@ -1194,6 +1202,38 @@ export function RegistryAssets() {
                                 </div>
                             </div>
                         </div>
+
+                        {/* Provider-unreachable banner.
+                            Discovery worker stamps ``meta.last_error`` on the
+                            cache row when preflight fails (tcp_refused,
+                            dns_unresolvable, connect_timeout, auth_failed, …)
+                            — without this banner the user only saw an empty
+                            asset list and couldn't distinguish "provider
+                            unreachable" from "provider has no graphs". */}
+                        {assetsEnvelope?.meta.last_error && (
+                            <div className="shrink-0 mb-3 p-3 rounded-xl border border-red-500/20 bg-red-500/5 flex items-start gap-3 animate-in slide-in-from-top-1 fade-in duration-200">
+                                <WifiOff className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-semibold text-red-600 dark:text-red-400">
+                                        Provider unreachable
+                                    </p>
+                                    <p className="text-xs text-red-500/90 dark:text-red-400/90 mt-0.5 break-words">
+                                        {friendlyError(assetsEnvelope.meta.last_error)}
+                                        {selectedProvider?.host && (
+                                            <span className="ml-1 font-mono text-red-500/70 dark:text-red-400/70">
+                                                (tried {selectedProvider.host}{selectedProvider.port ? `:${selectedProvider.port}` : ''})
+                                            </span>
+                                        )}
+                                    </p>
+                                </div>
+                                <Link
+                                    to={`/ingestion?tab=connections&edit=${selectedProviderId}`}
+                                    className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors"
+                                >
+                                    Edit connection
+                                </Link>
+                            </div>
+                        )}
 
                         {/* Asset list */}
                         <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">

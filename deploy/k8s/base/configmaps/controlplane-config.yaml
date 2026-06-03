@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: controlplane-config
+  namespace: synodic
+data:
+  SYNODIC_ROLE: "controlplane"
+  AGGREGATION_DISPATCH_MODE: "redis"
+  AGGREGATION_API_PORT: "8091"
+  FALKORDB_SOCKET_TIMEOUT: "5"

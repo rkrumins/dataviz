@@ -19,6 +19,10 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_LAYER_ASSIGNMENT,
+    ENDPOINT_TOP_LEVEL,
+    ENDPOINT_TRACE,
+    ENDPOINT_TRACE_EXPAND,
     GraphCache,
     _build_key,
 )
@@ -28,6 +32,13 @@ class _Result(BaseModel):
     """Minimal Pydantic model standing in for ChildrenWithEdgesResult."""
     value: int
     children: list = []
+
+
+class _TraceLike(BaseModel):
+    """Minimal Pydantic model standing in for TraceResult — has ``nodes``
+    so the empty-result heuristic can classify it correctly."""
+    nodes: list = []
+    label: str = ""
 
 
 def _make_redis() -> AsyncMock:
@@ -41,12 +52,18 @@ def _make_redis() -> AsyncMock:
 
 @pytest.fixture(autouse=True)
 def _enable_children_endpoint(monkeypatch):
-    """Force the children-with-edges flag on for tests that exercise it."""
+    """Force every cached endpoint on for the tests that exercise them."""
     monkeypatch.setitem(
         graph_cache._ENABLED_ENDPOINTS, ENDPOINT_CHILDREN, True,
     )
     monkeypatch.setitem(
         graph_cache._ENABLED_ENDPOINTS, ENDPOINT_AGGREGATED, True,
+    )
+    monkeypatch.setitem(
+        graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TRACE, True,
+    )
+    monkeypatch.setitem(
+        graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TRACE_EXPAND, True,
     )
 
 
@@ -247,6 +264,349 @@ def test_params_order_does_not_affect_key() -> None:
     k1 = _build_key(scope, 0, ENDPOINT_CHILDREN, {"a": 1, "b": 2})
     k2 = _build_key(scope, 0, ENDPOINT_CHILDREN, {"b": 2, "a": 1})
     assert k1 == k2
+
+
+# ─── memory safety (P1.5) ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_oversized_payload_is_not_cached(monkeypatch, caplog) -> None:
+    """A response larger than ``_MAX_PAYLOAD_BYTES`` must skip the cache
+    write — both primary and LKG — and log a WARNING. The compute already
+    succeeded, so the caller still gets the answer; we just decline to
+    cache it so it can't crowd out hundreds of normal entries."""
+    import logging
+    monkeypatch.setattr(graph_cache, "_MAX_PAYLOAD_BYTES", 50)
+
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    # A non-empty payload whose JSON serialization exceeds 50 bytes.
+    large = _Result(value=1, children=list(range(100)))
+    compute = AsyncMock(return_value=large)
+
+    caplog.set_level(logging.WARNING, logger="backend.app.services.graph_cache")
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    # Caller still gets the answer.
+    assert result.value == 1
+    # No SET fired — neither primary nor LKG.
+    assert redis.set.await_count == 0
+    # WARNING line was emitted with the diagnostic shape.
+    assert any("payload_too_large" in rec.message for rec in caplog.records)
+
+
+# ─── stale-on-error fallback (P1.1) ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stale_fallback_serves_lkg_when_compute_raises_provider_unavailable() -> None:
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    # First GET = generation (returns "0"); second GET = primary key (miss);
+    # third GET = LKG key (hit with last-known-good payload).
+    redis.get = AsyncMock(side_effect=[
+        "0",
+        None,
+        _Result(value=123).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
+    flagged: list[bool] = []
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=compute,
+        model_cls=_Result,
+        on_stale=lambda: flagged.append(True),
+    )
+
+    assert result.value == 123
+    assert flagged == [True]
+    compute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_serves_lkg_on_compute_timeout() -> None:
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0",
+        None,
+        _Result(value=77).model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=asyncio.TimeoutError())
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "x"},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    assert result.value == 77
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_propagates_when_no_lkg_available() -> None:
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    # generation miss, primary miss, LKG miss
+    redis.get = AsyncMock(side_effect=["0", None, None])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ProviderUnavailable("falkordb", "breaker open"))
+
+    with pytest.raises(ProviderUnavailable):
+        await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={},
+            compute=compute,
+            model_cls=_Result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_singleflight_followers_also_invoke_on_stale() -> None:
+    """Regression for P2.1.1: a leader hitting the stale-LKG path must
+    propagate the ``served_stale`` flag to followers awaiting on the
+    singleflight Future, so each follower can invoke its own ``on_stale``
+    callback (which sets the per-request ``X-Cache-Status: stale-fallback``
+    header). Without this, only one of N concurrent responses carries the
+    stale header and the frontend banner misfires for the rest."""
+    from backend.common.adapters import ProviderUnavailable
+
+    redis = _make_redis()
+    # Key-based dispatch so we don't depend on the interleaving of
+    # leader/follower gen+primary GETs. Gen reads return "0", primary
+    # reads return None (miss → singleflight), LKG read returns a stale
+    # payload that the leader serves and the follower inherits.
+    lkg_payload = _Result(value=555).model_dump_json(by_alias=True)
+
+    async def fake_get(key: str):
+        if key.startswith(graph_cache._GEN_PREFIX):
+            return "0"
+        if key.startswith(graph_cache._LKG_PREFIX):
+            return lkg_payload
+        return None  # primary miss
+
+    redis.get = AsyncMock(side_effect=fake_get)
+    cache = GraphCache(redis)
+    leader_callbacks: list[bool] = []
+    follower_callbacks: list[bool] = []
+
+    gate = asyncio.Event()
+
+    async def slow_compute() -> _Result:
+        await gate.wait()
+        raise ProviderUnavailable("falkordb", "breaker open")
+
+    async def leader_call() -> _Result:
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "shared"},
+            compute=slow_compute,
+            model_cls=_Result,
+            on_stale=lambda: leader_callbacks.append(True),
+        )
+
+    async def follower_call() -> _Result:
+        return await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={"urn": "shared"},
+            # Reads are idempotent — second caller hits singleflight.
+            compute=AsyncMock(side_effect=AssertionError("follower compute must not run")),
+            model_cls=_Result,
+            on_stale=lambda: follower_callbacks.append(True),
+        )
+
+    task_a = asyncio.create_task(leader_call())
+    # Give the leader time to register on _inflight before the follower joins.
+    await asyncio.sleep(0.01)
+    task_b = asyncio.create_task(follower_call())
+    await asyncio.sleep(0.01)
+    gate.set()
+    res_a, res_b = await asyncio.gather(task_a, task_b)
+
+    assert res_a.value == 555 and res_b.value == 555
+    assert leader_callbacks == [True], "leader missed its own on_stale"
+    assert follower_callbacks == [True], "follower missed on_stale via singleflight"
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_does_not_engage_on_logical_errors() -> None:
+    """Validation / 4xx errors must propagate; serving stale data would
+    hide real bugs."""
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0",
+        None,
+        _Result(value=1).model_dump_json(by_alias=True),  # would hit if fallback engaged
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=ValueError("bad input"))
+
+    with pytest.raises(ValueError):
+        await cache.get_or_compute(
+            scope=CacheScope("ws1", "ds1"),
+            endpoint=ENDPOINT_CHILDREN,
+            params={},
+            compute=compute,
+            model_cls=_Result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_successful_compute_writes_both_primary_and_lkg() -> None:
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    # Non-empty children so the result isn't classified as a negative-cache
+    # entry (which intentionally skips the LKG mirror).
+    compute = AsyncMock(return_value=_Result(value=42, children=[1, 2]))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={"urn": "a"},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    # One SET for primary, one for LKG (in either order).
+    assert redis.set.await_count == 2
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert any(graph_cache._KEY_PREFIX in k for k in keys)
+    assert any(graph_cache._LKG_PREFIX in k for k in keys)
+
+
+# ─── trace endpoint caching (P1.2) ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_trace_endpoint_cache_miss_then_hit() -> None:
+    """Two identical /trace/v2 calls — first computes + caches,
+    second returns the cached payload without invoking compute."""
+    redis = _make_redis()
+    # First call: gen=0, primary miss → compute runs and SETs primary + LKG
+    # Second call: gen=0, primary hit → no compute, no SET
+    redis.get = AsyncMock(side_effect=[
+        "0", None,                                                              # call 1: gen, miss
+        "0", _TraceLike(nodes=[1, 2], label="ok").model_dump_json(by_alias=True),  # call 2: gen, hit
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_TraceLike(nodes=[1, 2], label="ok"))
+    params = {"urn": "urn:x", "level": 0, "depth": 3}
+
+    a = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_TRACE,
+        params=params,
+        compute=compute,
+        model_cls=_TraceLike,
+    )
+    b = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_TRACE,
+        params=params,
+        compute=compute,
+        model_cls=_TraceLike,
+    )
+
+    assert a.label == "ok" and b.label == "ok"
+    # compute should have run exactly once across both calls
+    assert compute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_top_level_and_layer_assignment_keys_isolated_from_other_endpoints() -> None:
+    """Each endpoint must map to a unique cache key prefix so a /top-level
+    response can never be returned as a /children-with-edges hit (and so on)."""
+    scope = CacheScope("ws1", "ds1")
+    params = {"limit": 100}
+    keys = {
+        ep: _build_key(scope, 0, ep, params)
+        for ep in (
+            ENDPOINT_CHILDREN,
+            ENDPOINT_AGGREGATED,
+            ENDPOINT_TRACE,
+            ENDPOINT_TRACE_EXPAND,
+            ENDPOINT_TOP_LEVEL,
+            ENDPOINT_LAYER_ASSIGNMENT,
+        )
+    }
+    # All six keys are pairwise distinct.
+    assert len(set(keys.values())) == len(keys)
+    assert "top-level" in keys[ENDPOINT_TOP_LEVEL]
+    assert "layer-assignment" in keys[ENDPOINT_LAYER_ASSIGNMENT]
+
+
+@pytest.mark.asyncio
+async def test_trace_expand_uses_separate_namespace() -> None:
+    """An /trace/v2 call must not satisfy a /trace/expand cache lookup —
+    the endpoint key segregates them."""
+    scope = CacheScope("ws1", "ds1")
+    params = {"sourceUrn": "urn:s", "targetUrn": "urn:t", "nextLevel": 1}
+    k_trace = _build_key(scope, 0, ENDPOINT_TRACE, params)
+    k_expand = _build_key(scope, 0, ENDPOINT_TRACE_EXPAND, params)
+    assert k_trace != k_expand
+    assert "trace" in k_trace and "trace-expand" in k_expand
+
+
+@pytest.mark.asyncio
+async def test_trace_stale_fallback_on_provider_timeout() -> None:
+    """A timed-out trace falls back to LKG and fires the on_stale flag."""
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=[
+        "0",
+        None,
+        _TraceLike(nodes=[1], label="stale").model_dump_json(by_alias=True),
+    ])
+    cache = GraphCache(redis)
+    compute = AsyncMock(side_effect=asyncio.TimeoutError())
+    flagged: list[bool] = []
+
+    result = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_TRACE,
+        params={"urn": "urn:x"},
+        compute=compute,
+        model_cls=_TraceLike,
+        on_stale=lambda: flagged.append(True),
+    )
+
+    assert result.label == "stale"
+    assert flagged == [True]
+
+
+@pytest.mark.asyncio
+async def test_empty_result_does_not_pin_lkg() -> None:
+    """A transient empty answer must not become the stale fallback —
+    otherwise a future outage would serve empty data forever."""
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    compute = AsyncMock(return_value=_Result(value=0, children=[]))
+
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_CHILDREN,
+        params={},
+        compute=compute,
+        model_cls=_Result,
+    )
+
+    # Only the primary (negative-cache) SET should fire; LKG is skipped.
+    keys = [call.args[0] for call in redis.set.await_args_list]
+    assert any(graph_cache._KEY_PREFIX in k for k in keys)
+    assert not any(graph_cache._LKG_PREFIX in k for k in keys)
 
 
 def test_different_scopes_yield_different_keys() -> None:

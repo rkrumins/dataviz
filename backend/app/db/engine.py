@@ -433,17 +433,6 @@ def _alembic_config():
     return cfg
 
 
-def _run_alembic_upgrade() -> None:
-    """Synchronous Alembic upgrade — invoked via asyncio.to_thread.
-
-    Alembic itself is sync; running it on a worker thread keeps the
-    event loop free during startup.
-    """
-    from alembic import command
-    cfg = _alembic_config()
-    command.upgrade(cfg, "head")
-
-
 def _is_transient_db_error(exc: BaseException) -> bool:
     """Classify startup errors: transient (retry) vs permanent (give up).
 
@@ -529,55 +518,68 @@ class BootstrapError(RuntimeError):
         self.original = original
 
 
+# Latest schema verification result. Read by the FastAPI lifespan to
+# populate ``app.state.schema_at_head`` so the readiness endpoint can
+# surface schema staleness to operators / K8s probes.
+_LATEST_SCHEMA_STATE: dict = {
+    "at_head": False,
+    "applied": [],
+    "expected": [],
+}
+
+
+def get_schema_state() -> dict:
+    """Return the latest schema verification result.
+
+    Populated by :func:`init_db`. The keys are stable for use by the
+    readiness endpoint:
+
+    * ``at_head`` — ``True`` iff ``alembic_version`` matches every
+      script-directory head.
+    * ``applied`` — sorted list of currently-applied revision IDs.
+    * ``expected`` — sorted list of expected head revision IDs.
+    """
+    return dict(_LATEST_SCHEMA_STATE)
+
+
 async def init_db() -> None:
-    """Apply Alembic migrations and seed minimal singleton rows.
+    """Verify DB connectivity and that schema is at the expected Alembic head.
 
-    Boot resilience: if Postgres is not yet reachable (docker-compose
-    start order, pod init-ordering, etc.), retry the Alembic upgrade
-    with exponential backoff up to `DB_STARTUP_RETRY_TIMEOUT_SECS`
-    total wall clock (default 60s). On budget exhaustion or a
-    non-transient error (auth, bad migration), raise — the orchestrator
-    restarts the pod and we try again fresh. Hanging forever on a
-    blocked `psycopg2.connect()` is what the pre-fix behaviour did.
+    Schema upgrades are owned by the ``synodic-upgrade`` service
+    (``backend/scripts/upgrade.py``), invoked as a Helm pre-install/
+    pre-upgrade hook Job or a docker-compose one-shot. This function
+    NEVER runs ``command.upgrade()`` — it only verifies the migration
+    has already happened.
 
-    Schema lifecycle is owned by Alembic from Phase 1 onward — the
-    inline `ALTER TABLE` block that previously lived here has been
-    removed. The dev workflow when iterating on the schema is:
+    In Kubernetes, every backend Pod has a ``wait-for-schema``
+    initContainer that has already passed the same check before this
+    code runs; this is a runtime sanity check. In docker-compose the
+    ``upgrade`` service is a hard ``depends_on``. For developers
+    running ``uvicorn`` directly, run
+    ``python -m backend.scripts.upgrade upgrade`` first.
 
-        docker compose -f docker-compose.dev.yml down -v
-        docker compose -f docker-compose.dev.yml up -d
-        cd backend && alembic upgrade head
+    Boot resilience: bounded exponential backoff (up to
+    ``DB_STARTUP_RETRY_TIMEOUT_SECS``, default 60s) around the initial
+    connect, covering races between Postgres opening its socket and
+    this function being called. Permanent errors (missing role / db,
+    bad password) raise :class:`BootstrapError` immediately.
+
+    If the schema is not at head, the app enters degraded mode (via
+    :class:`BootstrapError` with ``reason="schema_not_initialised"``
+    when ``alembic_version`` is missing entirely) or logs a loud error
+    and continues serving (when the table exists but is at a different
+    revision). The ``/health/ready`` endpoint surfaces the mismatch.
     """
     import asyncio as _asyncio
     import time as _time
     from datetime import datetime as _dt, timezone as _tz
     sa_text = __import__("sqlalchemy").text
 
-    # ── Ensure the aggregation schema exists BEFORE Alembic runs ───
-    # The aggregation service owns its own Postgres schema. Tables in
-    # this schema are created by Alembic/create_all, but the schema
-    # itself must exist first. This is idempotent and safe from any
-    # process (viz-service, control plane, worker).
-    #
-    # Also doubles as the bootstrap probe: if the role or database is
-    # missing we fail fast here with an actionable message instead of
-    # burning the 60s Alembic retry budget on a permanent error.
-    try:
-        sa_text_mod = __import__("sqlalchemy").text
-        engine = get_engine(PoolRole.ADMIN)
-        async with engine.begin() as conn:
-            await conn.execute(sa_text_mod("CREATE SCHEMA IF NOT EXISTS aggregation"))
-        logger.info("Aggregation schema ready")
-    except Exception as exc:
-        reason = _permanent_bootstrap_reason(exc)
-        if reason is not None:
-            err = BootstrapError(reason, exc)
-            logger.error("Bootstrap failed (%s):\n%s", reason, err)
-            raise err from exc
-        # Transient or unrelated — continue; Alembic retry will surface it.
-        logger.warning("Aggregation schema creation warning: %s", exc)
-
-    # ── Alembic upgrade with bounded retry ──────────────────────────
+    # ── Connectivity probe + aggregation schema bootstrap ───────────
+    # Bounded retry to cover compose / pod start-order races. The
+    # aggregation schema CREATE is idempotent safety for non-Helm
+    # deploys (db-init-job already does this in K8s). Permanent errors
+    # (missing role/db, bad password) surface with actionable hints.
     budget = float(os.getenv("DB_STARTUP_RETRY_TIMEOUT_SECS", "60"))
     deadline = _time.monotonic() + budget
     delay = 1.0
@@ -585,57 +587,77 @@ async def init_db() -> None:
     while True:
         attempt += 1
         try:
-            # Alembic loads env.py, which imports every ORM module; this
-            # also ensures Base.metadata is fully populated.
-            await _asyncio.to_thread(_run_alembic_upgrade)
+            engine = get_engine(PoolRole.ADMIN)
+            async with engine.begin() as conn:
+                await conn.execute(sa_text("CREATE SCHEMA IF NOT EXISTS aggregation"))
             if attempt > 1:
                 logger.info(
-                    "Alembic upgrade succeeded on attempt %d (Postgres became reachable)",
-                    attempt,
+                    "DB connectivity established on attempt %d", attempt
                 )
-            logger.info("Alembic upgrade complete (head reached)")
+            logger.info("Aggregation schema ready")
             break
         except Exception as exc:
-            remaining = deadline - _time.monotonic()
             reason = _permanent_bootstrap_reason(exc)
             if reason is not None:
                 err = BootstrapError(reason, exc)
-                logger.error("Alembic bootstrap failed (%s):\n%s", reason, err)
+                logger.error("Bootstrap failed (%s):\n%s", reason, err)
                 raise err from exc
+            remaining = deadline - _time.monotonic()
             if not _is_transient_db_error(exc) or remaining <= 0:
                 if remaining <= 0:
                     logger.error(
-                        "Giving up on Alembic upgrade after %.0fs / %d attempts "
-                        "— Postgres unreachable. Last error: %s",
+                        "Giving up on DB connectivity after %.0fs / %d attempts: %s",
                         budget, attempt, str(exc)[:300],
                     )
                 raise
             sleep_for = min(delay, remaining)
             logger.warning(
-                "Alembic upgrade attempt %d failed (%.0fs budget left, "
+                "DB connectivity attempt %d failed (%.0fs budget left, "
                 "retrying in %.1fs): %s",
                 attempt, remaining, sleep_for, str(exc)[:200],
             )
             await _asyncio.sleep(sleep_for)
             delay = min(delay * 2, 10.0)
 
-    # ── Fallback: ensure aggregation tables exist ────────────────────
-    # The aggregation schema was created above. Now ensure its tables
-    # exist even if Alembic had a partial failure or the migration chain
-    # was broken. checkfirst=True makes this idempotent (~2ms cost).
+    # ── Verify schema is at Alembic head (read-only) ────────────────
+    # Schema upgrades are owned by synodic-upgrade. If verification
+    # fails, the operator must run that service; the API process cannot
+    # reconcile from here.
+    from alembic.script import ScriptDirectory
+    cfg = _alembic_config()
+    expected_heads = sorted(ScriptDirectory.from_config(cfg).get_heads())
+
     try:
-        from backend.app.services.aggregation import models as _agg_models  # noqa: F401
-        _admin_engine = get_engine(PoolRole.ADMIN)
-        async with _admin_engine.begin() as _agg_conn:
-            _agg_tables = [
-                t for t in Base.metadata.tables.values()
-                if getattr(t, "schema", None) == "aggregation"
-            ]
-            for _t in _agg_tables:
-                await _agg_conn.run_sync(lambda sync_conn, tbl=_t: tbl.create(sync_conn, checkfirst=True))
-        logger.info("Aggregation tables verified (%d tables)", len(_agg_tables))
+        engine = get_engine(PoolRole.ADMIN)
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa_text("SELECT version_num FROM alembic_version")
+            )
+            applied = sorted({r[0] for r in result.fetchall()})
     except Exception as exc:
-        logger.warning("Aggregation table fallback creation warning: %s", exc)
+        _LATEST_SCHEMA_STATE.update(
+            {"at_head": False, "applied": [], "expected": expected_heads}
+        )
+        logger.error(
+            "Schema verification failed (alembic_version missing or unreadable): %s. "
+            "Run the synodic-upgrade Job or "
+            "`python -m backend.scripts.upgrade upgrade`.",
+            exc,
+        )
+        raise BootstrapError("schema_not_initialised", exc) from exc
+
+    at_head = applied == expected_heads
+    _LATEST_SCHEMA_STATE.update(
+        {"at_head": at_head, "applied": applied, "expected": expected_heads}
+    )
+    if not at_head:
+        logger.error(
+            "ALEMBIC HEAD MISMATCH: applied=%s expected=%s. "
+            "Run synodic-upgrade to reconcile.",
+            applied, expected_heads,
+        )
+    else:
+        logger.info("Schema verified at Alembic head: %s", applied)
 
     # ── Seed singleton rows that aren't covered by ORM defaults ──────
     # announcement_config has a CHECK(id=1) constraint and needs an

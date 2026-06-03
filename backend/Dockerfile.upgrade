@@ -1,0 +1,36 @@
+# ── synodic-upgrade ─────────────────────────────────────────────────────
+# Standalone schema-management image. Runs Alembic upgrades/downgrades
+# (as a Helm pre-install/pre-upgrade hook Job) and schema-readiness
+# checks (as an initContainer on every backend Pod).
+#
+# Never serves HTTP. No gunicorn, no uvicorn.
+# ────────────────────────────────────────────────────────────────────────
+FROM python:3.13-slim AS base
+
+WORKDIR /app
+
+# Runtime libs for pre-built wheels (psycopg2-binary, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libffi-dev libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (cached layer).
+# Same requirements.txt as viz-service: the upgrade script imports from
+# backend.app.db.engine which transitively pulls in ORM modules; stripping
+# deps risks ImportError. Image-size optimization is a follow-up.
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code (needed because alembic/env.py imports ORM models
+# from backend.app.db.models and backend.app.services.aggregation.models)
+COPY backend/ /app/backend/
+
+# Non-root user for security
+RUN addgroup --system synodic && adduser --system --ingroup synodic synodic
+USER synodic
+
+# No HEALTHCHECK — Jobs and initContainers don't need one.
+# Default CMD is `check` so a misconfigured pod fails-closed rather than
+# silently running upgrades.
+ENTRYPOINT ["python", "-m", "backend.scripts.upgrade"]
+CMD ["check", "--wait", "60"]

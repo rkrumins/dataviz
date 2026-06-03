@@ -37,6 +37,18 @@ import type { WorkspaceSchema } from '@/types/schema'
 // new component type, unmounting and remounting children. That destroys
 // local state inside any motion-wrapped descendant (e.g. the
 // `lastSelectedId` anchor inside ExpandedDetail).
+// `useWorkspacesStore` imports `workspaceSwitchCleanup`, which imports
+// `@/main` for `getQueryClient` — that top-level call mounts the React
+// app via `ReactDOM.createRoot(document.getElementById('root'))`, which
+// throws in jsdom (no `#root`). Mock the store to return a stable shape
+// for the StaleDataBanner scope.
+vi.mock('@/store/workspaces', () => ({
+  useWorkspacesStore: (selector?: (s: { activeWorkspaceId: null; activeDataSourceId: null }) => unknown) => {
+    const state = { activeWorkspaceId: null, activeDataSourceId: null }
+    return selector ? selector(state) : state
+  },
+}))
+
 vi.mock('framer-motion', () => {
   const cache = new Map<string, React.ComponentType<unknown>>()
   const passthrough = (tag: string) => {

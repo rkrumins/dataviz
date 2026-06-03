@@ -26,8 +26,12 @@ import {
   isContainmentEdgeType,
   useContainmentEdgeTypes,
 } from '@/store/schema'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { generateColorFromType, generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
+import { withTimeout, TimeoutError } from '@/lib/concurrency'
+import { TIMEOUTS } from '@/config/timeouts'
+import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
 
 interface LineageNeighborsProps {
   nodeId: string
@@ -63,6 +67,10 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
   const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const containmentEdgeTypes = useContainmentEdgeTypes()
+  // Scope for the StaleDataBanner — same workspace + data source that
+  // produced the lineage edges we're rendering.
+  const workspaceId = useWorkspacesStore((s) => s.activeWorkspaceId ?? undefined)
+  const dataSourceId = useWorkspacesStore((s) => s.activeDataSourceId ?? undefined)
 
   const [expanded, setExpanded] = useState<Direction | null>(null)
 
@@ -138,7 +146,21 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
     // reveal pans to it.
     openNodeDrawer(neighborId)
     selectNode(neighborId)
-    await onFocusNode?.(neighborId)
+    if (!onFocusNode) return
+    // Wrap the canvas reveal in a hard timeout. The drawer is already
+    // showing the target's data via openNodeDrawer above; if the canvas
+    // pan stalls (provider slow, layout solving stuck), we give up on
+    // the visual reveal rather than pinning the drawer interaction.
+    try {
+      const result = onFocusNode(neighborId)
+      if (result && typeof (result as Promise<void>).then === 'function') {
+        await withTimeout(result as Promise<void>, TIMEOUTS.LINEAGE_FOCUS_MS, 'lineage.focusNode')
+      }
+    } catch (err) {
+      if (!(err instanceof TimeoutError)) throw err
+      // Swallow the timeout silently — the drawer swap already happened
+      // and the user can re-click the neighbor row to retry the reveal.
+    }
   }
 
   const toggle = (dir: Direction) =>
@@ -159,6 +181,14 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
           </span>
         )}
       </div>
+
+      <StaleDataBanner
+        workspaceId={workspaceId}
+        dataSourceId={dataSourceId}
+        subject="Lineage data"
+        className="mb-3"
+      />
+
 
       <div className="space-y-2">
         <DirectionCard

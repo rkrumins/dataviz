@@ -19,6 +19,8 @@ import { WorkspaceListRow } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHealthBadge'
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
+import { withTimeout } from '@/lib/concurrency'
+import { TIMEOUTS } from '@/config/timeouts'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -206,12 +208,19 @@ export function WorkspacesPage() {
     const loadData = useCallback(async () => {
         setIsLoading(true)
         try {
-            const [wsList, catList, provList, ontoList] = await Promise.all([
-                workspaceService.list(),
-                catalogService.list(),
-                providerService.list(),
-                ontologyDefinitionService.list().catch(() => [] as OntologyDefinitionResponse[]),
+            // Per-call timeout so a slow provider listing (or any other
+            // slow backend) does not pin the whole workspaces page on
+            // a spinner. Render with whatever lists settled in time.
+            const settled = await Promise.allSettled([
+                withTimeout(workspaceService.list(), TIMEOUTS.ADMIN_LIST_MS, 'workspaces.list'),
+                withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
+                withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
+                withTimeout(ontologyDefinitionService.list(), TIMEOUTS.ADMIN_LIST_MS, 'ontology.list'),
             ])
+            const wsList = settled[0].status === 'fulfilled' ? settled[0].value : ([] as WorkspaceResponse[])
+            const catList = settled[1].status === 'fulfilled' ? settled[1].value : ([] as CatalogItemResponse[])
+            const provList = settled[2].status === 'fulfilled' ? settled[2].value : ([] as ProviderResponse[])
+            const ontoList = settled[3].status === 'fulfilled' ? settled[3].value : ([] as OntologyDefinitionResponse[])
             setWorkspaces(wsList)
             setCatalogItems(catList)
             setProviders(provList)

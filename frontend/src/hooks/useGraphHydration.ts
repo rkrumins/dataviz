@@ -284,26 +284,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allNodes = batchResults.flat()
                         if (controller.signal.aborted) return
 
-                        // Also load children of assigned entities (for hierarchy within layers).
-                        // This ensures containment trees are populated, not just top-level entities.
-                        setHydrationPhase('children')
-                        if (allNodes.length > 0) {
-                            const parentsWithChildren = allNodes.filter(n => (n.childCount ?? 0) > 0)
-                            if (parentsWithChildren.length > 0) {
-                                const childResults = await Promise.all(
-                                    parentsWithChildren.map(parent =>
-                                        provider.getChildren(parent.urn, { limit: 100 })
-                                            .catch(() => [] as GraphNode[])
-                                    )
-                                )
-                                const childNodes = childResults.flat()
-                                if (controller.signal.aborted) return
-                                // Dedup: children might overlap with assigned entities
-                                const knownUrns = new Set(allNodes.map(n => n.urn))
-                                const newChildren = childNodes.filter(c => !knownUrns.has(c.urn))
-                                allNodes = [...allNodes, ...newChildren]
-                            }
-                        }
+                        // Children are NOT prefetched. Top-level assigned entities
+                        // render collapsed; the user expands a parent to fire the
+                        // existing 20-per-page lazy loader (loadChildren below),
+                        // and AutoLoadSentinel pages through the rest on scroll.
                     } else {
                         // ── Type-based loading (empty/new views) ──
                         // No assignments yet — load by entity type so the view has data
@@ -345,10 +329,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         [],
                     )
 
-                    // Fetch edges between all loaded nodes
+                    // Fetch edges between all loaded nodes. Pass the backend
+                    // hard maximum so the user's assigned set is never
+                    // truncated at the 50k default on large graphs.
                     setHydrationPhase('edges')
                     const allUrns = allNodes.map(n => n.urn)
-                    const allEdges = await provider.getEdgesBetween(allUrns).catch(() => [] as GraphEdge[])
+                    const allEdges = await provider.getEdgesBetween(allUrns, undefined, 200_000).catch(() => [] as GraphEdge[])
                     if (controller.signal.aborted) return
 
                     // Replace with complete dataset atomically
@@ -631,12 +617,16 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
                 const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
 
-                // Single round-trip: children + edges for search results
+                // Single round-trip: children + edges for search results.
+                // The backend filters the parent's FULL child set by searchQuery
+                // (not the loaded subset), so this is global within the subtree.
+                // limit=200 is the match-count cap: ensures wide queries against
+                // 1000+ children still surface a useful spread of results.
                 const result = await provider.getChildrenWithEdges(urn, {
                     edgeTypes: fetchTypes,
                     lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
                     searchQuery: query,
-                    limit: 50,
+                    limit: 200,
                     includeLineageEdges: true,
                 })
 

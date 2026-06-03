@@ -17,7 +17,9 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useLoadingToast } from '@/components/ui/toast'
 
 // UX-first interaction components (shared across canvases)
@@ -25,6 +27,8 @@ import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
+import { SearchMatchBadge } from './search/SearchMatchBadge'
+import { useSearchHighlight } from './search/useSearchHighlight'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
@@ -32,6 +36,13 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
+import { SearchMapPanel } from './search/SearchMapPanel'
+import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
+import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
+import { DisplayRuleTagChips } from './property-manager/DisplayRuleTagChips'
+import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
+import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -69,12 +80,25 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const { loadChildren, cancelChildLoad, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
   useLoadingToast('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
-  // Search state
+  // Legacy inline quick-filter (substring over visible nodes) — left
+  // in place as a complementary quick-filter alongside the new
+  // server-side SearchMapPanel. Full removal is tracked separately
+  // because the searchResults prop is consumed by several sub-trees.
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const searchInputRef = useRef<HTMLInputElement>(null)
   const pendingLoadRef = useRef<Set<string>>(new Set())
+  // Advanced search (Map + Builder + Power tools + Ask) — same surface
+  // mounted on ContextView and Graph canvases.
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+  const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
+  const activeView = useSchemaStore((s) => s.getActiveView())
+  const provider = useGraphProvider()
+  // Property Manager display-rule engine — publishes match sets so the
+  // HierarchyContainer rows render tag chips.
+  useDisplayRuleEngine(activeView?.id ?? null)
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
   // Edit Mode State (shared across canvases)
   const [isPaletteOpen, setPaletteOpen] = useState(false)
@@ -320,7 +344,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
       {/* Editor Toolbar - Unified with LineageCanvas */}
-      <div className="absolute top-4 left-4 z-30">
+      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
           onSave={handleSave}
@@ -328,6 +352,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
         />
+        {/* Property Manager toggle — browse properties + author
+            display-rule tags. Mirrors the Context View affordance. */}
+        {activeView?.id && (
+          <PropertyManagerButton
+            open={propertyManagerOpen}
+            onToggle={() => setPropertyManagerOpen((v) => !v)}
+          />
+        )}
       </div>
 
       {/* Node Palette - Drag and drop entity creation */}
@@ -494,6 +526,43 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
       </AnimatePresence>
 
+      {/* Advanced search — same SearchMapPanel surface mounted on every
+          canvas. Trigger handles ⌘K globally; panel is a flex-sibling
+          drawer alongside EntityDrawer. */}
+      <CanvasSearchTrigger
+        open={advancedSearchOpen}
+        onToggle={() => setAdvancedSearchOpen((v) => !v)}
+      />
+      <AnimatePresence>
+        {activeView?.id && advancedSearchOpen && (
+          <SearchMapPanel
+            key="advanced-search-panel"
+            open={advancedSearchOpen}
+            onClose={() => setAdvancedSearchOpen(false)}
+            viewId={activeView.id}
+            onRevealNode={(urn, ancestorPath) =>
+              revealSearchHit(urn, ancestorPath)
+            }
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Property Manager — display-rule tag overlay drawer. */}
+      <AnimatePresence>
+        {activeView?.id && (
+          <PropertyManagerDrawer
+            key="property-manager-drawer"
+            viewId={activeView.id}
+            open={propertyManagerOpen}
+            onClose={() => setPropertyManagerOpen(false)}
+            onSearchPredicate={(p) => {
+              useSearchStore.getState().requestSearchRun(p)
+              setAdvancedSearchOpen(true)
+            }}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Entity Drawer - Unified view & edit */}
       <EntityDrawer
         onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
@@ -596,10 +665,28 @@ function HierarchyContainer({
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
 
+  // W2.1 — advanced-search match decoration. Lights up the row when
+  // the URN is a direct match, surfaces an N-level subtree count
+  // badge when this is a collapsed ancestor of matches, and dims
+  // the row when spotlight mode is active and nothing in this
+  // subtree matched.
+  const {
+    isDirectMatch: isAdvancedSearchMatch,
+    ancestorMatchCount,
+    ancestorBreakdown,
+    isSpotlightDim,
+    isHidden: isHiddenByCanvasFilter,
+  } = useSearchHighlight(node.urn ?? node.id, { isSelected })
+
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
   const isFocusNode = traceFocusId === node.id
-  const isDimmed = isTraceActive && !isHighlighted
+  const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
+
+  // Canvas filter Isolate / Hide modes drop this row entirely. Same
+  // null-return pattern as GenericNode — keeps the hook order intact
+  // while collapsing the row out of the rendered tree.
+  if (isHiddenByCanvasFilter) return null
 
   // Calculate roll-up counts
   const rollUpCounts = useMemo(() => {
@@ -649,6 +736,11 @@ function HierarchyContainer({
           "bg-canvas-elevated",
           isSelected && !isFocusNode && "ring-2 ring-offset-2",
           isSearchResult && !isSelected && "ring-2 ring-amber-400/50 ring-offset-1",
+          // W2.1 — advanced-search direct-match glow (reuses the
+          // shared ``search-match-pulse`` keyframes already used by
+          // FlatTreeItem so all canvases pulse identically).
+          isAdvancedSearchMatch && !isSelected && !isFocusNode
+            && "ring-2 ring-amber-500/60 shadow-[0_0_22px_-2px_rgba(245,158,11,0.55)] search-match-pulse",
           // Trace styling - consistent across all canvases
           isFocusNode && "ring-4 ring-amber-400 ring-offset-2 shadow-[0_0_30px_rgba(251,191,36,0.5)] scale-[1.02] z-50",
           isHighlighted && !isFocusNode && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.3)]",
@@ -714,9 +806,21 @@ function HierarchyContainer({
                 </span>
               )}
             </div>
-            <h4 className="text-sm font-medium text-ink truncate">
-              {node.name}
-            </h4>
+            <div className="flex items-center gap-2 min-w-0">
+              <h4 className="text-sm font-medium text-ink truncate flex-1 min-w-0">
+                {node.name}
+              </h4>
+              {/* W2.1 — N-level subtree match count. Shown only on
+                  collapsed rows so the badge doesn't double-up
+                  the visible matches once the user expands. */}
+              {ancestorMatchCount > 0 && !isExpanded && hasChildren && schema && (
+                <SearchMatchBadge
+                  count={ancestorMatchCount}
+                  breakdown={ancestorBreakdown}
+                  schema={schema}
+                />
+              )}
+            </div>
 
             {/* Roll-up counts when collapsed */}
             {rollUpDisplay && !isExpanded && (
@@ -740,6 +844,10 @@ function HierarchyContainer({
               ))}
             </div>
           )}
+
+          {/* Display-rule tags — shared premium chip cluster (same as the
+              other canvases). */}
+          <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
 
           {/* Expand indicator */}
           {hasChildren && !isExpanded && (

@@ -70,8 +70,8 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --maxmemory 256mb
-      --maxmemory-policy noeviction
+      --maxmemory ${REDIS_MAXMEMORY:-2gb}
+      --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-volatile-lru}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -98,6 +98,29 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── synodic-upgrade (one-shot Alembic) ────────────────────────────
+  # Standalone image that owns every schema operation. Runs once per
+  # `docker compose up`, exits with code 0 on success. Every backend
+  # service depends on this completing (service_completed_successfully)
+  # so they never boot against a stale schema.
+  #
+  # For Alembic operations other than upgrade-to-head, run ad-hoc:
+  #   docker compose run --rm upgrade current
+  #   docker compose run --rm upgrade heads
+  #   docker compose run --rm upgrade downgrade --revision <rev>
+  upgrade:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.upgrade
+    image: synodic-upgrade:local
+    command: ["upgrade"]
+    environment:
+      MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # ── Aggregation Control Plane (Port 8091) ─────────────────────────
   # Owns the aggregation API surface: job lifecycle, scheduling, crash
   # recovery, drift detection.  Dispatches execution to Workers via
@@ -105,8 +128,8 @@ services:
   # Workers.  Uses SHORT FalkorDB timeouts (5s) so the API stays
   # responsive even when the graph provider is slow/down.
   #
-  # MUST start before viz-service (creates the aggregation schema) and
-  # before workers (they query the schema it owns).
+  # Waits for `upgrade` to finish so the schema is at head before the
+  # control plane initialises its own aggregation tables.
   aggregation-controlplane:
     build:
       context: .
@@ -116,6 +139,10 @@ services:
     environment:
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
+      # Cache Redis MUST be the dedicated ``redis`` service, not the
+      # ``falkordb`` container. DB 1 keeps the keyspace clean of the
+      # aggregation job streams on DB 0.
+      CACHE_REDIS_URL: redis://redis:6379/1
       AGGREGATION_DISPATCH_MODE: redis
 
       # FalkorDB access for drift checks, readiness probes, and purge.
@@ -135,6 +162,9 @@ services:
         condition: service_healthy
       falkordb:
         condition: service_healthy
+      # Schema must be at head before any backend service initialises.
+      upgrade:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8091/health"]
       interval: 10s
@@ -176,6 +206,9 @@ services:
 
       # Redis (for aggregation event listener — syncs status from CP)
       REDIS_URL: redis://redis:6379/0
+      # Dedicated cache Redis (FalkorDB provider's ancestor + URN caches).
+      # Separate DB index keeps it isolated from job streams on DB 0.
+      CACHE_REDIS_URL: redis://redis:6379/1
 
       # Aggregation proxy: all 13 aggregation endpoints are forwarded
       # to the Control Plane.  The viz-service does NOT run any
@@ -194,6 +227,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Schema must be at head before viz-service initialises.
+      upgrade:
+        condition: service_completed_successfully
       # Wait for Control Plane to be healthy so the aggregation schema
       # exists and proxy requests don't fail on first boot.
       aggregation-controlplane:
@@ -219,6 +255,8 @@ services:
     environment:
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
+      # Dedicated cache Redis (FalkorDB provider's ancestor + URN caches).
+      CACHE_REDIS_URL: redis://redis:6379/1
 
       # FalkorDB — worker-specific tuning: longer timeouts for heavy
       # MERGE ops, pool sizes auto-scaled from WORKER_CONCURRENCY.
@@ -237,6 +275,9 @@ services:
       SYNODIC_ROLE: worker
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
+      # Schema must be at head before any backend service initialises.
+      upgrade:
+        condition: service_completed_successfully
       # Worker must start after Control Plane (schema must exist)
       aggregation-controlplane:
         condition: service_healthy
@@ -271,6 +312,8 @@ services:
 
       # Redis — job stream + dedup keys. Same broker as aggregation.
       REDIS_URL: redis://redis:6379/0
+      # Dedicated cache Redis (FalkorDB provider's ancestor + URN caches).
+      CACHE_REDIS_URL: redis://redis:6379/1
 
       # Provider bootstrap — only used when a data source's credentials
       # reference env vars (normal path: credentials come from Postgres).
@@ -304,7 +347,10 @@ services:
         condition: service_healthy
       falkordb:
         condition: service_healthy
-      # Controlplane runs Alembic — ensures polling_config / stats tables exist.
+      # Schema must be at head before stats-service initialises.
+      upgrade:
+        condition: service_completed_successfully
+      # Controlplane creates aggregation-owned tables that stats reads.
       aggregation-controlplane:
         condition: service_healthy
     healthcheck:

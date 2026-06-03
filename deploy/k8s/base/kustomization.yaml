@@ -1,0 +1,57 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: synodic
+
+resources:
+  - namespace.yaml
+  - rbac/service-accounts.yaml
+
+  # ConfigMaps
+  - configmaps/common-config.yaml
+  - configmaps/viz-config.yaml
+  - configmaps/controlplane-config.yaml
+  - configmaps/worker-config.yaml
+  - configmaps/graph-config.yaml
+
+  # Secrets (templates — envsubst'd at deploy time)
+  - secrets/db-credentials.yaml
+  - secrets/app-secrets.yaml
+
+  # Infrastructure
+  - infrastructure/postgres/statefulset.yaml
+  - infrastructure/postgres/service.yaml
+  - infrastructure/redis/statefulset.yaml
+  - infrastructure/redis/service.yaml
+  - infrastructure/falkordb/statefulset.yaml
+  - infrastructure/falkordb/service.yaml
+
+  # Application services
+  - services/viz-service/deployment.yaml
+  - services/viz-service/service.yaml
+  - services/viz-service/hpa.yaml
+  - services/viz-service/pdb.yaml
+  - services/viz-service/backendconfig.yaml
+  - services/aggregation-controlplane/deployment.yaml
+  - services/aggregation-controlplane/service.yaml
+  - services/aggregation-controlplane/pdb.yaml
+  - services/aggregation-worker/deployment.yaml
+  - services/aggregation-worker/service.yaml
+  - services/aggregation-worker/hpa.yaml
+  - services/aggregation-worker/pdb.yaml
+  - services/graph-service/deployment.yaml
+  - services/graph-service/service.yaml
+  - services/graph-service/hpa.yaml
+  - services/graph-service/pdb.yaml
+  - services/graph-service/backendconfig.yaml
+  - services/frontend/deployment.yaml
+  - services/frontend/service.yaml
+  - services/frontend/hpa.yaml
+  - services/frontend/pdb.yaml
+  - services/frontend/backendconfig.yaml
+
+  # Networking
+  - networking/ingress.yaml
+  - networking/managed-certificate.yaml
+  - networking/network-policies.yaml
+

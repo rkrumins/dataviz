@@ -148,8 +148,21 @@ interface CanvasState {
    * peers too. That matches the intent — those edges represented the
    * subtree's relationships at its expanded granularity. Re-expanding
    * refetches them via loadChildren/drill paths.
+   *
+   * ``preserveEdgeIds`` (optional) — edges whose ids are in this set
+   * survive the collapse even when their endpoint lies inside
+   * ``nodeIds``. Used by the trace flow: trace lineage edges merged
+   * via ``/trace/v2`` have no re-add path on re-expand
+   * (``autoDrillOnExpand`` only drills aggregated edges, not the
+   * original trace lineage). Passing the lineage subset of
+   * ``useUnifiedTrace.addedEdgeIds`` keeps those edges in the store
+   * across expand/collapse cycles so the user can drill in/out
+   * without losing the lineage they were tracing.
    */
-  removeEdgesByNodeIds: (nodeIds: Iterable<string>) => void
+  removeEdgesByNodeIds: (
+    nodeIds: Iterable<string>,
+    preserveEdgeIds?: ReadonlySet<string>,
+  ) => void
 }
 
 import { persist, createJSONStorage } from 'zustand/middleware'
@@ -407,13 +420,18 @@ export const useCanvasStore = create<CanvasState>()(
           _edgeIndex: nextEdgeIndex,
         }
       }),
-      removeEdgesByNodeIds: (nodeIds) => set((state) => {
+      removeEdgesByNodeIds: (nodeIds, preserveEdgeIds) => set((state) => {
         const nodeIdSet = nodeIds instanceof Set ? nodeIds : new Set(nodeIds)
         if (nodeIdSet.size === 0) return state
         const nextEdgeIndex = new Set(state._edgeIndex)
         const remainingEdges: LineageEdge[] = []
         for (const e of state.edges) {
-          if (nodeIdSet.has(e.source) || nodeIdSet.has(e.target)) {
+          const touchesSubtree = nodeIdSet.has(e.source) || nodeIdSet.has(e.target)
+          // Edges in `preserveEdgeIds` survive the collapse even when an
+          // endpoint is inside the subtree — see the type definition
+          // for the trace-mode rationale.
+          const isPreserved = preserveEdgeIds?.has(e.id) === true
+          if (touchesSubtree && !isPreserved) {
             nextEdgeIndex.delete(e.id)
           } else {
             remainingEdges.push(e)

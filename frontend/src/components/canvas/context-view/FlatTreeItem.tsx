@@ -9,6 +9,11 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
+import { usePreferencesStore } from '@/store/preferences'
+import { densityRowTokens } from './density'
+import { SearchMatchBadge } from '../search/SearchMatchBadge'
+import { useSearchHighlight } from '../search/useSearchHighlight'
+import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -128,6 +133,27 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
   const hasChildren = node.children.length > 0 || childCount > 0
+
+  // Advanced-search roll-up: number of matches sitting anywhere in this
+  // node's subtree (N levels deep, deduped per hit). Drives the
+  // "[N matches inside]" badge on collapsed ancestor rows so a user
+  // can see, before expanding, that a domain contains 47 PII fields.
+  //
+  // W2.1: the row-decoration bundle is now produced by
+  // ``useSearchHighlight`` so GraphCanvas + HierarchyCanvas can light
+  // up identically with a single hook call.
+  const urnOrId = node.urn ?? node.id
+  // Note: FlatTreeItem receives ``isSearchResult`` from its parent
+  // (ContextViewCanvas merges quick-search + advanced-search hits),
+  // which already drives the pulse class — so we don't destructure
+  // ``isDirectMatch`` here. Other canvases (GraphCanvas /
+  // HierarchyCanvas) consume ``isDirectMatch`` directly because they
+  // bind to the store, not the prop.
+  const {
+    ancestorMatchCount,
+    ancestorBreakdown: ancestorMatchBreakdown,
+    isSpotlightDim,
+  } = useSearchHighlight(urnOrId, { isSelected })
   // In trace mode, useTraceFilteredHierarchy already prunes node.children to
   // the trace context, so children.length reflects what the user will see on
   // expand. The graph-wide childCount would mislead them with siblings the
@@ -136,21 +162,33 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ? (isTracing ? node.children.length : (childCount || node.children.length))
     : 0
 
-  // IMPROVED SIZING - Keep items readable at ALL depths
-  // Root items are slightly larger, but children remain very readable
+  // Density-aware sizing — driven by usePreferencesStore.canvasDensity. The
+  // virtualizer in LayerColumn reads the same density via densityRowHeights()
+  // so its size estimates stay in lockstep with the rendered row heights.
+  // `?? default` covers users whose persisted state predates these fields.
+  const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
+  const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
+  const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
   const isRoot = depth === 0
-  const heightClass = isRoot ? 'min-h-[52px]' : 'min-h-[44px]'
-  const paddingClass = isRoot ? 'py-3' : 'py-2.5'
-  const textClass = isRoot ? 'text-sm' : 'text-[13px]'
-  const iconSize = isRoot ? 'w-5 h-5' : 'w-4 h-4'
-  const iconContainerSize = isRoot ? 'w-9 h-9' : 'w-7 h-7'
+  const sizing = densityRowTokens(density, isRoot)
+  const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
+  const paddingClass = sizing.paddingClass
+  const textClass = sizing.textClass
+  const iconSize = sizing.iconSize
+  const iconContainerSize = sizing.iconContainerSize
 
-  // Dimming applies only to the click-highlight feature now. Trace mode used
-  // to dim non-traced nodes here, but ContextViewCanvas's
-  // `useTraceFilteredHierarchy` removes them from the render tree entirely
-  // — so anything that reaches FlatTreeItem during trace IS in the trace
-  // context and should render at full opacity.
-  const isDimmed = isDimmedByHighlight
+  // Dimming applies to (a) the click-highlight feature, and (b) the
+  // advanced-search "spotlight" mode (sourced from useSearchHighlight
+  // above): when any search has matches, every node that's NOT a
+  // direct match AND NOT an ancestor of one fades to 40% so the
+  // matched chain is visually unmissable. Selected rows stay bright
+  // regardless so the user never loses their focus during search.
+  // Trace mode used to dim non-traced nodes here, but
+  // ContextViewCanvas's ``useTraceFilteredHierarchy`` removes them
+  // from the render tree entirely — so anything that reaches
+  // FlatTreeItem during trace IS in the trace context and should
+  // render at full opacity.
+  const isDimmed = isDimmedByHighlight || isSpotlightDim
 
   // Tree line indent - reduced to save horizontal space
   const indentWidth = depth * 16
@@ -198,7 +236,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-trace-focus={isFocusNode ? 'true' : 'false'}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative z-[2]",
-        heightClass,
         paddingClass,
         // Subtle backdrop-blur on the card body — visually invisible
         // (matches the glassy translucent design) but blurs anything
@@ -212,8 +249,23 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
         // Selected state with accent glow
         isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
-        // Search result highlight
-        isSearchResult && !isSelected && "bg-gradient-to-r from-amber-500/15 to-transparent shadow-[inset_0_0_0_1px_rgba(245,158,11,0.3)]",
+        // Search result highlight — direct match (advanced search or quick search)
+        isSearchResult && !isSelected && cn(
+            "bg-gradient-to-r from-amber-500/15 to-transparent",
+            "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.4),0_0_18px_-2px_rgba(245,158,11,0.45)]",
+            "search-match-pulse",
+        ),
+        // Ancestor of a search match — softer amber treatment so the
+        // user can scan the canvas top-down and see at a glance which
+        // branches contain hits, without the row competing with direct
+        // matches for attention. Applies whether the row is collapsed
+        // (with a ✦N badge) or expanded (descendants then carry their
+        // own stronger highlight). Suppressed when the row is itself a
+        // direct match, selected, or part of a trace focus path.
+        ancestorMatchCount > 0 && !isSearchResult && !isSelected && !isFocusNode && cn(
+            "bg-gradient-to-r from-amber-500/[0.06] to-transparent",
+            "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.18)]",
+        ),
         // Focus node (trace target)
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
@@ -233,6 +285,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       )}
       style={{
         paddingLeft: 12 + indentWidth,
+        minHeight: minRowHeightPx,
         // Subtle left border accent for root items
         ...(depth === 0 && {
           borderLeft: `3px solid ${nodeColor}40`,
@@ -256,17 +309,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
-      {/* Modern Tree Lines with gradient effect */}
+      {/* Modern Tree Lines with gradient effect.
+          Subtle mode dims connectors + dot for a calmer look without
+          removing them — orientation cues survive at lower contrast. */}
       <div className="flex items-center absolute left-3" style={{ width: indentWidth }}>
         {parentIsLast.map((pIsLast, idx) => (
           <div key={idx} className="w-5 h-full flex justify-center">
             {!pIsLast && (
-              <div className="w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]" />
+              <div className={cn(
+                "w-px h-full bg-gradient-to-b from-white/[0.08] via-white/[0.12] to-white/[0.08]",
+                subtleTreeLines && "opacity-40"
+              )} />
             )}
           </div>
         ))}
         {depth > 0 && (
-          <div className="w-5 h-full relative">
+          <div className={cn("w-5 h-full relative", subtleTreeLines && "opacity-50")}>
             {/* Vertical line with gradient */}
             <div className={cn(
               "absolute left-1/2 -translate-x-1/2 w-px",
@@ -360,8 +418,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         />
       </div>
 
-      {/* Name - IMPROVED: Better visibility with tooltip */}
-      <div className="flex-1 min-w-0 flex flex-col justify-center" title={stagedSummary ?? node.name}>
+      {/* Name + type — the text region IS the row's primary payload.
+          ``min-w-0`` keeps the flex child from forcing the row to
+          expand to fit a long word; ``break-words`` lets only
+          genuinely-unbreakable identifiers wrap mid-character (the
+          earlier ``break-all`` was too eager — it broke normal
+          names like ``INTERMEDIATE_T1`` into ``IN``/``T..``).
+          ``line-clamp-2`` caps height so the virtualizer's row
+          estimate stays accurate. The action overlay uses a
+          backdrop-blur gradient so text behind it stays legible
+          without us having to re-flow the layout on hover (the
+          previous ``pr-[120px]`` reflow shrank the text to
+          unreadable widths). */}
+      <div
+        className="flex-1 min-w-0 flex flex-col justify-center"
+        title={stagedSummary ?? node.name}
+      >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
           textClass,
@@ -369,44 +441,120 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           isHovered && !isSelected && "text-ink",
           // Strikethrough for pending-delete makes the destruction intent unmissable
           stagedColor === 'red' && "line-through decoration-rose-300/80 decoration-2",
-          // Allow text to wrap to 2 lines for better readability
-          "line-clamp-2"
+          // 3-line cap + word-wrap. ``break-words`` triggers only
+          // when a word genuinely cannot fit, so normal labels
+          // stay on a single line. The 3-line ceiling handles
+          // extra-long snake_case identifiers (e.g. the user's
+          // ``INTERMEDIATE_T1a sfdasdfasdfasdfafaf`` test case)
+          // without losing the tail to ellipsis. The virtualizer
+          // re-measures rows dynamically so taller rows reflow
+          // their successors without scroll-jump.
+          "line-clamp-3 break-words"
         )}>
           {node.name}
         </span>
-        {/* Type badge - show for all items to help identify entity types */}
-        <span className={cn(
-          "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
-          isRoot && "text-[11px]"
-        )}>
-          <span
-            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-            style={{ backgroundColor: nodeColor }}
-          />
-          {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
-        </span>
+        {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
+            users can reclaim vertical space in dense canvases. */}
+        {showTypeBadge && (
+          <span className={cn(
+            "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
+            isRoot && "text-[11px]"
+          )}>
+            <span
+              className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+              style={{ backgroundColor: nodeColor }}
+            />
+            {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
+          </span>
+        )}
+        {/* Display-rule tags — shared chip cluster (premium chips +
+            overflow popover) so all canvases render identically. */}
+        <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" className="mt-1" />
       </div>
 
-      {/* Badges - Descendant count */}
-      <AnimatePresence>
-        {descendantCount > 0 && (
-          <motion.span
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.8 }}
-            className="text-[11px] px-2 py-1 rounded-lg bg-white/[0.06] border border-white/[0.08] text-ink-muted font-semibold tabular-nums flex-shrink-0"
-          >
-            +{descendantCount}
-          </motion.span>
-        )}
-      </AnimatePresence>
+      {/* Right-side metadata cluster — descendant count + search
+          badge. NO reserved slot: both items only occupy space when
+          they have something to show, so a short name like ``Sales``
+          on a dataset with no matches gets the entire row width.
 
-      {/* Action buttons - Glass morphism style, appear on hover */}
+          The cluster STAYS VISIBLE on hover so the user can scan
+          + hover the SearchMatchBadge to open its premium
+          breakdown tooltip — that hover affordance is the whole
+          reason the badge exists. Only the ``+N`` descendant pill
+          fades, because it overlaps the action overlay's slot.
+          The action overlay positions itself with
+          ``right-[3.125rem]`` when a badge is present so it lands
+          to the LEFT of the badge, never on top of it. */}
+      <div className="flex items-center gap-1.5 flex-shrink-0 relative z-[5]">
+        {descendantCount > 0 && (
+          <span className={cn(
+            "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",
+            "bg-white/[0.06] border border-white/[0.08]",
+            "text-ink-muted font-semibold tabular-nums",
+            "transition-opacity duration-150",
+            isHovered && "opacity-0 pointer-events-none",
+          )}>
+            +{descendantCount}
+          </span>
+        )}
+
+        {/* Search-match badge — shows even when the row itself is a
+            direct match. A search for "account" against a dataset
+            called ``account_details`` whose columns are
+            ``account_number`` etc. needs to tell the user that
+            expanding surfaces more matches; suppressing the badge on
+            direct-match rows hid that signal. (GraphCanvas +
+            HierarchyCanvas already render it unconditionally — this
+            keeps ContextView aligned.) */}
+        {ancestorMatchCount > 0 && !isExpanded && hasChildren && (
+          <SearchMatchBadge
+            count={ancestorMatchCount}
+            breakdown={ancestorMatchBreakdown}
+            schema={schema}
+          />
+        )}
+      </div>
+
+      {/* Action buttons — absolute overlay anchored to the row's
+          right edge. Right offset is DYNAMIC so the overlay never
+          covers the SearchMatchBadge:
+            - When a badge is present, sit at ``right-[3.125rem]``
+              (50px) so the badge column stays interactive (the
+              user can still hover the badge for the breakdown
+              tooltip).
+            - When no badge, sit at ``right-2`` (8px) so the
+              overlay uses the row's full trailing edge.
+
+          Backdrop strategy — when text wraps to 2 lines the row
+          height grows, so the overlay now sits on top of the
+          SECOND line of text too. The previous
+          ``from-X via-X/92 to-transparent`` gradient kept the
+          leftmost ~50% of the overlay transparent, which exposed
+          the wrapped text behind the buttons (buttons read as
+          "invisible" because their semi-transparent bgs mixed with
+          the text below). The fix:
+            1. Push the solid-to-transparent fade into the
+               leftmost ~25% only (``via-75%``) so the entire button
+               column sits on a fully opaque canvas-elevated bg.
+            2. Bump blur from ``backdrop-blur-md`` to
+               ``backdrop-blur-xl`` so even the fade zone obscures
+               any text it overlaps. */}
       <motion.div
         initial={false}
         animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
-        transition={{ duration: 0.15 }}
-        className="flex items-center gap-1 flex-shrink-0"
+        transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+        className={cn(
+          "absolute inset-y-0 flex items-center gap-1 pl-8 pr-1 rounded-l-xl z-[4]",
+          (ancestorMatchCount > 0 && !isExpanded && hasChildren)
+            ? "right-[3.125rem]"
+            : "right-2",
+          isHovered && cn(
+            "backdrop-blur-xl",
+            "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
+            "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
+          ),
+          !isHovered && "pointer-events-none"
+        )}
       >
         {/* Focus/Drill button */}
         {hasChildren && (
@@ -415,10 +563,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
               e.stopPropagation()
               onFocus(node)
             }}
-            className="p-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 transition-all duration-200 hover:scale-110 active:scale-95"
+            className="flex items-center justify-center p-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 transition-all duration-200 hover:scale-110 active:scale-95 leading-none"
             title="Focus on this subtree"
           >
-            <LucideIcons.Maximize2 className="w-3 h-3" />
+            <LucideIcons.Maximize2 className="w-3 h-3 block" />
           </button>
         )}
 
@@ -430,14 +578,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
               onToggleSearch(node.id)
             }}
             className={cn(
-              "p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95",
+              "flex items-center justify-center p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95 leading-none",
               isSearchVisible
                 ? "bg-amber-500/20 text-amber-400"
                 : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted"
             )}
             title="Search children"
           >
-            <LucideIcons.Search className="w-3 h-3" />
+            <LucideIcons.Search className="w-3 h-3 block" />
           </button>
         )}
 
@@ -448,10 +596,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
               e.stopPropagation()
               onAddChild(node.id)
             }}
-            className="p-1.5 rounded-lg bg-green-500/10 hover:bg-green-500/20 text-green-400 hover:text-green-300 transition-all duration-200 hover:scale-110 active:scale-95"
+            className="flex items-center justify-center p-1.5 rounded-lg bg-green-500/10 hover:bg-green-500/20 text-green-400 hover:text-green-300 transition-all duration-200 hover:scale-110 active:scale-95 leading-none"
             title="Add child entity"
           >
-            <LucideIcons.Plus className="w-3 h-3" />
+            <LucideIcons.Plus className="w-3 h-3 block" />
           </button>
         )}
       </motion.div>
@@ -470,3 +618,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     </div>
   )
 })
+
+
+// `formatBreakdown` + `pluralize` moved into ./SearchMatchBadge.tsx
+// alongside the tooltip rendering that consumes them.

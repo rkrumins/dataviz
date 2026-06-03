@@ -144,11 +144,24 @@ export function useLayerAssignment({
     // Use a Set to track processed.
     const processed = new Set<string>()
 
+    // When the view config carries any explicit ``entityAssignments``,
+    // treat them as the CLOSED, AUTHORITATIVE set of root-layer
+    // assignments — backend ``effectiveAssignments`` and rule-based
+    // resolution cannot promote an un-listed root entity into a layer.
+    // Reason: the Layer Studio / Entity Assignment Panel is the user's
+    // source of truth (it shows "Sales is unassigned"); the canvas
+    // must agree. Previously the priority chain consulted
+    // ``effectiveAssignments`` first, so stale backend data or
+    // overly-broad rules could float an unassigned domain (e.g. Sales)
+    // into a layer column, contradicting the wizard. See the
+    // Phase-1 root-cause investigation in
+    // /plans/i-want-you-to-precious-sunset.md.
+    const viewHasExplicitAssignments = explicitAssignments.size > 0
+
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
-    // Root-level nodes use priority chain:
-    // 1. effectiveAssignments (backend) 2. instanceAssignments (user drag)
-    // 3. explicitAssignments (view config) 4. ruleAssignments (rules) 5. inheritance
+    // Root-level nodes use the priority chain below, with closed-scope
+    // semantics when the view has explicit assignments.
     const roots = nodes.filter((n: any) => !parentMap.has(n.id))
     const stack: Array<{ nodeId: string; inheritedLayerId?: string }> = []
     // Push roots in reverse so first root is processed first
@@ -172,31 +185,35 @@ export function useLayerAssignment({
         // Absolute inheritance — child is locked to parent's layer
         myLayerId = inheritedLayerId
       } else {
-        // Root-level node: use priority chain
-        // 1. effectiveAssignments (backend)
-        const backendAssignment = effectiveAssignments.get(nodeId)
-        if (backendAssignment?.layerId) myLayerId = backendAssignment.layerId
-
-        // 2. instanceAssignments (user drag)
-        if (!myLayerId) {
-          const instanceAssignment = instanceAssignments.get(nodeId)
-          if (instanceAssignment) myLayerId = instanceAssignment.layerId
+        // Root-level node priority chain.
+        //
+        // 1. instanceAssignments (live user drag in this session) — always
+        //    wins. The user just dropped this onto a layer; respect that
+        //    immediately regardless of view config or backend state.
+        const instanceAssignment = instanceAssignments.get(nodeId)
+        if (instanceAssignment) {
+          myLayerId = instanceAssignment.layerId
+        } else if (viewHasExplicitAssignments) {
+          // 2a. Closed-scope mode: view config has explicit assignments.
+          //     Only entities listed in ``explicitAssignments`` get a
+          //     layer; everything else drops out. This is what makes the
+          //     canvas mirror the wizard's "if you didn't drag it, it's
+          //     not in the view" mental model.
+          myLayerId = explicitAssignments.get(nodeId)
+        } else {
+          // 2b. Open-scope mode: empty / new view with no explicit
+          //     assignments. Fall back to backend → rules → inheritance
+          //     so the user has data to start dragging from in the
+          //     wizard.
+          const backendAssignment = effectiveAssignments.get(nodeId)
+          if (backendAssignment?.layerId) {
+            myLayerId = backendAssignment.layerId
+          } else if (ruleAssignments.has(nodeId)) {
+            myLayerId = ruleAssignments.get(nodeId)
+          } else if (inheritedLayerId) {
+            myLayerId = inheritedLayerId
+          }
         }
-
-        // 3. explicitAssignments (view config)
-        if (!myLayerId) myLayerId = explicitAssignments.get(nodeId)
-
-        // 4. ruleAssignments (ontology rules)
-        if (!myLayerId) myLayerId = ruleAssignments.get(nodeId)
-
-        // 5. inheritance (for non-containment relationships, if any)
-        if (!myLayerId && inheritedLayerId) myLayerId = inheritedLayerId
-
-        // No fallback beyond inheritance. Nodes that match nothing in the
-        // chain stay unassigned and drop out of `nodesByLayer` — this is
-        // what keeps trace results from pulling in entities (e.g. layer
-        // nodes with no view-level assignment) into a focus column where
-        // they don't actually belong.
       }
 
       if (myLayerId === '__UNASSIGNED__') myLayerId = undefined

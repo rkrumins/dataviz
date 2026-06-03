@@ -251,6 +251,14 @@ class InsightsJobConsumer:
             async with factory() as session:
                 await asyncio.wait_for(handler(session, envelope), timeout=timeout)
                 await session.commit()
+            # Post-commit hook: handlers (currently just stats collector)
+            # can stash a deferred cache-warm request via
+            # ``cache_warmer.defer_warm`` during their run. The warm fires
+            # AFTER commit so it sees the freshly-written
+            # ``data_source_stats`` row (especially important against a
+            # read replica). No-op when nothing was deferred.
+            from . import cache_warmer
+            cache_warmer.fire_deferred_warm()
         except asyncio.TimeoutError:
             duration = asyncio.get_event_loop().time() - start_ts
             logger.warning(

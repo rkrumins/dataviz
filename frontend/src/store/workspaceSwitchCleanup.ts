@@ -22,6 +22,8 @@ import { getQueryClient } from '@/main'
 import { useSchemaStore } from '@/store/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useCacheStalenessStore } from '@/store/cacheStaleness'
+import { useProviderHealthStore } from '@/store/providerHealth'
 
 export function cleanupOnWorkspaceSwitch(): void {
   // --- 1. Evict React Query caches -----------------------------------------
@@ -80,6 +82,30 @@ export function cleanupOnWorkspaceSwitch(): void {
       canvasStore.clearCache?.()
       canvasStore.clearSelection?.()
     }
+  } catch {
+    /* no-op */
+  }
+
+  // --- 3. Resilience-signal stores ----------------------------------------
+  // The two stores fed by ``X-Provider-Health`` and ``X-Cache-Status``
+  // response headers hold per-(workspaceId, dataSourceId) entries. On a
+  // workspace switch, leaving the old workspace's entries behind would
+  // (a) leak memory across a long hop-around session and (b) potentially
+  // resurface the stale banner if the user returns. ``reset()`` also
+  // cancels pending auto-clear setTimeouts.
+  try {
+    useCacheStalenessStore.getState().reset()
+  } catch {
+    /* no-op */
+  }
+  try {
+    // providerHealth doesn't have a reset — clearing the Map is enough,
+    // and the 30s background poller will refill from /health/providers
+    // on the next cycle.
+    const ph = useProviderHealthStore.getState() as {
+      providers: Map<string, unknown>
+    }
+    ph.providers.clear()
   } catch {
     /* no-op */
   }

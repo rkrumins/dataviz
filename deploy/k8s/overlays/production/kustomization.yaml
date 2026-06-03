@@ -1,0 +1,43 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - path: patches/replicas.yaml
+  - path: patches/resource-limits.yaml
+  - path: patches/ingress-patch.yaml
+  - path: patches/anti-affinity.yaml
+  - path: patches/hpa-production.yaml
+  # Override LOG_LEVEL to WARNING
+  - target:
+      kind: ConfigMap
+      name: common-config
+    patch: |-
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "WARNING"
+
+images:
+  - name: REGISTRY/synodic-viz
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-viz
+    newTag: latest
+  - name: REGISTRY/synodic-controlplane
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-controlplane
+    newTag: latest
+  - name: REGISTRY/synodic-worker
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-worker
+    newTag: latest
+  - name: REGISTRY/synodic-graph
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-graph
+    newTag: latest
+  - name: REGISTRY/synodic-frontend
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-frontend
+    newTag: latest
+  - name: REGISTRY/synodic-falkordb
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-falkordb
+    newTag: latest
+  - name: REGISTRY/synodic-seed
+    newName: us-docker.pkg.dev/PROJECT_ID/synodic/synodic-seed
+    newTag: latest

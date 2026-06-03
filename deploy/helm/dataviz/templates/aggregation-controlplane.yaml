@@ -23,6 +23,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if not .Values.services.controlplane.skipSchemaCheck }}
+      initContainers:
+        {{- include "dataviz.schemaCheckInitContainer" (dict "ctx" $) | nindent 8 }}
+      {{- end }}
       containers:
         - name: aggregation-controlplane
           image: {{ include "dataviz.image" (dict "ctx" $ "name" "aggregation-controlplane") | quote }}

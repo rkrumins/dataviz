@@ -570,6 +570,7 @@ class ContextModelORM(Base):
     scope_filter = Column(Text, nullable=True)                       # JSON: ScopeFilterConfig
     instance_assignments = Column(Text, nullable=False, default="{}") # JSON: entityId→assignment
     scope_edge_config = Column(Text, nullable=True)                  # JSON: ScopeEdgeConfig
+    display_rules_config = Column(Text, nullable=True)               # JSON: DisplayRuleConfig[]
     is_active = Column(Boolean, nullable=False, default=True)
     # Columns added during context-model → view unification
     view_type = Column(Text, nullable=True)                            # graph | table | lineage | ...

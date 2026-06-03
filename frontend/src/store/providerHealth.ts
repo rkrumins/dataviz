@@ -27,6 +27,11 @@ interface ProviderHealthState {
 
   /** Refresh from backend */
   refresh: () => Promise<void>
+
+  /** Ingest a header-borne signal from a real request response (e.g.
+   *  ``X-Provider-Health: unreachable``). Lets the UI react in < 1s
+   *  instead of waiting for the next 30s ``/health/providers`` poll. */
+  markFromHeader: (workspaceId: string | undefined, dataSourceId: string | undefined, value: string) => void
 }
 
 export const useProviderHealthStore = create<ProviderHealthState>((set, get) => ({
@@ -59,6 +64,26 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
     } catch {
       // Poll failure — don't clear existing data, just skip this cycle
     }
+  },
+
+  markFromHeader: (workspaceId, dataSourceId, value) => {
+    if (!workspaceId || !dataSourceId) return
+    // Only act on the two values the backend emits; ignore anything else
+    // so future header values don't accidentally flip status.
+    if (value !== 'unreachable' && value !== 'healthy') return
+    const key = `${workspaceId}:${dataSourceId}`
+    const cur = get().providers.get(key)
+    const next: ProviderStatus = value === 'healthy' ? 'healthy' : 'unhealthy'
+    // No-op if already in the same state — avoids triggering subscribers
+    // on every request response.
+    if (cur && cur.status === next) return
+    const newMap = new Map(get().providers)
+    newMap.set(key, {
+      status: next,
+      error: value === 'unreachable' ? 'Reported unreachable by recent request' : undefined,
+      lastChecked: Date.now(),
+    })
+    set({ providers: newMap })
   },
 }))
 

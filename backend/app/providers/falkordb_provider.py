@@ -41,11 +41,202 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
+def _redact_redis_url(url: str) -> str:
+    """Strip embedded credentials from a Redis URL for safe logging.
+
+    ``redis://:password@host:6379/1`` → ``redis://***@host:6379/1``.
+    Best-effort: unparseable input returns the literal ``redis://***``
+    so a malformed URL never leaks raw chars into the log.
+    """
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        if parsed.password is None and parsed.username is None:
+            return url
+        netloc = parsed.hostname or ""
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunparse(parsed._replace(netloc=f"***@{netloc}"))
+    except Exception:
+        return "redis://***"
+
+
+def _compute_searchable_text(
+    display_name: Optional[str],
+    qualified_name: Optional[str],
+    description: Optional[str],
+    user_properties: Optional[Dict[str, Any]],
+) -> str:
+    """Build a lowercased, space-joined searchable string for n.searchableText.
+
+    Includes displayName, qualifiedName, description, and every
+    string-valued user property value. Capped at
+    ``DeepSearchSettings.searchable_text_cap_bytes`` (env
+    ``DEEP_SEARCH_SEARCHABLE_TEXT_CAP``, default 8192) so a node with
+    very large string properties can't bloat the denormalised field.
+
+    Truncated at a word boundary when the cap fires so the tail
+    doesn't end mid-token (a partial token would defeat
+    ``CONTAINS '<word>'`` substring search).
+    """
+    parts: List[str] = []
+    if display_name:
+        parts.append(display_name)
+    if qualified_name:
+        parts.append(qualified_name)
+    if description:
+        parts.append(description)
+    if user_properties:
+        for value in user_properties.values():
+            if isinstance(value, str):
+                parts.append(value)
+    result = " ".join(parts).lower()
+    # Lazy import to avoid pulling settings into module import time
+    # (this helper is hot — called on every write).
+    from backend.app.services.deep_search import get_deep_search_settings
+    cap = get_deep_search_settings().searchable_text_cap_bytes
+    if len(result) <= cap:
+        return result
+    # Trim at the last word boundary <= cap so we never end mid-word.
+    truncated = result[:cap]
+    last_space = truncated.rfind(" ")
+    if last_space > 0:
+        truncated = truncated[:last_space]
+    return truncated
+
+
+# Reserved node-key set — fields the provider writes directly onto a FalkorDB
+# node. User-supplied `properties` keys that collide with these names are
+# dropped at write time so provider state stays authoritative. Used by both
+# the write-side split helper and the read-side reconstruction of the user
+# `properties` dict (everything NOT in this set is a user property).
+#
+# `properties` is included because nodes upserted before the native-property
+# refactor still carry the legacy JSON blob; the read path parses it as a
+# transitional fallback, and the write path strips it on next write.
+# `propertiesRaw` is the post-refactor escape hatch — a JSON-stringified
+# dict of values that couldn't be written natively (nested objects, lists
+# of dicts, etc.).
+_RESERVED_NODE_KEYS: frozenset = frozenset({
+    "urn", "entityType", "displayName", "qualifiedName", "description",
+    "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
+    "level", "levelDigest",
+    "properties",      # legacy blob — read path no longer hydrates from it
+    "propertiesRaw",   # native escape hatch for non-scalar property values
+})
+
+
+# One-time warning latch (W1.3): logged once per provider boot when we
+# encounter a pre-refactor node that still carries the ``n.properties``
+# JSON blob. The read path no longer hydrates from the blob — operators
+# run the backfill migration to surface those properties as native fields.
+_logged_legacy_blob: bool = False
+
+
+def _split_user_properties(
+    props: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    """Split a user-supplied `properties` dict into (native_scalar, residual_json).
+
+    Returns
+    -------
+    native_scalar : dict
+        Keys whose values are FalkorDB-native (scalars or flat lists of
+        scalars). Suitable for `SET n += $native_scalar` — each key becomes
+        a real node property and is therefore indexable and Cypher-queryable.
+    residual_json : str
+        JSON-stringified dict of values that couldn't be written natively
+        (nested dicts, lists of dicts, anything heterogenous). Always a
+        string — empty dict serialises to "{}" so the SET clause always
+        has a value and we don't need a separate REMOVE round-trip when
+        the residual becomes empty on an upsert.
+
+    Keys that collide with `_RESERVED_NODE_KEYS` are dropped with a warning
+    so user data can't shadow provider-owned fields like `urn` or `level`.
+    `None` values are skipped (writing null would shadow an existing value).
+    """
+    native: Dict[str, Any] = {}
+    residual: Dict[str, Any] = {}
+    collided: List[str] = []
+    for k, v in (props or {}).items():
+        if v is None:
+            continue
+        if k in _RESERVED_NODE_KEYS:
+            collided.append(k)
+            continue
+        if isinstance(v, bool) or isinstance(v, (str, int, float)):
+            native[k] = v
+        elif isinstance(v, list) and all(
+            isinstance(x, (str, int, float, bool)) for x in v
+        ):
+            native[k] = v
+        else:
+            residual[k] = v
+    if collided:
+        logger.warning(
+            "user-property keys collided with reserved node keys, dropping: %s",
+            collided,
+        )
+    return native, json.dumps(residual)
+
+
 def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
-    """Build GraphNode from FalkorDB node properties."""
+    """Build GraphNode from FalkorDB node properties.
+
+    Reconstructs the user `properties` dict from two layers, in
+    increasing priority (later wins):
+
+      1. Non-reserved native keys on the node — written by the
+         post-refactor ingest path. The source of truth.
+      2. JSON-stringified residual in `props['propertiesRaw']` —
+         non-scalar values that couldn't be written natively (nested
+         dicts, lists of dicts). Layered on top of native because
+         residual keys are disjoint from native keys by construction.
+
+    The pre-refactor ``n.properties`` legacy JSON blob is no longer
+    consulted (W1.3 / greenfield cleanup). Nodes that still carry
+    that blob will lose those properties on read until the next
+    write hydrates them as native fields — operators run
+    ``backend/scripts/migrate_native_properties.py`` to backfill.
+    A one-time WARNING surfaces if such a node is observed so the
+    operator knows to run the migration.
+    """
     if not props or "urn" not in props:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
+
+    if "properties" in props:
+        # Pre-refactor node still carries the legacy blob. Flag it once
+        # per provider boot so operators can run the backfill. The
+        # warning is bounded by ``_logged_legacy_blob`` (module-level
+        # set) so we don't spam the logs in production.
+        global _logged_legacy_blob
+        if not _logged_legacy_blob:
+            logger.warning(
+                "deep_search: node urn=%s still carries the pre-refactor "
+                "n.properties JSON blob; run "
+                "backend/scripts/migrate_native_properties.py to backfill. "
+                "These properties are NOT visible to advanced search "
+                "until migrated.",
+                props.get("urn"),
+            )
+            _logged_legacy_blob = True
+
+    user_props: Dict[str, Any] = {}
+    for k, v in props.items():
+        if k in _RESERVED_NODE_KEYS:
+            continue
+        user_props[k] = v
+
+    residual_blob = props.get("propertiesRaw")
+    if isinstance(residual_blob, str) and residual_blob:
+        try:
+            residual_dict = json.loads(residual_blob)
+            if isinstance(residual_dict, dict):
+                user_props.update(residual_dict)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     try:
         return GraphNode(
             urn=props["urn"],
@@ -53,7 +244,7 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
             displayName=props.get("displayName", ""),
             qualifiedName=props.get("qualifiedName"),
             description=props.get("description"),
-            properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
+            properties=user_props,
             tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
             layerAssignment=props.get("layerAssignment"),
             childCount=props.get("childCount"),
@@ -349,6 +540,11 @@ class FalkorDBProvider(GraphDataProvider):
                     # redis://:password@host:port/0) so we don't pass our
                     # FalkorDB password here — the cache Redis is a separate
                     # instance that may have separate credentials.
+                    logger.info(
+                        "FalkorDB provider using dedicated cache Redis %s "
+                        "(decoupled from graph host %s:%s).",
+                        _redact_redis_url(cache_redis_url), self._host, self._port,
+                    )
                     _raw_redis = Redis.from_url(
                         cache_redis_url,
                         max_connections=redis_pool_size,
@@ -359,7 +555,17 @@ class FalkorDBProvider(GraphDataProvider):
                     self._redis_pool = None  # managed by from_url
                 else:
                     # Cache Redis falls back to the FalkorDB instance — same
-                    # host, same auth (P1.6).
+                    # host, same auth (P1.6). This is dev-compat only: in
+                    # production CACHE_REDIS_URL MUST be set to a separate
+                    # Redis so a FalkorDB outage doesn't take caching with
+                    # it. Warn loudly so ops can spot the misconfiguration.
+                    logger.warning(
+                        "CACHE_REDIS_URL is not set; FalkorDB provider's "
+                        "ancestor/URN caches will share the FalkorDB instance "
+                        "(host=%s:%s). A FalkorDB outage will also disable "
+                        "caching. Set CACHE_REDIS_URL to a dedicated Redis "
+                        "in production.", self._host, self._port,
+                    )
                     _redis_pool_kwargs: dict = {
                         "host": self._host,
                         "port": self._port,
@@ -467,6 +673,7 @@ class FalkorDBProvider(GraphDataProvider):
     from ..config import resilience as _resilience
     _READ_TIMEOUT = _resilience.FALKORDB_QUERY_TIMEOUT_SECS
     _WRITE_TIMEOUT = _resilience.FALKORDB_WRITE_TIMEOUT_SECS
+    _EDGES_BETWEEN_TIMEOUT = _resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
     del _resilience
 
     # FalkorDB engine cancels the query 500ms before the asyncio deadline so
@@ -959,6 +1166,31 @@ class FalkorDBProvider(GraphDataProvider):
             "depend on containment classification."
         )
 
+    def _get_lineage_edge_types(self) -> Set[str]:
+        """Return the authoritative lineage edge type set.
+
+        Mirrors ``_get_containment_edge_types``. The set is populated by
+        ``set_resolved_edge_metadata`` (called from
+        ``ContextEngine._resolve_ontology``) from the live ontology's
+        ``is_lineage`` flags. Empty is a valid resolved state (graph has
+        no lineage edges); a missing set raises ``ProviderConfigurationError``
+        so silent misconfiguration is impossible — search predicates that
+        depend on lineage (``isOrphan``, ``degree``, ``withinHops``) must
+        fail loudly if the ontology was never injected.
+
+        No hardcoded fallback: the whole point of the ontology resolution
+        gate is that lineage classification is per-data-source.
+        """
+        if getattr(self, "_resolved_edge_metadata_set", False):
+            return self._resolved_lineage_types
+        raise ProviderConfigurationError(
+            "Lineage edge types are not configured for this provider. "
+            "ContextEngine / aggregation must call set_resolved_edge_metadata() "
+            "with the resolved ontology before invoking provider methods that "
+            "depend on lineage classification (e.g. degree / isOrphan / "
+            "withinHops predicates)."
+        )
+
     def _extract_node_from_result(self, row) -> Optional[GraphNode]:
         """Extract GraphNode from a FalkorDB result row (Node or dict of properties)."""
         if not row:
@@ -1240,6 +1472,34 @@ class FalkorDBProvider(GraphDataProvider):
         q = NodeQuery(search_query=query, limit=limit, offset=offset)
         return await self.get_nodes(q)
 
+    async def deep_search(self, query, *, deadline_ms=None):
+        """Advanced server-side search. See ``backend/common/models/search.py``.
+
+        Implementation lives in ``falkordb_deep_search.execute_deep_search``
+        to keep this provider module focused. Imported lazily to avoid a
+        circular dependency at module load (the deep-search module
+        imports from this one's read-path helpers indirectly via
+        ``_extract_node_from_result`` and friends).
+        """
+        from .falkordb_deep_search import execute_deep_search
+        await self._ensure_connected()
+        return await execute_deep_search(self, query, deadline_ms=deadline_ms)
+
+    async def deep_search_explain(self, query):
+        """Compile-only path. Mirrors ``deep_search`` (lazy import to
+        avoid the circular load order)."""
+        from .falkordb_deep_search import explain_deep_search
+        await self._ensure_connected()
+        return explain_deep_search(self, query)
+
+    async def deep_search_discover(self, *, sample_per_label: int = 200):
+        """Schema discovery. Mirrors ``deep_search`` (lazy import)."""
+        from .falkordb_deep_search import discover_native_property_keys
+        await self._ensure_connected()
+        return await discover_native_property_keys(
+            self, sample_per_label=sample_per_label,
+        )
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 
@@ -1273,7 +1533,16 @@ class FalkorDBProvider(GraphDataProvider):
         params["limit"] = limit
         cypher += " RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
 
-        result = await self._ro_query(cypher, params=params)
+        # /edges/between issues an AND query (both source_urns and
+        # target_urns set). On large URN sets this legitimately exceeds the
+        # 5s read default, so give that pattern a longer deadline; all other
+        # callers keep the default.
+        is_between = bool(query.source_urns and query.target_urns)
+        result = await self._ro_query(
+            cypher,
+            params=params,
+            timeout=self._EDGES_BETWEEN_TIMEOUT if is_between else None,
+        )
         edges = []
         for row in (result.result_set or []):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
@@ -5744,13 +6013,23 @@ class FalkorDBProvider(GraphDataProvider):
         return out
 
     async def get_nodes_batch(self, urns: List[str]) -> List[GraphNode]:
-        """Bulk node fetch by URN — used by trace v2 to hydrate nodes after BFS."""
+        """Bulk node fetch by URN — used by trace v2 to hydrate nodes after
+        BFS AND by advanced search's batched ancestor hydration (W1.1c).
+
+        Uses the longer ``FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS`` (15s
+        default) rather than the generic 5s read timeout because a
+        single batch may carry hundreds of URNs from a large search
+        page; the IN-list scan on a million-node graph is the same
+        cost class as the children-fetch this timeout was tuned for.
+        """
         if not urns:
             return []
+        from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         try:
             result = await self._ro_query(
                 "MATCH (n) WHERE n.urn IN $urns RETURN n",
                 params={"urns": urns},
+                timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
             )
             out: List[GraphNode] = []
             for row in (result.result_set or []):
@@ -6133,18 +6412,24 @@ class FalkorDBProvider(GraphDataProvider):
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
             label = _sanitize_label(str(node.entity_type))
+            native_props, residual_blob = _split_user_properties(node.properties)
             nodes_by_label[label].append({
                 "urn": node.urn,
                 "displayName": node.display_name or "",
                 "qualifiedName": node.qualified_name or "",
                 "description": node.description or "",
-                "properties": json.dumps(node.properties),
+                "nativeProps": native_props,
+                "propertiesRaw": residual_blob,
                 "tags": json.dumps(node.tags or []),
                 "layerAssignment": node.layer_assignment or "",
                 "childCount": node.child_count or 0,
                 "sourceSystem": node.source_system or "",
                 "lastSyncedAt": node.last_synced_at or "",
                 "level": self._get_node_level(node.entity_type),
+                "searchableText": _compute_searchable_text(
+                    node.display_name, node.qualified_name,
+                    node.description, native_props,
+                ),
             })
 
         # Bulk-cache urn→label mappings
@@ -6155,23 +6440,38 @@ class FalkorDBProvider(GraphDataProvider):
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
                 try:
-                    # Note: SET n.level is conditional via COALESCE — if the engine
-                    # hasn't injected the entity-type→level map (e.g. seed-from-file
-                    # before ontology resolution), level is null and we leave the
-                    # existing value untouched. Backfill script handles those nodes.
+                    # Notes on the SET / REMOVE shape:
+                    # - `n += item.nativeProps` merges user-supplied scalar
+                    #   properties as real node fields. Merge semantics —
+                    #   keys that disappear across upserts are NOT removed
+                    #   (delete via an explicit op if needed). This matches
+                    #   how every other reserved field is upserted here.
+                    # - `n.propertiesRaw` always written (always a string,
+                    #   "{}" when empty) so we don't need a separate REMOVE
+                    #   round-trip when the residual goes empty.
+                    # - `REMOVE n.properties` strips the legacy blob on
+                    #   every write so the read-path transitional code
+                    #   becomes dead weight as soon as a node is touched.
+                    # - `n.level = coalesce(item.level, n.level)` keeps the
+                    #   pre-refactor semantics: if the engine hasn't
+                    #   injected the entity-type→level map yet (seed-from-
+                    #   file before ontology resolution), level stays as-is.
                     await self._query(
                         f"UNWIND $batch AS item "
                         f"MERGE (n:{label} {{urn: item.urn}}) "
                         f"SET n.displayName = item.displayName, "
                         f"n.qualifiedName = item.qualifiedName, "
                         f"n.description = item.description, "
-                        f"n.properties = item.properties, "
                         f"n.tags = item.tags, "
                         f"n.layerAssignment = item.layerAssignment, "
                         f"n.childCount = item.childCount, "
                         f"n.sourceSystem = item.sourceSystem, "
                         f"n.lastSyncedAt = item.lastSyncedAt, "
-                        f"n.level = coalesce(item.level, n.level)",
+                        f"n.propertiesRaw = item.propertiesRaw, "
+                        f"n.level = coalesce(item.level, n.level), "
+                        f"n.searchableText = item.searchableText, "
+                        f"n += item.nativeProps "
+                        f"REMOVE n.properties",
                         params={"batch": batch},
                     )
                 except Exception as e:
@@ -6212,26 +6512,39 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         try:
             label = _sanitize_label(str(node.entity_type))
-            params = {
-                "urn": node.urn,
+            native_props, residual_blob = _split_user_properties(node.properties)
+            # Reserved fields go into the merge map alongside native user
+            # props — `SET n += $p` writes them all in one pass. The native
+            # user props sit at the top level of the map (they ARE the new
+            # node fields); the legacy blob is stripped via REMOVE.
+            params: Dict[str, Any] = {
                 "displayName": node.display_name or "",
                 "qualifiedName": node.qualified_name or "",
                 "description": node.description or "",
-                "properties": json.dumps(node.properties),
+                "propertiesRaw": residual_blob,
                 "tags": json.dumps(node.tags or []),
                 "layerAssignment": node.layer_assignment or "",
-                "childCount": node.child_count,
                 "sourceSystem": node.source_system or "",
                 "lastSyncedAt": node.last_synced_at or "",
+                "searchableText": _compute_searchable_text(
+                    node.display_name, node.qualified_name,
+                    node.description, native_props,
+                ),
             }
+            if node.child_count is not None:
+                params["childCount"] = node.child_count
             # Only include level when the engine has injected the mapping;
             # otherwise omit the key so SET n += $p doesn't overwrite an
             # existing level with null.
             level = self._get_node_level(node.entity_type)
             if level is not None:
                 params["level"] = level
+            # Merge native user props on top — they become real node
+            # fields. Reserved-key collisions were already dropped by
+            # _split_user_properties so this is safe.
+            params.update(native_props)
             await self._query(
-                f"MERGE (n:{label} {{urn: $urn}}) SET n += $p",
+                f"MERGE (n:{label} {{urn: $urn}}) SET n += $p REMOVE n.properties",
                 params={"urn": node.urn, "p": params},
             )
             await self._cache_urn_label(node.urn, label)
@@ -6315,21 +6628,24 @@ class FalkorDBProvider(GraphDataProvider):
     # ------------------------------------------------------------------ #
 
     async def list_graphs(self) -> list:
-        """Return all graph keys on this FalkorDB instance via GRAPH.LIST."""
+        """Return all graph keys on this FalkorDB instance via GRAPH.LIST.
+
+        Raises on connection / auth / timeout failure so the discovery
+        worker can stamp ``last_error`` and the UI can surface a
+        reachable-failure reason (e.g. "tcp_refused: localhost:6379")
+        instead of an empty list that the user can't distinguish from
+        "no graphs exist". Only an empty result is normalised to ``[]``.
+        """
         await self._ensure_connected()
-        try:
-            # GRAPH.LIST is a one-off Redis-protocol command on the FalkorDB
-            # client (not Cypher, not the TimeoutRedis proxy) so it has no
-            # natural wrapper.  Bound it inline at the read-query timeout to
-            # honour the per-operation deadline contract.
-            result = await asyncio.wait_for(
-                self._db.execute_command("GRAPH.LIST"),
-                timeout=self._READ_TIMEOUT,
-            )
-            return list(result) if result else []
-        except Exception as exc:
-            logger.warning("GRAPH.LIST failed: %s", exc)
-            return []
+        # GRAPH.LIST is a one-off Redis-protocol command on the FalkorDB
+        # client (not Cypher, not the TimeoutRedis proxy) so it has no
+        # natural wrapper.  Bound it inline at the read-query timeout to
+        # honour the per-operation deadline contract.
+        result = await asyncio.wait_for(
+            self._db.execute_command("GRAPH.LIST"),
+            timeout=self._READ_TIMEOUT,
+        )
+        return list(result) if result else []
 
     async def close(self) -> None:
         """Release both connection pools held by this provider."""

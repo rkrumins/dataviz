@@ -12,6 +12,8 @@ import {
 import { cn } from '@/lib/utils'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { providerService } from '@/services/providerService'
+import { withTimeout } from '@/lib/concurrency'
+import { TIMEOUTS } from '@/config/timeouts'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -43,10 +45,15 @@ export function AdminOverview() {
     const loadInsights = useCallback(async () => {
         setIsLoading(true)
         try {
-            const [workspaces, providers] = await Promise.all([
-                workspaceService.list(),
-                providerService.list(),
+            // Render even when one of these stalls. The dashboard's value
+            // is mostly the per-workspace KPIs; a slow provider-list
+            // shouldn't gate the whole page.
+            const [wsRes, provRes] = await Promise.allSettled([
+                withTimeout(workspaceService.list(), TIMEOUTS.ADMIN_LIST_MS, 'workspaces.list'),
+                withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
             ])
+            const workspaces = wsRes.status === 'fulfilled' ? wsRes.value : []
+            const providers = provRes.status === 'fulfilled' ? provRes.value : []
             setProviderCount(providers.length)
 
             // Parallel fan-out over (workspace, datasource) pairs. The

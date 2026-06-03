@@ -2,6 +2,8 @@ import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, type CircuitBreaker } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { TIMEOUTS } from '@/config/timeouts'
+import { useProviderHealthStore } from '@/store/providerHealth'
+import { useCacheStalenessStore } from '@/store/cacheStaleness'
 
 import type {
     GraphDataProvider,
@@ -31,6 +33,13 @@ import type {
     TopLevelNodesResult,
 } from './GraphDataProvider'
 import type { TraceMeta } from '@/services/traceApi'
+import type {
+    SearchQuery,
+    SearchResultPage,
+    SearchExplainResult,
+    SearchDiscoverResult,
+} from '@/types/search'
+import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -219,6 +228,33 @@ export class RemoteGraphProvider implements GraphDataProvider {
                 throw error
             }
 
+            // Header-borne resilience signals from the backend GraphCache.
+            // - ``X-Provider-Health``: 'healthy' | 'unreachable' — pushed
+            //   into providerHealth store so the UI banner reacts faster
+            //   than the 30s /health/providers poll cycle.
+            // - ``X-Cache-Status: stale-fallback`` — backend served from
+            //   the last-known-good snapshot; signal so the user sees a
+            //   "data may be stale" hint near affected widgets.
+            const providerHealth = response.headers.get('X-Provider-Health')
+            if (providerHealth) {
+                useProviderHealthStore.getState().markFromHeader(
+                    this.workspaceId, this.dataSourceId, providerHealth,
+                )
+            }
+            const cacheStatus = response.headers.get('X-Cache-Status')
+            if (cacheStatus === 'stale-fallback') {
+                useCacheStalenessStore.getState().markStale(
+                    this.workspaceId, this.dataSourceId, url,
+                )
+            } else if (providerHealth === 'healthy') {
+                // Fresh response from a healthy provider — clear any
+                // stale flag for this scope so the banner disappears on
+                // recovery without waiting for the TTL.
+                useCacheStalenessStore.getState().clear(
+                    this.workspaceId, this.dataSourceId,
+                )
+            }
+
             const data = await response.json() as T
 
             // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
@@ -272,6 +308,76 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify({ query, limit }),
         })
+    }
+
+    /**
+     * Advanced server-side search (POST /search/advanced).
+     *
+     * Sends a structured `SearchQuery` predicate tree and receives an
+     * aggregate-and/or-hit `SearchResultPage`. See `frontend/src/types/search.ts`
+     * for the full contract and `backend/common/models/search.py` for the
+     * authoritative shape.
+     *
+     * No client-side caching: search results depend on the full predicate
+     * body which the GET-cache layer can't key on, and the backend will
+     * grow its own Redis cache in workstream 3.
+     */
+    async searchAdvanced(query: SearchQuery): Promise<SearchResultPage> {
+        return await this.fetch<SearchResultPage>('/search/advanced', {
+            method: 'POST',
+            body: JSON.stringify(query),
+        })
+    }
+
+    /**
+     * Fetch the SearchQuery JSON Schema served by the backend.
+     *
+     * The body IS the canonical contract used by Ajv validation in the
+     * JSON editor and by the schema-version assertion in `useSearchSchema`.
+     * The schema's `properties.$schemaVersion` carries the wire-format
+     * version (`Literal["1"]` today). The FE asserts that against the
+     * version of `@synodic/search-schema` (or, in this worktree, the
+     * `SCHEMA_VERSION` constant in `frontend/src/types/searchSchemaVersion.ts`)
+     * to fail loud on protocol mismatches.
+     *
+     * Cached aggressively by the browser (Cache-Control: max-age=300 +
+     * ETag) and once per app boot in React Query.
+     */
+    async searchSchema(): Promise<JsonSchemaDocument> {
+        return await this.fetch<JsonSchemaDocument>('/search/schema')
+    }
+
+    /**
+     * Compile a SearchQuery without executing it.
+     *
+     * Returns the Cypher + params that `searchAdvanced` would run,
+     * plus diagnostic notes. Powers the dev panel's "Show Cypher"
+     * button and is the first stop when a query silently returns 0
+     * results.
+     */
+    async searchExplain(query: SearchQuery): Promise<SearchExplainResult> {
+        return await this.fetch<SearchExplainResult>('/search/explain', {
+            method: 'POST',
+            body: JSON.stringify(query),
+        })
+    }
+
+    /**
+     * Discover what native node properties exist in the active graph.
+     *
+     * Per-label sample (cap = sample_per_label) of distinct native
+     * property keys, plus a `blobOnlyLabels` list flagging labels
+     * whose nodes are still on pre-W1 blob storage. Answers "what
+     * can I actually query?" — the most common cause of property
+     * predicates returning 0 results.
+     */
+    async discoverSearchableProperties(
+        samplePerLabel = 200,
+    ): Promise<SearchDiscoverResult> {
+        return await this.fetch<SearchDiscoverResult>(
+            '/search/discover',
+            { extraParams: { samplePerLabel: String(samplePerLabel) } },
+        )
     }
 
     // ==========================================
