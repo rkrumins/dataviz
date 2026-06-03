@@ -249,6 +249,7 @@ class ProviderORM(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
     extra_config = Column(Text, nullable=True)        # JSON blob
+    falkor_max_resident = Column(Integer, nullable=True)  # per-provider FalkorDB cache-eviction budget (max resident graphs); NULL ⇒ unset
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 

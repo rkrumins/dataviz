@@ -166,6 +166,7 @@ class ProviderCreateRequest(BaseModel):
     credentials: Optional[ConnectionCredentials] = None
     tls_enabled: bool = Field(False, alias="tlsEnabled")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
 
     class Config:
         populate_by_name = True
@@ -217,6 +218,7 @@ class ProviderUpdateRequest(BaseModel):
     tls_enabled: Optional[bool] = Field(None, alias="tlsEnabled")
     is_active: Optional[bool] = Field(None, alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
 
     class Config:
         populate_by_name = True
@@ -231,6 +233,7 @@ class ProviderResponse(BaseModel):
     tls_enabled: bool = Field(alias="tlsEnabled")
     is_active: bool = Field(alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
     permitted_workspaces: List[str] = Field(default_factory=lambda: ["*"], alias="permittedWorkspaces")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")

@@ -15,8 +15,9 @@ projecting the same graph concurrently. Mirrors the aggregation worker runtime.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from typing import Callable, Optional, Set, TYPE_CHECKING
+from typing import Awaitable, Callable, Optional, Set, Union, TYPE_CHECKING
 
 from . import config
 from .messaging import (
@@ -43,7 +44,7 @@ class ProjectionWorker:
         consumer_name: str = "proj-1",
         versioning: Optional["GraphVersioningService"] = None,
         sweep_secs: Optional[int] = None,
-        evict_budget: Optional[Callable[[str], int]] = None,
+        evict_budget: Optional[Callable[[str], Union[int, Awaitable[int]]]] = None,
         evict_secs: Optional[int] = None,
     ):
         self._proj = projector
@@ -91,7 +92,8 @@ class ProjectionWorker:
             return []
         evicted = []
         for provider in await self._cache.resident_providers():
-            budget = self._evict_budget(provider)
+            raw = self._evict_budget(provider)
+            budget = await raw if inspect.isawaitable(raw) else raw
             if budget <= 0:
                 continue                          # 0 ⇒ unlimited for this provider
             resident = await self._cache.resident_count(provider)

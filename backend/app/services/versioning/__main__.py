@@ -19,6 +19,7 @@ from .messaging import close_broker_redis
 from .projection import FalkorProjector, make_falkor_graph_factory
 from .service import GraphVersioningService
 from .worker import ProjectionWorker
+from backend.app.providers.eviction_budget import make_registry_budget_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,10 @@ async def _amain() -> None:
     worker = ProjectionWorker(
         projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
         versioning=GraphVersioningService(),
-        evict_budget=(config.falkor_budget_for if config.falkor_eviction_configured() else None),
+        # Per-provider eviction budgets come from the provider registry (env
+        # GRAPHVER_FALKOR_* as fallback); the loop no-ops until a provider's
+        # falkorMaxResident is set.
+        evict_budget=make_registry_budget_resolver(),
     )
 
     loop = asyncio.get_running_loop()
