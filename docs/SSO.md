@@ -4,6 +4,16 @@ Single source of truth for the SSO/IdP integration shipped in Phases
 0–4. Read this end-to-end before reviewing the branch; share the
 relevant sub-sections with operators standing up a new IdP.
 
+> **For developers integrating on top of SSO** — read alongside
+> [`SSO_INTEGRATION.md`](SSO_INTEGRATION.md). That guide covers
+> developer setup (Day 1), architecture + component diagrams, 15
+> user-journey sequence diagrams, backend + frontend integration
+> cookbooks, testing strategy, operational runbooks, the threat
+> model, and the reference tables (cookies / endpoints / outbox
+> events / config / schema). This doc focuses on *what exists* +
+> *how to operate it*; the integration guide focuses on *how to
+> read, extend, test, and debug it*.
+
 Branch under review: `claude/audit-rbac-enforcement-PikQK`
 Phases landed: **Phase 0** (RBAC hardening + fail-fast secrets) →
 **Phase 1** (OIDC) → **Phase 2** (SAML, custom dev IdP, 24h re-auth,
