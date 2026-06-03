@@ -14,15 +14,15 @@
  * URNs into the match store. Disabled/deleted rules are pruned so their
  * chips disappear immediately.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useCanvasStore } from '@/store/canvas'
-import { useDisplayRules } from '@/store/referenceModelStore'
+import { useDisplayRules, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useDisplayRuleMatchStore } from '@/store/displayRuleMatchStore'
 import type { Predicate } from '@/types/search'
 
-import { evaluateDisplayRule } from '@/services/displayRuleEval'
+import { evaluateDisplayRule, resolveScopeRootUrns } from '@/services/displayRuleEval'
 
 
 /** Debounce window before (re-)evaluating rules after a dependency
@@ -34,10 +34,22 @@ const DEBOUNCE_MS = 350
 export function useDisplayRuleEngine(viewId: string | null | undefined): void {
     const provider = useGraphProvider()
     const rules = useDisplayRules()
-    // Subscribe to node-count changes as a cheap proxy for "canvas data
-    // changed" — re-evaluating on every node identity churn would be
-    // wasteful; the count moving covers lazy-load + add/delete.
+    const layers = useReferenceModelStore((s) => s.layers)
+    // Node count is only a cheap trigger to RE-DERIVE the scope roots; the
+    // heavy rule searches below key on the resolved-roots signature, not on
+    // node count, so they don't re-fire on every expand/collapse or
+    // streaming-load tick (the view-scoped search already covers descendants).
     const nodeCount = useCanvasStore((s) => s.nodes.length)
+
+    // Signature of the resolved view-scope roots. Recomputed cheaply
+    // (O(nodes)) when the canvas/layers change, but its VALUE only changes
+    // when the roots actually change (initial roots load / layer-assignment
+    // edit) — which is exactly when rules need re-evaluating.
+    const scopeSignature = useMemo(
+        () => resolveScopeRootUrns().slice().sort().join(''),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [viewId, nodeCount, layers],
+    )
 
     const setRuleMatches = useDisplayRuleMatchStore((s) => s.setRuleMatches)
     const setRuleMeta = useDisplayRuleMatchStore((s) => s.setRuleMeta)
@@ -70,6 +82,11 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
                     viewId,
                     rule.predicate as Predicate,
                     controller.signal,
+                    // Progressive paint: apply each page as it arrives so
+                    // chips for big rules show up before pagination finishes.
+                    (urns) => {
+                        if (!controller.signal.aborted) setRuleMatches(rule.id, urns)
+                    },
                 )
                     .then((urns) => {
                         if (controller.signal.aborted) return
@@ -88,7 +105,9 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
             controller.abort()
             clearTimeout(timer)
         }
-    }, [viewId, rules, nodeCount, provider, setRuleMatches, clear])
+        // Heavy searches re-run only when the rule set or the resolved scope
+        // roots change — NOT on every node-count change (see scopeSignature).
+    }, [viewId, rules, scopeSignature, provider, setRuleMatches, clear])
 
     // Wipe the match store on unmount so a remount (view switch) starts
     // from a clean slate.

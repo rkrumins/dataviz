@@ -69,22 +69,15 @@ function collectMatchUrns(result: SearchResultPage): string[] {
 
 
 /**
- * Build a view-scoped SearchQuery for an arbitrary predicate + options.
- * Reads live canvas + schema + layer state via ``getState()`` (no hooks)
- * so it can run from anywhere — including outside React. Shared by the
- * display-rule evaluator and the property-insights service so both scope
- * identically.
+ * Resolve the view-scope root URNs (capped) the same way for both the
+ * display-rule evaluator and the engine's recompute key. Prefers explicit
+ * layer-assignment URNs (closed-scope override, same precedence as
+ * ``stampScope``); falls back to the canvas's computed view roots. Reads
+ * live store state via ``getState()`` so it can run outside React.
  */
-export function buildViewScopedQuery(
-    viewId: string,
-    predicate: Predicate,
-    options: SearchQuery['options'],
-): SearchQuery {
+export function resolveScopeRootUrns(): string[] {
     const canvas = useCanvasStore.getState()
     const schema = useSchemaStore.getState().schema
-
-    // Prefer explicit layer assignment URNs (closed-scope override —
-    // same precedence as stampScope); fall back to computed view roots.
     const layers = useReferenceModelStore.getState().layers
     const explicitAssignmentUrns: string[] = []
     for (const layer of layers) {
@@ -100,7 +93,23 @@ export function buildViewScopedQuery(
             schema?.containmentEdgeTypes ?? [],
             schema?.rootEntityTypes ?? [],
         )
-    const rootUrns = allRootUrns.slice(0, SAFE_ROOT_URN_CAP)
+    return allRootUrns.slice(0, SAFE_ROOT_URN_CAP)
+}
+
+
+/**
+ * Build a view-scoped SearchQuery for an arbitrary predicate + options.
+ * Reads live canvas + schema + layer state via ``getState()`` (no hooks)
+ * so it can run from anywhere — including outside React. Shared by the
+ * display-rule evaluator and the property-insights service so both scope
+ * identically.
+ */
+export function buildViewScopedQuery(
+    viewId: string,
+    predicate: Predicate,
+    options: SearchQuery['options'],
+): SearchQuery {
+    const rootUrns = resolveScopeRootUrns()
 
     const scope: SearchScope = {
         viewId,
@@ -142,12 +151,17 @@ function buildRuleQuery(viewId: string, predicate: Predicate): SearchQuery {
  * matching more than one page would otherwise tag only the first page.
  * We loop until the cursor is exhausted (or the safety guard fires),
  * deduping URNs, so every matched node gets its chip — not just the first.
+ *
+ * ``onPage`` (optional) is invoked after each page with the CUMULATIVE set
+ * so far — lets the caller paint chips progressively (the first 5000 appear
+ * immediately, the rest fill in) instead of waiting for the whole set.
  */
 export async function evaluateDisplayRule(
     provider: GraphDataProvider,
     viewId: string,
     predicate: Predicate,
     signal?: AbortSignal,
+    onPage?: (cumulativeUrns: string[]) => void,
 ): Promise<string[]> {
     if (!(provider instanceof RemoteGraphProvider)) return []
     if (!viewId) return []
@@ -165,6 +179,9 @@ export async function evaluateDisplayRule(
         if (signal?.aborted) return []
         for (const urn of collectMatchUrns(result)) seen.add(urn)
         cursor = result.cursor ?? undefined
+        // Progressive paint: hand the caller the cumulative set after each
+        // page so chips appear before the full pagination completes.
+        onPage?.([...seen])
         if (!cursor) break
     }
 

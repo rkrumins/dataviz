@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { evaluateDisplayRule } from '../displayRuleEval'
+import { evaluateDisplayRule, resolveScopeRootUrns } from '../displayRuleEval'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
@@ -160,5 +160,39 @@ describe('evaluateDisplayRule', () => {
         const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE, ac.signal)
         expect(urns).toEqual([])
         expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('invokes onPage with the cumulative set after each page (progressive)', async () => {
+        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
+        vi.spyOn(provider, 'searchAdvanced').mockImplementation(async (q: SearchQuery) => {
+            if (!q.options?.cursor) {
+                return makeResult({ hits: [{ node: { urn: 'urn:a' } } as never], cursor: 'c1' })
+            }
+            return makeResult({ hits: [{ node: { urn: 'urn:b' } } as never], cursor: null })
+        })
+        const pages: string[][] = []
+        const all = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE, undefined, (urns) => pages.push(urns))
+        expect([...all].sort()).toEqual(['urn:a', 'urn:b'])
+        expect(pages).toHaveLength(2)
+        expect(pages[0]).toEqual(['urn:a'])                 // after page 1
+        expect([...pages[1]].sort()).toEqual(['urn:a', 'urn:b']) // cumulative after page 2
+    })
+})
+
+
+describe('resolveScopeRootUrns', () => {
+    it('returns explicit layer-assignment URNs (capped at 256)', () => {
+        const assignments = Array.from({ length: 300 }, (_, i) => ({ entityId: `urn:x:${i}` }))
+        useReferenceModelStore.setState({ layers: [{ entityAssignments: assignments }] as never })
+        const roots = resolveScopeRootUrns()
+        expect(roots).toHaveLength(256)
+        expect(roots[0]).toBe('urn:x:0')
+        useReferenceModelStore.setState({ layers: [] })
+    })
+
+    it('returns [] when there are no layer assignments and no canvas roots', () => {
+        useReferenceModelStore.setState({ layers: [] })
+        useCanvasStore.setState({ nodes: [], edges: [] })
+        expect(resolveScopeRootUrns()).toEqual([])
     })
 })
