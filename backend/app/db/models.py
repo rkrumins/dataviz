@@ -1154,7 +1154,12 @@ class UserRoleORM(Base):
 
     id = Column(Text, primary_key=True, default=lambda: f"urole_{uuid.uuid4().hex[:12]}")
     user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    role_name = Column(Text, nullable=False, default="user")  # admin | user | viewer
+    # Phase 5: legacy ``user_roles`` table still consulted by
+    # ``require_admin``; the constraint enumerates the post-uplift
+    # taxonomy. Production Postgres dropped the original Phase-1 CHECK
+    # in 20260430_1500_roles_lifecycle; SQLite tests use create_all so
+    # we keep the constraint in the ORM and update the allowed set.
+    role_name = Column(Text, nullable=False, default="workspace_member")
     created_at = Column(Text, nullable=False, default=_now)
 
     user = relationship("UserORM", back_populates="roles")
@@ -1163,7 +1168,10 @@ class UserRoleORM(Base):
         UniqueConstraint("user_id", "role_name", name="uq_user_role"),
         Index("idx_user_roles_user", "user_id"),
         CheckConstraint(
-            "role_name IN ('admin', 'user', 'viewer')",
+            "role_name IN ("
+            "'super_admin', 'org_admin', "
+            "'workspace_admin', 'workspace_member', 'workspace_viewer'"
+            ")",
             name="ck_user_roles_role_name",
         ),
     )

@@ -52,7 +52,11 @@ class ChangeRoleRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        allowed = {"admin", "user", "viewer"}
+        # Phase 5 taxonomy: see docs/RBAC.md.
+        allowed = {
+            "super_admin", "org_admin",
+            "workspace_admin", "workspace_member", "workspace_viewer",
+        }
         if v not in allowed:
             raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
         return v
@@ -147,7 +151,11 @@ class CreateInviteRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        allowed = {"admin", "user", "viewer"}
+        # Phase 5 taxonomy: see docs/RBAC.md.
+        allowed = {
+            "super_admin", "org_admin",
+            "workspace_admin", "workspace_member", "workspace_viewer",
+        }
         if v not in allowed:
             raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
         return v

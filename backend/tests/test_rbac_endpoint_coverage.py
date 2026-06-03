@@ -222,9 +222,10 @@ async def test_ws_mutation_forbidden_for_read_only_member(
 @pytest.mark.asyncio
 async def test_ws_mutation_allowed_for_manager(test_client: AsyncClient):
     """``workspace:datasource:*`` (the wildcard production collapses the
-    user/admin role into) satisfies both the read baseline and the
-    manage gate, so the auth layer lets the request through (the row
-    doesn't exist → handler 404, which is fine — not 401/403)."""
+    workspace_member / workspace_admin role into) satisfies both the
+    read baseline and the manage gate, so the auth layer lets the
+    request through (the row doesn't exist → handler 404, which is
+    fine — not 401/403)."""
     claims = PermissionClaims(
         sid="sess_mgr",
         ws_perms={"ws_a": ("workspace:datasource:*",)},

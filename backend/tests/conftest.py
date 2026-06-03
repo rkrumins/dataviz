@@ -85,7 +85,11 @@ _FAKE_USER = User(
     email="test@example.com",
     first_name="Test",
     last_name="User",
-    role="admin",
+    # Phase 5 rename: ``admin`` -> ``super_admin``. The legacy User.role
+    # field is still consulted by require_admin's legacy path; setting
+    # ``super_admin`` here keeps that allow-path live for tests that
+    # don't set custom permission claims.
+    role="super_admin",
     status="active",
     auth_provider="local",
     created_at="2024-01-01T00:00:00Z",
@@ -147,24 +151,90 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
         expire_on_commit=False,
     )
 
-    # RBAC Phase 3: seed the canonical ``roles`` table with the three
-    # built-in system roles so binding endpoints (which validate
-    # against the table) can find them. Production seeds via the
-    # 20260430_1500_roles_lifecycle migration; tests use create_all
-    # so we mirror the seed here.
+    # RBAC Phase 5: seed the canonical ``roles`` / ``permissions`` /
+    # ``role_permissions`` tables with the post-uplift catalogue so
+    # the resolver (which queries permission_repo.get_permission_categories
+    # to apply its category × scope filter) and binding endpoints have
+    # something to validate against. Production seeds via the migration
+    # chain; tests use create_all so we mirror the final shape here.
     async with session_factory() as _seed_session:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
+        # Roles — five-tier taxonomy. All system roles are stored at
+        # scope_type='global' (the CHECK constraint requires
+        # workspace-scoped roles to carry a concrete scope_id, which
+        # template roles like workspace_admin do not have). The
+        # resolver's category × scope filter ensures binding a global
+        # role at workspace scope still only emits workspace:* perms.
         for name, desc in (
-            ("admin", "Full system access across every workspace and resource."),
-            ("user", "Standard workspace member — manage views and data sources."),
-            ("viewer", "Read-only access to views and data sources."),
+            ("super_admin",
+             "Platform owner. Carries system:admin; implies every permission."),
+            ("org_admin",
+             "Cross-workspace operator — manage every workspace + create new ones."),
+            ("workspace_admin",
+             "Workspace administrator. Auto-implies every workspace:* permission."),
+            ("workspace_member",
+             "Standard workspace member — manage views and data sources."),
+            ("workspace_viewer",
+             "Read-only access to the bound workspace's views + data sources."),
         ):
             _seed_session.add(_models.RoleORM(
                 name=name, description=desc,
                 scope_type="global", scope_id=None,
                 is_system=True,
                 created_at=now, updated_at=now, created_by=None,
+            ))
+        # Permissions — catalogue with category column populated.
+        for pid, pdesc, pcat in (
+            ("system:admin", "Platform owner short-circuit.", "system"),
+            ("system:org-admin",
+             "Cross-workspace operator; implies every workspace permission.",
+             "system"),
+            ("system:users:manage", "Manage user accounts.", "system"),
+            ("system:groups:manage", "Manage groups and memberships.", "system"),
+            ("system:workspaces:create", "Create new workspaces.", "system"),
+            ("workspace:admin", "Workspace administrator.", "workspace"),
+            ("workspace:datasource:manage", "Manage data sources.", "workspace"),
+            ("workspace:datasource:read", "Read data sources.", "workspace"),
+            ("workspace:view:create", "Create views.", "workspace"),
+            ("workspace:view:edit", "Edit views.", "workspace"),
+            ("workspace:view:delete", "Delete views.", "workspace"),
+            ("workspace:view:read", "Read views.", "workspace"),
+        ):
+            _seed_session.add(_models.PermissionORM(
+                id=pid, description=pdesc, category=pcat,
+            ))
+        await _seed_session.flush()
+        # Role → permission bundles.
+        _role_perms = (
+            [("super_admin", p) for p in (
+                "system:admin", "system:org-admin",
+                "system:users:manage", "system:groups:manage",
+                "system:workspaces:create", "workspace:admin",
+                "workspace:datasource:manage", "workspace:datasource:read",
+                "workspace:view:create", "workspace:view:edit",
+                "workspace:view:delete", "workspace:view:read",
+            )]
+            + [("org_admin", p) for p in (
+                "system:org-admin", "system:groups:manage",
+                "system:workspaces:create", "workspace:admin",
+                "workspace:datasource:manage", "workspace:datasource:read",
+                "workspace:view:create", "workspace:view:edit",
+                "workspace:view:delete", "workspace:view:read",
+            )]
+            + [("workspace_admin", "workspace:admin")]
+            + [("workspace_member", p) for p in (
+                "workspace:datasource:manage", "workspace:datasource:read",
+                "workspace:view:create", "workspace:view:edit",
+                "workspace:view:delete", "workspace:view:read",
+            )]
+            + [("workspace_viewer", p) for p in (
+                "workspace:datasource:read", "workspace:view:read",
+            )]
+        )
+        for role_name, perm_id in _role_perms:
+            _seed_session.add(_models.RolePermissionORM(
+                role_name=role_name, permission_id=perm_id,
             ))
         await _seed_session.commit()
 

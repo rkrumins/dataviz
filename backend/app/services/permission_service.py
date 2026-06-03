@@ -117,6 +117,26 @@ async def resolve(
 
     Then folds those into a (global, ws_id → permissions) map, with
     wildcard collapsing for compactness.
+
+    Phase 5 invariants:
+
+      * **Category × scope filter** — only ``system``-category perms
+        land in ``global_perms``; only ``workspace``-category perms
+        land in ``ws_perms``. A global ``super_admin`` binding (whose
+        role bundles every permission across categories) therefore
+        does NOT leak ``workspace:*`` perms into ``global_perms``,
+        and a workspace ``admin`` binding does NOT leak ``system:*``
+        perms into ``ws_perms``. Without this filter the JWT bloats
+        and a malformed cross-scope binding could silently grant the
+        wrong tier.
+      * **``workspace:admin`` auto-implication** — once we've folded
+        bindings, any workspace bucket that contains
+        ``workspace:admin`` is unioned with every other known
+        ``workspace:*`` leaf in the catalogue. Matches operator
+        intuition: "I'm admin in this workspace, so I can read its
+        data sources / edit its views / etc." Lets custom roles
+        bundle just ``workspace:admin`` rather than enumerating every
+        workspace permission.
     """
     sid = sid or new_session_id()
 
@@ -132,6 +152,9 @@ async def resolve(
     role_perms = await permission_repo.get_role_permissions_for_roles(
         session, role_names
     )
+    # Phase 5: pull the {permission_id: category} map once so the
+    # category × scope filter has no per-permission DB cost.
+    perm_categories = await permission_repo.get_permission_categories(session)
 
     # Aggregate into per-scope permission sets.
     global_set: set[str] = set()
@@ -139,21 +162,24 @@ async def resolve(
 
     for b in bindings:
         perms_for_role = role_perms.get(b.role_name, [])
-        if b.scope_type == "global":
-            global_set.update(perms_for_role)
-        else:
-            ws_id = b.scope_id or ""
-            if not ws_id:
-                continue
-            ws_sets.setdefault(ws_id, set()).update(perms_for_role)
+        for perm in perms_for_role:
+            cat = perm_categories.get(perm, "system")
+            if b.scope_type == "global" and cat == "system":
+                global_set.add(perm)
+            elif b.scope_type == "workspace" and cat == "workspace":
+                ws_id = b.scope_id or ""
+                if ws_id:
+                    ws_sets.setdefault(ws_id, set()).add(perm)
+            # Other category × scope combinations are silently dropped.
+            # See Phase 5 invariants in the docstring above.
 
-    # Admin shortcut: a global admin binding implies every workspace
-    # permission in every workspace, but the workspace bindings already
-    # carry that for the membership-backfilled rows. We DO NOT
-    # synthesize implicit ws scopes here — the JWT must list workspaces
-    # explicitly so the FE knows which workspaces to display. The
-    # admin's actual access in a given workspace falls back to the
-    # global "system:admin" implicit-allow check inside ``requires()``.
+    # Phase 5: ``workspace:admin`` auto-implies every other workspace
+    # permission in the same bucket. Computed against the seed leaves
+    # so a future operator can add a new workspace:* permission to
+    # the catalogue and have it pick up automatically.
+    for ws_id, perms in ws_sets.items():
+        if "workspace:admin" in perms:
+            perms.update(_WORKSPACE_CATEGORY_LEAVES)
 
     return PermissionClaims(
         sid=sid,
@@ -201,6 +227,23 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
     }),
 }
 
+# Phase 5 — every ``workspace:*`` leaf known to the seed catalogue.
+# Used by ``resolve()`` to auto-imply the full workspace permission
+# set whenever a binding grants ``workspace:admin`` in some workspace.
+# ``workspace:admin`` itself is the "I can manage settings, members,
+# and deletion" perm; bundling it auto-implies "and everything else
+# you can do in this workspace as a side effect" — matches operator
+# intuition (Phase 5 user decision).
+_WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
+    "workspace:admin",
+    "workspace:datasource:manage",
+    "workspace:datasource:read",
+    "workspace:view:create",
+    "workspace:view:edit",
+    "workspace:view:delete",
+    "workspace:view:read",
+})
+
 
 def _known_leaves_for_prefix(prefix: str) -> frozenset[str]:
     return _SEED_LEAVES.get(prefix, frozenset())
@@ -221,11 +264,29 @@ def has_permission(
     Wildcard expansion: a claim of ``workspace:view:*`` matches any
     ``workspace:view:<leaf>`` lookup.
 
-    Global-admin shortcut: a global ``system:admin`` claim implies
-    every other permission, in every workspace, full stop.
+    Two short-circuits at the top:
+
+      * ``system:admin`` (carried by the ``super_admin`` role) implies
+        every permission, every scope. The platform owner.
+      * ``system:org-admin`` (Phase 5; carried by ``super_admin`` and
+        ``org_admin``) implies every **workspace-scoped** permission
+        in any workspace. The cross-workspace operator. Does NOT
+        imply system-category permissions (users:manage etc.) — those
+        stay tied to ``super_admin``.
     """
-    # System admin shortcut: implies all.
+    # 1. System admin shortcut: implies all permissions, every scope.
     if "system:admin" in claims.global_perms:
+        return True
+
+    # 2. Phase 5: org-admin shortcut for workspace-scoped checks. An
+    #    org_admin has every workspace power in every workspace
+    #    without per-ws bindings; ``MyAccessPage`` surfaces this as
+    #    "Organisation admin" and the FE topbar shows the same tier
+    #    in every workspace they visit.
+    if (
+        workspace_id is not None
+        and "system:org-admin" in claims.global_perms
+    ):
         return True
 
     if workspace_id is None:

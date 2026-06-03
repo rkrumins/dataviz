@@ -94,7 +94,7 @@ async def list_workspaces(
 @router.post("", response_model=WorkspaceResponse, status_code=201)
 async def create_workspace(
     req: WorkspaceCreateRequest = Body(...),
-    _user: User = Depends(requires("workspaces:create")),
+    _user: User = Depends(requires("system:workspaces:create")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new workspace with one or more data sources."""

@@ -1,7 +1,7 @@
 """Admin endpoints for managing groups (RBAC Phase 2).
 
 Mounted at ``/api/v1/admin/groups`` and gated by the new
-``requires("groups:manage")`` dependency. The classic ``require_admin``
+``requires("system:groups:manage")`` dependency. The classic ``require_admin``
 gate would also work (admin role bundles ``groups:manage``), but we
 use the granular permission so a future custom-roles release can
 delegate group management without granting full system admin.
@@ -60,7 +60,7 @@ async def _to_response(session: AsyncSession, group_orm) -> GroupResponse:
 async def list_groups(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    _admin: User = Depends(requires("groups:manage")),
+    _admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     groups = await group_repo.list_groups(session, limit=limit, offset=offset)
@@ -75,7 +75,7 @@ async def list_groups(
 )
 async def create_group(
     body: GroupCreateRequest,
-    admin: User = Depends(requires("groups:manage")),
+    admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     existing = await group_repo.get_group_by_name(session, body.name)
@@ -104,7 +104,7 @@ async def create_group(
 async def update_group(
     group_id: str,
     body: GroupUpdateRequest,
-    admin: User = Depends(requires("groups:manage")),
+    admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     group = await group_repo.update_group(
@@ -123,7 +123,7 @@ async def update_group(
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_group(
     group_id: str,
-    admin: User = Depends(requires("groups:manage")),
+    admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     deleted = await group_repo.soft_delete_group(session, group_id)
@@ -163,7 +163,7 @@ async def delete_group(
 )
 async def list_members(
     group_id: str,
-    _admin: User = Depends(requires("groups:manage")),
+    _admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     if await group_repo.get_group_by_id(session, group_id) is None:
@@ -189,7 +189,7 @@ async def list_members(
 async def add_member(
     group_id: str,
     body: GroupMemberAddRequest,
-    admin: User = Depends(requires("groups:manage")),
+    admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     if await group_repo.get_group_by_id(session, group_id) is None:
@@ -227,7 +227,7 @@ async def add_member(
 async def remove_member(
     group_id: str,
     user_id: str,
-    admin: User = Depends(requires("groups:manage")),
+    admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
     removed = await group_repo.remove_member(session, group_id, user_id)

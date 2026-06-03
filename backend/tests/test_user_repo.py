@@ -170,12 +170,12 @@ async def test_update_user_status_returns_none_for_missing(db_session):
 async def test_assign_role_and_get_roles(db_session):
     user = await _create_test_user(db_session, email="roles@test.com")
 
-    role = await user_repo.assign_role(db_session, user.id, "admin")
-    assert role.role_name == "admin"
+    role = await user_repo.assign_role(db_session, user.id, "super_admin")
+    assert role.role_name == "super_admin"
     assert role.user_id == user.id
 
     roles = await user_repo.get_user_roles(db_session, user.id)
-    assert "admin" in roles
+    assert "super_admin" in roles
 
 
 async def test_get_user_roles_empty(db_session):
@@ -187,11 +187,11 @@ async def test_get_user_roles_empty(db_session):
 async def test_assign_multiple_roles(db_session):
     user = await _create_test_user(db_session, email="multi@test.com")
 
-    await user_repo.assign_role(db_session, user.id, "admin")
-    await user_repo.assign_role(db_session, user.id, "user")
+    await user_repo.assign_role(db_session, user.id, "super_admin")
+    await user_repo.assign_role(db_session, user.id, "workspace_member")
 
     roles = await user_repo.get_user_roles(db_session, user.id)
-    assert set(roles) == {"admin", "user"}
+    assert set(roles) == {"super_admin", "workspace_member"}
 
 
 # ── password management ──────────────────────────────────────────────

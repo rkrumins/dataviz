@@ -75,10 +75,13 @@ const ROLE_CONFIG: Record<string, { icon: typeof Shield; color: string; iconBg: 
     },
 }
 
+// Phase 5 taxonomy — see docs/RBAC.md for the full role descriptions.
 const AVAILABLE_ROLES = [
-    { value: 'admin', label: 'Administrator', description: 'Full system access', icon: Shield },
-    { value: 'user', label: 'User', description: 'Standard workspace access', icon: UserCog },
-    { value: 'viewer', label: 'Viewer', description: 'Read-only access', icon: Eye },
+    { value: 'super_admin', label: 'Super Admin', description: 'Platform owner; every permission, every scope', icon: Shield },
+    { value: 'org_admin', label: 'Org Admin', description: 'Manage every workspace; no user / SSO admin', icon: Shield },
+    { value: 'workspace_admin', label: 'Workspace Admin', description: 'Full powers in their bound workspaces', icon: UserCog },
+    { value: 'workspace_member', label: 'Member', description: 'Edit views and data sources in their workspaces', icon: UserCog },
+    { value: 'workspace_viewer', label: 'Viewer', description: 'Read-only access in their workspaces', icon: Eye },
 ]
 
 const KPI_CARDS = [
@@ -171,7 +174,7 @@ export function AdminUsers() {
     const [resetMode, setResetMode] = useState<'direct' | 'token'>('token')
 
     // Invite state
-    const [inviteRole, setInviteRole] = useState('user')
+    const [inviteRole, setInviteRole] = useState('workspace_member')
     const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
@@ -206,7 +209,13 @@ export function AdminUsers() {
         total: users.length,
         pending: users.filter(u => u.status === 'pending').length,
         active: users.filter(u => u.status === 'active').length,
-        admins: users.filter(u => u.role === 'admin').length,
+        // Phase 5: count global-tier admins (super_admin + org_admin).
+        // Workspace-scoped admins (workspace_admin bindings) aren't in
+        // this number — they're not "platform" admins, just workspace
+        // admins. Surface that distinction in the tooltip on the KPI.
+        admins: users.filter(
+            u => u.role === 'super_admin' || u.role === 'org_admin',
+        ).length,
     }), [users])
 
     const resetRequestCount = useMemo(() => users.filter(u => u.resetRequested).length, [users])
@@ -329,7 +338,7 @@ export function AdminUsers() {
         setResetMode('token')
         setInviteResult(null)
         setInviteCopied(false)
-        setInviteRole('user')
+        setInviteRole('workspace_member')
     }
 
     const handleCreateInvite = async () => {

@@ -116,9 +116,10 @@ async def approve_user(
     if user.status != "pending":
         raise HTTPException(status_code=409, detail=f"User is already '{user.status}', not pending")
 
-    # Activate user + assign default role
+    # Activate user + assign default role (Phase 5: workspace_member is
+    # the new default "everyone is a workspace user" sentinel role).
     await user_repo.update_user_status(session, user_id, "active")
-    await user_repo.assign_role(session, user_id, "user")
+    await user_repo.assign_role(session, user_id, "workspace_member")
 
     # Resolve approval record
     await user_repo.resolve_approval(
@@ -242,10 +243,10 @@ async def reactivate_user(
 
     await user_repo.update_user_status(session, user_id, "active")
 
-    # Ensure they have at least the 'user' role
+    # Ensure they have at least the workspace_member role.
     roles = await user_repo.get_user_roles(session, user_id)
     if not roles:
-        await user_repo.assign_role(session, user_id, "user")
+        await user_repo.assign_role(session, user_id, "workspace_member")
 
     await user_repo.create_outbox_event(
         session,

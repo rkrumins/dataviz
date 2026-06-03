@@ -797,14 +797,17 @@ def _primary_role(roles: list[str]) -> str:
     """Pick the highest-privilege role for downstream gating.
 
     UserORM allows multiple roles per user; the access-token claim and
-    the User DTO carry a single ``role`` for simplicity. We prefer
-    ``admin`` if present, then fall back to the first role, then
-    ``user``.
+    the User DTO carry a single ``role`` for simplicity. Phase 5
+    rename: ``admin`` is now ``super_admin``; the fallback "no role"
+    sentinel is ``workspace_member`` (the new analogue of the old
+    Phase-1 ``user``).
     """
     if not roles:
-        return "user"
-    if "admin" in roles:
-        return "admin"
+        return "workspace_member"
+    if "super_admin" in roles:
+        return "super_admin"
+    if "org_admin" in roles:
+        return "org_admin"
     return roles[0]
 
 

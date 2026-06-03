@@ -1353,9 +1353,13 @@ function ByWorkspaceTab({
         if (!members) return { total: 0, admin: 0, user: 0, viewer: 0, groups: 0, users: 0 }
         return {
             total: members.length,
-            admin: members.filter(m => m.role === 'admin').length,
-            user: members.filter(m => m.role === 'user').length,
-            viewer: members.filter(m => m.role === 'viewer').length,
+            // Phase 5: relabel internally to the new role names; the
+            // UI keys these as 'admin'/'user'/'viewer' for short
+            // KPI labels but the underlying data uses the canonical
+            // workspace_* names.
+            admin: members.filter(m => m.role === 'workspace_admin').length,
+            user: members.filter(m => m.role === 'workspace_member').length,
+            viewer: members.filter(m => m.role === 'workspace_viewer').length,
             groups: members.filter(m => m.subject.type === 'group').length,
             users: members.filter(m => m.subject.type === 'user').length,
         }

@@ -123,7 +123,7 @@ const KPI_CARDS = [
         iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
     },
     {
-        key: 'admin',
+        key: 'workspace_admin',
         label: 'Admins',
         icon: Shield,
         gradient: 'from-amber-500/20 to-amber-500/0',
@@ -131,15 +131,15 @@ const KPI_CARDS = [
         iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
     },
     {
-        key: 'user',
-        label: 'Users',
+        key: 'workspace_member',
+        label: 'Members',
         icon: UserCog,
         gradient: 'from-sky-500/20 to-sky-500/0',
         accent: 'text-sky-600 dark:text-sky-400',
         iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
     },
     {
-        key: 'viewer',
+        key: 'workspace_viewer',
         label: 'Viewers',
         icon: Eye,
         gradient: 'from-slate-500/20 to-slate-500/0',
@@ -270,9 +270,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
     const kpis = useMemo(() => ({
         total: members.length,
-        admin: members.filter(m => m.role === 'admin').length,
-        user: members.filter(m => m.role === 'user').length,
-        viewer: members.filter(m => m.role === 'viewer').length,
+        workspace_admin: members.filter(m => m.role === 'workspace_admin').length,
+        workspace_member: members.filter(m => m.role === 'workspace_member').length,
+        workspace_viewer: members.filter(m => m.role === 'workspace_viewer').length,
     }), [members])
 
     const processedMembers = useMemo(() => {
@@ -683,7 +683,7 @@ function AddMemberModal({
     const [availableRoles, setAvailableRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [search, setSearch] = useState('')
     const [selected, setSelected] = useState<{ id: string; label: string } | null>(null)
-    const [role, setRole] = useState<RoleName>('user')
+    const [role, setRole] = useState<RoleName>('workspace_member')
     const { showToast } = useToast()
 
     // Phase 3: pull the bindable roles for *this* workspace — global

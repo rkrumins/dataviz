@@ -138,7 +138,7 @@ async def test_change_role_not_found(test_client: AsyncClient):
     """Changing role of non-existent user returns 404."""
     resp = await test_client.put(
         "/api/v1/admin/users/usr_nonexistent/role",
-        json={"role": "admin"},
+        json={"role": "super_admin"},
     )
     assert resp.status_code == 404
 
@@ -157,7 +157,7 @@ async def test_change_role(test_client: AsyncClient, db_session):
 
     resp = await test_client.put(
         f"/api/v1/admin/users/{user.id}/role",
-        json={"role": "admin"},
+        json={"role": "super_admin"},
     )
     assert resp.status_code == 200
     assert "Role changed" in resp.json()["detail"]
@@ -172,7 +172,7 @@ async def test_change_own_role_forbidden(test_client: AsyncClient):
     """
     resp = await test_client.put(
         "/api/v1/admin/users/usr_test000000/role",
-        json={"role": "viewer"},
+        json={"role": "workspace_viewer"},
     )
     assert resp.status_code == 403
 

@@ -40,11 +40,41 @@ export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated
 const EMPTY_CLAIMS: PermissionClaims = { sid: '', global: [], ws: {} }
 
 /**
- * Check a single permission against the claim. Mirrors the server-side
- * ``has_permission`` exactly — wildcard expansion (``workspace:view:*``)
- * and global ``system:admin`` implicit-allow are honoured.
+ * Phase 5 role taxonomy — exported so consumers don't have to
+ * hand-roll the string literals. Bound contexts:
  *
- * @param permission e.g. ``"workspace:view:edit"`` or ``"workspaces:create"``
+ *   * ``super_admin``     — global, full platform access
+ *   * ``org_admin``       — global, every workspace power w/o user/SSO admin
+ *   * ``workspace_admin`` — workspace, auto-implies every workspace:*
+ *   * ``workspace_member``— workspace, manage views + data sources
+ *   * ``workspace_viewer``— workspace, read-only
+ */
+export type SystemRole =
+    | 'super_admin'
+    | 'org_admin'
+    | 'workspace_admin'
+    | 'workspace_member'
+    | 'workspace_viewer'
+
+export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
+    super_admin: 'Super Admin',
+    org_admin: 'Org Admin',
+    workspace_admin: 'Workspace Admin',
+    workspace_member: 'Member',
+    workspace_viewer: 'Viewer',
+}
+
+/**
+ * Check a single permission against the claim. Mirrors the server-side
+ * ``has_permission`` exactly:
+ *
+ *   * ``system:admin`` global short-circuit (super_admin)
+ *   * ``system:org-admin`` shortcut for any workspace-scoped check
+ *     (Phase 5; org_admin acts in every workspace without per-ws
+ *     bindings)
+ *   * Wildcard expansion (``workspace:view:*`` matches every leaf)
+ *
+ * @param permission e.g. ``"workspace:view:edit"`` or ``"system:workspaces:create"``
  * @param workspaceId required for workspace-scoped permissions; pass
  *   undefined for global ones.
  */
@@ -53,8 +83,15 @@ export function checkPermission(
     permission: string,
     workspaceId?: string | null,
 ): boolean {
-    // Global admin shortcut.
+    // 1. Super-admin shortcut: implies every permission, every scope.
     if (claims.global.includes('system:admin')) return true
+
+    // 2. Phase 5 org-admin shortcut: any workspace-scoped check passes
+    //    in any workspace. The FE topbar surfaces this as "Org Admin"
+    //    and MyAccessPage renders the explicit reason.
+    if (workspaceId && claims.global.includes('system:org-admin')) {
+        return true
+    }
 
     if (!workspaceId) {
         return claims.global.includes(permission)
@@ -72,6 +109,42 @@ export function checkPermission(
         }
     }
     return false
+}
+
+/**
+ * Compute the user's effective tier for display purposes. Mirrors the
+ * order the resolver applies on the backend:
+ *
+ *   1. super_admin   → ``system:admin`` in global_perms
+ *   2. org_admin     → ``system:org-admin`` in global_perms
+ *   3. workspace_admin   → ``workspace:admin`` in the named ws bucket
+ *   4. workspace_member  → any workspace:view:edit in the named ws bucket
+ *   5. workspace_viewer  → any workspace:view:read in the named ws bucket
+ *   6. null          → no role in this scope
+ *
+ * The TopBar uses this with the active workspace id to render a
+ * workspace-aware role badge (a user can be admin in finance and viewer
+ * in marketing — the badge changes when they navigate).
+ */
+export function effectiveRoleFor(
+    claims: PermissionClaims,
+    workspaceId?: string | null,
+): SystemRole | null {
+    if (claims.global.includes('system:admin')) return 'super_admin'
+    if (claims.global.includes('system:org-admin')) return 'org_admin'
+    if (!workspaceId) return null
+    const bucket = claims.ws[workspaceId]
+    if (!bucket) return null
+    if (bucket.includes('workspace:admin')) return 'workspace_admin'
+    // Use wildcard-aware checks so a 'workspace:view:*' / 'workspace:view:edit'
+    // claim correctly resolves to "member".
+    if (checkPermission(claims, 'workspace:view:edit', workspaceId)) {
+        return 'workspace_member'
+    }
+    if (checkPermission(claims, 'workspace:view:read', workspaceId)) {
+        return 'workspace_viewer'
+    }
+    return null
 }
 
 interface AuthState {

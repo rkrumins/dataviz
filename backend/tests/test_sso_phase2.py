@@ -228,7 +228,7 @@ class _StubUserRepo:
         return self._user if uid == "usr_1" else None
 
     async def get_user_roles(self, session, uid):
-        return ["user"]
+        return ["workspace_member"]
 
 
 class _StubUserIdentityRepo:
@@ -350,12 +350,12 @@ async def test_reconcile_creates_revokes_reactivates(db_session):
     )
     await idp_group_mapping_repo.create_role_binding_mapping(
         db_session, idp_group="Eng",
-        scope_type="workspace", scope_id="ws_1", role_name="user",
+        scope_type="workspace", scope_id="ws_1", role_name="workspace_member",
         provider_id=provider.id,
     )
     await idp_group_mapping_repo.create_role_binding_mapping(
         db_session, idp_group="Admins",
-        scope_type="workspace", scope_id="ws_2", role_name="user",
+        scope_type="workspace", scope_id="ws_2", role_name="workspace_member",
         provider_id=provider.id,
     )
 

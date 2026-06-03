@@ -48,9 +48,13 @@ logger = logging.getLogger(__name__)
 # if revocation cannot be verified) so a Redis incident doesn't
 # black-hole the read path.
 _FAIL_CLOSED_PERMISSIONS = frozenset({
+    # Phase 5: renamed to ``system:*`` prefix to match category;
+    # see ``docs/RBAC.md`` for the rename map.
     "system:admin",
-    "users:manage",
-    "groups:manage",
+    "system:org-admin",
+    "system:users:manage",
+    "system:groups:manage",
+    "system:workspaces:create",
     "workspace:admin",
 })
 
@@ -134,7 +138,8 @@ async def require_admin(
     change and is encouraged for new admin endpoints.
     """
     # Legacy path — still authoritative when the kill-switch is on.
-    legacy_allow = user.role == "admin"
+    # Phase 5: ``admin`` was renamed to ``super_admin`` in user_roles.
+    legacy_allow = user.role == "super_admin"
 
     if not rbac_flag("RBAC_ENFORCE_ADMIN"):
         if legacy_allow:
@@ -270,9 +275,26 @@ def requires(
                 )
 
         if not has_permission(claims, permission, workspace_id=workspace_id):
+            # Phase 5: structured 403 body so the FE can route by
+            # ``detail.error`` instead of regex-matching on the prose.
+            # The ``detail`` string is kept as-is so existing
+            # test-suite scrapers and the access-denied modal in
+            # AppLayout (which parses ``Missing permission: <perm>``)
+            # keep working unchanged. New consumers should read the
+            # structured fields.
+            scope_obj = (
+                {"type": "workspace", "id": workspace_id}
+                if workspace_id is not None
+                else {"type": "global", "id": None}
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Missing permission: {permission}",
+                detail={
+                    "error": "missing_permission",
+                    "permission": permission,
+                    "scope": scope_obj,
+                    "message": f"Missing permission: {permission}",
+                },
             )
         return user
 

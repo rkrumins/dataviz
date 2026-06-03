@@ -268,7 +268,7 @@ async def lifespan(_app: FastAPI):
                         last_name="Admin",
                         status="active",
                     )
-                    await user_repo.assign_role(session, user.id, "admin")
+                    await user_repo.assign_role(session, user.id, "super_admin")
                     await user_repo.create_approval(
                         session, user.id, status="approved", approved_by="system",
                     )

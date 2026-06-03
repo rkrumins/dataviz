@@ -168,12 +168,13 @@ async def test_workspace_member_crud(test_client: AsyncClient, db_session):
     # Create binding.
     r = await test_client.post(
         f"/api/v1/admin/workspaces/{ws_id}/members",
-        json={"subjectType": "user", "subjectId": user_id, "role": "user"},
+        json={"subjectType": "user", "subjectId": user_id,
+              "role": "workspace_member"},
     )
     assert r.status_code == 201, r.text
     body = r.json()
     binding_id = body["bindingId"]
-    assert body["role"] == "user"
+    assert body["role"] == "workspace_member"
     assert body["subject"]["type"] == "user"
     assert body["subject"]["displayName"] == "Bob Bobson"
 
@@ -185,7 +186,8 @@ async def test_workspace_member_crud(test_client: AsyncClient, db_session):
     # Idempotent: adding the same user × same role again is a 409.
     r = await test_client.post(
         f"/api/v1/admin/workspaces/{ws_id}/members",
-        json={"subjectType": "user", "subjectId": user_id, "role": "user"},
+        json={"subjectType": "user", "subjectId": user_id,
+              "role": "workspace_member"},
     )
     assert r.status_code == 409
 
@@ -279,7 +281,8 @@ async def test_role_bindings_audit_filters(test_client: AsyncClient, db_session)
     # Seed via the workspace-members endpoint so the binding is real.
     await test_client.post(
         f"/api/v1/admin/workspaces/{ws_id}/members",
-        json={"subjectType": "user", "subjectId": user_id, "role": "user"},
+        json={"subjectType": "user", "subjectId": user_id,
+              "role": "workspace_member"},
     )
 
     # Filter by subject_id.
@@ -290,7 +293,10 @@ async def test_role_bindings_audit_filters(test_client: AsyncClient, db_session)
     assert r.status_code == 200, r.text
     rows = r.json()
     assert all(row["subjectId"] == user_id for row in rows)
-    assert any(row["scopeId"] == ws_id and row["role"] == "user" for row in rows)
+    assert any(
+        row["scopeId"] == ws_id and row["role"] == "workspace_member"
+        for row in rows
+    )
 
     # Filter by scope.
     r = await test_client.get(
@@ -333,7 +339,14 @@ async def test_list_roles_returns_seeded_system_roles(test_client: AsyncClient):
     r = await test_client.get("/api/v1/admin/roles")
     assert r.status_code == 200, r.text
     by_name = {row["name"]: row for row in r.json()}
-    for name in ("admin", "user", "viewer"):
+    # Phase 5 taxonomy: all five system roles are stored at
+    # scope_type='global' (the workspace_* ones are templates that
+    # bind to any workspace; the CHECK constraint requires a concrete
+    # scope_id for non-global roles which templates don't have).
+    for name in (
+        "super_admin", "org_admin",
+        "workspace_admin", "workspace_member", "workspace_viewer",
+    ):
         assert name in by_name
         assert by_name[name]["isSystem"] is True
         assert by_name[name]["scopeType"] == "global"
@@ -361,7 +374,7 @@ async def test_create_role_round_trip_and_reject_system_name(
     # Reject reserved name
     r = await test_client.post(
         "/api/v1/admin/roles",
-        json={"name": "admin", "scopeType": "global", "permissions": []},
+        json={"name": "super_admin", "scopeType": "global", "permissions": []},
     )
     assert r.status_code == 409
 
@@ -408,7 +421,7 @@ async def test_update_and_delete_lifecycle_guards(
 
     # System role rejects edit
     r = await test_client.put(
-        "/api/v1/admin/roles/admin",
+        "/api/v1/admin/roles/super_admin",
         json={"description": "tampered"},
     )
     assert r.status_code == 409

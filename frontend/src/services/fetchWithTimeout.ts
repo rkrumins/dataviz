@@ -197,14 +197,37 @@ function parseRetryAfterMs(header: string | null): number | null {
 async function notifyAccessDenied(res: Response, requestPath: string): Promise<void> {
   if (typeof window === 'undefined') return
   let detail: string | null = null
-  // Clone before reading so the caller can still consume the body.
+  let permission: string | null = null
+  let scope: { type: 'global' | 'workspace'; id: string | null } | null = null
   try {
     const clone = res.clone()
     const text = await clone.text()
     if (text) {
       try {
-        const body = JSON.parse(text) as { detail?: string }
-        detail = body.detail ?? null
+        // Phase 5: the backend ``requires()`` 403 body is structured:
+        //   { detail: { error, permission, scope, message } }
+        // We tolerate both the old (string detail) and new (dict detail)
+        // shapes so a deploy mid-upgrade doesn't render '[object Object]'.
+        const body = JSON.parse(text) as {
+          detail?: string | {
+            error?: string
+            permission?: string
+            scope?: { type?: 'global' | 'workspace'; id?: string | null }
+            message?: string
+          }
+        }
+        if (typeof body.detail === 'string') {
+          detail = body.detail
+        } else if (body.detail) {
+          detail = body.detail.message ?? body.detail.error ?? null
+          permission = body.detail.permission ?? null
+          scope = body.detail.scope
+            ? {
+                type: body.detail.scope.type ?? 'global',
+                id: body.detail.scope.id ?? null,
+              }
+            : null
+        }
       } catch {
         detail = text
       }
@@ -214,7 +237,7 @@ async function notifyAccessDenied(res: Response, requestPath: string): Promise<v
   }
   window.dispatchEvent(
     new CustomEvent(ACCESS_DENIED_EVENT, {
-      detail: { detail, path: requestPath, status: res.status },
+      detail: { detail, permission, scope, path: requestPath, status: res.status },
     }),
   )
 }
