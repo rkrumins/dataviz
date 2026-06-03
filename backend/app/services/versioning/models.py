@@ -184,7 +184,8 @@ class MergeRequestORM(VersioningBase):
     __tablename__ = "merge_requests"
 
     id = Column(Text, primary_key=True, default=lambda: prefixed_id("pr"))
-    graph_id = Column(Text, nullable=False)                # logical
+    graph_id = Column(Text, nullable=False)                # logical (source side)
+    source_graph_id = Column(Text, nullable=True)          # == target_graph_id ⇒ draft→main MR; NULL ⇒ legacy fork PR
     source_branch_id = Column(Text, nullable=False)
     target_graph_id = Column(Text, nullable=False)
     target_branch = Column(Text, nullable=False, default="main")
@@ -203,6 +204,7 @@ class MergeRequestORM(VersioningBase):
 
     __table_args__ = _plain(
         Index("ix_mr_graph", "graph_id"),
+        Index("ix_mr_source", "source_graph_id"),
         Index("ix_mr_status", "status"),
         CheckConstraint(
             "status IN ('open','conflicts','mergeable','approved','merged','closed')",

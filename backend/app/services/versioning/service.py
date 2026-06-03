@@ -426,7 +426,9 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
     ) -> str:
         """Squash a draft into a single ``main`` commit, rebasing onto current
-        main with a field-level 3-way merge (plan §8).
+        main with a field-level 3-way merge (plan §8) — the ungated path (admin /
+        no review). The reviewed path is :meth:`open_draft_mr` + :meth:`merge_mr`,
+        which share the squash body in :meth:`_apply_draft_squash`.
 
         If ``main`` advanced under the draft, non-overlapping field edits
         auto-merge; genuine same-field conflicts raise :class:`MergeConflict`
@@ -449,64 +451,76 @@ class GraphVersioningService:
             )
             if conflicts:
                 raise MergeConflict(conflicts)
-
-            # Deleting a node cascades to its incident edges in this same commit;
-            # the guard then only rejects edges to an endpoint that never existed
-            # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
-            self._cascade_incident_edges(merged_state)
-            self._assert_referential_integrity(merged_state)
-
-            deltas = net_delta(theirs, merged_state)   # what publish adds to main
-            new_seq = graph.main_head_commit_seq + 1
-            if not deltas:
-                draft.status = "merged"
-                draft.base_commit_seq = graph.main_head_commit_seq
-                return draft.head_commit_id or ""
-
-            contributors = await self._branch_contributors(s, graph_id, branch_id)
-            source_commits = await self._branch_commit_ids(s, graph_id, branch_id)
-            main = await s.get(BranchORM, main_id)
-            squash = CommitORM(
-                graph_id=graph_id,
-                branch_id=main_id,
-                commit_seq=new_seq,
-                parent_commit_id=main.head_commit_id,
-                kind="squash_publish",
-                message=message,
-                actor=actor,
-                contributors=contributors,
-                source_branch_id=branch_id,
-                source_commit_ids=source_commits,
-                source_commit_count=len(source_commits),
-                originating_view_id=draft.originating_view_id,
+            return await self._apply_draft_squash(
+                s, graph, draft, main_id, merged_state, theirs, actor, message
             )
-            s.add(squash)
-            await s.flush()
 
-            kind_by_entity = await self._kind_map_multi(
-                s, [(graph_id, branch_id), (graph_id, main_id)]
-            )
-            ontology = Ontology.from_spec(graph.ontology_spec)   # PR re-validation gate (§16.5 #6)
-            if ontology is not None and graph.ontology_enforcement == "strict":
-                viol = validate_entities(
-                    [(d.entity_id, kind_by_entity.get(d.entity_id, "node"), d.payload)
-                     for d in deltas if d.op != "delete"], ontology)
-                if viol:
-                    raise OntologyViolation(viol)
-            await self._write_deltas(s, graph_id, main_id, squash, deltas, kind_by_entity, actor)
+    async def _apply_draft_squash(
+        self, s, graph, draft, main_id, merged_state, theirs, actor, message,
+    ) -> str:
+        """Squash a draft's (already-merged, conflict-free) state onto ``main`` as a
+        single ``squash_publish`` commit: cascade incident-edge deletes, assert
+        referential integrity, write the net delta, advance the head + merkle, and
+        mark the draft merged + projection target. Shared by :meth:`publish` and the
+        reviewed :meth:`merge_mr` (so both attribute contributors and re-gate ontology
+        identically)."""
+        # Deleting a node cascades to its incident edges in this same commit;
+        # the guard then only rejects edges to an endpoint that never existed
+        # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
+        self._cascade_incident_edges(merged_state)
+        self._assert_referential_integrity(merged_state)
 
-            main.head_commit_id = squash.id
-            graph.main_head_commit_seq = new_seq       # advance head before merkle
-            squash.merkle_root = await self._commit_merkle(s, graph_id, main_id, squash, deltas)
-            graph.updated_at = _now()
-            squash.stats = _delta_stats(deltas)
+        deltas = net_delta(theirs, merged_state)   # what publish adds to main
+        new_seq = graph.main_head_commit_seq + 1
+        if not deltas:
             draft.status = "merged"
-            draft.base_commit_seq = new_seq            # rebased onto new main
+            draft.base_commit_seq = graph.main_head_commit_seq
+            return draft.head_commit_id or ""
 
-            ps = await s.get(ProjectionStateORM, graph_id)
-            if ps is not None:
-                ps.target_commit_seq = new_seq
-            return squash.id
+        contributors = await self._branch_contributors(s, graph.id, draft.id)
+        source_commits = await self._branch_commit_ids(s, graph.id, draft.id)
+        main = await s.get(BranchORM, main_id)
+        squash = CommitORM(
+            graph_id=graph.id,
+            branch_id=main_id,
+            commit_seq=new_seq,
+            parent_commit_id=main.head_commit_id,
+            kind="squash_publish",
+            message=message,
+            actor=actor,
+            contributors=contributors,
+            source_branch_id=draft.id,
+            source_commit_ids=source_commits,
+            source_commit_count=len(source_commits),
+            originating_view_id=draft.originating_view_id,
+        )
+        s.add(squash)
+        await s.flush()
+
+        kind_by_entity = await self._kind_map_multi(
+            s, [(graph.id, draft.id), (graph.id, main_id)]
+        )
+        ontology = Ontology.from_spec(graph.ontology_spec)   # PR re-validation gate (§16.5 #6)
+        if ontology is not None and graph.ontology_enforcement == "strict":
+            viol = validate_entities(
+                [(d.entity_id, kind_by_entity.get(d.entity_id, "node"), d.payload)
+                 for d in deltas if d.op != "delete"], ontology)
+            if viol:
+                raise OntologyViolation(viol)
+        await self._write_deltas(s, graph.id, main_id, squash, deltas, kind_by_entity, actor)
+
+        main.head_commit_id = squash.id
+        graph.main_head_commit_seq = new_seq       # advance head before merkle
+        squash.merkle_root = await self._commit_merkle(s, graph.id, main_id, squash, deltas)
+        graph.updated_at = _now()
+        squash.stats = _delta_stats(deltas)
+        draft.status = "merged"
+        draft.base_commit_seq = new_seq            # rebased onto new main
+
+        ps = await s.get(ProjectionStateORM, graph.id)
+        if ps is not None:
+            ps.target_commit_seq = new_seq
+        return squash.id
 
     async def abandon_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
@@ -877,6 +891,117 @@ class GraphVersioningService:
                 ps.target_commit_seq = new_seq
             return squash.id
 
+    # ---- draft → main merge request (reviewed publish) ------------------- #
+    @staticmethod
+    def _is_draft_mr(pr: MergeRequestORM) -> bool:
+        """A same-graph draft→main MR (vs a legacy fork PR, where source_graph_id is
+        NULL or the parent)."""
+        return bool(pr.source_graph_id and pr.source_graph_id == pr.target_graph_id)
+
+    async def open_draft_mr(
+        self, *, graph_id: str, branch_id: str, actor: str,
+        title: Optional[str] = None, reviewers: Optional[Sequence[str]] = None,
+    ) -> str:
+        """Open a merge request from a per-user ``draft`` back to its own graph's
+        ``main`` — the reviewed alternative to a bare :meth:`publish`. Records the
+        current mergeability/conflict set; ``reviewers`` makes approval a merge
+        precondition (plan §17 #5). ``title`` is accepted for API symmetry."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            draft = await s.get(BranchORM, branch_id)
+            if graph is None or draft is None or draft.graph_id != graph_id:
+                raise ValueError("unknown graph/branch")
+            if draft.kind == "main":
+                raise ValueError("cannot open a merge request for main")
+            self._require_open(draft)
+            main_id = await self._main_branch_id(s, graph_id)
+            _merged, conflicts, _theirs = await self._compute_merge(
+                s, graph_id, graph, draft, main_id, {}
+            )
+            revs = list(dict.fromkeys(reviewers or []))      # dedup, keep order
+            pr = MergeRequestORM(
+                graph_id=graph_id,
+                source_graph_id=graph_id,                    # source == target ⇒ draft MR
+                source_branch_id=branch_id,
+                target_graph_id=graph_id,
+                target_branch="main",
+                base_commit_seq=draft.base_commit_seq,
+                status="conflicts" if conflicts else "mergeable",
+                conflicts=conflicts or None,
+                reviewers=revs or None,
+                approval_status="pending" if revs else None,
+                actor=actor,
+            )
+            s.add(pr)
+            await s.flush()
+            return pr.id
+
+    async def preview_mr(self, *, mr_id: str) -> Dict[str, object]:
+        """Dry-run a merge request's merge (conflicts + change counts), dispatching
+        draft→main vs fork→parent."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, mr_id)
+            if pr is None:
+                raise ValueError(f"unknown merge request {mr_id}")
+            if self._is_draft_mr(pr):
+                graph = await s.get(GraphORM, pr.target_graph_id)
+                draft = await s.get(BranchORM, pr.source_branch_id)
+                main_id = await self._main_branch_id(s, graph.id)
+                merged, conflicts, theirs = await self._compute_merge(
+                    s, graph.id, graph, draft, main_id, {}
+                )
+            else:
+                fork = await s.get(GraphORM, pr.graph_id)
+                merged, conflicts, theirs = await self._compute_fork_merge(s, fork, {})
+            return {
+                "clean": not conflicts,
+                "conflicts": conflicts,
+                "changes": _delta_stats(net_delta(theirs, merged)),
+            }
+
+    async def merge_mr(
+        self, *, mr_id: str, actor: str, message: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+    ) -> str:
+        """Merge a merge request, dispatching on its kind: a fork PR delegates to
+        :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
+        (main may have advanced under continued editing), enforces the
+        reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, mr_id)
+            if pr is None:
+                raise ValueError(f"unknown merge request {mr_id}")
+            is_draft = self._is_draft_mr(pr)
+        if not is_draft:
+            return await self.merge_pr(
+                pr_id=mr_id, actor=actor, message=message, resolutions=resolutions
+            )
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, mr_id)
+            if pr.status in ("merged", "closed"):
+                raise ValueError(f"merge request {mr_id} is {pr.status}")
+            graph = await s.get(GraphORM, pr.target_graph_id)
+            draft = await s.get(BranchORM, pr.source_branch_id)
+            if graph is None or draft is None:
+                raise ValueError("merge request endpoints missing")
+            self._require_open(draft)
+            main_id = await self._main_branch_id(s, graph.id)
+            merged_state, conflicts, theirs = await self._compute_merge(
+                s, graph.id, graph, draft, main_id, dict(resolutions or {})
+            )
+            if conflicts:
+                raise MergeConflict(conflicts)
+            reviewers = set(pr.reviewers or [])              # approval gate (plan §17 #5)
+            if reviewers and pr.approval_status != "approved":
+                raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
+            commit_id = await self._apply_draft_squash(
+                s, graph, draft, main_id, merged_state, theirs, actor, message
+            )
+            pr.status = "merged"
+            pr.resulting_commit_id = commit_id
+            pr.updated_at = _now()
+            return commit_id
+
     async def _compute_fork_merge(self, s, fork, resolutions):
         """3-way merge a fork's divergence into its parent's current main.
 
@@ -1230,7 +1355,8 @@ class GraphVersioningService:
     @staticmethod
     def _pr_meta(pr: MergeRequestORM) -> dict:
         return {
-            "pr_id": pr.id, "graph_id": pr.graph_id, "source_branch_id": pr.source_branch_id,
+            "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
+            "source_branch_id": pr.source_branch_id,
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
             "base_commit_seq": pr.base_commit_seq, "status": pr.status,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,

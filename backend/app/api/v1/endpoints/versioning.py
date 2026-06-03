@@ -323,6 +323,11 @@ class OpenPrRequest(_ApiModel):
     reviewers: Optional[List[str]] = None
 
 
+class OpenMrRequest(_ApiModel):
+    title: Optional[str] = None
+    reviewers: Optional[List[str]] = None
+
+
 class OpenPrResponse(_ApiModel):
     pr_id: str = Field(alias="prId")
 
@@ -877,4 +882,97 @@ async def merge_pull_request(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
     background.add_task(nudge_projection, str(_pr["target_graph_id"]))   # base graph got the commit
+    return {"commit_id": commit_id}
+
+
+# --------------------------------------------------------------------------- #
+# Draft -> main merge requests (reviewed publish)                              #
+# --------------------------------------------------------------------------- #
+@router.post("/graphs/{graph_id}/branches/{branch_id}/merge-requests",
+             response_model=OpenPrResponse, status_code=201)
+async def open_merge_request(
+    ws_id: str, graph_id: str, branch_id: str,
+    body: Optional[OpenMrRequest] = None,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # the draft owner raises the MR
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Raise a formal merge request from a per-user draft to its graph's ``main``."""
+    with _domain_errors():
+        pr_id = await svc.open_draft_mr(
+            graph_id=graph_id, branch_id=branch_id, actor=user.id,
+            title=body.title if body else None,
+            reviewers=body.reviewers if body else None,
+        )
+    return {"pr_id": pr_id}
+
+
+@router.get("/graphs/{graph_id}/merge-requests", response_model=List[PrResponse])
+async def list_merge_requests(
+    ws_id: str, graph_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """All merge requests targeting this graph's ``main`` (draft MRs + incoming fork PRs)."""
+    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset)
+
+
+@router.get("/merge-requests/{pr_id}", response_model=PrResponse)
+async def get_merge_request(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+):
+    return pr
+
+
+@router.get("/merge-requests/{pr_id}/preview", response_model=MergePreviewResponse)
+async def preview_merge_request_endpoint(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.preview_mr(mr_id=pr_id)
+
+
+@router.post("/merge-requests/{pr_id}/approve", response_model=PrResponse)
+async def approve_merge_request(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.approve_pr(pr_id=pr_id, actor=user.id)
+
+
+@router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
+async def close_merge_request(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        return await svc.close_pr(pr_id=pr_id)
+
+
+@router.post("/merge-requests/{pr_id}/merge", response_model=CommitResponse)
+async def merge_merge_request(
+    ws_id: str, pr_id: str, body: MergePrRequest,
+    background: BackgroundTasks,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    with _domain_errors():
+        commit_id = await svc.merge_mr(
+            mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
+        )
+    background.add_task(nudge_projection, str(_pr["target_graph_id"]))
     return {"commit_id": commit_id}
