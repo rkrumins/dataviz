@@ -237,6 +237,32 @@ Outbox events (consumed by `auth_audit_log` table via the relay):
 
 ## 2. How to use it (operator playbooks)
 
+### 2.0 Local laptop bootstrap
+
+The auth service refuses to start without `JWT_SECRET_KEY` (≥32 chars)
+in the environment — by design, no ephemeral fallback. For local
+development, drop a `.env` or `.env.dev` file in the repo root with
+the entries from `.env.example`. The auth-service config will
+auto-source it on import, **gated on** `ENV` not being a
+production-looking value AND the file existing in CWD. Anything you
+export in the shell beforehand wins (`override=False`), so you can
+still pin a one-off secret without editing the file. Production
+containers that don't ship a `.env` remain on the bare-env path; a
+stray `.env` accidentally baked into a prod image is ignored because
+the `ENV` gate fails.
+
+```bash
+# fresh laptop, first time
+cp .env.example .env.dev   # or write your own with a 48-char secret
+uvicorn backend.app.main:app --reload
+# -> boots. No need to manually `export JWT_SECRET_KEY` first.
+
+# CI / one-off override
+export JWT_SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+uvicorn backend.app.main:app --reload
+# -> shell value wins over .env.dev's value (override=False is honoured).
+```
+
 ### 2.1 Configure a new OIDC provider
 
 1. Admin → SSO → Providers → **Add provider**.

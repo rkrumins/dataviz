@@ -7,9 +7,35 @@ ephemeral fallback**: a per-process random key silently invalidates
 every outstanding session on restart and masks a missing-secret
 misconfiguration in production. Absence or a too-weak value fails fast
 at import so the process never starts in an insecure state.
+
+Local-dev convenience: when ``ENV`` is NOT a production-looking value
+AND a ``.env`` / ``.env.dev`` file exists in CWD, we auto-source it
+via ``python-dotenv`` so operators don't have to ``export
+JWT_SECRET_KEY=...`` before every ``uvicorn`` invocation. Both gates
+have to pass; either fails closed -> we never load the file. A stray
+``.env`` baked into a prod container is therefore inert.
 """
 import logging
 import os
+from pathlib import Path
+
+# ── Gated .env auto-load (local dev only) ────────────────────────────
+# Two layered gates: ENV check + CWD file existence. ``override=False``
+# keeps anything already exported in the shell authoritative over the
+# file value. Missing python-dotenv falls back to the explicit-export
+# path silently — operators can still ``export JWT_SECRET_KEY=...``.
+_dev_env = os.getenv("ENV", "dev").strip().lower()
+if _dev_env not in {"prod", "production"}:
+    for _candidate in (".env.dev", ".env"):
+        _path = Path(_candidate)
+        if _path.is_file():
+            try:
+                from dotenv import load_dotenv as _load_dotenv  # noqa: WPS433
+                _load_dotenv(_path, override=False)
+            except ImportError:
+                # python-dotenv missing -> stay on the bare-env path.
+                pass
+            break  # prefer .env.dev over .env; first hit wins
 
 logger = logging.getLogger(__name__)
 

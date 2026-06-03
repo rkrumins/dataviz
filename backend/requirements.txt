@@ -27,6 +27,11 @@ slowapi>=0.1.9           # Rate limiting for auth endpoints
 # this import succeeds, so a missing install is a silent no-op.
 python3-saml>=1.16.0
 
+# Local-dev .env auto-load. ``auth_service.core.config`` imports it
+# behind a try/except + ENV/file-existence gate, so a missing dep
+# silently falls back to the explicit-export path (no boot crash).
+python-dotenv>=1.0.0
+
 # Graph adapter dependencies
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
 httpx>=0.26.0            # DataHub GraphQL HTTP client + async test client
