@@ -89,11 +89,6 @@ class VersionedWriteProvider:
         return None if node is None else {
             "op": "create", "entity_kind": "node", "entity_id": urn, "payload": _node_payload(node)}
 
-    async def _edges_state(self) -> Dict[str, dict]:
-        gid = await self._graph_id()
-        return (await self._svc.materialize_state(
-            graph_id=gid, branch_id=await self._svc.main_branch_id(gid)))["edges"]
-
     # ---- writes: record to versioning, then apply to the provider ---- #
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,
@@ -112,7 +107,7 @@ class VersionedWriteProvider:
         return await self._inner.create_edge(edge)
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        cur = (await self._edges_state()).get(edge_id)
+        cur = await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id)
         if cur is not None:                              # need the full edge payload to version it
             payload = {**cur, "properties": {**(cur.get("properties") or {}), **(properties or {})}}
             await self._record([{"op": "update", "entity_kind": "edge",
@@ -120,7 +115,7 @@ class VersionedWriteProvider:
         return await self._inner.update_edge(edge_id, properties)
 
     async def delete_edge(self, edge_id: str) -> bool:
-        if edge_id in await self._edges_state():
+        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is not None:
             await self._record([{"op": "delete", "entity_kind": "edge",
                                  "entity_id": edge_id, "payload": None}], f"delete edge {edge_id}")
         return await self._inner.delete_edge(edge_id)

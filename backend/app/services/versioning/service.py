@@ -1824,30 +1824,80 @@ class GraphVersioningService:
         the 'versioned write' primitive behind provider write-through, so an ordinary
         graph write becomes a durable, attributed commit without a draft round-trip.
         Each op is ``{op, entity_kind, entity_id, payload}``. Returns the commit id, or
-        ``None`` if the ops are a no-op against current state."""
+        ``None`` if the ops are a no-op against current state.
+
+        Cost is **O(ops)**, not O(graph): it resolves only the affected entities' current
+        values (``_current_values``), cascades node deletes to their live incident edges
+        via a bounded degree query (``_incident_live_edges``), and checks referential
+        integrity only for the edges this commit writes — never composing full state.
+        """
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             bid = branch_id or await self._main_branch_id(s, graph_id)
-            cur = await self._composed_state(s, graph_id, bid)
-            new_state: Dict[str, Optional[dict]] = dict(cur)
+
+            # Resolve ops → new payloads for the AFFECTED entities only.
+            new_vals: Dict[str, Optional[dict]] = {}
             kind_by_entity: Dict[str, str] = {}
             for op in ops:
                 eid = op["entity_id"]
                 payload = op.get("payload") or {}
                 kind_by_entity[eid] = (op.get("entity_kind")
                                        or ("edge" if _is_edge_payload(payload) else "node"))
-                new_state[eid] = None if op["op"] == "delete" else dict(payload)
+                new_vals[eid] = None if op["op"] == "delete" else dict(payload)
 
-            self._cascade_incident_edges(new_state)
-            self._assert_referential_integrity(new_state)
-            deltas = net_delta(cur, new_state)
+            # Prior values of just the affected entities (bounded; base+overlay for a draft).
+            cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
+
+            # Cascade: a deleted node tombstones its currently-live incident edges
+            # (bounded by node degree via ix_ev_source/ix_ev_target).
+            deleted_nodes = {eid for eid, v in new_vals.items()
+                             if v is None and kind_by_entity.get(eid) == "node"}
+            for eid, payload in (await self._incident_live_edges(s, graph_id, bid, deleted_nodes)).items():
+                if eid in new_vals:
+                    continue
+                src = payload.get("sourceEntityId") or payload.get("source_entity_id")
+                tgt = payload.get("targetEntityId") or payload.get("target_entity_id")
+                if src in deleted_nodes or tgt in deleted_nodes:
+                    new_vals[eid] = None
+                    cur_vals.setdefault(eid, payload)
+                    kind_by_entity[eid] = "edge"
+
+            # Referential integrity (bounded): every edge written here must have live
+            # endpoints in the resulting state. Resolve only unknown endpoints.
+            endpoints: set = set()
+            for v in new_vals.values():
+                if v is None:
+                    continue
+                src = v.get("sourceEntityId") or v.get("source_entity_id")
+                tgt = v.get("targetEntityId") or v.get("target_entity_id")
+                if src is not None or tgt is not None:
+                    endpoints.update((src, tgt))
+            endpoints.discard(None)
+            unknown = [e for e in endpoints if e not in new_vals and e not in cur_vals]
+            if unknown:
+                cur_vals.update(await self._current_values(s, graph_id, bid, unknown))
+
+            def _live(eid) -> bool:
+                return (new_vals[eid] if eid in new_vals else cur_vals.get(eid)) is not None
+
+            for eid, v in new_vals.items():
+                if v is None:
+                    continue
+                src = v.get("sourceEntityId") or v.get("source_entity_id")
+                tgt = v.get("targetEntityId") or v.get("target_entity_id")
+                if src is None and tgt is None:
+                    continue                                   # a node
+                if not _live(src) or not _live(tgt):
+                    raise ConcurrencyError(f"edge {eid} would dangle: {src}->{tgt}")
+
+            deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:
                 return None
-            for d in deltas:                                  # kinds for cascaded deletes
+            for d in deltas:
                 kind_by_entity.setdefault(
-                    d.entity_id, "edge" if _is_edge_payload(cur.get(d.entity_id) or {}) else "node")
+                    d.entity_id, "edge" if _is_edge_payload(cur_vals.get(d.entity_id) or {}) else "node")
 
             last = await s.scalar(select(CommitORM.commit_seq).where(
                 CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
@@ -2038,6 +2088,52 @@ class GraphVersioningService:
             for eid, op, payload in (await s.execute(stmt)).all():
                 out[eid] = None if op == "delete" else payload
         return out
+
+    async def _current_values(
+        self, s, graph_id: str, branch_id: str, ids,
+    ) -> Dict[str, Optional[dict]]:
+        """Current value of each id on a branch, bounded to *ids* (absent ids omitted).
+        ``main`` → values at head; a draft → ``main`` at its branch point overlaid with
+        the draft's own rows. O(ids) via ``_values_at`` — never composes full state."""
+        ids = list(ids)
+        if not ids:
+            return {}
+        main_id = await self._main_branch_id(s, graph_id)
+        if branch_id == main_id:
+            graph = await s.get(GraphORM, graph_id)
+            return await self._values_at(s, graph_id, main_id, ids, graph.main_head_commit_seq)
+        branch = await s.get(BranchORM, branch_id)
+        out = await self._values_at(s, graph_id, main_id, ids, branch.base_commit_seq or 0)
+        out.update(await self._values_at(s, graph_id, branch_id, ids, 1 << 62))  # all draft-own rows
+        return out
+
+    async def _incident_live_edges(
+        self, s, graph_id: str, branch_id: str, node_ids,
+    ) -> Dict[str, dict]:
+        """Currently-live edges on a branch incident to any of *node_ids* — bounded by
+        node degree via ix_ev_source/ix_ev_target. Returns {edge_entity_id: payload}."""
+        ids = list(node_ids)
+        if not ids:
+            return {}
+        cand: set = set()
+        for col in (EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id):
+            rows = (await s.execute(
+                select(EdgeVersionORM.entity_id).where(
+                    EdgeVersionORM.graph_id == graph_id, col.in_(ids),
+                ).distinct()
+            )).scalars().all()
+            cand.update(rows)
+        vals = await self._current_values(s, graph_id, branch_id, cand)
+        return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def entity_value(
+        self, *, graph_id: str, entity_id: str, branch_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Current payload of one entity on a branch (default ``main``), or ``None`` — a
+        bounded lookup for provider write-through (no full-state materialize)."""
+        async with self._session() as s:
+            bid = branch_id or await self._main_branch_id(s, graph_id)
+            return (await self._current_values(s, graph_id, bid, [entity_id])).get(entity_id)
 
     async def _entity_value_at(self, s, graph_id, branch_id, entity_id, seq) -> Optional[dict]:
         """One entity's value at ``seq`` (fork-aware): this graph, else the parent
