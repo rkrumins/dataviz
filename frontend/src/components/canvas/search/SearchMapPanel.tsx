@@ -63,6 +63,7 @@ import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { ScopeStrip } from './panel/ScopeStrip'
+import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
     type SearchTemplate,
@@ -188,15 +189,10 @@ function PanelInner({
 
     // "Open in Advanced Search + run" bridge: an external surface (the
     // Property Manager value clicks / quick actions) seeds the draft and
-    // sets ``pendingRunPredicate``; the panel consumes it on mount/change
-    // and runs it through the real engine — regardless of run mode — so
-    // the constructed query executes once and spotlights the matches.
-    const pendingRunPredicate = useSearchStore((s) => s.pendingRunPredicate)
-    useEffect(() => {
-        if (!pendingRunPredicate) return
-        const p = useSearchStore.getState().consumePendingRun()
-        if (p) void runPredicate(p, { results: 'hits', pageSize: 5000, includeAncestorPath: true })
-    }, [pendingRunPredicate, runPredicate])
+    // sets ``pendingRunPredicate``; this hook consumes it and runs the
+    // predicate through the real engine — resilient to the StrictMode /
+    // first-open remount race (see usePendingSearchRun).
+    usePendingSearchRun(runPredicate, commitDraft)
 
     // Count of options that differ from defaults — drives the badge
     // on the Options toolbar chip. Power-user-tuned queries get a
