@@ -14,6 +14,20 @@ import { announcementService, type AnnouncementResponse } from '@/services/annou
 /** Map of announcement id → timestamp (ms) when snooze expires. */
 type SnoozeMap = Record<string, number>
 
+/** Compare the fields the banner renders, so an identical poll is a no-op. */
+function announcementsEqual(a: AnnouncementResponse[], b: AnnouncementResponse[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i]
+    if (
+      x.id !== y.id || x.title !== y.title || x.message !== y.message ||
+      x.bannerType !== y.bannerType || x.snoozeDurationMinutes !== y.snoozeDurationMinutes ||
+      x.ctaText !== y.ctaText || x.ctaUrl !== y.ctaUrl || x.updatedAt !== y.updatedAt
+    ) return false
+  }
+  return true
+}
+
 interface AnnouncementState {
   announcements: AnnouncementResponse[]
   /** id → epoch ms when snooze expires. Persisted in localStorage. */
@@ -44,13 +58,14 @@ export const useAnnouncementStore = create<AnnouncementState>()(
       error: null,
 
       fetchActive: async () => {
-        // Don't set isLoading on subsequent polls — only first load
-        const isFirst = get().announcements.length === 0
-        if (isFirst) set({ isLoading: true })
-        set({ error: null })
         try {
           const data = await announcementService.getActive()
-          set({ announcements: data, isLoading: false })
+          const prev = get()
+          // The banner subscribes to the whole store, so any set() re-renders
+          // it. Skip the write when the active set is unchanged (identical
+          // poll, or the common steady-state with zero announcements).
+          if (announcementsEqual(prev.announcements, data) && !prev.isLoading && prev.error === null) return
+          set({ announcements: data, isLoading: false, error: null })
         } catch (err: any) {
           set({ error: err.message, isLoading: false })
         }
