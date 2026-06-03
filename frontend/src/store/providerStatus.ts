@@ -56,9 +56,29 @@ function persistToStorage(statuses: Record<string, ProviderStatusEntry>): void {
   }
 }
 
+// Compare the re-render-relevant fields only. `lastCheckedAt` is a heartbeat
+// the backend bumps on every poll and nothing renders it, so comparing it
+// would defeat the dedupe and churn a fresh reference each poll.
+function statusesEqual(
+  a: Record<string, ProviderStatusEntry>,
+  b: Record<string, ProviderStatusEntry>,
+): boolean {
+  const aKeys = Object.keys(a)
+  if (aKeys.length !== Object.keys(b).length) return false
+  for (const key of aKeys) {
+    const x = a[key]
+    const y = b[key]
+    if (!y) return false
+    if (x.status !== y.status || x.name !== y.name || x.error !== y.error) {
+      return false
+    }
+  }
+  return true
+}
+
 const initialHydrated = hydrateFromStorage()
 
-export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
+export const useProviderStatusStore = create<ProviderStatusState>((set, get) => ({
   statuses: initialHydrated?.statuses ?? {},
   lastUpdatedAt: initialHydrated?.ts ?? null,
   fromCache: initialHydrated !== null,
@@ -67,12 +87,19 @@ export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
     try {
       const statuses = await providerService.listStatus()
       const map = Object.fromEntries(statuses.map((status) => [status.id, status]))
+      persistToStorage(map)
+      // Skip the state write when the meaningful snapshot is unchanged so
+      // subscribers keep their object references — handing out fresh ones each
+      // poll re-runs downstream effects (e.g. ViewExecutionProvider's
+      // provider-ready gate) and flickers the canvas. The first poll after
+      // localStorage hydration must still write to clear `fromCache`.
+      const prev = get()
+      if (!prev.fromCache && statusesEqual(prev.statuses, map)) return
       set({
         statuses: map,
         lastUpdatedAt: Date.now(),
         fromCache: false,
       })
-      persistToStorage(map)
     } catch {
       // Keep the previous snapshot. Provider status should never blank the UI.
     }
