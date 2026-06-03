@@ -63,6 +63,7 @@ import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { ScopeStrip } from './panel/ScopeStrip'
+import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
     type SearchTemplate,
@@ -185,6 +186,13 @@ function PanelInner({
         const persisted = readPersistedCanvasFilterMode(viewId)
         setCanvasFilterMode(persisted, viewId)
     }, [viewId, setCanvasFilterMode])
+
+    // "Open in Advanced Search + run" bridge: an external surface (the
+    // Property Manager value clicks / quick actions) seeds the draft and
+    // sets ``pendingRunPredicate``; this hook consumes it and runs the
+    // predicate through the real engine — resilient to the StrictMode /
+    // first-open remount race (see usePendingSearchRun).
+    usePendingSearchRun(runPredicate, commitDraft)
 
     // Count of options that differ from defaults — drives the badge
     // on the Options toolbar chip. Power-user-tuned queries get a

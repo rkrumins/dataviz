@@ -17,6 +17,7 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useLoadingToast } from '@/components/ui/toast'
@@ -554,6 +555,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             viewId={activeView.id}
             open={propertyManagerOpen}
             onClose={() => setPropertyManagerOpen(false)}
+            onSearchPredicate={(p) => {
+              useSearchStore.getState().requestSearchRun(p)
+              setAdvancedSearchOpen(true)
+            }}
           />
         )}
       </AnimatePresence>

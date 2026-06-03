@@ -43,6 +43,10 @@ export interface PropertyManagerDrawerProps {
     knownEntityTypes?: string[]
     /** Layer names from the view config (for the criteria builder). */
     knownLayers?: string[]
+    /** Open the Advanced Search panel seeded + run with a predicate
+     *  (the canvas owns the panel open-state). Powers the Properties
+     *  tab's value clicks / quick actions. */
+    onSearchPredicate?: (predicate: Predicate) => void
 }
 
 type Tab = 'properties' | 'rules'
@@ -55,7 +59,7 @@ type EditorState =
 
 
 export function PropertyManagerDrawer({
-    viewId, open, onClose, knownEntityTypes = [], knownLayers = [],
+    viewId, open, onClose, knownEntityTypes = [], knownLayers = [], onSearchPredicate,
 }: PropertyManagerDrawerProps) {
     const [tab, setTab] = useState<Tab>('rules')
     const [editor, setEditor] = useState<EditorState>({ mode: 'closed' })
@@ -190,12 +194,20 @@ export function PropertyManagerDrawer({
                             )}
                         </div>
 
-                        {/* Body — animated list ⇄ editor transition. */}
-                        <div className="flex-1 overflow-y-auto custom-scrollbar p-4">
+                        {/* Body — animated list ⇄ editor transition.
+                            ``min-h-0`` lets this flex child shrink below its
+                            content so ``overflow-y-auto`` actually scrolls
+                            (without it the body grows past the overflow-hidden
+                            shell and clips — the Properties tab "won't scroll"
+                            bug). */}
+                        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4">
                             {tab === 'properties' && (
                                 <PropertyBrowser
                                     viewId={viewId}
+                                    knownEntityTypes={knownEntityTypes}
+                                    knownLayers={knownLayers}
                                     onCreateRuleFromPredicate={handleCreateFromPredicate}
+                                    onSearchPredicate={onSearchPredicate}
                                 />
                             )}
                             {tab === 'rules' && (

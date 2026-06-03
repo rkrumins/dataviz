@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { evaluateDisplayRule } from '../displayRuleEval'
+import { evaluateDisplayRule, resolveScopeRootUrns } from '../displayRuleEval'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
@@ -124,5 +124,75 @@ describe('evaluateDisplayRule', () => {
 
         const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE)
         expect(urns).toContain('urn:c')
+    })
+
+    it('cursor-paginates and unions every page (not just the first)', async () => {
+        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
+        const calls: SearchQuery[] = []
+        vi.spyOn(provider, 'searchAdvanced').mockImplementation(async (q: SearchQuery) => {
+            calls.push(q)
+            if (!q.options?.cursor) {
+                return makeResult({
+                    hits: [{ node: { urn: 'urn:a' } } as never, { node: { urn: 'urn:b' } } as never],
+                    cursor: 'c1',
+                })
+            }
+            return makeResult({ hits: [{ node: { urn: 'urn:c' } } as never], cursor: null })
+        })
+
+        const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE)
+
+        // Full union across both pages — the bug was tagging only page 1.
+        expect([...urns].sort()).toEqual(['urn:a', 'urn:b', 'urn:c'])
+        expect(calls).toHaveLength(2)
+        // Page 1 requests the max page size + a raised candidate cap.
+        expect(calls[0].options?.pageSize).toBe(5000)
+        expect(calls[0].options?.candidateCap).toBe(100000)
+        // Page 2 carries the cursor from page 1.
+        expect(calls[1].options?.cursor).toBe('c1')
+    })
+
+    it('returns [] without scanning when the signal is already aborted', async () => {
+        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
+        const spy = vi.spyOn(provider, 'searchAdvanced')
+        const ac = new AbortController()
+        ac.abort()
+        const urns = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE, ac.signal)
+        expect(urns).toEqual([])
+        expect(spy).not.toHaveBeenCalled()
+    })
+
+    it('invokes onPage with the cumulative set after each page (progressive)', async () => {
+        const provider = new RemoteGraphProvider({ workspaceId: 'ws-1' })
+        vi.spyOn(provider, 'searchAdvanced').mockImplementation(async (q: SearchQuery) => {
+            if (!q.options?.cursor) {
+                return makeResult({ hits: [{ node: { urn: 'urn:a' } } as never], cursor: 'c1' })
+            }
+            return makeResult({ hits: [{ node: { urn: 'urn:b' } } as never], cursor: null })
+        })
+        const pages: string[][] = []
+        const all = await evaluateDisplayRule(provider, 'view-1', TAG_PREDICATE, undefined, (urns) => pages.push(urns))
+        expect([...all].sort()).toEqual(['urn:a', 'urn:b'])
+        expect(pages).toHaveLength(2)
+        expect(pages[0]).toEqual(['urn:a'])                 // after page 1
+        expect([...pages[1]].sort()).toEqual(['urn:a', 'urn:b']) // cumulative after page 2
+    })
+})
+
+
+describe('resolveScopeRootUrns', () => {
+    it('returns explicit layer-assignment URNs (capped at 256)', () => {
+        const assignments = Array.from({ length: 300 }, (_, i) => ({ entityId: `urn:x:${i}` }))
+        useReferenceModelStore.setState({ layers: [{ entityAssignments: assignments }] as never })
+        const roots = resolveScopeRootUrns()
+        expect(roots).toHaveLength(256)
+        expect(roots[0]).toBe('urn:x:0')
+        useReferenceModelStore.setState({ layers: [] })
+    })
+
+    it('returns [] when there are no layer assignments and no canvas roots', () => {
+        useReferenceModelStore.setState({ layers: [] })
+        useCanvasStore.setState({ nodes: [], edges: [] })
+        expect(resolveScopeRootUrns()).toEqual([])
     })
 })
