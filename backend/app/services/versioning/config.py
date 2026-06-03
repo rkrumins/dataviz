@@ -155,6 +155,10 @@ def falkor_budget_for(provider: str) -> int:
 # Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days, swept by
 # the worker every DRAFT_SWEEP_SECS (default daily).
 DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
+
+# Retries when a commit races another writer for the next per-branch commit_seq
+# (uq_commits_branch_seq) — concurrent write-through writes to main.
+COMMIT_MAX_RETRIES: int = int(os.getenv("GRAPHVER_COMMIT_MAX_RETRIES", "5"))
 DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.

@@ -22,11 +22,13 @@ Design choices honoured here:
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy import select, func, delete, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from . import config, db
 from .changeset import Delta, materialize, net_delta, diff_states
@@ -1826,7 +1828,26 @@ class GraphVersioningService:
         values (``_current_values``), cascades node deletes to their live incident edges
         via a bounded degree query (``_incident_live_edges``), and checks referential
         integrity only for the edges this commit writes — never composing full state.
+
+        Concurrent writers to the same branch race for the next ``commit_seq``; on the
+        unique-constraint collision this retries (bounded backoff) before giving up with
+        :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
+        entities are validated (the write-through gate, parity with publish/stage).
         """
+        for attempt in range(config.COMMIT_MAX_RETRIES):
+            try:
+                return await self._apply_ops_once(
+                    graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id)
+            except IntegrityError:
+                if attempt + 1 >= config.COMMIT_MAX_RETRIES:
+                    raise ConcurrencyError(
+                        f"apply_ops commit-seq contention on {graph_id}/{branch_id or 'main'}")
+                await asyncio.sleep(0.02 * (2 ** attempt))
+
+    async def _apply_ops_once(
+        self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
+        message: str, branch_id: Optional[str],
+    ) -> Optional[str]:
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
@@ -1887,6 +1908,14 @@ class GraphVersioningService:
                     continue                                   # a node
                 if not _live(src) or not _live(tgt):
                     raise ConcurrencyError(f"edge {eid} would dangle: {src}->{tgt}")
+
+            ontology = Ontology.from_spec(graph.ontology_spec)   # write-through ontology gate
+            if ontology is not None and graph.ontology_enforcement == "strict":
+                viol = validate_entities(
+                    [(eid, kind_by_entity.get(eid, "node"), v)
+                     for eid, v in new_vals.items() if v is not None], ontology)
+                if viol:
+                    raise OntologyViolation(viol)
 
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:
