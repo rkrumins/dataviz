@@ -263,6 +263,47 @@ uvicorn backend.app.main:app --reload
 # -> shell value wins over .env.dev's value (override=False is honoured).
 ```
 
+### 2.0.1 Apply the migrations (laptop-only step)
+
+The auth path writes to `auth_audit_log` (Phase 0 table) and reads
+from `user_identities`, `idp_providers`, `user_external_attributes`,
+`app_auth_config` (Phase 2–4 tables). On Kubernetes those are
+created by the Helm `pre-install,pre-upgrade` hook
+(`deploy/helm/dataviz/templates/upgrade-job.yaml`) and every backend
+pod refuses to start until the `schemaCheckInitContainer` confirms
+the DB matches every Alembic head. `uvicorn --reload` on a laptop
+bypasses both — you have to apply the chain yourself once, when
+pointing the app at a fresh Postgres:
+
+```bash
+# one-time bootstrap against a local Postgres
+export MANAGEMENT_DB_URL=postgresql+asyncpg://synodic:synodic@localhost:5432/synodic
+python -m backend.scripts.upgrade upgrade   # alembic upgrade head, under pg_advisory_lock
+python -m backend.scripts.upgrade check     # exits 0 iff the DB matches every head
+```
+
+`backend/scripts/upgrade.py` is the same CLI the Helm Job runs. Using
+it (rather than raw `alembic upgrade head`) gets you the
+`pg_advisory_lock(0x53594E4F)` serialisation guard for free, so a
+second invocation from `kubectl exec` or another shell can't race.
+
+If you skip this step you'll see a stream of warnings from the
+outbox relay:
+
+```
+WARNING [backend.app.services.outbox_relay] Outbox relay drain failed:
+  relation "auth_audit_log" does not exist
+```
+
+This is loud on purpose — the relay reports a genuinely missing
+table every few seconds and we deliberately do NOT swallow it (silent
+schema drift is exactly what the Phase 0 hardening pass set out to
+prevent). The stream stops the moment `upgrade` completes; no need
+to restart uvicorn.
+
+K8s deployments via Helm do not need this step — the hook Job runs
+ahead of every `helm install/upgrade`.
+
 ### 2.1 Configure a new OIDC provider
 
 1. Admin → SSO → Providers → **Add provider**.
