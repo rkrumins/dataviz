@@ -1,8 +1,18 @@
 """SSO Phase 4 — signup provenance + indexed claim attributes + app auth config.
 
-Revision ID: 20260527_1200_user_provenance_and_config
+Revision ID: 20260527_1200_sso_phase4
 Revises: 20260524_1100_sso_phase3
 Create Date: 2026-05-27 12:00
+
+NB on the id: this migration originally shipped as
+``20260527_1200_user_provenance_and_config`` (40 chars), which
+overflowed the default ``alembic_version.version_num VARCHAR(32)``
+column and produced a ``StringDataRightTruncation`` on the
+post-migration UPDATE. The revision was renamed to
+``20260527_1200_sso_phase4`` (24 chars, matching the
+``sso_phase2`` / ``sso_phase3`` naming convention) before any deployed
+environment had committed to the old id, so no on-disk
+``alembic_version`` rows need rewriting.
 
 Three additions on top of Phase 3:
 
@@ -32,7 +42,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260527_1200_user_provenance_and_config"
+revision: str = "20260527_1200_sso_phase4"
 down_revision: Union[str, None] = "20260524_1100_sso_phase3"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

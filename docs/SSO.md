@@ -528,8 +528,8 @@ export JWT_SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_urlsafe(4
    `20260517_1300_auth_audit_log.py` →
    `20260521_1200_sso_phase2.py` →
    `20260524_1100_sso_phase3.py` →
-   `20260527_1200_user_provenance_and_config.py` →
-   `20260530_1200_context_models_display_rules.py`.
+   `20260527_1200_sso_phase4.py` →
+   `20260530_1200_display_rules.py`.
    Each is idempotent + reversible.
 3. Skim `auth_service/service.py:complete_sso_login` — the linking
    policy matrix is the highest-risk surface.
@@ -638,8 +638,11 @@ backend/alembic/versions/
   20260517_1300_auth_audit_log.py
   20260521_1200_sso_phase2.py
   20260524_1100_sso_phase3.py
-  20260527_1200_user_provenance_and_config.py
-  20260530_1200_context_models_display_rules.py  # (main; re-pointed)
+  20260527_1200_sso_phase4.py                    # (Phase 4; renamed from
+                                                  #  user_provenance_and_config to
+                                                  #  fit alembic_version VARCHAR(32))
+  20260530_1200_display_rules.py                  # (main; re-pointed + renamed
+                                                  #  from context_models_display_rules)
 
 frontend/src/
   store/auth.ts                  # auth store (Zustand)
