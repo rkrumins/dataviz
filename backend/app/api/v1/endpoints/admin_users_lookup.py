@@ -20,7 +20,6 @@ seamlessly.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Literal, Optional
 
@@ -243,25 +242,39 @@ async def lookup_user(
     response_model_by_alias=True,
 )
 async def search_users(
-    q: str = Query(..., min_length=1, max_length=200),
+    q: str = Query("", max_length=200),
     limit: int = Query(default=20, ge=1, le=100),
     _admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Fan-out across users.email, users.first/last name, identity
     external_id, and indexed external attribute values. Dedupes on
-    user_id; ``matchedOn`` records every dimension that matched."""
-    # Run all four scans concurrently. Limits per stream so a single
-    # popular needle doesn't make the response huge.
-    by_user, by_identity, by_attr_exact, by_attr_substr = await asyncio.gather(
-        user_repo.search_users(session, q=q, limit=limit),
-        _search_by_identity_external_id(session, q=q, limit=limit),
-        user_attribute_repo.get_users_by_attribute(
-            session, key="", value="", limit=limit,
-        ),
-        user_attribute_repo.search_users_by_attribute_substring(
-            session, needle=q, limit=limit,
-        ),
+    user_id; ``matchedOn`` records every dimension that matched.
+
+    Empty or whitespace-only ``q`` short-circuits to an empty list —
+    the SSO admin page hits this endpoint with ``q=`` on mount before
+    the user has typed anything; rejecting that with 422 just adds
+    UI noise.
+    """
+    needle = (q or "").strip()
+    if not needle:
+        return []
+
+    # The four scans run sequentially against the request's single
+    # AsyncSession. SQLAlchemy refuses concurrent ``execute`` calls
+    # on one session (``InvalidRequestError: concurrent operations
+    # are not permitted``); ``asyncio.gather`` here used to crash
+    # 500. A single typeahead is fast enough sequentially that this
+    # isn't worth fanning out across separate sessions.
+    by_user = await user_repo.search_users(session, q=needle, limit=limit)
+    by_identity = await _search_by_identity_external_id(
+        session, q=needle, limit=limit,
+    )
+    by_attr_exact = await user_attribute_repo.get_users_by_attribute(
+        session, key="", value="", limit=limit,
+    )
+    by_attr_substr = await user_attribute_repo.search_users_by_attribute_substring(
+        session, needle=needle, limit=limit,
     )
     # by_attr_exact above is intentionally an empty list (we don't
     # know which key to match exactly during fan-out); the substring

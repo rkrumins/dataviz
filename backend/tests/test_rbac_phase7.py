@@ -480,6 +480,93 @@ async def test_workspace_delete_cascades_custom_roles_and_bindings(
     assert "purge_role" in payload["roles_removed"]
 
 
+# ── Phase 8 — audit severity / summary / category filter ───────────
+
+
+@pytest.mark.asyncio
+async def test_audit_response_includes_severity_and_summary(
+    test_client: AsyncClient, db_session,
+):
+    """Every audit row carries a ``severity`` + human ``summary``
+    derived from the event_type catalogue. A role-change event
+    surfaces ``critical`` severity and the new role in the summary."""
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.role_changed",
+        payload={
+            "user_id": "usr_alice", "new_role": "super_admin",
+            "changed_by": "usr_admin",
+        },
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/admin/audit",
+        params={"eventType": "user.role_changed"},
+    )
+    assert resp.status_code == 200
+    ev = resp.json()["events"][0]
+    assert ev["severity"] == "critical"
+    assert "super_admin" in ev["summary"]
+
+
+@pytest.mark.asyncio
+async def test_audit_category_security_hides_login_noise(
+    test_client: AsyncClient, db_session,
+):
+    """The default ``category=security`` filter drops noisy events
+    so the audit page surfaces real RBAC signal by default."""
+    # Mix of noisy + meaningful events.
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.logged_in",
+        payload={"user_id": "usr_alice"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.access_denied",
+        payload={"user_id": "usr_alice", "permission": "x"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.role_changed",
+        payload={"user_id": "usr_alice", "new_role": "org_admin"},
+    )
+    await db_session.commit()
+
+    # Default — security only.
+    resp_sec = await test_client.get("/api/v1/admin/audit")
+    sec_types = {e["eventType"] for e in resp_sec.json()["events"]}
+    assert "user.role_changed" in sec_types
+    assert "user.logged_in" not in sec_types
+    assert "user.access_denied" not in sec_types
+
+    # Override — everything.
+    resp_all = await test_client.get(
+        "/api/v1/admin/audit", params={"category": "all"},
+    )
+    all_types = {e["eventType"] for e in resp_all.json()["events"]}
+    assert {"user.logged_in", "user.access_denied", "user.role_changed"} <= all_types
+
+
+@pytest.mark.asyncio
+async def test_audit_summary_handles_unknown_event_type(
+    test_client: AsyncClient, db_session,
+):
+    """An event type not in the catalogue still renders — severity
+    defaults to ``info`` and summary falls back to the raw type."""
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.workspace.totally_made_up",
+        payload={"x": 1},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/admin/audit",
+        params={"eventType": "rbac.workspace.totally_made_up"},
+    )
+    assert resp.status_code == 200
+    ev = resp.json()["events"][0]
+    assert ev["severity"] == "info"
+    assert ev["summary"] == "rbac.workspace.totally_made_up"
+
+
 @pytest.mark.asyncio
 async def test_audit_endpoint_event_types_list(
     test_client: AsyncClient, db_session,

@@ -81,7 +81,20 @@ export function AdminAudit() {
     const [activeCategory, setActiveCategory] = useState<string | null>(null)
     const [actorFilter, setActorFilter] = useState('')
     const [targetUserFilter, setTargetUserFilter] = useState('')
+    // Phase 8: ``security`` default hides login noise. ``all`` opts
+    // back into the full firehose for debugging.
+    const [scope, setScope] = useState<'security' | 'all'>('security')
+    // Phase 8: time window. ``7d`` is the default — wide enough to
+    // cover a typical incident review, narrow enough to keep the
+    // result set scannable. ``all`` removes the lower bound.
+    const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d' | 'all'>('7d')
     const { showToast } = useToast()
+
+    const fromTs = useMemo(() => {
+        if (timeRange === 'all') return undefined
+        const ms = { '24h': 86_400_000, '7d': 7 * 86_400_000, '30d': 30 * 86_400_000 }[timeRange]
+        return new Date(Date.now() - ms).toISOString()
+    }, [timeRange])
 
     const activeFilters: AuditFilters = useMemo(() => {
         const cat = CATEGORIES.find(c => c.key === activeCategory)
@@ -89,9 +102,11 @@ export function AdminAudit() {
             eventType: cat ? `${cat.prefix}*` : undefined,
             actorId: actorFilter.trim() || undefined,
             targetUserId: targetUserFilter.trim() || undefined,
+            category: scope,
+            fromTs,
             limit: 50,
         }
-    }, [activeCategory, actorFilter, targetUserFilter])
+    }, [activeCategory, actorFilter, targetUserFilter, scope, fromTs])
 
     const load = useCallback(
         async (silent = false) => {
@@ -164,8 +179,7 @@ export function AdminAudit() {
     }
 
     return (
-        <div className="absolute inset-0 overflow-y-auto bg-canvas">
-            <div className="max-w-6xl mx-auto p-6 space-y-6">
+        <div className="max-w-6xl mx-auto p-8 space-y-6 animate-in fade-in duration-500">
                 {/* Hero */}
                 <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3 min-w-0">
@@ -224,6 +238,59 @@ export function AdminAudit() {
                     })}
                 </div>
 
+                {/* Time range + scope toggle */}
+                <div className="rounded-xl border border-glass-border bg-canvas-elevated p-3 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-2xs uppercase tracking-wide text-ink-muted mr-1">
+                            Range
+                        </span>
+                        {(['24h', '7d', '30d', 'all'] as const).map(r => {
+                            const active = timeRange === r
+                            return (
+                                <button
+                                    key={r}
+                                    onClick={() => setTimeRange(r)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors',
+                                        active
+                                            ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                            : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
+                                    )}
+                                >
+                                    {r === 'all' ? 'All time' : `Last ${r}`}
+                                </button>
+                            )
+                        })}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-2xs uppercase tracking-wide text-ink-muted mr-1">
+                            Scope
+                        </span>
+                        {(['security', 'all'] as const).map(s => {
+                            const active = scope === s
+                            return (
+                                <button
+                                    key={s}
+                                    onClick={() => setScope(s)}
+                                    className={cn(
+                                        'px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors capitalize',
+                                        active
+                                            ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                            : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
+                                    )}
+                                    title={
+                                        s === 'security'
+                                            ? 'Hide login + access-denied noise'
+                                            : 'Show every event (debugging)'
+                                    }
+                                >
+                                    {s === 'security' ? 'Security only' : 'Everything'}
+                                </button>
+                            )
+                        })}
+                    </div>
+                </div>
+
                 {/* Filter row */}
                 <div className="rounded-xl border border-glass-border bg-canvas-elevated p-3 flex flex-wrap items-center gap-2">
                     <Filter className="w-4 h-4 text-ink-muted shrink-0" />
@@ -280,8 +347,9 @@ export function AdminAudit() {
                             <table className="w-full text-sm">
                                 <thead className="text-2xs uppercase tracking-wide text-ink-muted bg-glass-base/30">
                                     <tr>
+                                        <th className="text-left px-2 py-2 w-6"></th>
                                         <th className="text-left px-4 py-2">When</th>
-                                        <th className="text-left px-4 py-2">Event</th>
+                                        <th className="text-left px-4 py-2">What happened</th>
                                         <th className="text-left px-4 py-2">Actor</th>
                                         <th className="text-left px-4 py-2">Target</th>
                                         <th className="text-left px-4 py-2">Workspace</th>
@@ -309,40 +377,93 @@ export function AdminAudit() {
                         )}
                     </>
                 )}
-            </div>
         </div>
     )
 }
 
 
+const SEVERITY_DOT: Record<string, string> = {
+    info: 'bg-sky-500',
+    warning: 'bg-amber-500',
+    critical: 'bg-red-500',
+}
+
+
 function AuditRow({ event }: { event: AuditEvent }) {
     const [expanded, setExpanded] = useState(false)
+    const severity = event.severity ?? 'info'
     return (
         <>
             <tr
                 onClick={() => setExpanded(v => !v)}
                 className="border-t border-glass-border hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer"
             >
+                <td className="px-2 py-2.5">
+                    <span
+                        className={cn(
+                            'inline-block w-2 h-2 rounded-full',
+                            SEVERITY_DOT[severity] ?? SEVERITY_DOT.info,
+                        )}
+                        title={`Severity: ${severity}`}
+                    />
+                </td>
                 <td className="px-4 py-2.5 text-xs text-ink-muted whitespace-nowrap" title={event.createdAt}>
                     {formatRelative(event.createdAt)}
                 </td>
                 <td className="px-4 py-2.5">
-                    <code className="font-mono text-[11px] text-ink">{event.eventType}</code>
+                    <p className="text-sm text-ink font-medium">
+                        {event.summary || event.eventType}
+                    </p>
+                    <code className="font-mono text-[10px] text-ink-muted">
+                        {event.eventType}
+                    </code>
                 </td>
                 <td className="px-4 py-2.5 text-xs text-ink-secondary">
-                    {event.actorId ? <code className="font-mono text-[11px]">{event.actorId}</code> : <span className="text-ink-muted">—</span>}
+                    {event.actorId ? (
+                        <a
+                            href={`/admin/users#${event.actorId}`}
+                            onClick={e => e.stopPropagation()}
+                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
+                        >
+                            {event.actorId}
+                        </a>
+                    ) : (
+                        <span className="text-ink-muted">—</span>
+                    )}
                 </td>
                 <td className="px-4 py-2.5 text-xs text-ink-secondary">
-                    {event.targetUserId ? <code className="font-mono text-[11px]">{event.targetUserId}</code> : <span className="text-ink-muted">—</span>}
-                    {event.targetRole && <span className="ml-1 text-ink-muted">@ {event.targetRole}</span>}
+                    {event.targetUserId ? (
+                        <a
+                            href={`/admin/users#${event.targetUserId}`}
+                            onClick={e => e.stopPropagation()}
+                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
+                        >
+                            {event.targetUserId}
+                        </a>
+                    ) : (
+                        <span className="text-ink-muted">—</span>
+                    )}
+                    {event.targetRole && (
+                        <span className="ml-1 text-ink-muted">@ {event.targetRole}</span>
+                    )}
                 </td>
                 <td className="px-4 py-2.5 text-xs text-ink-secondary">
-                    {event.workspaceId ? <code className="font-mono text-[11px]">{event.workspaceId}</code> : <span className="text-ink-muted">—</span>}
+                    {event.workspaceId ? (
+                        <a
+                            href={`/workspaces/${event.workspaceId}`}
+                            onClick={e => e.stopPropagation()}
+                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
+                        >
+                            {event.workspaceId}
+                        </a>
+                    ) : (
+                        <span className="text-ink-muted">—</span>
+                    )}
                 </td>
             </tr>
             {expanded && (
                 <tr className="border-t border-glass-border bg-glass-base/20">
-                    <td colSpan={5} className="px-4 py-3">
+                    <td colSpan={6} className="px-4 py-3">
                         <pre className="text-2xs font-mono text-ink-secondary whitespace-pre-wrap break-words">
                             {JSON.stringify(event.payload, null, 2)}
                         </pre>

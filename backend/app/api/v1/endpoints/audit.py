@@ -39,10 +39,181 @@ router = APIRouter()
 # so the chip set stays in sync with whatever the backend emits.
 _AUDIT_PREFIXES = (
     "rbac.workspace.",   # member_bound / member_revoked / member_expiry_updated
+    "rbac.view.",        # grant_added / grant_removed
     "rbac.role.",        # created / updated / deleted / cascade_revoked
     "rbac.permission.",  # updated
-    "user.",             # access_denied / role_changed / approved / etc.
+    "rbac.group.",       # created / updated / deleted / member_added / member_removed
+    "rbac.access_request.",  # created / approved / denied
+    "rbac.sso_mapping.",     # created / deleted
+    "user.",             # role_changed / approved / etc.
+    "auth.",             # config.updated
+    "idp.",              # provider.created / updated / deleted
 )
+
+
+# Phase 8: noisy events the default ``category=security`` filter
+# excludes. These either fire on every request (logged_in /
+# access_denied) or are bookkeeping the operator doesn't usually want
+# in an audit trail (password-reset chrome, invite token chrome,
+# self-service signups). The "Everything" toggle on the FE switches
+# to ``category=all`` which suppresses this filter.
+_NOISE_EVENT_TYPES = frozenset({
+    "user.logged_in",
+    "user.access_denied",
+    "user.created",                  # pending signup; the .approved is the security event
+    "user.created_via_invite",       # invite chrome — the role_changed/bound event is what matters
+    "user.password_reset_requested",
+    "user.password_reset_completed",
+    "user.reset_token_generated",
+    "user.invite_created",
+    "rbac.access_request.created",   # only the approve/deny step is interesting
+})
+
+
+# Phase 8: per-event display metadata. Each entry maps a known
+# event_type to (severity, summary-builder). The summary builder
+# receives the decoded payload dict and returns a one-line human
+# sentence. Missing payload keys are tolerated — the builder uses
+# ``.get`` with sensible fallbacks so a malformed event never raises
+# inside the response serialisation path.
+def _summary_role_changed(p: dict) -> str:
+    role = p.get("new_role") or "?"
+    return f"Global role changed → {role}"
+
+
+def _summary_ws_member_bound(p: dict) -> str:
+    role = p.get("role") or "?"
+    ws = p.get("workspace_id") or "?"
+    expiry = p.get("expires_at")
+    suffix = f" (expires {expiry[:10]})" if expiry else ""
+    return f"Bound as {role} in {ws}{suffix}"
+
+
+def _summary_ws_member_revoked(p: dict) -> str:
+    role = p.get("role") or "?"
+    ws = p.get("workspace_id") or "?"
+    killed = p.get("sessions_revoked") or 0
+    suffix = f" (killed {killed} session{'s' if killed != 1 else ''})" if killed else ""
+    return f"{role} revoked from {ws}{suffix}"
+
+
+def _summary_ws_expiry(p: dict) -> str:
+    new = p.get("new_expires_at")
+    if new is None:
+        return f"Cleared expiry on {p.get('role') or '?'} in {p.get('workspace_id') or '?'}"
+    return f"Expiry updated → {new[:10]} ({p.get('role') or '?'} in {p.get('workspace_id') or '?'})"
+
+
+def _summary_role_lifecycle(verb: str):
+    def _build(p: dict) -> str:
+        return f"Role '{p.get('name') or '?'}' {verb}"
+    return _build
+
+
+def _summary_cascade(p: dict) -> str:
+    n = p.get("users_revoked") or 0
+    role = p.get("role_name") or "?"
+    return f"Role '{role}' update cascade-revoked {n} user{'s' if n != 1 else ''}"
+
+
+def _summary_ws_roles_cascaded(p: dict) -> str:
+    n = len(p.get("roles_removed") or [])
+    ws = p.get("workspace_id") or "?"
+    return f"Workspace {ws} deletion cascaded {n} role{'s' if n != 1 else ''}"
+
+
+def _summary_view_grant(verb: str):
+    def _build(p: dict) -> str:
+        view = p.get("view_id") or "?"
+        role = p.get("role") or "?"
+        return f"View grant ({role}) {verb} on {view}"
+    return _build
+
+
+def _summary_group_lifecycle(verb: str):
+    def _build(p: dict) -> str:
+        return f"Group '{p.get('group_name') or p.get('group_id') or '?'}' {verb}"
+    return _build
+
+
+def _summary_group_membership(verb: str):
+    def _build(p: dict) -> str:
+        return f"User {verb} group '{p.get('group_id') or '?'}'"
+    return _build
+
+
+def _summary_user_status(verb: str):
+    def _build(p: dict) -> str:
+        uid = p.get("user_id") or "?"
+        return f"User {uid} {verb}"
+    return _build
+
+
+def _summary_identity(verb: str):
+    def _build(p: dict) -> str:
+        return f"SSO identity {verb} for {p.get('user_id') or '?'}"
+    return _build
+
+
+def _summary_access_request(verb: str):
+    def _build(p: dict) -> str:
+        ws = p.get("workspace_id") or "?"
+        return f"Access request {verb} for {ws}"
+    return _build
+
+
+def _summary_idp_provider(verb: str):
+    def _build(p: dict) -> str:
+        slug = p.get("slug") or p.get("provider_id") or "?"
+        return f"IdP provider '{slug}' {verb}"
+    return _build
+
+
+def _summary_sso_mapping(verb: str):
+    def _build(p: dict) -> str:
+        return f"IdP group mapping {verb} ({p.get('idp_group') or '?'})"
+    return _build
+
+
+_EVENT_META: dict[str, tuple[str, callable]] = {
+    # ── critical: role / identity changes
+    "user.role_changed": ("critical", _summary_role_changed),
+    "user.suspended": ("critical", _summary_user_status("suspended")),
+    "user.rejected": ("critical", _summary_user_status("rejected")),
+    "user.identity.admin_linked": ("critical", _summary_identity("linked")),
+    "user.identity.admin_unlinked": ("critical", _summary_identity("unlinked")),
+    "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
+    "rbac.role.cascade_revoked": ("critical", _summary_cascade),
+    "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
+
+    # ── warning: revokes / deletes / denials
+    "rbac.workspace.member_revoked": ("warning", _summary_ws_member_revoked),
+    "rbac.view.grant_removed": ("warning", _summary_view_grant("revoked")),
+    "rbac.role.deleted": ("warning", _summary_role_lifecycle("deleted")),
+    "rbac.group.deleted": ("warning", _summary_group_lifecycle("deleted")),
+    "rbac.group.member_removed": ("warning", _summary_group_membership("removed from")),
+    "rbac.sso_mapping.deleted": ("warning", _summary_sso_mapping("deleted")),
+    "idp.provider.deleted": ("warning", _summary_idp_provider("deleted")),
+    "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
+
+    # ── info: binds / creates / updates
+    "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
+    "rbac.workspace.member_expiry_updated": ("info", _summary_ws_expiry),
+    "rbac.view.grant_added": ("info", _summary_view_grant("added")),
+    "rbac.role.created": ("info", _summary_role_lifecycle("created")),
+    "rbac.role.updated": ("info", _summary_role_lifecycle("permissions updated")),
+    "rbac.permission.updated": ("info", lambda p: f"Permission '{p.get('id') or '?'}' description updated"),
+    "rbac.group.created": ("info", _summary_group_lifecycle("created")),
+    "rbac.group.updated": ("info", _summary_group_lifecycle("updated")),
+    "rbac.group.member_added": ("info", _summary_group_membership("added to")),
+    "rbac.sso_mapping.created": ("info", _summary_sso_mapping("created")),
+    "idp.provider.created": ("info", _summary_idp_provider("created")),
+    "idp.provider.updated": ("info", _summary_idp_provider("updated")),
+    "user.approved": ("info", _summary_user_status("approved")),
+    "user.reactivated": ("info", _summary_user_status("reactivated")),
+    "rbac.access_request.approved": ("info", _summary_access_request("approved")),
+}
+
 
 _MAX_LIMIT = 500
 _DEFAULT_LIMIT = 50
@@ -50,7 +221,8 @@ _DEFAULT_LIMIT = 50
 
 def _row_to_response(row: OutboxEventORM) -> AuditEventResponse:
     """Decode the JSON payload + surface payload-derived fields the
-    UI keys off (actor_id, target_user_id, target_role).
+    UI keys off (actor_id, target_user_id, target_role, severity,
+    summary).
 
     Bad JSON is treated as ``{}`` rather than 500'd — an event with a
     malformed payload is operationally rare and shouldn't break the
@@ -62,6 +234,21 @@ def _row_to_response(row: OutboxEventORM) -> AuditEventResponse:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+
+    # Phase 8: pick severity + human summary from the per-event
+    # catalogue. Unknown events default to ``info`` + the raw type
+    # so a new event added on the backend without a catalogue entry
+    # still renders something sensible (just not as polished).
+    meta = _EVENT_META.get(row.event_type)
+    if meta is not None:
+        severity, summary_builder = meta
+        try:
+            summary = summary_builder(payload)
+        except Exception:  # noqa: BLE001 — never break the response on a bad summary
+            summary = row.event_type
+    else:
+        severity = "info"
+        summary = row.event_type
 
     return AuditEventResponse(
         event_id=row.id,
@@ -81,6 +268,8 @@ def _row_to_response(row: OutboxEventORM) -> AuditEventResponse:
             or payload.get("role_name")
             or payload.get("name"),
         workspace_id=payload.get("workspace_id"),
+        severity=severity,
+        summary=summary,
         payload=payload,
     )
 
@@ -118,6 +307,15 @@ async def list_audit_events(
         ),
     ),
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
+    category: str = Query(
+        "security",
+        description=(
+            "``security`` (default) hides operational noise like "
+            "``user.logged_in`` / ``user.access_denied`` / signup "
+            "chrome. ``all`` returns every event under the RBAC + "
+            "user + auth + idp namespaces."
+        ),
+    ),
     _admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ) -> AuditListResponse:
@@ -155,6 +353,14 @@ async def list_audit_events(
                 OutboxEventORM.event_type.like(f"{p}%")
                 for p in _AUDIT_PREFIXES
             ])
+        )
+
+    # Phase 8: ``category=security`` (the default) additionally drops
+    # the noisy event types so the page surfaces real RBAC signal by
+    # default. ``category=all`` opts back into the full firehose.
+    if category != "all":
+        stmt = stmt.where(
+            OutboxEventORM.event_type.notin_(_NOISE_EVENT_TYPES)
         )
     if from_ts:
         stmt = stmt.where(OutboxEventORM.created_at >= from_ts)

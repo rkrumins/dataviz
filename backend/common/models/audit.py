@@ -30,6 +30,13 @@ class AuditEventResponse(BaseModel):
     target_role: Optional[str] = Field(default=None, alias="targetRole")
     workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
 
+    # Phase 8: human-readable display fields the FE keys off so the
+    # admin audit table doesn't show raw event_type codes.
+    # ``severity`` is one of ``info`` / ``warning`` / ``critical`` and
+    # drives the row colour; ``summary`` is a one-line sentence.
+    severity: str = Field(default="info")
+    summary: str = Field(default="")
+
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

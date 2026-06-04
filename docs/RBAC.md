@@ -324,6 +324,48 @@ Workspace roles see `workspace:*` + `resource:*` only; global
 roles see `system:*` + `resource:*` only. Switching scope mid-edit
 clears any silently-invalid selections.
 
+## Phase 8 hardening — audit-log usability
+
+The Phase-7 audit endpoint worked but the page was operationally
+useless: 30+ `user.logged_in` rows dominated the view, every cell
+showed opaque slugs, the layout escaped the admin sidebar, and the
+`/admin/users/search` typeahead crashed (500 on real query, 422 on
+empty). Phase 8 closes those gaps.
+
+* **Default filter is now `category=security`** — operationally noisy
+  events (`user.logged_in`, `user.access_denied`,
+  `user.created`, `user.password_reset_*`,
+  `user.reset_token_generated`, `user.invite_created`,
+  `rbac.access_request.created`) are excluded. Toggle to
+  `category=all` for the full firehose when debugging.
+
+* **Severity + human summary** — every audit row now carries
+  `severity` (`info` / `warning` / `critical`) and `summary` (a
+  one-line sentence) computed from the `event_type` catalogue. The
+  FE renders a coloured dot + the sentence; the raw `event_type`
+  stays visible underneath as a small monospace caption. Unknown
+  events fall back to `info` + the raw type so a new backend event
+  still renders without a catalogue entry.
+
+* **Time range chips** — `Last 24h / 7d / 30d / All time`. Defaults
+  to 7d (wide enough for incident review, narrow enough to scan).
+
+* **Layout fix** — `AdminAudit.tsx` swapped its
+  `absolute inset-0` wrapper for the standard
+  `max-w-6xl mx-auto p-8` pattern so it sits inside the admin
+  sidebar layout like every other admin page.
+
+* **Clickable entities** — `actorId` / `targetUserId` /
+  `workspaceId` cells are now hyperlinks (`/admin/users#<id>` and
+  `/workspaces/<id>`) so an operator can drill from "who did this?"
+  to the affected user / workspace in one click.
+
+* **SSO search fixes** — `/admin/users/search` accepts empty `q`
+  (returns `[]` instead of 422) and runs the four underlying scans
+  sequentially (a single AsyncSession can't service concurrent
+  `execute(...)` calls; the `asyncio.gather` crashed the SSO admin
+  page).
+
 ## Phase 7 hardening — workspace deletion cascade
 
 Deleting a workspace used to leave behind:

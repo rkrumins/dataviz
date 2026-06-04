@@ -11,6 +11,8 @@ import { authFetch } from './apiClient'
 const AUDIT_API = '/api/v1/admin/audit'
 
 
+export type AuditSeverity = 'info' | 'warning' | 'critical'
+
 export interface AuditEvent {
     eventId: string
     eventType: string
@@ -23,6 +25,12 @@ export interface AuditEvent {
     targetUserId?: string | null
     targetRole?: string | null
     workspaceId?: string | null
+
+    /** Phase 8: backend-derived display fields. ``severity`` drives
+     *  the row colour, ``summary`` is the human one-liner shown
+     *  instead of the raw ``event_type`` code. */
+    severity: AuditSeverity
+    summary: string
 
     payload: Record<string, unknown>
 }
@@ -44,6 +52,9 @@ export interface AuditFilters {
     toTs?: string
     cursor?: string
     limit?: number
+    /** Phase 8: ``security`` (default) hides login + access-denied
+     *  noise; ``all`` returns the full firehose. */
+    category?: 'security' | 'all'
 }
 
 
