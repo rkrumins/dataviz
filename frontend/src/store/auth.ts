@@ -167,6 +167,12 @@ interface AuthState {
     handleSessionLost: () => void
     /** Internal: invoked after login / silent refresh hydrates claims. */
     setPermissions: (claims: PermissionClaims) => void
+    /** Phase 10: re-fetch ``/me/permissions`` after a silent refresh
+     *  so route guards and TopBar react to role / binding mutations
+     *  that happened mid-session. Fire-and-forget — failures clear
+     *  the claim to empty so guards fail-closed until the next page
+     *  load. */
+    refreshPermissions: () => Promise<void>
     clearError: () => void
     /** Predicate helpers used by UI components. Reading the store via
      *  these instead of hand-rolling the check keeps the wildcard +
@@ -285,6 +291,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     setPermissions: (permissions) => set({ permissions }),
+
+    refreshPermissions: async () => {
+        // Mirrors ``hydratePermissions`` but called from outside the
+        // login / bootstrap flow. Used by ``fetchWithTimeout`` after
+        // a successful silent refresh — the new JWT carries
+        // re-resolved claims (auth_service/service.py:365) and the
+        // FE store needs to catch up so route guards stop blocking
+        // a freshly-promoted admin.
+        await hydratePermissions(set)
+    },
 
     clearError: () => set({ error: null }),
 

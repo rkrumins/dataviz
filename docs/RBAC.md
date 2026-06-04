@@ -324,6 +324,55 @@ Workspace roles see `workspace:*` + `resource:*` only; global
 roles see `system:*` + `resource:*` only. Switching scope mid-edit
 clears any silently-invalid selections.
 
+## Phase 10 — promoted admin sees admin UI without re-login
+
+Pre-Phase-10 a real bug: an admin promoted to `super_admin` while
+logged in had to manually log out and log back in before the admin
+UI worked. Two compounding root causes:
+
+1. **Revocation only fired on `requires(...)` routes.**
+   `get_current_user` — the base auth dep used by every other
+   protected endpoint, including those gated by `require_admin` —
+   never consulted the revoked-sid set. So a stale JWT survived
+   indefinitely on `require_admin` routes (`auth/dependencies.py`
+   carried an explicit "does NOT consult revocation" docstring).
+
+2. **`require_admin` had a legacy DTO-role fallback.** The
+   `user.role` field on the User DTO is re-read from `user_roles`
+   on every `validate_session`, so post-promotion it correctly
+   showed `super_admin`. `require_admin` accepted the DTO role
+   AND let the user in even when the JWT's `system:admin` claim
+   was missing — but every endpoint gated by `requires(...)` then
+   403'd because the claim wasn't there. The user saw a half-
+   functional admin page.
+
+**Phase 10 fix:**
+
+* Revocation moves into `get_current_user`. Every authenticated
+  request now consults the set. A revoked session → 401 → silent
+  refresh → fresh JWT with re-resolved claims → request retried
+  → admin works. Fail-open on Redis outage (an incident must
+  not lock every authenticated user out); `requires(...)` keeps
+  its fail-closed probe for sensitive permissions.
+* `require_admin` is simplified to require the `system:admin`
+  claim. The legacy DTO-role path is gone — Phase 6's
+  `set_global_role` made the two stores agree by construction,
+  so any state where DTO says admin but claim doesn't is a
+  stale-JWT state that should silent-refresh, not be accepted.
+* `requires(...)` drops its duplicate revocation block (now done
+  upstream in `get_current_user`); keeps the fail-closed probe
+  for sensitive permissions like `system:admin` /
+  `workspace:admin`.
+* Frontend `tryRefresh` calls `useAuthStore.refreshPermissions()`
+  after a successful silent refresh. The route guards
+  (`RequirePermission`) and TopBar admin cog react to the new
+  claims without an explicit page reload.
+
+End-to-end: admin promotes user U mid-session. U's next request
+401's (revoked sid), silent-refresh runs, new JWT minted with
+`system:admin`, FE permissions re-hydrate, admin nav appears,
+admin functions work. No manual re-login.
+
 ## Phase 9 — audit log first-class on a quiet system
 
 The Phase-8 default filter hid login/logout as "noise", which made

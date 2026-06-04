@@ -96,7 +96,26 @@ async function tryRefresh(): Promise<boolean> {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       })
-      if (res.ok) return true
+      if (res.ok) {
+        // Phase 10: the new JWT carries re-resolved claims (the
+        // backend refresh path calls ``permission_service.resolve``
+        // — see auth_service/service.py:365). Re-hydrate the FE
+        // store so route guards (RequirePermission, TopBar admin
+        // cog) react to role / binding mutations made
+        // mid-session. Fire-and-forget — a failed re-hydrate
+        // logs and the next page transition picks up fresh state.
+        // Dynamic import avoids a circular dep through the auth
+        // store.
+        void (async () => {
+          try {
+            const mod = await import('@/store/auth')
+            await mod.useAuthStore.getState().refreshPermissions()
+          } catch {
+            // best-effort
+          }
+        })()
+        return true
+      }
 
       // SSO daily ceiling: the backend signals "session expired at the
       // IdP, follow login_url to re-authenticate" via a structured 401

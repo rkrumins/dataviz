@@ -99,6 +99,15 @@ async def get_current_user(request: Request) -> User:
 
     The access token is read from the ``nx_access`` HttpOnly cookie set
     by /api/v1/auth/login.
+
+    Phase 10: also consults the Redis revocation set so a forced
+    session-kill (admin promote / demote / suspend) takes effect on
+    the very next request — not just on routes that happen to use
+    ``requires(...)``. The check is fail-open on Redis outage: a
+    Redis incident must not lock every authenticated user out of
+    the platform; the JWT TTL is still the staleness floor. Fail-
+    closed only applies on routes that explicitly opt-in via
+    ``requires(...)`` against a sensitive permission.
     """
     user = await _identity_service(request).validate_session(read_access_cookie(request))
     if user is None:
@@ -106,6 +115,34 @@ async def get_current_user(request: Request) -> User:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
+
+    # Phase 10: pull the sid from the JWT (the decode is cheap and
+    # the result is already cached by FastAPI deps if the caller
+    # also takes get_permission_claims). A missing sid means the
+    # token predates the revocation feature — treat as not-revoked
+    # and let the JWT TTL handle it.
+    token = read_access_cookie(request)
+    sid = ""
+    if token:
+        try:
+            payload = decode_token(token)
+            sid = payload.get("sid", "") or ""
+        except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+            # validate_session already rejected this above — defensive.
+            sid = ""
+
+    if sid:
+        try:
+            if await get_revocation_service().is_revoked(sid):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session revoked",
+                )
+        except RevocationBackendError as exc:
+            logger.warning(
+                "Revocation backend unavailable in get_current_user "
+                "(user=%s): %s — honouring JWT", user.id, exc,
+            )
     return user
 
 
@@ -122,51 +159,27 @@ async def require_admin(
     request: Request,
     user: User = Depends(get_current_user),
 ) -> User:
-    """Require that the authenticated user is an admin.
+    """Require that the authenticated user is a Super Admin.
 
-    Phase 2 transition: accepts EITHER the legacy ``user.role == "admin"``
-    DTO field OR a ``system:admin`` permission claim in the JWT. Both
-    are equivalent for genuine admins, and the dual check makes the
-    swap non-breaking — tokens minted before Phase 1 (no claims) still
-    pass via the role string, and tokens minted after Phase 1 pass via
-    the claim.
+    Phase 10: the dual-mode legacy / claim check is gone. Phase 6
+    made the two stores (``user_roles`` + ``role_bindings``) agree
+    by construction, and ``get_current_user`` (Phase 10) now
+    honours the revocation set on EVERY request. A stale JWT
+    without ``system:admin`` triggers a 403 → the FE silent-refresh
+    mints a fresh JWT with re-resolved claims → retry succeeds.
 
-    The legacy role check stays the source of truth when the
-    ``RBAC_ENFORCE_ADMIN`` env var is explicitly set to ``false``
-    (emergency rollback). Default behaviour is to honour both.
-
-    The dependency does NOT consult the Redis revocation set — Phase 1
-    keeps revocation behind the new ``requires(...)`` factory only.
-    Endpoints that need revocation honoured should migrate to
-    ``Depends(requires("system:admin"))`` directly; that's a one-line
-    change and is encouraged for new admin endpoints.
+    The legacy DTO-role path used to mask a real bug: a promoted
+    user's ``User.role`` flipped to ``super_admin`` (from the
+    ``user_roles`` re-read) but their JWT carried empty
+    ``global_perms``. ``require_admin`` accepted the role string
+    and let them in; every route using ``requires(...)`` then 403'd
+    because the claim was missing. The user saw a half-functional
+    admin page. Dropping the legacy path forces a single consistent
+    state: if you don't have the claim, you don't have admin.
     """
-    # Legacy path — still authoritative when the kill-switch is on.
-    # Phase 5: ``admin`` was renamed to ``super_admin`` in user_roles.
-    legacy_allow = user.role == "super_admin"
-
-    if not rbac_flag("RBAC_ENFORCE_ADMIN"):
-        if legacy_allow:
-            return user
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
-
-    # Enforcement on: also try the claim path so post-Phase-1 tokens
-    # without a populated User.role can still authenticate as admin.
-    claim_allow = False
-    try:
-        claims = get_permission_claims(request)
-        claim_allow = has_permission(claims, "system:admin")
-    except HTTPException:
-        # 401 from get_permission_claims → no claims; fall back to
-        # legacy. If legacy also fails we 403 below.
-        pass
-
-    if legacy_allow or claim_allow:
+    claims = get_permission_claims(request)
+    if has_permission(claims, "system:admin"):
         return user
-
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Admin access required",
@@ -309,16 +322,21 @@ def requires(
         # success path here so the audit row outlives the rollback.
         session: AsyncSession = Depends(get_db_session),
     ) -> User:
-        # Revocation check.
-        revocation = get_revocation_service()
-        try:
-            if claims.sid and await revocation.is_revoked(claims.sid):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Session revoked",
-                )
-        except RevocationBackendError as exc:
-            if fail_closed:
+        # Phase 10: revocation is now enforced inside
+        # ``get_current_user`` for every authenticated request, so
+        # by the time we get here we know the sid hasn't been
+        # revoked. For fail-closed permissions we still want the
+        # Redis-outage 503 behaviour (a sensitive route shouldn't
+        # be reached if we can't confirm the session is alive), so
+        # we run a second, opt-in revocation probe here.
+        if fail_closed:
+            try:
+                if claims.sid and await get_revocation_service().is_revoked(claims.sid):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session revoked",
+                    )
+            except RevocationBackendError as exc:
                 logger.warning(
                     "Revocation backend unavailable on fail-closed path "
                     "(perm=%s user=%s): %s",
@@ -328,12 +346,6 @@ def requires(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Authorization temporarily unavailable",
                 )
-            # Fail-open: log and continue with the JWT claims as-is.
-            logger.warning(
-                "Revocation backend unavailable on fail-open path "
-                "(perm=%s user=%s): %s — honouring JWT claim",
-                permission, user.id, exc,
-            )
 
         # Resolve workspace id from the path, if scoped.
         workspace_id: Optional[str] = None
