@@ -33,6 +33,11 @@ const SignUpPage = lazy(() => import('@/components/auth/SignUpPage').then(m => (
 const DocsPage = lazy(() => import('@/pages/DocsPage').then(m => ({ default: m.DocsPage })))
 const DocsContent = lazy(() => import('@/components/docs/DocsContent').then(m => ({ default: m.DocsContent })))
 const DocsFAQ = lazy(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
+
+// User Guide (public, self-contained premium layout)
+const GuidePage = lazy(() => import('@/pages/GuidePage').then(m => ({ default: m.GuidePage })))
+const GuideHome = lazy(() => import('@/components/guide/GuideHome').then(m => ({ default: m.GuideHome })))
+const GuideContent = lazy(() => import('@/components/guide/GuideContent').then(m => ({ default: m.GuideContent })))
 const ForgotPasswordPage = lazy(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
 const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
 
@@ -61,6 +66,15 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="overview" replace /> },
       { path: 'faq', element: <Lazy><DocsFAQ /></Lazy> },
       { path: ':slug', element: <Lazy><DocsContent /></Lazy> },
+    ],
+  },
+  // Public user guide
+  {
+    path: '/guide',
+    element: <Lazy><GuidePage /></Lazy>,
+    children: [
+      { index: true, element: <Lazy><GuideHome /></Lazy> },
+      { path: ':slug', element: <Lazy><GuideContent /></Lazy> },
     ],
   },
   { path: '/forgot-password', element: <Lazy><ForgotPasswordPage /></Lazy> },
