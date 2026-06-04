@@ -17,8 +17,26 @@ import {
     RotateCcw, Lock, Copy, Check, Link2,
 } from 'lucide-react'
 import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
+import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
+import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
+
+
+// Phase 11: classify a role for invite purposes from its catalogue
+// entry. Mirrors the backend rules so the modal can drive the
+// workspace-picker + email-required UX before the request is sent.
+const _WORKSPACE_TEMPLATE_ROLES = new Set([
+    'workspace_admin', 'workspace_member', 'workspace_viewer',
+])
+
+function roleIsPrivileged(perms: string[]): boolean {
+    return perms.some(p => p === 'workspace:admin' || p.startsWith('system:'))
+}
+
+function roleNeedsWorkspace(role: RoleDefinitionResponse): boolean {
+    return _WORKSPACE_TEMPLATE_ROLES.has(role.name) || role.scopeType === 'workspace'
+}
 
 // ── Types & constants ────────────────────────────────────────────────
 
@@ -190,12 +208,9 @@ export function AdminUsers() {
     // Reset password mode: 'direct' or 'token'
     const [resetMode, setResetMode] = useState<'direct' | 'token'>('token')
 
-    // Invite state
-    // Phase 6: invite role is optional. ``''`` (the default) means
-    // no global role — the new user activates as a regular account
-    // and gets bound to workspaces afterwards. Set to ``'super_admin'``
-    // or ``'org_admin'`` to provision a global admin on signup.
-    const [inviteRole, setInviteRole] = useState<string>('')
+    // Invite state. Phase 11: the role / workspace / email selection
+    // lives inside <InviteForm/>; the parent only holds the generated
+    // result + copy state.
     const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
@@ -359,14 +374,16 @@ export function AdminUsers() {
         setResetMode('token')
         setInviteResult(null)
         setInviteCopied(false)
-        setInviteRole('')
     }
 
-    const handleCreateInvite = async () => {
+    const handleCreateInvite = async (
+        role: string | null,
+        opts: { workspaceId?: string | null; email?: string | null },
+    ) => {
         setInviteLoading(true)
         setError(null)
         try {
-            const resp = await adminUserService.createInvite(inviteRole || null)
+            const resp = await adminUserService.createInvite(role, opts)
             setInviteResult(resp)
             setSuccessMsg('Invite link generated')
         } catch (err: any) {
@@ -891,11 +908,19 @@ export function AdminUsers() {
                                                     </button>
                                                 </div>
                                                 <p className="text-[11px] text-ink-muted mt-2">
-                                                    Role: <span className="font-semibold capitalize">{inviteResult.role}</span> &middot; Expires: {formatDate(inviteResult.expiresAt)}
+                                                    Role: <span className="font-semibold">{inviteResult.role ?? 'No role (plain account)'}</span>
+                                                    {inviteResult.workspaceId && <> &middot; Workspace: <span className="font-semibold">{inviteResult.workspaceId}</span></>}
+                                                    {' '}&middot; Expires: {formatDate(inviteResult.expiresAt)}
                                                 </p>
-                                                <p className="text-[11px] text-ink-muted mt-1">
-                                                    Share this link with the user. They will be auto-activated upon signup.
-                                                </p>
+                                                {inviteResult.email ? (
+                                                    <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
+                                                        Email-bound: only <span className="font-semibold">{inviteResult.email}</span> can accept this link.
+                                                    </p>
+                                                ) : (
+                                                    <p className="text-[11px] text-ink-muted mt-1">
+                                                        Share this link with the user. They will be auto-activated upon signup.
+                                                    </p>
+                                                )}
                                             </div>
                                             <div className="flex justify-end">
                                                 <button onClick={closeModal}
@@ -905,45 +930,12 @@ export function AdminUsers() {
                                             </div>
                                         </div>
                                     ) : (
-                                        <>
-                                            <p className="text-sm text-ink-secondary mb-4">
-                                                Generate a link that lets a new user sign up and bypass the approval queue.
-                                                Choose what role the invited user will receive.
-                                            </p>
-                                            <div className="space-y-2 mb-5">
-                                                {assignableRoles.map(r => {
-                                                    const RIcon = r.icon
-                                                    const isSelected = inviteRole === r.value
-                                                    return (
-                                                        <button key={r.value} onClick={() => setInviteRole(r.value)}
-                                                            className={cn(
-                                                                "w-full flex items-center gap-3 p-3 rounded-xl border transition-colors text-left",
-                                                                isSelected
-                                                                    ? "border-accent-lineage bg-accent-lineage/5"
-                                                                    : "border-glass-border hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
-                                                            )}>
-                                                            <div className={cn(
-                                                                "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                                                                isSelected ? "bg-accent-lineage/10 text-accent-lineage" : "bg-black/5 dark:bg-white/5 text-ink-muted"
-                                                            )}>
-                                                                <RIcon className="w-4 h-4" />
-                                                            </div>
-                                                            <div>
-                                                                <p className={cn("text-sm font-semibold", isSelected ? "text-accent-lineage" : "text-ink")}>{r.label}</p>
-                                                                <p className="text-[11px] text-ink-muted">{r.description}</p>
-                                                            </div>
-                                                            {isSelected && (
-                                                                <CheckCircle2 className="w-5 h-5 text-accent-lineage ml-auto shrink-0" />
-                                                            )}
-                                                        </button>
-                                                    )
-                                                })}
-                                            </div>
-                                            <ModalFooter onCancel={closeModal} onConfirm={handleCreateInvite}
-                                                confirmLabel="Generate Link" confirmIcon={Link2}
-                                                confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
-                                                loading={inviteLoading} />
-                                        </>
+                                        <InviteForm
+                                            canGrantSuperAdmin={canGrantSuperAdmin}
+                                            loading={inviteLoading}
+                                            onCancel={closeModal}
+                                            onSubmit={handleCreateInvite}
+                                        />
                                     )}
                                 </>
                             )}
@@ -1110,5 +1102,179 @@ function ModalFooter({ onCancel, onConfirm, confirmLabel, confirmIcon: Icon, con
                 {confirmLabel}
             </button>
         </div>
+    )
+}
+
+
+// ── Phase 11: Invite form ────────────────────────────────────────────
+// Renders the full role catalogue (global + workspace + custom), a
+// workspace picker when a workspace-scoped role is chosen, and a
+// conditional email field that becomes required for privileged roles.
+// A user with NO role (or a basic global role) gets a shareable link
+// and zero workspace access until explicitly granted.
+function InviteForm({
+    canGrantSuperAdmin, loading, onCancel, onSubmit,
+}: {
+    canGrantSuperAdmin: boolean
+    loading: boolean
+    onCancel: () => void
+    onSubmit: (
+        role: string | null,
+        opts: { workspaceId?: string | null; email?: string | null },
+    ) => void
+}) {
+    const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
+    const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
+    // '' = the explicit "No role" choice (a plain activated account
+    // with no workspace access until granted later).
+    const [selectedRole, setSelectedRole] = useState<string>('')
+    const [workspaceId, setWorkspaceId] = useState<string>('')
+    const [email, setEmail] = useState<string>('')
+
+    useEffect(() => {
+        permissionsService.listRoles()
+            .then(rs => setRoles(
+                canGrantSuperAdmin ? rs : rs.filter(r => r.name !== 'super_admin'),
+            ))
+            .catch(() => setRoles([]))
+        workspaceService.list().then(setWorkspaces).catch(() => setWorkspaces([]))
+    }, [canGrantSuperAdmin])
+
+    const roleObj = useMemo(
+        () => roles?.find(r => r.name === selectedRole) ?? null,
+        [roles, selectedRole],
+    )
+    const isPrivileged = roleObj ? roleIsPrivileged(roleObj.permissions) : false
+    const isWorkspaceScoped = roleObj ? roleNeedsWorkspace(roleObj) : false
+    // Custom workspace roles fix the workspace to their own scope; the
+    // admin can't pick a different one.
+    const fixedWorkspaceId = roleObj && roleObj.scopeType === 'workspace'
+        ? roleObj.scopeId : null
+    const needsWorkspacePick = isWorkspaceScoped && !fixedWorkspaceId
+    const effectiveWorkspaceId = fixedWorkspaceId ?? (needsWorkspacePick ? workspaceId : null)
+
+    const emailValid = /.+@.+\..+/.test(email.trim())
+    const canSubmit =
+        (!needsWorkspacePick || !!workspaceId)
+        && (!isPrivileged || emailValid)
+
+    const submit = () => {
+        if (!canSubmit) return
+        onSubmit(selectedRole || null, {
+            workspaceId: isWorkspaceScoped ? effectiveWorkspaceId : null,
+            email: email.trim() ? email.trim() : null,
+        })
+    }
+
+    // Build the picker list: "No role" first, then the catalogue.
+    const roleOptions: Array<{
+        value: string; label: string; sublabel: string; privileged: boolean; scoped: boolean
+    }> = [
+        { value: '', label: 'No role', sublabel: 'Plain account — no workspace access until granted', privileged: false, scoped: false },
+        ...(roles ?? []).map(r => ({
+            value: r.name,
+            label: r.name,
+            sublabel: r.description
+                || (roleNeedsWorkspace(r) ? 'Workspace-scoped role' : 'Global role'),
+            privileged: roleIsPrivileged(r.permissions),
+            scoped: roleNeedsWorkspace(r),
+        })),
+    ]
+
+    return (
+        <>
+            <p className="text-sm text-ink-secondary mb-4">
+                Generate a link that lets a new user sign up and bypass the approval queue.
+                Pick the role they'll receive — any role works, including workspace and custom roles.
+            </p>
+
+            {roles === null ? (
+                <div className="flex items-center justify-center py-8">
+                    <Loader2 className="w-5 h-5 animate-spin text-ink-muted" />
+                </div>
+            ) : (
+                <>
+                    <div className="space-y-1.5 mb-4 max-h-64 overflow-y-auto pr-1">
+                        {roleOptions.map(opt => {
+                            const isSelected = selectedRole === opt.value
+                            return (
+                                <button key={opt.value || '__none__'} onClick={() => setSelectedRole(opt.value)}
+                                    className={cn(
+                                        "w-full flex items-center gap-3 p-2.5 rounded-xl border transition-colors text-left",
+                                        isSelected
+                                            ? "border-accent-lineage bg-accent-lineage/5"
+                                            : "border-glass-border hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                                    )}>
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-2">
+                                            <p className={cn("text-sm font-semibold truncate", isSelected ? "text-accent-lineage" : "text-ink")}>{opt.label}</p>
+                                            {opt.scoped && (
+                                                <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">workspace</span>
+                                            )}
+                                            {opt.privileged && (
+                                                <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">privileged</span>
+                                            )}
+                                        </div>
+                                        <p className="text-[11px] text-ink-muted truncate">{opt.sublabel}</p>
+                                    </div>
+                                    {isSelected && <CheckCircle2 className="w-5 h-5 text-accent-lineage shrink-0" />}
+                                </button>
+                            )
+                        })}
+                    </div>
+
+                    {/* Workspace picker — only when an admin-pickable workspace role is chosen */}
+                    {needsWorkspacePick && (
+                        <div className="mb-4">
+                            <label className="block text-xs font-semibold text-ink mb-1.5">Workspace</label>
+                            <select
+                                value={workspaceId}
+                                onChange={e => setWorkspaceId(e.target.value)}
+                                className="w-full bg-canvas-elevated border border-glass-border rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-lineage/40"
+                            >
+                                <option value="">Select a workspace…</option>
+                                {(workspaces ?? []).map(w => (
+                                    <option key={w.id} value={w.id}>{w.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+                    {fixedWorkspaceId && (
+                        <p className="text-[11px] text-ink-muted mb-4">
+                            This custom role is scoped to workspace <span className="font-mono">{fixedWorkspaceId}</span>.
+                        </p>
+                    )}
+
+                    {/* Email — optional, required + highlighted for privileged roles */}
+                    <div className="mb-5">
+                        <label className="block text-xs font-semibold text-ink mb-1.5">
+                            Target email {isPrivileged ? <span className="text-amber-600 dark:text-amber-400">(required)</span> : <span className="text-ink-muted">(optional)</span>}
+                        </label>
+                        <input
+                            type="email"
+                            value={email}
+                            onChange={e => setEmail(e.target.value)}
+                            placeholder="user@company.com"
+                            className={cn(
+                                "w-full bg-canvas-elevated border rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:outline-none",
+                                isPrivileged && !emailValid
+                                    ? "border-amber-500/40 focus:border-amber-500/60"
+                                    : "border-glass-border focus:border-accent-lineage/40"
+                            )}
+                        />
+                        <p className="text-[11px] text-ink-muted mt-1.5">
+                            {isPrivileged
+                                ? "Privileged roles must be sent to a specific email — the link is bound to that address so it can't be forwarded to escalate someone else."
+                                : "Leave blank for a shareable link, or pin it to one email to make the invite single-recipient."}
+                        </p>
+                    </div>
+
+                    <ModalFooter onCancel={onCancel} onConfirm={submit}
+                        confirmLabel="Generate Link" confirmIcon={Link2}
+                        confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
+                        loading={loading} disabled={!canSubmit} />
+                </>
+            )}
+        </>
     )
 }

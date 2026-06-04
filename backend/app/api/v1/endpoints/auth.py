@@ -14,6 +14,7 @@ POST /api/v1/auth/reset-password    → 200 + message
 GET  /api/v1/auth/verify-invite     → 200 + InviteVerifyResponse
 """
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from slowapi import Limiter
@@ -86,6 +87,71 @@ async def _build_user_response(session: AsyncSession, user) -> UserPublicRespons
     )
 
 
+# Phase 11: workspace-template system roles are bound at workspace
+# scope on invite; super_admin/org_admin go through set_global_role
+# (which also writes the legacy user_roles display row).
+_INVITE_GLOBAL_TIER = frozenset({"super_admin", "org_admin"})
+
+
+async def _grant_invite_role(
+    session,
+    *,
+    user_id: str,
+    role: str,
+    workspace_id: Optional[str],
+    granted_by: Optional[str],
+) -> None:
+    """Apply the invite's role to a freshly-created user.
+
+    Global tiers (super_admin / org_admin) go through
+    ``set_global_role`` so the legacy display badge stays correct.
+    Everything else — workspace templates and custom roles — is a
+    plain ``role_binding`` at the right scope.
+
+    Re-validates bindability at signup time: the role could have
+    been deleted or rescoped since the invite was minted. If it's
+    no longer bindable we activate the user anyway (the invite is
+    still valid) and log — we never 500 the signup over a stale
+    role reference.
+    """
+    from backend.app.db.repositories import role_repo, binding_repo
+
+    if role in _INVITE_GLOBAL_TIER:
+        try:
+            await user_repo.set_global_role(
+                session, user_id, role, granted_by=granted_by,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Invite global role %s no longer assignable for %s: %s",
+                role, user_id, exc,
+            )
+        return
+
+    scope_type = "workspace" if workspace_id else "global"
+    bindable = await role_repo.role_is_bindable_in_scope(
+        session, role_name=role,
+        binding_scope_type=scope_type, binding_scope_id=workspace_id,
+    )
+    if not bindable:
+        logger.warning(
+            "Invite role %s no longer bindable in scope %s/%s for %s; "
+            "activating without a binding.",
+            role, scope_type, workspace_id, user_id,
+        )
+        return
+
+    await binding_repo.create_binding(
+        session,
+        subject_type="user",
+        subject_id=user_id,
+        role_name=role,
+        scope_type=scope_type,
+        scope_id=workspace_id,
+        granted_by=granted_by,
+    )
+
+
 # ── POST /auth/signup ─────────────────────────────────────────────────
 
 @router.post("/signup", response_model=SignUpResponse, status_code=status.HTTP_201_CREATED)
@@ -101,28 +167,40 @@ async def signup(
     # 1. Password strength
     _check_password_strength(body.password)
 
-    # 2. Validate invite token (if provided). Phase 6: a valid invite
-    # auto-activates the account regardless of role. The optional
-    # ``role`` payload field carries a global role (super_admin /
-    # org_admin) that the inviter wanted granted on signup; anything
-    # else (a stale Phase-1 "user", a workspace template, etc.) is
-    # silently dropped so the signup doesn't 500 on a stale token.
+    # 2. Validate invite token (if provided). Phase 11: a valid
+    # invite auto-activates the account and grants the token's role —
+    # global tiers, workspace tiers, AND custom roles. The token
+    # carries ``role`` + optional ``workspace_id`` (workspace-scoped
+    # invites) + optional ``email`` (privileged roles pin a target
+    # address so a forwarded link can't escalate an unintended user).
     invite_valid = False
     invite_role = None
     invite_admin = None
+    invite_workspace_id = None
+    invite_email = None
     if body.invite_token:
         try:
             payload = decode_invite_token(body.invite_token)
             invite_valid = True
-            raw_role = payload.get("role")
-            if raw_role in ("super_admin", "org_admin"):
-                invite_role = raw_role
+            invite_role = payload.get("role")  # may be None (plain invite)
             invite_admin = payload.get("created_by")
+            invite_workspace_id = payload.get("workspace_id")
+            invite_email = payload.get("email")
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invite link is invalid or has expired.",
             )
+
+    # 2b. Email pin (Phase 11): an email-bound invite can only be
+    # accepted by the pinned address. We check BEFORE the
+    # enumeration-safe uniqueness short-circuit so a mismatched email
+    # is a clear 400 rather than a silent no-op.
+    if invite_email and invite_email.strip().lower() != body.email.strip().lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This invite is for a different email address.",
+        )
 
     # 3. Check email uniqueness — return the same 201 response regardless
     # to prevent email enumeration attacks.
@@ -147,13 +225,13 @@ async def signup(
     )
 
     if invite_valid:
-        # Invited: mark as approved + (optionally) grant a global role.
-        # Phase 6: ``set_global_role`` writes both ``user_roles`` and
-        # ``role_bindings`` so the invitee actually has the permission
-        # claim, not just a misleading display role.
+        # Invited: mark as approved + (optionally) grant the role.
         if invite_role:
-            await user_repo.set_global_role(
-                session, user.id, invite_role,
+            await _grant_invite_role(
+                session,
+                user_id=user.id,
+                role=invite_role,
+                workspace_id=invite_workspace_id,
                 granted_by=invite_admin,
             )
         await user_repo.create_approval(
@@ -166,10 +244,14 @@ async def signup(
                 "user_id": user.id,
                 "email": user.email,
                 "role": invite_role,
+                "workspace_id": invite_workspace_id,
                 "invited_by": invite_admin,
             },
         )
-        logger.info("User signed up via invite: %s (role=%s)", user.id, invite_role)
+        logger.info(
+            "User signed up via invite: %s (role=%s ws=%s)",
+            user.id, invite_role, invite_workspace_id,
+        )
         return SignUpResponse(message="Account created and activated. You can now sign in.")
     else:
         # Standard signup: pending approval
@@ -258,13 +340,37 @@ async def reset_password(
 # ── GET /auth/verify-invite ──────────────────────────────────────────
 
 @router.get("/verify-invite", response_model=InviteVerifyResponse)
-async def verify_invite(token: str):
-    """Validate an invite token and return the assigned role."""
+async def verify_invite(
+    token: str,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Validate an invite token and return the assigned role + scope.
+
+    Phase 11: also surfaces the workspace (id + friendly name) and
+    the pinned email so the signup page can render "You'll join
+    Finance as Viewer" and lock the email field for email-bound
+    invites.
+    """
     from backend.app.auth.jwt import decode_invite_token
     import jwt as pyjwt
 
     try:
         payload = decode_invite_token(token)
-        return InviteVerifyResponse(valid=True, role=payload.get("role", "user"))
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
         return InviteVerifyResponse(valid=False, role=None)
+
+    workspace_id = payload.get("workspace_id")
+    workspace_name = None
+    if workspace_id:
+        from backend.app.db.repositories import workspace_repo
+        ws = await workspace_repo.get_workspace_orm(session, workspace_id)
+        if ws is not None:
+            workspace_name = ws.name
+
+    return InviteVerifyResponse(
+        valid=True,
+        role=payload.get("role"),
+        workspaceId=workspace_id,
+        workspaceName=workspace_name,
+        email=payload.get("email"),
+    )

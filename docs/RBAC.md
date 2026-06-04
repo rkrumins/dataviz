@@ -324,6 +324,59 @@ Workspace roles see `workspace:*` + `resource:*` only; global
 roles see `system:*` + `resource:*` only. Switching scope mid-edit
 clears any silently-invalid selections.
 
+## Phase 11 — Invite By Link supports all roles (tiered)
+
+Invites are no longer limited to the global admin tiers. An admin can
+now mint an invite for **any** role — workspace tiers
+(`workspace_member`, `workspace_viewer`, `workspace_admin`) and
+custom roles — with the workspace bound on signup.
+
+**Two link classes, by privilege:**
+
+* **Shareable link** (no email pin, reusable until expiry) — for
+  **non-privileged** roles: `workspace_member`, `workspace_viewer`,
+  custom roles with no admin/manage perm, or **no role** (a plain
+  activated account). "Everyone on the team use this link to join
+  Finance as Viewer."
+* **Email-bound link** (token pins a target email, reusable until
+  expiry but only that address can accept) — **required** for
+  **privileged** roles: `super_admin`, `org_admin`,
+  `workspace_admin`, and any custom role carrying `workspace:admin`
+  or a `system:*` perm. A forwarded link can't escalate an
+  unintended identity. (This tightens Phase 6 — admin invites now
+  need a target email.)
+
+**Privileged** = the role's permission bundle includes
+`workspace:admin` or any `system:*`. Computed from
+`role_permissions`, so custom roles classify automatically.
+
+**Token** (`create_invite_token`) carries optional `workspace_id`
+and `email`. **Signup** (`auth.py`) honours every role: global tiers
+via `set_global_role`; everything else via a `role_binding` at the
+right scope, re-validated for bindability at signup time. Email-bound
+invites reject a mismatched signup email.
+
+### The access model invites respect
+
+> **A user has no access to any workspace unless explicitly granted
+> a binding in that workspace.** Invites don't change this.
+
+* A **plain invite** (no role) → activated account, zero bindings →
+  no workspace access at all.
+* A **non-privileged global** custom role → shareable, gets a
+  global binding, but the resolver's category × scope filter drops
+  any workspace perms bundled in it → still no workspace access.
+* Only an explicit **workspace binding** (`workspace_member` /
+  `viewer` / `admin` / custom workspace role) grants access to that
+  one workspace.
+* Only `super_admin` (`system:admin`) and `org_admin`
+  (`system:org-admin`) cross workspaces — via the resolver
+  short-circuits, not via per-workspace bindings.
+
+Regression coverage:
+`test_invite_roles.py::test_plain_invite_user_has_no_workspace_access`
+and `::test_custom_global_role_grants_no_workspace_access` prove it.
+
 ## Phase 10 — promoted admin sees admin UI without re-login
 
 Pre-Phase-10 a real bug: an admin promoted to `super_admin` while

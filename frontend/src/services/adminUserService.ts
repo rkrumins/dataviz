@@ -25,8 +25,19 @@ export interface ResetTokenResponse {
 
 export interface InviteResponse {
     inviteToken: string
-    role: string
+    role: string | null
+    /** Phase 11: workspace the invite binds into (workspace-scoped
+     *  roles) and the pinned email (privileged / email-bound
+     *  invites). Both null for a global shareable invite. */
+    workspaceId: string | null
+    email: string | null
     expiresAt: string
+}
+
+export interface CreateInviteOptions {
+    workspaceId?: string | null
+    email?: string | null
+    expiresInHours?: number
 }
 
 export const adminUserService = {
@@ -82,13 +93,19 @@ export const adminUserService = {
 
     createInvite(
         role: string | null = null,
-        expiresInHours: number = 72,
+        opts: CreateInviteOptions = {},
     ): Promise<InviteResponse> {
-        // Phase 6: ``role`` is optional. ``null`` creates a regular
-        // user invite (no global role granted); ``'super_admin'`` /
-        // ``'org_admin'`` provision a global admin on signup.
-        const body: Record<string, unknown> = { expiresInHours }
+        // Phase 11: ``role`` is optional (null = plain activated
+        // account). Workspace-scoped roles take ``workspaceId``;
+        // privileged roles take ``email`` to bind the link to one
+        // identity. The backend validates the role × scope ×
+        // privilege rules.
+        const body: Record<string, unknown> = {
+            expiresInHours: opts.expiresInHours ?? 72,
+        }
         if (role) body.role = role
+        if (opts.workspaceId) body.workspaceId = opts.workspaceId
+        if (opts.email) body.email = opts.email
         return authFetch<InviteResponse>(`${ADMIN_USERS_API}/invite`, {
             method: 'POST',
             body: JSON.stringify(body),

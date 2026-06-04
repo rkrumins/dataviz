@@ -348,6 +348,23 @@ async def generate_reset_token(
 
 # ── Invite link ──────────────────────────────────────────────────────
 
+# Phase 11: workspace-template system roles. Stored ``scope_type=
+# 'global'`` in the roles table (they bind to any workspace) but
+# they are NOT globally meaningful — an invite for one of these
+# MUST carry a workspace_id.
+_WORKSPACE_TEMPLATE_ROLES = frozenset({
+    "workspace_admin", "workspace_member", "workspace_viewer",
+})
+_GLOBAL_TIER_ROLES = frozenset({"super_admin", "org_admin"})
+
+
+def _role_is_privileged(perms: list[str]) -> bool:
+    """A role is privileged (→ requires an email-bound invite) if it
+    grants ``workspace:admin`` or any ``system:*`` permission. Custom
+    roles are classified automatically from their permission bundle."""
+    return any(p == "workspace:admin" or p.startswith("system:") for p in perms)
+
+
 @admin_router.post(
     "/invite",
     response_model=InviteTokenResponse,
@@ -359,14 +376,111 @@ async def create_invite(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Generate a signed invite token that lets a new user sign up and
-    be auto-activated with the specified role.  The frontend constructs
-    the full URL from its own origin."""
+    be auto-activated with the specified role. The frontend constructs
+    the full URL from its own origin.
+
+    Phase 11 — tiered invites:
+      * ``role`` omitted → plain activated account.
+      * Workspace-tier / custom-workspace roles → require a
+        ``workspace_id`` (custom workspace roles fix it to the role's
+        own scope).
+      * Global-tier / custom-global roles → no workspace.
+      * Privileged roles (grant ``workspace:admin`` or any
+        ``system:*``) → require a target ``email`` so the link is
+        bound to one identity and can't be forwarded to escalate
+        another user.
+    """
     from backend.app.auth.jwt import create_invite_token
+    from backend.app.db.repositories import role_repo, workspace_repo
+
+    resolved_workspace_id: Optional[str] = None
+
+    if body.role is not None:
+        role = await role_repo.get_role(session, body.role)
+        if role is None:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown role '{body.role}'",
+            )
+
+        # Privilege classification from the role's permission bundle.
+        bundles = await role_repo.role_names_with_permissions(session, [body.role])
+        perms = bundles.get(body.role, [])
+        if _role_is_privileged(perms) and not body.email:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "This role is privileged and must be sent to a specific "
+                    "email address — a shareable link could be forwarded to "
+                    "escalate another identity. Provide a target email."
+                ),
+            )
+
+        # Scope classification.
+        is_workspace_role = (
+            body.role in _WORKSPACE_TEMPLATE_ROLES
+            or role.scope_type == "workspace"
+        )
+        if is_workspace_role:
+            if role.scope_type == "workspace":
+                # Custom workspace role — workspace is fixed to its scope.
+                resolved_workspace_id = role.scope_id
+                if body.workspace_id and body.workspace_id != role.scope_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Role '{body.role}' is scoped to workspace "
+                            f"'{role.scope_id}' and cannot be invited into a "
+                            f"different workspace."
+                        ),
+                    )
+            else:
+                # Workspace template — admin must pick a workspace.
+                if not body.workspace_id:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Role '{body.role}' is workspace-scoped; a "
+                            f"workspace must be selected for the invite."
+                        ),
+                    )
+                resolved_workspace_id = body.workspace_id
+
+            # Confirm the target workspace exists.
+            if not await workspace_repo.get_workspace_orm(session, resolved_workspace_id):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Workspace '{resolved_workspace_id}' not found",
+                )
+            # Bindability guard (mirrors workspace-members POST).
+            if not await role_repo.role_is_bindable_in_scope(
+                session, role_name=body.role,
+                binding_scope_type="workspace",
+                binding_scope_id=resolved_workspace_id,
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Role '{body.role}' cannot be bound in workspace "
+                        f"'{resolved_workspace_id}'."
+                    ),
+                )
+        else:
+            # Global role — reject a stray workspace_id.
+            if body.workspace_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Role '{body.role}' is global and cannot be "
+                        f"workspace-scoped."
+                    ),
+                )
 
     token, expires_at = create_invite_token(
         role=body.role,
         created_by=admin.id,
         expires_in_hours=body.expires_in_hours,
+        workspace_id=resolved_workspace_id,
+        email=body.email,
     )
 
     await user_repo.create_outbox_event(
@@ -374,14 +488,21 @@ async def create_invite(
         event_type="user.invite_created",
         payload={
             "role": body.role,
+            "workspace_id": resolved_workspace_id,
+            "email": body.email,
             "created_by": admin.id,
             "expires_at": expires_at,
         },
     )
 
-    logger.info("Invite token created by admin %s (role=%s)", admin.id, body.role)
+    logger.info(
+        "Invite token created by admin %s (role=%s ws=%s email_bound=%s)",
+        admin.id, body.role, resolved_workspace_id, bool(body.email),
+    )
     return InviteTokenResponse(
         inviteToken=token,
         role=body.role,
+        workspaceId=resolved_workspace_id,
+        email=body.email,
         expiresAt=expires_at,
     )

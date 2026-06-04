@@ -180,8 +180,14 @@ export const authService = {
         })
     },
 
-    verifyInvite(token: string): Promise<{ valid: boolean; role: string | null }> {
-        return request<{ valid: boolean; role: string | null }>(
+    verifyInvite(token: string): Promise<{
+        valid: boolean
+        role: string | null
+        workspaceId?: string | null
+        workspaceName?: string | null
+        email?: string | null
+    }> {
+        return request(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,
         )
     },

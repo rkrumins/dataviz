@@ -172,8 +172,19 @@ def create_invite_token(
     role: str,
     created_by: str,
     expires_in_hours: int = 72,
+    *,
+    workspace_id: str | None = None,
+    email: str | None = None,
 ) -> tuple[str, str]:
-    """Create a signed invite JWT. Returns (token, expires_at_iso)."""
+    """Create a signed invite JWT. Returns (token, expires_at_iso).
+
+    Phase 11: the token can now carry an optional ``workspace_id``
+    (for workspace-scoped role invites) and an optional ``email``
+    (for email-bound invites — privileged roles pin a target address
+    so a forwarded link can't escalate an unintended identity). Both
+    are omitted from the payload when ``None`` so existing global,
+    shareable invites are unchanged on the wire.
+    """
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=expires_in_hours)
     payload = {
@@ -185,6 +196,10 @@ def create_invite_token(
         "iat": now,
         "exp": expires_at,
     }
+    if workspace_id is not None:
+        payload["workspace_id"] = workspace_id
+    if email is not None:
+        payload["email"] = email
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at.isoformat()
 

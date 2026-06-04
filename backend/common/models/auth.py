@@ -144,28 +144,47 @@ class ResetTokenResponse(BaseModel):
 
 
 class CreateInviteRequest(BaseModel):
-    """Admin creates an invite link with optional role and expiry.
+    """Admin creates an invite link with optional role / workspace /
+    target email.
 
-    Phase 6: ``role`` is optional. ``None`` (the default) creates a
-    plain workspace-bound user — the new account activates with no
-    global role and gets bound to workspaces afterwards. Setting
-    ``role`` to ``super_admin`` or ``org_admin`` provisions a global
-    administrator on first signup (the same set the change-role
-    endpoint allows).
+    Phase 11: any role can be invited — global tiers, workspace
+    tiers, and custom roles. The endpoint (not this DTO) validates
+    the role against the catalogue, classifies its scope, and
+    enforces the privilege tiering:
+
+      * ``role`` omitted → a plain activated account (no binding).
+      * ``role`` + ``workspace_id`` → a workspace-scoped binding
+        (workspace tiers + custom workspace roles).
+      * ``role`` alone → a global binding (super_admin / org_admin /
+        custom global roles).
+      * Privileged roles (anything granting ``workspace:admin`` or a
+        ``system:*`` perm) require ``email`` so the invite is bound
+        to a single identity and can't be forwarded to escalate
+        someone else.
+
+    The static validator only does shape checks — it can't see
+    custom roles in the DB, so the real role validation lives in the
+    endpoint.
     """
     model_config = ConfigDict(populate_by_name=True)
 
-    role: Optional[str] = Field(None, min_length=1, max_length=50)
+    role: Optional[str] = Field(None, min_length=1, max_length=64)
+    workspace_id: Optional[str] = Field(None, alias="workspaceId", max_length=64)
+    email: Optional[str] = Field(None, max_length=254)
     expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=720)
 
-    @field_validator("role")
+    @field_validator("email")
     @classmethod
-    def validate_role(cls, v: Optional[str]) -> Optional[str]:
+    def validate_email(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        allowed = {"super_admin", "org_admin"}
-        if v not in allowed:
-            raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
+        v = v.strip().lower()
+        if not v:
+            return None
+        # Cheap shape check — a full RFC validator is overkill; the
+        # signup flow compares against the submitted email anyway.
+        if "@" not in v or v.startswith("@") or v.endswith("@"):
+            raise ValueError("email must be a valid address")
         return v
 
 
@@ -174,7 +193,11 @@ class InviteTokenResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     invite_token: str = Field(alias="inviteToken")
-    role: str
+    role: Optional[str] = None
+    # Phase 11: echo the scope + email pin so the admin UI can
+    # render "Viewer in Finance, sent to alice@x.com".
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    email: Optional[str] = None
     expires_at: str = Field(alias="expiresAt")
 
 
@@ -184,3 +207,9 @@ class InviteVerifyResponse(BaseModel):
 
     valid: bool
     role: Optional[str] = None
+    # Phase 11: workspace context + email pin so the signup page can
+    # show "You'll join Finance as Viewer" and lock the email field
+    # for email-bound invites.
+    workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
+    email: Optional[str] = None
