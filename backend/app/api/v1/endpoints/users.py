@@ -206,8 +206,11 @@ async def change_user_role(
     # Phase 7: kill the target user's live sessions so the new claim
     # (promotion OR demotion) takes effect on the next request, not
     # at the end of the current JWT TTL. Best-effort.
+    # Phase 9: ``reason`` lands in the audit ``user.session_revoked``.
     from backend.app.services.revocation_service import revoke_subject_sessions
-    revoked = await revoke_subject_sessions("user", user_id)
+    revoked = await revoke_subject_sessions(
+        "user", user_id, session=session, reason="role_changed",
+    )
 
     await user_repo.create_outbox_event(
         session,

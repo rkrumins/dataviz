@@ -81,9 +81,11 @@ export function AdminAudit() {
     const [activeCategory, setActiveCategory] = useState<string | null>(null)
     const [actorFilter, setActorFilter] = useState('')
     const [targetUserFilter, setTargetUserFilter] = useState('')
-    // Phase 8: ``security`` default hides login noise. ``all`` opts
-    // back into the full firehose for debugging.
-    const [scope, setScope] = useState<'security' | 'all'>('security')
+    // Phase 9: three-mode scope picker. Security (default) hides
+    // chatty operational events but keeps logins / logouts; activity
+    // adds password / signup chrome for support work; everything is
+    // the unfiltered firehose for debugging.
+    const [scope, setScope] = useState<'security' | 'activity' | 'all'>('security')
     // Phase 8: time window. ``7d`` is the default — wide enough to
     // cover a typical incident review, narrow enough to keep the
     // result set scannable. ``all`` removes the lower bound.
@@ -266,29 +268,49 @@ export function AdminAudit() {
                         <span className="text-2xs uppercase tracking-wide text-ink-muted mr-1">
                             Scope
                         </span>
-                        {(['security', 'all'] as const).map(s => {
+                        {(['security', 'activity', 'all'] as const).map(s => {
                             const active = scope === s
+                            const labels = {
+                                security: 'Security',
+                                activity: 'Activity',
+                                all: 'Everything',
+                            } as const
+                            const tooltips = {
+                                security: 'Logins, role changes, RBAC mutations. Hides per-request 403 noise + signup/password chrome.',
+                                activity: 'Security view plus signup / password-reset chrome — useful for support troubleshooting.',
+                                all: 'Unfiltered firehose. Includes 403 spam — slow on busy systems.',
+                            } as const
                             return (
                                 <button
                                     key={s}
                                     onClick={() => setScope(s)}
                                     className={cn(
-                                        'px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors capitalize',
+                                        'px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors',
                                         active
                                             ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
                                             : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30',
                                     )}
-                                    title={
-                                        s === 'security'
-                                            ? 'Hide login + access-denied noise'
-                                            : 'Show every event (debugging)'
-                                    }
+                                    title={tooltips[s]}
                                 >
-                                    {s === 'security' ? 'Security only' : 'Everything'}
+                                    {labels[s]}
                                 </button>
                             )
                         })}
                     </div>
+                </div>
+
+                {/* Inline scope description — keeps operators from
+                    wondering "why isn't event X showing up?". */}
+                <div className="text-2xs text-ink-muted -mt-3 px-3">
+                    {scope === 'security' && (
+                        <>Showing: logins, logouts, failed logins, session revocations, every RBAC mutation. Hiding: access-denied noise, password chrome, signup chrome.</>
+                    )}
+                    {scope === 'activity' && (
+                        <>Showing: everything from Security plus password resets, signups, access requests. Hiding: per-request access-denied noise only.</>
+                    )}
+                    {scope === 'all' && (
+                        <>Showing the unfiltered firehose — including hourly access-denied events.</>
+                    )}
                 </div>
 
                 {/* Filter row */}

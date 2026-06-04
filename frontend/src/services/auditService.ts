@@ -52,9 +52,12 @@ export interface AuditFilters {
     toTs?: string
     cursor?: string
     limit?: number
-    /** Phase 8: ``security`` (default) hides login + access-denied
-     *  noise; ``all`` returns the full firehose. */
-    category?: 'security' | 'all'
+    /** Phase 9: three-mode filter. ``security`` (default) hides
+     *  per-request noise + password / signup chrome; surfaces
+     *  logins, role changes, every RBAC mutation. ``activity``
+     *  adds back password / signup chrome for support work.
+     *  ``all`` is the unfiltered firehose. */
+    category?: 'security' | 'activity' | 'all'
 }
 
 

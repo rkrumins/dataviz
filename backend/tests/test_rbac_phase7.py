@@ -510,14 +510,18 @@ async def test_audit_response_includes_severity_and_summary(
 
 
 @pytest.mark.asyncio
-async def test_audit_category_security_hides_login_noise(
+async def test_audit_default_security_includes_logins_hides_403(
     test_client: AsyncClient, db_session,
 ):
-    """The default ``category=security`` filter drops noisy events
-    so the audit page surfaces real RBAC signal by default."""
-    # Mix of noisy + meaningful events.
+    """Phase 9: ``security`` (the default) now SURFACES logins +
+    logouts (auditors open the page to see them) while still hiding
+    per-request access_denied noise and signup chrome."""
     await user_repo.create_outbox_event(
         db_session, event_type="user.logged_in",
+        payload={"user_id": "usr_alice", "provider": "local"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.logged_out",
         payload={"user_id": "usr_alice"},
     )
     await user_repo.create_outbox_event(
@@ -525,24 +529,76 @@ async def test_audit_category_security_hides_login_noise(
         payload={"user_id": "usr_alice", "permission": "x"},
     )
     await user_repo.create_outbox_event(
+        db_session, event_type="user.created",
+        payload={"user_id": "usr_bob"},
+    )
+    await user_repo.create_outbox_event(
         db_session, event_type="user.role_changed",
         payload={"user_id": "usr_alice", "new_role": "org_admin"},
     )
     await db_session.commit()
 
-    # Default — security only.
-    resp_sec = await test_client.get("/api/v1/admin/audit")
-    sec_types = {e["eventType"] for e in resp_sec.json()["events"]}
-    assert "user.role_changed" in sec_types
-    assert "user.logged_in" not in sec_types
-    assert "user.access_denied" not in sec_types
+    # Default — security mode.
+    resp = await test_client.get("/api/v1/admin/audit")
+    types = {e["eventType"] for e in resp.json()["events"]}
+    # Surfaced (first-class signal):
+    assert "user.logged_in" in types
+    assert "user.logged_out" in types
+    assert "user.role_changed" in types
+    # Hidden noise:
+    assert "user.access_denied" not in types
+    assert "user.created" not in types
 
-    # Override — everything.
-    resp_all = await test_client.get(
+
+@pytest.mark.asyncio
+async def test_audit_activity_mode_shows_chrome_hides_403(
+    test_client: AsyncClient, db_session,
+):
+    """``category=activity`` adds back signup / password chrome for
+    support work but still hides per-request access_denied spam."""
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.created",
+        payload={"user_id": "usr_x"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.password_reset_completed",
+        payload={"user_id": "usr_x"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.access_denied",
+        payload={"user_id": "usr_x", "permission": "y"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/admin/audit", params={"category": "activity"},
+    )
+    types = {e["eventType"] for e in resp.json()["events"]}
+    assert "user.created" in types
+    assert "user.password_reset_completed" in types
+    assert "user.access_denied" not in types
+
+
+@pytest.mark.asyncio
+async def test_audit_all_mode_shows_everything(
+    test_client: AsyncClient, db_session,
+):
+    """``category=all`` is the unfiltered firehose."""
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.access_denied",
+        payload={"user_id": "usr_z", "permission": "x"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="user.logged_in",
+        payload={"user_id": "usr_z"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
         "/api/v1/admin/audit", params={"category": "all"},
     )
-    all_types = {e["eventType"] for e in resp_all.json()["events"]}
-    assert {"user.logged_in", "user.access_denied", "user.role_changed"} <= all_types
+    types = {e["eventType"] for e in resp.json()["events"]}
+    assert {"user.access_denied", "user.logged_in"} <= types
 
 
 @pytest.mark.asyncio
@@ -565,6 +621,129 @@ async def test_audit_summary_handles_unknown_event_type(
     ev = resp.json()["events"][0]
     assert ev["severity"] == "info"
     assert ev["summary"] == "rbac.workspace.totally_made_up"
+
+
+# ── Phase 9 — login_failed / session_revoked / workspace lifecycle ──
+
+
+@pytest.mark.asyncio
+async def test_login_failed_emits_audit_event(
+    test_client: AsyncClient, db_session,
+):
+    """Wrong password emits ``user.login_failed`` with the email
+    + reason in the payload so brute-force attempts are auditable.
+
+    The conftest's test IdentityService isn't wired with an
+    ``outbox_emit`` callback (production wires it in main.py), so
+    we inject one for this test to exercise the audit-emit code
+    path end-to-end. Without this, ``_emit_audit`` short-circuits
+    and the test would always fail on a real implementation bug
+    AND on the test-fixture gap, which would hide a real bug behind
+    a fake one.
+    """
+    from backend.auth_service.core.password import hash_password
+    from backend.app.main import app as _app
+
+    # Wire a session-bound outbox emitter so _emit_audit produces
+    # actual rows in the test's db_session.
+    identity_service = _app.state.identity_service
+    if getattr(identity_service, "_outbox_emit", None) is None:
+        async def _emit(session, event_type: str, payload: dict) -> None:
+            await user_repo.create_outbox_event(
+                session, event_type=event_type, payload=payload,
+            )
+        identity_service._outbox_emit = _emit  # type: ignore[attr-defined]
+
+    user = await user_repo.create_user(
+        db_session,
+        email="lockedout@example.com",
+        password_hash=hash_password("Correct-Horse-Battery-9!"),
+        first_name="Locked", last_name="Out",
+    )
+    await user_repo.update_user_status(db_session, user.id, "active")
+    await db_session.commit()
+
+    resp = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "lockedout@example.com", "password": "wrong"},
+    )
+    assert resp.status_code == 401, resp.text
+
+    audit = await test_client.get(
+        "/api/v1/admin/audit",
+        params={"eventType": "user.login_failed"},
+    )
+    events = audit.json()["events"]
+    assert any(e["payload"].get("email") == "lockedout@example.com"
+               for e in events), [e["payload"] for e in events]
+
+
+@pytest.mark.asyncio
+async def test_role_change_emits_session_revoked_audit(
+    test_client: AsyncClient, db_session,
+):
+    """Phase 9: when a role change kills sessions, an audit row
+    captures it with reason='role_changed'."""
+    user = await user_repo.create_user(
+        db_session,
+        email="promoted@example.com", password_hash="x",
+        first_name="P", last_name="R",
+    )
+
+    resp = await test_client.put(
+        f"/api/v1/admin/users/{user.id}/role",
+        json={"role": "org_admin"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    audit = await test_client.get(
+        "/api/v1/admin/audit",
+        params={"eventType": "user.session_revoked"},
+    )
+    events = audit.json()["events"]
+    assert any(
+        e["payload"].get("user_id") == user.id
+        and e["payload"].get("reason") == "role_changed"
+        for e in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_workspace_lifecycle_events_emitted(
+    test_client: AsyncClient, db_session,
+):
+    """POST / PUT / DELETE on workspaces emit lifecycle events that
+    surface in the audit log."""
+    from backend.app.db.models import WorkspaceORM
+    # POST
+    create = await test_client.post(
+        "/api/v1/admin/workspaces",
+        json={"name": "AuditWS", "dataSources": []},
+    )
+    assert create.status_code == 201, create.text
+    ws_id = create.json()["id"]
+
+    # PUT
+    upd = await test_client.put(
+        f"/api/v1/admin/workspaces/{ws_id}",
+        json={"name": "AuditWS-Renamed"},
+    )
+    assert upd.status_code == 200, upd.text
+
+    # DELETE
+    rm = await test_client.delete(f"/api/v1/admin/workspaces/{ws_id}")
+    assert rm.status_code == 204, rm.text
+
+    audit = await test_client.get(
+        "/api/v1/admin/audit",
+        params={"eventType": "rbac.workspace.*"},
+    )
+    types = {e["eventType"] for e in audit.json()["events"]}
+    assert {
+        "rbac.workspace.created",
+        "rbac.workspace.updated",
+        "rbac.workspace.deleted",
+    } <= types
 
 
 @pytest.mark.asyncio

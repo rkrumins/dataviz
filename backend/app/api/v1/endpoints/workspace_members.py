@@ -305,9 +305,11 @@ async def revoke_member_binding(
     # Phase 7: kill the affected user's (or every group member's)
     # live sessions so the demotion takes effect immediately rather
     # than waiting up to JWT_EXPIRY_MINUTES for the next refresh.
+    # Phase 9: pass ``reason`` so the per-user
+    # ``user.session_revoked`` audit events show why.
     revoked_count = await revoke_subject_sessions(
         binding.subject_type, binding.subject_id,
-        session=session,
+        session=session, reason="workspace_binding_revoked",
     )
 
     await user_repo.create_outbox_event(

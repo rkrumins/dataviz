@@ -51,23 +51,56 @@ _AUDIT_PREFIXES = (
 )
 
 
-# Phase 8: noisy events the default ``category=security`` filter
-# excludes. These either fire on every request (logged_in /
-# access_denied) or are bookkeeping the operator doesn't usually want
-# in an audit trail (password-reset chrome, invite token chrome,
-# self-service signups). The "Everything" toggle on the FE switches
-# to ``category=all`` which suppresses this filter.
-_NOISE_EVENT_TYPES = frozenset({
-    "user.logged_in",
+# Phase 9: three-mode noise filter.
+#
+# * ``security`` (the default) shows the events a SOC analyst /
+#   compliance officer actually wants — logins, logouts, failed
+#   logins, session revocations, every RBAC mutation, SSO config
+#   changes, identity links. It hides only the truly chatty
+#   operational events.
+# * ``activity`` adds back password-reset / signup / access-denied
+#   chrome — useful for support troubleshooting "what did this user
+#   do today?".
+# * ``all`` returns every event under the audit prefixes — the
+#   firehose, for debugging.
+#
+# The Phase-8 default put logins on the noise list. That was an
+# overcorrection: a SOC analyst opens the audit page TO see logins.
+# Phase 9 moves them back to first-class.
+
+_SECURITY_HIDE = frozenset({
+    # Per-request 403 noise — even sampled, the volume is too high
+    # to surface in the security view.
     "user.access_denied",
-    "user.created",                  # pending signup; the .approved is the security event
-    "user.created_via_invite",       # invite chrome — the role_changed/bound event is what matters
+    # Pre-activation chrome. The real signal lives in
+    # ``user.approved`` (admin clicked Approve) and
+    # ``user.role_changed`` (role grant).
+    "user.created",
+    "user.created_via_invite",
+    # Password-reset chrome — the completed event is the signal but
+    # at security volume it's still noise. Activity mode keeps it.
     "user.password_reset_requested",
     "user.password_reset_completed",
     "user.reset_token_generated",
     "user.invite_created",
-    "rbac.access_request.created",   # only the approve/deny step is interesting
+    # Access request lifecycle — only the approve / deny step is
+    # interesting at security volume.
+    "rbac.access_request.created",
 })
+
+# ``activity`` keeps the page useful for support work — adds back
+# the password / signup chrome — but still hides the per-request
+# 403 spam.
+_ACTIVITY_HIDE = frozenset({
+    "user.access_denied",
+})
+
+# ``all`` hides nothing.
+_HIDE_BY_CATEGORY: dict[str, frozenset[str]] = {
+    "security": _SECURITY_HIDE,
+    "activity": _ACTIVITY_HIDE,
+    "all": frozenset(),
+}
 
 
 # Phase 8: per-event display metadata. Each entry maps a known
@@ -175,18 +208,46 @@ def _summary_sso_mapping(verb: str):
     return _build
 
 
+def _summary_login(p: dict) -> str:
+    provider = p.get("provider") or p.get("provider_slug") or "local"
+    return f"Signed in via {provider}"
+
+
+def _summary_login_failed(p: dict) -> str:
+    reason = p.get("reason") or "invalid_credentials"
+    email = p.get("email") or "?"
+    return f"Failed login for {email} ({reason})"
+
+
+def _summary_session_revoked(p: dict) -> str:
+    reason = p.get("reason") or "unspecified"
+    n = p.get("sessions_killed") or 1
+    return f"Session revoked ({reason}, {n} kill{'s' if n != 1 else ''})"
+
+
+def _summary_workspace_lifecycle(verb: str):
+    def _build(p: dict) -> str:
+        name = p.get("name") or p.get("workspace_id") or "?"
+        return f"Workspace '{name}' {verb}"
+    return _build
+
+
 _EVENT_META: dict[str, tuple[str, callable]] = {
-    # ── critical: role / identity changes
+    # ── critical: role / identity changes / forced revocation
     "user.role_changed": ("critical", _summary_role_changed),
     "user.suspended": ("critical", _summary_user_status("suspended")),
     "user.rejected": ("critical", _summary_user_status("rejected")),
     "user.identity.admin_linked": ("critical", _summary_identity("linked")),
     "user.identity.admin_unlinked": ("critical", _summary_identity("unlinked")),
+    "user.session_revoked": ("critical", _summary_session_revoked),
     "auth.config.updated": ("critical", lambda p: "SSO / login config changed"),
     "rbac.role.cascade_revoked": ("critical", _summary_cascade),
     "rbac.workspace.roles_cascaded": ("critical", _summary_ws_roles_cascaded),
+    "rbac.workspace.deleted": (
+        "critical", _summary_workspace_lifecycle("deleted"),
+    ),
 
-    # ── warning: revokes / deletes / denials
+    # ── warning: revokes / deletes / denials / failed login
     "rbac.workspace.member_revoked": ("warning", _summary_ws_member_revoked),
     "rbac.view.grant_removed": ("warning", _summary_view_grant("revoked")),
     "rbac.role.deleted": ("warning", _summary_role_lifecycle("deleted")),
@@ -195,6 +256,8 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.sso_mapping.deleted": ("warning", _summary_sso_mapping("deleted")),
     "idp.provider.deleted": ("warning", _summary_idp_provider("deleted")),
     "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
+    "user.login_failed": ("warning", _summary_login_failed),
+    "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
 
     # ── info: binds / creates / updates
     "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
@@ -212,6 +275,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.approved": ("info", _summary_user_status("approved")),
     "user.reactivated": ("info", _summary_user_status("reactivated")),
     "rbac.access_request.approved": ("info", _summary_access_request("approved")),
+    # Phase 9 — login / lifecycle events promoted to first-class.
+    "user.logged_in": ("info", _summary_login),
+    "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
+    "rbac.workspace.updated": ("info", _summary_workspace_lifecycle("updated")),
 }
 
 
@@ -310,10 +377,13 @@ async def list_audit_events(
     category: str = Query(
         "security",
         description=(
-            "``security`` (default) hides operational noise like "
-            "``user.logged_in`` / ``user.access_denied`` / signup "
-            "chrome. ``all`` returns every event under the RBAC + "
-            "user + auth + idp namespaces."
+            "Three-mode filter (Phase 9). ``security`` (default) "
+            "hides per-request noise (access_denied) plus signup / "
+            "password-reset chrome; surfaces logins, logouts, "
+            "failed logins, session revocations, every RBAC "
+            "mutation. ``activity`` adds back signup + password "
+            "chrome for support work. ``all`` is the unfiltered "
+            "firehose."
         ),
     ),
     _admin: User = Depends(requires("system:admin")),
@@ -355,12 +425,14 @@ async def list_audit_events(
             ])
         )
 
-    # Phase 8: ``category=security`` (the default) additionally drops
-    # the noisy event types so the page surfaces real RBAC signal by
-    # default. ``category=all`` opts back into the full firehose.
-    if category != "all":
+    # Phase 9: three-mode category filter. ``security`` (default)
+    # hides only the chatty events that drown out the security
+    # signal; ``activity`` keeps password / signup chrome visible
+    # for support work; ``all`` is the unfiltered firehose.
+    hide_set = _HIDE_BY_CATEGORY.get(category, _SECURITY_HIDE)
+    if hide_set:
         stmt = stmt.where(
-            OutboxEventORM.event_type.notin_(_NOISE_EVENT_TYPES)
+            OutboxEventORM.event_type.notin_(hide_set)
         )
     if from_ts:
         stmt = stmt.where(OutboxEventORM.created_at >= from_ts)

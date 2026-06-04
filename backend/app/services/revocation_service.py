@@ -243,12 +243,42 @@ class RevocationService:
 # safety net).
 
 
+async def _emit_session_revoked(
+    session, *, user_id: str, reason: str, sessions_killed: int = 1,
+) -> None:
+    """Phase 9: emit one ``user.session_revoked`` outbox event per
+    user whose sessions we killed. Best-effort — a failure here must
+    never block the binding mutation that triggered the revocation.
+    The caller passes ``reason`` so the audit log shows WHY (the
+    Phase-7 revoke helpers fan out from multiple call sites).
+    """
+    if session is None:
+        return
+    try:
+        from backend.app.db.repositories import user_repo
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.session_revoked",
+            payload={
+                "user_id": user_id,
+                "reason": reason,
+                "sessions_killed": sessions_killed,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "_emit_session_revoked(user=%s reason=%s) failed: %s",
+            user_id, reason, exc,
+        )
+
+
 async def revoke_subject_sessions(
     subject_type: str,
     subject_id: str,
     *,
     expand_groups: bool = True,
     session=None,
+    reason: str = "unspecified",
 ) -> int:
     """Revoke every live session belonging to a binding subject.
 
@@ -259,11 +289,18 @@ async def revoke_subject_sessions(
     Returns the number of users whose sessions were revoked.
     Best-effort: a Redis failure or an empty session index returns 0
     silently — the JWT TTL is still the floor on staleness.
+
+    Phase 9: ``reason`` is propagated to a ``user.session_revoked``
+    outbox event per affected user so the audit log explains WHY
+    each kill happened (binding revoked, role changed, etc.).
     """
     svc = get_revocation_service()
     if subject_type == "user":
         try:
             await svc.revoke_all_user_sessions(subject_id)
+            await _emit_session_revoked(
+                session, user_id=subject_id, reason=reason,
+            )
             return 1
         except Exception as exc:  # noqa: BLE001 — best-effort by design
             logger.warning(
@@ -293,6 +330,9 @@ async def revoke_subject_sessions(
         for m in members:
             try:
                 await svc.revoke_all_user_sessions(m.user_id)
+                await _emit_session_revoked(
+                    session, user_id=m.user_id, reason=reason,
+                )
                 count += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -304,7 +344,9 @@ async def revoke_subject_sessions(
     return 0
 
 
-async def revoke_role_sessions(role_name: str, *, session) -> int:
+async def revoke_role_sessions(
+    role_name: str, *, session, reason: str = "role_changed",
+) -> int:
     """Revoke sessions for every user touched by a role-shape change.
 
     Used by ``PUT /admin/roles/{name}`` (the role's permission bundle
@@ -314,6 +356,9 @@ async def revoke_role_sessions(role_name: str, *, session) -> int:
 
     Best-effort throughout. Returns the count of distinct users
     revoked so the caller can audit-log the blast radius.
+
+    Phase 9: emits one ``user.session_revoked`` event per affected
+    user (with ``reason``) so the audit log captures the cascade.
     """
     from sqlalchemy import select
     from backend.app.db.models import RoleBindingORM
@@ -348,6 +393,7 @@ async def revoke_role_sessions(role_name: str, *, session) -> int:
     for uid in user_ids:
         try:
             await svc.revoke_all_user_sessions(uid)
+            await _emit_session_revoked(session, user_id=uid, reason=reason)
             count += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning(

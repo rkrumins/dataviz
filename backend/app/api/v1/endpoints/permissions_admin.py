@@ -298,8 +298,11 @@ async def update_role(
     # to the role. Kill their live sessions so the new permission
     # set takes effect immediately. Best-effort; emits the count
     # into the audit event so the blast radius is visible.
+    # Phase 9: pass ``reason`` for the per-user audit event.
     from backend.app.services.revocation_service import revoke_role_sessions
-    cascade_revoked = await revoke_role_sessions(name, session=session)
+    cascade_revoked = await revoke_role_sessions(
+        name, session=session, reason="role_permissions_updated",
+    )
 
     await user_repo.create_outbox_event(
         session,

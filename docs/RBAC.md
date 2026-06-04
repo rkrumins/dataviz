@@ -324,6 +324,47 @@ Workspace roles see `workspace:*` + `resource:*` only; global
 roles see `system:*` + `resource:*` only. Switching scope mid-edit
 clears any silently-invalid selections.
 
+## Phase 9 — audit log first-class on a quiet system
+
+The Phase-8 default filter hid login/logout as "noise", which made
+the audit page look blank on fresh systems. Phase 9 also found
+several events that **weren't being emitted at all** — failed
+logins, session revocations, workspace lifecycle.
+
+**New events emitted:**
+
+| Event | Severity | Fired by |
+|-------|----------|----------|
+| `user.login_failed` | warning | both raise paths in `auth_service.service.login` (best-effort, rollback-safe via `_emit_audit`) |
+| `user.session_revoked` | critical | `revoke_subject_sessions` / `revoke_role_sessions` — one per affected user, carries `reason` (workspace_binding_revoked / role_changed / role_permissions_updated) |
+| `rbac.workspace.created` | info | `POST /admin/workspaces` |
+| `rbac.workspace.updated` | info | `PUT /admin/workspaces/{id}` |
+| `rbac.workspace.deleted` | critical | `DELETE /admin/workspaces/{id}` (fires before the cascade event so the timeline reads in order) |
+
+**Three-mode scope filter** (replacing the two-mode Phase-8 toggle):
+
+| Mode | Surfaces | Hides |
+|------|----------|-------|
+| **Security** (default) | logins, logouts, failed logins, session revocations, every RBAC mutation, SSO config changes | password chrome, signup chrome, access-denied noise |
+| **Activity** | the above PLUS signup / password / access-request chrome | per-request access-denied spam only |
+| **Everything** | the unfiltered firehose | nothing |
+
+`user.logged_in` / `user.logged_out` moved off the noise list —
+they're first-class security signal now.
+
+**Operator recipes:**
+
+* "Who tried to brute-force Alice's account?" — set scope to
+  Security, filter `eventType=user.login_failed`. The email + reason
+  appear in the summary.
+* "Did Bob's revoked binding kill his session?" — Security mode,
+  filter `targetUserId=bob`. Two rows appear:
+  `rbac.workspace.member_revoked` and `user.session_revoked`
+  with `reason=workspace_binding_revoked`.
+* "Why is the new workspace missing?" — Security mode, filter
+  `eventType=rbac.workspace.*`. Created / updated / deleted events
+  show with actor + workspace name.
+
 ## Phase 8 hardening — audit-log usability
 
 The Phase-7 audit endpoint worked but the page was operationally

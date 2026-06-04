@@ -97,7 +97,7 @@ async def list_workspaces(
 @router.post("", response_model=WorkspaceResponse, status_code=201)
 async def create_workspace(
     req: WorkspaceCreateRequest = Body(...),
-    _user: User = Depends(requires("system:workspaces:create")),
+    user: User = Depends(requires("system:workspaces:create")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new workspace with one or more data sources."""
@@ -117,9 +117,23 @@ async def create_workspace(
             raise HTTPException(status_code=404, detail=f"Ontology '{ds.ontology_id}' not found")
 
     try:
-        return await workspace_repo.create_workspace(session, req)
+        ws = await workspace_repo.create_workspace(session, req)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    # Phase 9: workspace lifecycle audit. Operators expect "who
+    # created this workspace?" to be answerable from the audit log.
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.created",
+        payload={
+            "workspace_id": ws.id,
+            "name": ws.name,
+            "actor_id": user.id,
+            "data_source_count": len(req.data_sources),
+        },
+    )
+    return ws
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
@@ -145,13 +159,28 @@ async def get_workspace(
 async def update_workspace(
     workspace_id: str = Path(...),
     req: WorkspaceUpdateRequest = Body(...),
-    _user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
+    user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update workspace metadata (name, description, is_active)."""
     ws = await workspace_repo.update_workspace(session, workspace_id, req)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+
+    # Phase 9: lifecycle audit. ``changes`` keys only carries the
+    # fields the request actually set so the event payload doesn't
+    # serialise every unset field.
+    changes = req.model_dump(exclude_unset=True, by_alias=False)
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.updated",
+        payload={
+            "workspace_id": workspace_id,
+            "name": ws.name,
+            "actor_id": user.id,
+            "changes": list(changes.keys()),
+        },
+    )
     return ws
 
 
@@ -178,6 +207,12 @@ async def delete_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
 
+    # Phase 9: capture the workspace's name BEFORE we delete it so
+    # the audit event has something human-readable. Emit the
+    # ``rbac.workspace.deleted`` event ahead of the cascade event
+    # so the audit timeline reads "deleted → cascade" in order.
+    ws_name = ws.name
+
     # Drop workspace-scoped bindings first so the role-cascade can
     # remove the roles without RoleInUseError tripping.
     revoked_bindings = await binding_repo.delete_scope_bindings(
@@ -191,6 +226,18 @@ async def delete_workspace(
     deleted = await workspace_repo.delete_workspace(session, workspace_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.deleted",
+        payload={
+            "workspace_id": workspace_id,
+            "name": ws_name,
+            "actor_id": user.id,
+            "bindings_removed": revoked_bindings,
+            "roles_removed_count": len(cascaded_roles),
+        },
+    )
 
     if revoked_bindings or cascaded_roles:
         await user_repo.create_outbox_event(

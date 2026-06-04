@@ -194,10 +194,30 @@ class LocalIdentityService:
                 get_user_by_email=_get_user_by_email,
             )
             if identity is None:
+                # Phase 9: emit user.login_failed BEFORE raising so the
+                # audit log captures brute-force / password-spray
+                # attempts. Use the rollback-safe emit since the raise
+                # would roll back the main session and drop the event.
+                # Best-effort throughout — an audit failure must never
+                # block the 401 (wrapped below).
+                try:
+                    await self._emit_audit(
+                        "user.login_failed",
+                        {"email": email, "reason": "invalid_credentials"},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 raise InvalidCredentials("Invalid email or password")
 
             orm = await self._user_repo.get_user_by_id(session, identity.external_id)
             if orm is None:
+                try:
+                    await self._emit_audit(
+                        "user.login_failed",
+                        {"email": email, "reason": "user_not_found"},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 raise InvalidCredentials("Invalid email or password")
             roles = await self._user_repo.get_user_roles(session, orm.id)
 
@@ -676,14 +696,25 @@ class LocalIdentityService:
     async def _emit_audit(self, event_type: str, payload: dict) -> None:
         """Emit an audit event in its own committed transaction.
 
-        Used for the link-denied path: the main session rolls back when
-        we raise ``SSOAuthError``, so the audit record must be written
-        and committed separately or it would be lost with the rollback.
+        Used for paths that raise (link-denied, login-failed) where the
+        main session would roll back and drop the audit row. We open a
+        SECOND session, write the event, and commit it before the
+        caller raises.
+
+        Phase 9: added the explicit commit so the audit endpoint can
+        see the event. The SSO-link-denied path used to work because
+        the outer transaction was already in flight when raise fired;
+        the login-failed path raises directly, so without the commit
+        the new session was reaped without flushing.
         """
         if self._outbox_emit is None:
             return
         async with self._session_factory() as session:
             await self._outbox_emit(session, event_type, payload)
+            try:
+                await session.commit()
+            except Exception:  # noqa: BLE001 — best-effort by design
+                pass
 
     # ── Identity helpers (refresh path) ──────────────────────────────
 
