@@ -23,7 +23,10 @@ from backend.app.auth.dependencies import (
 from backend.app.common.http_caching import make_etag, maybe_not_modified
 from backend.app.common.single_flight import read_stats_sf
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import workspace_repo, provider_repo, ontology_definition_repo, data_source_repo
+from backend.app.db.repositories import (
+    workspace_repo, provider_repo, ontology_definition_repo, data_source_repo,
+    binding_repo, role_repo, user_repo,
+)
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services.permission_service import (
     PermissionClaims,
@@ -155,17 +158,51 @@ async def update_workspace(
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(
     workspace_id: str = Path(...),
-    _user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
+    user: User = Depends(requires("workspace:admin", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Delete a workspace (cascades data sources, views, and rule-sets)."""
+    """Delete a workspace (cascades data sources, views, and rule-sets).
+
+    Phase 7: also cascades to RBAC artefacts so the workspace doesn't
+    leave behind orphan data:
+
+      1. Drop every role binding scoped to this workspace.
+      2. Drop every custom role scoped to this workspace (those roles
+         can never be bound anywhere else, so they're operational
+         debt). System workspace-template roles live at scope='global'
+         and are unaffected.
+      3. Emit ``rbac.workspace.roles_cascaded`` listing the role names
+         so the audit log shows the cascade explicitly.
+    """
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+
+    # Drop workspace-scoped bindings first so the role-cascade can
+    # remove the roles without RoleInUseError tripping.
+    revoked_bindings = await binding_repo.delete_scope_bindings(
+        session, scope_type="workspace", scope_id=workspace_id,
+    )
+    cascaded_roles = await role_repo.delete_workspace_scoped_roles(
+        session, workspace_id,
+    )
+
     await provider_registry.evict_workspace(workspace_id, session)
     deleted = await workspace_repo.delete_workspace(session, workspace_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
+
+    if revoked_bindings or cascaded_roles:
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.workspace.roles_cascaded",
+            payload={
+                "workspace_id": workspace_id,
+                "bindings_removed": revoked_bindings,
+                "roles_removed": cascaded_roles,
+                "actor_id": user.id,
+            },
+        )
 
 
 @router.post("/{workspace_id}/set-default", response_model=WorkspaceResponse)

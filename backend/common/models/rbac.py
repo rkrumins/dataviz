@@ -9,9 +9,46 @@ arrive in either case and serialization defaults to camelCase.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# Phase 7: ``expires_in`` shortcut → ISO ``expires_at`` normalisation.
+# Operators express contractor / temp access durations naturally; the
+# DTO converts them once at the API boundary so the persistence layer
+# only ever sees timestamps. Accepts ``Nh`` (hours), ``Nd`` (days),
+# and ``Nw`` (weeks). Capped at ``365d`` to avoid surprise.
+_DURATION_RE = re.compile(r"^(\d+)([hdw])$")
+_DURATION_CAP_DAYS = 365
+
+
+def _parse_duration_to_expires_at(expr: str) -> str:
+    """Turn ``"24h"`` / ``"7d"`` / ``"2w"`` into a UTC ISO timestamp.
+
+    Raises ``ValueError`` for malformed expressions or durations over
+    the 365-day cap (a permanent binding should omit the field
+    altogether, not abuse the duration shortcut).
+    """
+    m = _DURATION_RE.match(expr.strip().lower())
+    if not m:
+        raise ValueError(
+            f"expires_in must look like '24h', '7d', or '2w'; got {expr!r}"
+        )
+    n, unit = int(m.group(1)), m.group(2)
+    if n <= 0:
+        raise ValueError("expires_in must be a positive duration")
+    days = {"h": n / 24, "d": n, "w": n * 7}[unit]
+    if days > _DURATION_CAP_DAYS:
+        raise ValueError(
+            f"expires_in capped at {_DURATION_CAP_DAYS} days; "
+            f"got {n}{unit}"
+        )
+    delta = {"h": timedelta(hours=n), "d": timedelta(days=n),
+             "w": timedelta(weeks=n)}[unit]
+    return (datetime.now(timezone.utc) + delta).isoformat()
 
 
 # ── Groups ───────────────────────────────────────────────────────────
@@ -77,16 +114,61 @@ class WorkspaceMemberResponse(BaseModel):
     role: str
     granted_at: str = Field(alias="grantedAt")
     granted_by: Optional[str] = Field(default=None, alias="grantedBy")
+    # Phase 7: time-bound bindings. ``None`` for permanent;
+    # ISO-8601 UTC for an expiry. The FE renders a countdown badge.
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
     subject: WorkspaceMemberSubject
 
 
 class WorkspaceMemberCreateRequest(BaseModel):
-    """Bind a user or group to a workspace at a specific role."""
+    """Bind a user or group to a workspace at a specific role.
+
+    Phase 7: ``expires_at`` (ISO timestamp) and ``expires_in``
+    (duration shortcut like ``"24h"`` / ``"7d"`` / ``"2w"``) are
+    both accepted. Setting both is a 422 — pick one. Setting neither
+    creates a permanent binding (the prior behaviour).
+    """
     model_config = ConfigDict(populate_by_name=True)
     subject_type: str = Field(alias="subjectType")  # "user" | "group"
     subject_id: str = Field(alias="subjectId")
     # See ``WorkspaceMemberResponse.role`` for the accepted set.
     role: str
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+
+    @model_validator(mode="after")
+    def _normalise_expiry(self) -> "WorkspaceMemberCreateRequest":
+        if self.expires_at and self.expires_in:
+            raise ValueError(
+                "Pass either expiresAt OR expiresIn, not both",
+            )
+        if self.expires_in:
+            self.expires_at = _parse_duration_to_expires_at(self.expires_in)
+            self.expires_in = None
+        return self
+
+
+class WorkspaceMemberExpiryUpdateRequest(BaseModel):
+    """Phase 7: extend, change, or clear a binding's ``expires_at``.
+
+    ``expires_at=null`` or ``expires_in=null`` (both omitted) clears
+    the expiry → the binding becomes permanent. Used to extend a
+    contractor's access without re-creating the binding.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+    expires_in: Optional[str] = Field(default=None, alias="expiresIn")
+
+    @model_validator(mode="after")
+    def _normalise_expiry(self) -> "WorkspaceMemberExpiryUpdateRequest":
+        if self.expires_at and self.expires_in:
+            raise ValueError(
+                "Pass either expiresAt OR expiresIn, not both",
+            )
+        if self.expires_in:
+            self.expires_at = _parse_duration_to_expires_at(self.expires_in)
+            self.expires_in = None
+        return self
 
 
 # ── View grants (Layer-3 explicit shares) ───────────────────────────

@@ -20,6 +20,7 @@ const AdminGroups = lazy(() => import('@/components/admin/AdminGroups').then(m =
 const AdminPermissions = lazy(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
 const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
 const AdminSso = lazy(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
+const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
@@ -126,6 +127,7 @@ export const router = createBrowserRouter([
           { path: 'permissions', element: <Lazy><AdminPermissions /></Lazy> },
           { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
           { path: 'sso', element: <Lazy><AdminSso /></Lazy> },
+          { path: 'audit', element: <Lazy><AdminAudit /></Lazy> },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

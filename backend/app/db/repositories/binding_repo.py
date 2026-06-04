@@ -103,6 +103,26 @@ async def create_binding(
     return binding
 
 
+async def update_binding_expiry(
+    session: AsyncSession,
+    binding_id: str,
+    *,
+    expires_at: Optional[str],
+) -> Optional[RoleBindingORM]:
+    """Phase 7: extend, change, or clear a binding's ``expires_at``.
+
+    Passing ``None`` clears the expiry (the binding becomes
+    permanent). Passing an ISO timestamp sets / replaces it. Returns
+    the updated binding or ``None`` if no binding has that id.
+    """
+    binding = await get_binding(session, binding_id)
+    if binding is None:
+        return None
+    binding.expires_at = expires_at
+    await session.flush()
+    return binding
+
+
 async def delete_binding(session: AsyncSession, binding_id: str) -> bool:
     result = await session.execute(
         delete(RoleBindingORM).where(RoleBindingORM.id == binding_id)

@@ -1925,7 +1925,41 @@ function CreateRoleModal({
     const [error, setError] = useState<string | null>(null)
     const { showToast } = useToast()
 
-    const grouped = useMemo(() => groupByCategory(permissions), [permissions])
+    // Phase 7: the resolver's category × scope filter silently drops
+    // perms whose category doesn't match the binding's scope. So a
+    // workspace-scoped role bundling ``system:*`` perms grants
+    // nothing of those perms — confusing for operators. Filter the
+    // picker by the role's scope so they only see what will actually
+    // work: ``workspace`` perms for ws-scoped roles, ``system`` perms
+    // for global roles. ``resource`` perms (per-view grants) are
+    // visible from both — they sit at a different layer.
+    const visiblePermissions = useMemo(() => {
+        if (scopeType === 'workspace') {
+            return permissions.filter(
+                p => p.category === 'workspace' || p.category === 'resource',
+            )
+        }
+        return permissions.filter(
+            p => p.category === 'system' || p.category === 'resource',
+        )
+    }, [permissions, scopeType])
+
+    // Clear selections that the scope flip rendered invalid so the
+    // silently-dropped perms don't sneak through on submit.
+    useEffect(() => {
+        const visibleIds = new Set(visiblePermissions.map(p => p.id))
+        setSelectedPerms(prev => {
+            let changed = false
+            const next = new Set<string>()
+            for (const id of prev) {
+                if (visibleIds.has(id)) next.add(id)
+                else changed = true
+            }
+            return changed ? next : prev
+        })
+    }, [visiblePermissions])
+
+    const grouped = useMemo(() => groupByCategory(visiblePermissions), [visiblePermissions])
 
     // Lazy-load workspaces only when the user picks workspace scope.
     useEffect(() => {

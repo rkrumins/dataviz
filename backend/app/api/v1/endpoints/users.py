@@ -203,13 +203,27 @@ async def change_user_role(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Phase 7: kill the target user's live sessions so the new claim
+    # (promotion OR demotion) takes effect on the next request, not
+    # at the end of the current JWT TTL. Best-effort.
+    from backend.app.services.revocation_service import revoke_subject_sessions
+    revoked = await revoke_subject_sessions("user", user_id)
+
     await user_repo.create_outbox_event(
         session,
         event_type="user.role_changed",
-        payload={"user_id": user_id, "new_role": body.role, "changed_by": admin.id},
+        payload={
+            "user_id": user_id,
+            "new_role": body.role,
+            "changed_by": admin.id,
+            "sessions_revoked": revoked,
+        },
     )
 
-    logger.info("User %s role changed to '%s' by %s", user_id, body.role, admin.id)
+    logger.info(
+        "User %s role changed to '%s' by %s (sessions killed: %d)",
+        user_id, body.role, admin.id, revoked,
+    )
     return {"detail": f"Role changed to '{body.role}'"}
 
 

@@ -294,11 +294,33 @@ async def update_role(
     except UnknownPermissionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Phase 7: a role-bundle change fans out to every subject bound
+    # to the role. Kill their live sessions so the new permission
+    # set takes effect immediately. Best-effort; emits the count
+    # into the audit event so the blast radius is visible.
+    from backend.app.services.revocation_service import revoke_role_sessions
+    cascade_revoked = await revoke_role_sessions(name, session=session)
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.role.updated",
-        payload={"name": name, "actor_id": admin.id},
+        payload={
+            "name": name,
+            "actor_id": admin.id,
+            "cascade_sessions_revoked": cascade_revoked,
+        },
     )
+    if cascade_revoked:
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.role.cascade_revoked",
+            payload={
+                "role_name": name,
+                "actor_id": admin.id,
+                "users_revoked": cascade_revoked,
+                "reason": "role_permissions_updated",
+            },
+        )
     bundles = await role_repo.role_names_with_permissions(session, [name])
     counts = await _binding_counts(session, [name])
     return _role_to_response(

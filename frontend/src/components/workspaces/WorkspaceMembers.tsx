@@ -170,6 +170,40 @@ function timeAgo(iso: string): string {
 }
 
 
+/** Phase 7 — small inline badge next to time-bound binding rows.
+ *  Red if expired, amber if within 24h, slate otherwise. */
+function ExpiryBadge({ expiresAt }: { expiresAt: string }) {
+    const remaining = new Date(expiresAt).getTime() - Date.now()
+    const expired = remaining <= 0
+    const soon = remaining > 0 && remaining < 24 * 3600_000
+
+    const label = expired
+        ? 'Expired'
+        : (soon
+            ? `Expires in ${Math.max(1, Math.floor(remaining / 3600_000))}h`
+            : `Expires in ${Math.max(1, Math.floor(remaining / 86_400_000))}d`)
+
+    const tone = expired
+        ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20'
+        : (soon
+            ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
+            : 'bg-slate-500/10 text-ink-muted border-slate-500/20')
+
+    return (
+        <span
+            className={cn(
+                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold mt-1 border',
+                tone,
+            )}
+            title={`Auto-revokes at ${new Date(expiresAt).toLocaleString()}`}
+        >
+            <Clock className="w-2.5 h-2.5" />
+            {label}
+        </span>
+    )
+}
+
+
 function SortHeader({
     label, field, current, dir, onSort,
 }: {
@@ -307,13 +341,23 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
     // ── Actions ──────────────────────────────────────────────────────
 
-    const handleAdd = async (subjectType: SubjectType, subjectId: string, role: RoleName, label: string) => {
+    const handleAdd = async (
+        subjectType: SubjectType,
+        subjectId: string,
+        role: RoleName,
+        label: string,
+        expiresIn?: string | null,
+    ) => {
         setActionLoading('add')
         setError(null)
         try {
-            await workspaceMembersService.create(workspaceId, { subjectType, subjectId, role })
+            await workspaceMembersService.create(workspaceId, {
+                subjectType, subjectId, role,
+                expiresIn: expiresIn ?? null,
+            })
             await fetchMembers()
-            showToast('success', `Granted ${resolveRoleVisual(role).label} to ${label}`)
+            const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
+            showToast('success', `Granted ${resolveRoleVisual(role).label} to ${label}${suffix}`)
             setModal(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to add member'
@@ -564,6 +608,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                         <td className="px-5 py-4">
                                             <p className="text-sm text-ink-secondary">{formatDate(m.grantedAt)}</p>
                                             <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(m.grantedAt)}</p>
+                                            {m.expiresAt && (
+                                                <ExpiryBadge expiresAt={m.expiresAt} />
+                                            )}
                                         </td>
 
                                         {/* Actions */}
@@ -674,6 +721,7 @@ function AddMemberModal({
         subjectId: string,
         role: RoleName,
         label: string,
+        expiresIn?: string | null,
     ) => Promise<void>
     submitting: boolean
 }) {
@@ -684,6 +732,10 @@ function AddMemberModal({
     const [search, setSearch] = useState('')
     const [selected, setSelected] = useState<{ id: string; label: string } | null>(null)
     const [role, setRole] = useState<RoleName>('workspace_member')
+    // Phase 7: time-bound bindings. ``''`` means permanent; otherwise
+    // we send the duration shortcut to the backend which normalises
+    // it to an ISO ``expires_at`` on the server side.
+    const [expiresIn, setExpiresIn] = useState<string>('')
     const { showToast } = useToast()
 
     // Phase 3: pull the bindable roles for *this* workspace — global
@@ -921,6 +973,39 @@ function AddMemberModal({
                 </div>
             </div>
 
+            {/* Phase 7 — access duration */}
+            <div className="mt-5 pt-5 border-t border-glass-border">
+                <p className="text-xs font-semibold text-ink mb-2">
+                    Access duration
+                </p>
+                <div className="flex flex-wrap gap-2">
+                    {(['', '24h', '7d', '30d', '90d'] as const).map(opt => {
+                        const isSelected = expiresIn === opt
+                        const label = opt === '' ? 'Permanent' : opt
+                        return (
+                            <button
+                                key={opt || 'permanent'}
+                                type="button"
+                                onClick={() => setExpiresIn(opt)}
+                                className={cn(
+                                    'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                    isSelected
+                                        ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                        : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                )}
+                            >
+                                {label}
+                            </button>
+                        )
+                    })}
+                </div>
+                <p className="text-[11px] text-ink-muted mt-2">
+                    {expiresIn
+                        ? `Access auto-revokes after ${expiresIn}. Useful for contractors and temporary cover.`
+                        : 'Binding stays active until manually revoked.'}
+                </p>
+            </div>
+
             {/* Conflict notice */}
             <AnimatePresence>
                 {conflict && (
@@ -948,7 +1033,10 @@ function AddMemberModal({
                 <button
                     onClick={() => {
                         if (!selected) return
-                        void onSubmit(subjectType, selected.id, role, selected.label)
+                        void onSubmit(
+                            subjectType, selected.id, role, selected.label,
+                            expiresIn || null,
+                        )
                     }}
                     disabled={!valid || conflict || submitting}
                     className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-accent-lineage hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-accent-lineage/20"

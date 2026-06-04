@@ -22,11 +22,13 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.models import GroupORM, UserORM, WorkspaceORM
 from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
 from backend.app.services.permission_service import simulate_for_user
+from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ImpactPreviewResponse,
     ImpactPreviewUser,
     WorkspaceMemberCreateRequest,
+    WorkspaceMemberExpiryUpdateRequest,
     WorkspaceMemberResponse,
     WorkspaceMemberSubject,
 )
@@ -109,6 +111,7 @@ async def list_members(
                 role=b.role_name,
                 granted_at=b.granted_at,
                 granted_by=b.granted_by,
+                expires_at=b.expires_at,
                 subject=subject,
             )
         )
@@ -188,6 +191,7 @@ async def create_member_binding(
             scope_type="workspace",
             scope_id=ws_id,
             granted_by=admin.id,
+            expires_at=body.expires_at,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -202,6 +206,7 @@ async def create_member_binding(
             "subject_id": body.subject_id,
             "role": body.role,
             "actor_id": admin.id,
+            "expires_at": body.expires_at,
         },
     )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)
@@ -210,6 +215,71 @@ async def create_member_binding(
         role=binding.role_name,
         granted_at=binding.granted_at,
         granted_by=binding.granted_by,
+        expires_at=binding.expires_at,
+        subject=subject,
+    )
+
+
+@router.put(
+    "/{binding_id}/expiry",
+    response_model=WorkspaceMemberResponse,
+    response_model_by_alias=True,
+)
+async def update_member_expiry(
+    ws_id: str,
+    binding_id: str,
+    body: WorkspaceMemberExpiryUpdateRequest,
+    admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Phase 7: extend / change / clear a binding's expiry.
+
+    Used to extend a contractor's access window without re-creating
+    the binding (which would lose its ``granted_at`` provenance and
+    break audit links). ``expires_at`` / ``expires_in`` both
+    accepted; sending neither clears the expiry → permanent.
+
+    Does NOT kill the affected user's session. An expiry extension
+    is non-narrowing (the user keeps the access they had); an expiry
+    shortening is rare and the JWT TTL is the floor on staleness.
+    Callers who want immediate effect should follow up with the
+    revoke endpoint instead.
+    """
+    binding = await binding_repo.get_binding(session, binding_id)
+    if binding is None or binding.scope_type != "workspace" or binding.scope_id != ws_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Binding not found in this workspace",
+        )
+
+    updated = await binding_repo.update_binding_expiry(
+        session, binding_id, expires_at=body.expires_at,
+    )
+    assert updated is not None  # we just fetched it
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.workspace.member_expiry_updated",
+        payload={
+            "workspace_id": ws_id,
+            "binding_id": binding_id,
+            "subject_type": updated.subject_type,
+            "subject_id": updated.subject_id,
+            "role": updated.role_name,
+            "new_expires_at": body.expires_at,
+            "actor_id": admin.id,
+        },
+    )
+
+    subject = await _hydrate_subject(
+        session, updated.subject_type, updated.subject_id,
+    )
+    return WorkspaceMemberResponse(
+        binding_id=updated.id,
+        role=updated.role_name,
+        granted_at=updated.granted_at,
+        granted_by=updated.granted_by,
+        expires_at=updated.expires_at,
         subject=subject,
     )
 
@@ -231,6 +301,15 @@ async def revoke_member_binding(
             detail="Binding not found in this workspace",
         )
     await binding_repo.delete_binding(session, binding_id)
+
+    # Phase 7: kill the affected user's (or every group member's)
+    # live sessions so the demotion takes effect immediately rather
+    # than waiting up to JWT_EXPIRY_MINUTES for the next refresh.
+    revoked_count = await revoke_subject_sessions(
+        binding.subject_type, binding.subject_id,
+        session=session,
+    )
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.workspace.member_revoked",
@@ -241,11 +320,12 @@ async def revoke_member_binding(
             "subject_id": binding.subject_id,
             "role": binding.role_name,
             "actor_id": admin.id,
+            "sessions_revoked": revoked_count,
         },
     )
     logger.info(
-        "Binding %s revoked from workspace %s by %s",
-        binding_id, ws_id, admin.id,
+        "Binding %s revoked from workspace %s by %s (sessions killed: %d)",
+        binding_id, ws_id, admin.id, revoked_count,
     )
 
 

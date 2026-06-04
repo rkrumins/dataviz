@@ -14,6 +14,7 @@ from .endpoints import (
     admin_users_lookup,
     admin_sso_config,
     me_identities,
+    audit,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -133,6 +134,14 @@ api_router.include_router(
     rbac_search.router,
     prefix="/admin/rbac/search",
     tags=["admin:rbac:search"],
+)
+
+# RBAC Phase 7 — audit history lens. Reads outbox events with
+# filter + cursor pagination. Backs the /admin/audit page.
+api_router.include_router(
+    audit.router,
+    prefix="/admin/audit",
+    tags=["admin:audit"],
 )
 
 # RBAC Phase 5 — IdP group -> RoleBinding / Group membership mapping.

@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, Network,
+    UserCog, Users2, KeyRound, Network, History,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -44,6 +44,7 @@ const adminGroups = [
             { path: 'groups', label: 'Groups', icon: Users2, description: 'Bundle members for bulk role grants' },
             { path: 'permissions', label: 'Permissions', icon: KeyRound, description: 'Roles, permissions, and who has access where' },
             { path: 'sso', label: 'SSO', icon: Network, description: 'IdP providers + IdP group mappings' },
+            { path: 'audit', label: 'Audit Log', icon: History, description: 'RBAC + user lifecycle history' },
         ]
     }
 ]

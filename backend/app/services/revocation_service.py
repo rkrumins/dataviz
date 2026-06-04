@@ -228,6 +228,135 @@ class RevocationService:
         return await self._backend.health()
 
 
+# ── Binding-mutation fan-out helpers ────────────────────────────────
+#
+# Phase 7: when an admin demotes a user or revokes a binding, the
+# resolver's read path catches the change at next login. Until then,
+# the user's existing JWT carries the old claims for up to
+# ``JWT_EXPIRY_MINUTES``. For enterprise security postures this is
+# too slow — a fired employee retains workspace access for 5 minutes
+# after their offboarding ticket completes.
+#
+# The helpers below convert a binding-shape change into the right
+# ``revoke_*_user_sessions`` calls. Wrapped in try/except so a Redis
+# outage never blocks the API mutation (the JWT expiry is still the
+# safety net).
+
+
+async def revoke_subject_sessions(
+    subject_type: str,
+    subject_id: str,
+    *,
+    expand_groups: bool = True,
+    session=None,
+) -> int:
+    """Revoke every live session belonging to a binding subject.
+
+    For ``subject_type='user'`` the call is direct. For
+    ``subject_type='group'`` we expand to every group member (so a
+    group-binding revoke fans out across the membership).
+
+    Returns the number of users whose sessions were revoked.
+    Best-effort: a Redis failure or an empty session index returns 0
+    silently — the JWT TTL is still the floor on staleness.
+    """
+    svc = get_revocation_service()
+    if subject_type == "user":
+        try:
+            await svc.revoke_all_user_sessions(subject_id)
+            return 1
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning(
+                "revoke_subject_sessions(user=%s) failed: %s", subject_id, exc,
+            )
+            return 0
+
+    if subject_type == "group" and expand_groups:
+        if session is None:
+            logger.warning(
+                "revoke_subject_sessions(group=%s): no DB session "
+                "passed; skipping membership expansion. JWT TTL is "
+                "the only floor on staleness.",
+                subject_id,
+            )
+            return 0
+        from backend.app.db.repositories import group_repo
+        try:
+            members = await group_repo.list_group_members(session, subject_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "revoke_subject_sessions(group=%s) membership lookup "
+                "failed: %s", subject_id, exc,
+            )
+            return 0
+        count = 0
+        for m in members:
+            try:
+                await svc.revoke_all_user_sessions(m.user_id)
+                count += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "revoke_subject_sessions(group=%s, member=%s) failed: %s",
+                    subject_id, m.user_id, exc,
+                )
+        return count
+
+    return 0
+
+
+async def revoke_role_sessions(role_name: str, *, session) -> int:
+    """Revoke sessions for every user touched by a role-shape change.
+
+    Used by ``PUT /admin/roles/{name}`` (the role's permission bundle
+    changed) and ``DELETE`` (cascading after individual bindings are
+    removed). Walks every binding that references the role, expands
+    group bindings to their members, and dedupes per user.
+
+    Best-effort throughout. Returns the count of distinct users
+    revoked so the caller can audit-log the blast radius.
+    """
+    from sqlalchemy import select
+    from backend.app.db.models import RoleBindingORM
+    from backend.app.db.repositories import group_repo
+
+    try:
+        rows = (await session.execute(
+            select(RoleBindingORM).where(RoleBindingORM.role_name == role_name)
+        )).scalars().all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "revoke_role_sessions(%s) lookup failed: %s", role_name, exc,
+        )
+        return 0
+
+    user_ids: set[str] = set()
+    for b in rows:
+        if b.subject_type == "user":
+            user_ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            try:
+                members = await group_repo.list_group_members(
+                    session, b.subject_id,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            for m in members:
+                user_ids.add(m.user_id)
+
+    svc = get_revocation_service()
+    count = 0
+    for uid in user_ids:
+        try:
+            await svc.revoke_all_user_sessions(uid)
+            count += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "revoke_role_sessions(%s, user=%s) failed: %s",
+                role_name, uid, exc,
+            )
+    return count
+
+
 # ── Singleton wiring ──────────────────────────────────────────────────
 
 _INSTANCE: Optional[RevocationService] = None

@@ -1,9 +1,10 @@
 # RBAC
 
-> Phase 6 hardening notes folded into Phase 5 role taxonomy.
-> Last updated: 2026-06-04 (Phase 6 — dual-store sync, dropdown
-> safety, view-grants router gate, denial audit). The Phase-5
-> migration `20260603_1100_rbac_uplift` is unchanged.
+> Phase 7 enterprise hardening folded into Phase 5/6 taxonomy.
+> Last updated: 2026-06-04 (Phase 7 — session-kill on revoke,
+> time-bound bindings, audit log, custom-role picker filter,
+> workspace deletion cascade). The Phase-5 migration
+> `20260603_1100_rbac_uplift` is unchanged.
 
 ## TL;DR
 
@@ -247,6 +248,94 @@ Payload shape:
 
 Operators wire this into their SIEM or log aggregator to drive
 "access-denied spikes" alerts.
+
+## Phase 7 hardening — session-kill on demote
+
+Pre-Phase-7, an admin who fired a contractor and revoked their
+workspace binding left the contractor's JWT valid for up to
+`JWT_EXPIRY_MINUTES` (default 5 min). For enterprise security
+postures that's too slow.
+
+Phase 7 wires `revocation_service.revoke_all_user_sessions` into
+every mutation that narrows access:
+
+* `DELETE /admin/workspaces/{ws}/members/{binding}` — user binding
+  → revoke that user's sessions; group binding → revoke every group
+  member's sessions.
+* `PUT /admin/users/{id}/role` — revoke target user's sessions.
+* `PUT /admin/roles/{name}` — revoke every user bound to that role
+  (direct + via group). Emits `rbac.role.cascade_revoked` with the
+  affected user count.
+
+Every kill is best-effort: a Redis outage logs and continues — the
+JWT TTL is still the safety net.
+
+## Phase 7 hardening — time-bound bindings
+
+Contractor / temp access / on-call rotations need bindings that
+auto-expire. The `RoleBindingORM.expires_at` column has always
+existed and the resolver always honoured it; Phase 7 surfaces it
+through the admin API and UI.
+
+* `POST /admin/workspaces/{ws}/members` accepts:
+  * `expiresAt` (ISO timestamp) OR
+  * `expiresIn` (duration shortcut: `"24h"` / `"7d"` / `"2w"` —
+    accepts `h`/`d`/`w` units, capped at 365 days).
+  Setting both is a 422.
+* `PUT /admin/workspaces/{ws}/members/{binding}/expiry` — extend,
+  change, or clear (empty body → permanent) the expiry without
+  re-creating the binding.
+* `WorkspaceMembers` UI gains an "Access duration" picker
+  (Permanent / 24h / 7d / 30d / 90d) on the add-member modal and a
+  countdown badge on the member list.
+
+Recipe: "Give a contractor 30-day access" → bind workspace_member
+with `expiresIn: "30d"`. Audit log shows the bind + the expiry.
+
+## Phase 7 hardening — audit log lens
+
+Every Phase 5+ RBAC mutation already wrote to the outbox. Phase 7
+gives operators + compliance a UI:
+
+* `GET /api/v1/admin/audit` (gated `system:admin`) — filter by
+  event type prefix (`rbac.role.*`), actor, target user / role,
+  workspace, timestamp window. Cursor pagination (50/page default,
+  500 max).
+* `GET /api/v1/admin/audit/event-types` — distinct event types
+  for the FE filter dropdown.
+* `/admin/audit` — admin page with KPI strip by category
+  (workspace bindings / role lifecycle / permissions / user
+  lifecycle) and a click-to-expand JSON payload table.
+
+Compliance recipe: "Who promoted Alice last week?" → filter
+`targetUserId=alice`, `eventType=user.role_changed`,
+`fromTs=<7-days-ago>`.
+
+## Phase 7 hardening — custom-role permission picker
+
+The resolver silently drops cross-category permissions
+(`system:*` perms in a workspace-scoped role's bundle, vice versa
+— see the category × scope filter). Pre-Phase-7 the create-role
+modal showed all perms; operators got confused when "I bundled
+system:users:manage into this workspace role" did nothing.
+
+Phase 7: the picker filters by the role's selected scope.
+Workspace roles see `workspace:*` + `resource:*` only; global
+roles see `system:*` + `resource:*` only. Switching scope mid-edit
+clears any silently-invalid selections.
+
+## Phase 7 hardening — workspace deletion cascade
+
+Deleting a workspace used to leave behind:
+
+* `RoleBindingORM` rows pointing at the dead workspace (covered
+  by `delete_scope_bindings`).
+* Custom `RoleORM` rows scoped to the dead workspace, which
+  couldn't be bound anywhere else. Phase 7 cascades these too via
+  `role_repo.delete_workspace_scoped_roles`.
+
+A `rbac.workspace.roles_cascaded` outbox event lists the removed
+bindings + roles so the audit log shows the cascade.
 
 ## Migration map (Phase 5)
 
