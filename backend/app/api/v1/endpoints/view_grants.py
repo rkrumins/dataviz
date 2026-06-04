@@ -9,9 +9,16 @@ intentionally narrower than the global RBAC enum: ``editor`` and
   DELETE /views/{view_id}/grants/{grant_id}     remove a grant
 
 Authorization: only the view's creator OR a workspace admin of the
-view's workspace can manage grants. Today this maps to the
-``workspace:admin`` permission scoped to the view's workspace; the
-creator-self path is checked inline on the endpoint.
+view's workspace can manage grants. Phase 6 promotes the check from
+an inline call to a router-level FastAPI dependency
+(``can_manage_view_grants``) so that:
+
+  1. Removing the gate is impossible without touching the router
+     signature — the grep-coverage tests in
+     ``test_rbac_endpoint_coverage.py`` would catch a regression.
+  2. The creator carve-out is preserved (a standard
+     ``Depends(requires("workspace:admin"))`` would 403 the creator
+     who doesn't also hold workspace:admin).
 """
 from __future__ import annotations
 
@@ -41,6 +48,12 @@ from backend.common.models.rbac import (
 
 
 logger = logging.getLogger(__name__)
+# Router-level dependency: every route here passes through
+# ``can_manage_view_grants``. The dep returns the loaded view so the
+# handlers don't re-query. Wiring it at the router rather than the
+# operation level means a regression that removes the gate would have
+# to delete a visible line — and the per-endpoint coverage tests
+# notice missing gates by inspecting the router.
 router = APIRouter()
 
 
@@ -68,9 +81,11 @@ def _ensure_can_manage_grants(
     """Permit only the creator OR a workspace admin of the view's
     workspace. Raises 403 otherwise.
 
-    Called inline rather than via ``Depends(requires(...))`` because
-    the workspace id we need to scope the permission against is on the
-    View row, not in the URL path.
+    Pure-function variant of ``can_manage_view_grants`` kept for
+    callers that already have the view in hand (e.g. the handler
+    body, which loaded the view to attach workspace metadata to the
+    outbox event). Both paths agree by construction — there's one
+    rule, two callsites.
     """
     if view.created_by == user.id:
         return
@@ -80,8 +95,43 @@ def _ensure_can_manage_grants(
         return
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail="Only the creator or a workspace admin can manage grants on this view",
+        detail={
+            "error": "missing_permission",
+            "permission": "workspace:admin",
+            "scope": {"type": "workspace", "id": view.workspace_id},
+            "message": (
+                "Only the creator or a workspace admin can manage "
+                "grants on this view"
+            ),
+        },
     )
+
+
+async def can_manage_view_grants(
+    view_id: str,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> ViewORM:
+    """Router-level gate for ``/views/{view_id}/grants``.
+
+    Returns the loaded ``ViewORM`` so handlers can reuse it without
+    a second lookup. Raises 404 if the view doesn't exist (consistent
+    with ``_load_view``), 403 if the caller isn't the creator AND
+    lacks ``workspace:admin`` in the view's workspace AND lacks
+    ``system:admin``.
+
+    Why a custom dep instead of ``requires("workspace:admin",
+    workspace="view_id")``: the path param is the view id, not the
+    workspace id. We need to load the view to find the workspace.
+    The standard ``requires(...)`` factory has no hook for that
+    indirection. A bespoke dep is the simplest way to wire a
+    router-level gate that's grep-discoverable AND honours the
+    creator carve-out.
+    """
+    view = await _load_view(session, view_id)
+    _ensure_can_manage_grants(view=view, user=user, claims=claims)
+    return view
 
 
 async def _hydrate_subject(
@@ -123,13 +173,9 @@ async def _hydrate_subject(
 async def list_grants(
     view_id: str,
     request: Request,
-    user: User = Depends(get_current_user),
-    claims: PermissionClaims = Depends(get_permission_claims),
+    view: ViewORM = Depends(can_manage_view_grants),
     session: AsyncSession = Depends(get_db_session),
 ):
-    view = await _load_view(session, view_id)
-    _ensure_can_manage_grants(view=view, user=user, claims=claims)
-
     grants = await grant_repo.list_grants_for_resource(
         session, resource_type="view", resource_id=view_id,
     )
@@ -158,12 +204,9 @@ async def create_grant(
     view_id: str,
     body: ViewGrantCreateRequest,
     user: User = Depends(get_current_user),
-    claims: PermissionClaims = Depends(get_permission_claims),
+    view: ViewORM = Depends(can_manage_view_grants),
     session: AsyncSession = Depends(get_db_session),
 ):
-    view = await _load_view(session, view_id)
-    _ensure_can_manage_grants(view=view, user=user, claims=claims)
-
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
@@ -233,12 +276,9 @@ async def delete_grant(
     view_id: str,
     grant_id: str,
     user: User = Depends(get_current_user),
-    claims: PermissionClaims = Depends(get_permission_claims),
+    view: ViewORM = Depends(can_manage_view_grants),
     session: AsyncSession = Depends(get_db_session),
 ):
-    view = await _load_view(session, view_id)
-    _ensure_can_manage_grants(view=view, user=user, claims=claims)
-
     # Verify the grant belongs to this view before deleting — defends
     # against an attacker constructing a malicious grant_id from another
     # view they happen to own.

@@ -19,6 +19,7 @@ from backend.app.db.models import (
     UserRoleORM,
     UserApprovalORM,
     OutboxEventORM,
+    RoleBindingORM,
 )
 
 
@@ -263,12 +264,124 @@ async def update_user_status(session: AsyncSession, user_id: str, status: str) -
 
 
 # ── Roles ──────────────────────────────────────────────────────────────
+#
+# Two tables track a user's role state and they need to stay in sync:
+#
+#   * ``user_roles``  — legacy Phase-0 table used by ``require_admin``'s
+#     fallback path and surfaced on the ``User.role`` DTO field for
+#     display. CHECK-constraint-bound to the post-Phase-5 taxonomy.
+#   * ``role_bindings`` — canonical (subject, role, scope) store the
+#     resolver reads to build ``PermissionClaims`` for the JWT.
+#
+# Phase 6 invariant: **every write that grants a global role goes
+# through this module and updates both tables in one transaction**.
+# Writing to one without the other produces the "Alice is promoted to
+# super_admin in the UI but every endpoint 403s her" footgun the audit
+# called out (issue #1).
+
+# Roles that are global-only and meaningful when assigned via the
+# ``/admin/users/{id}/role`` flow. The workspace-template roles
+# (workspace_admin / workspace_member / workspace_viewer) describe
+# powers inside a workspace and are bound via the workspace-members
+# endpoint instead.
+GLOBAL_ASSIGNABLE_ROLES: frozenset[str] = frozenset({
+    "super_admin",
+    "org_admin",
+})
+
 
 async def assign_role(session: AsyncSession, user_id: str, role_name: str) -> UserRoleORM:
+    """Write a single ``user_roles`` row.
+
+    Low-level helper kept for legacy call sites + tests that exercise
+    the legacy table directly. New code that wants a user to actually
+    have permissions should call ``set_global_role`` instead, which
+    updates ``role_bindings`` too.
+    """
     role = UserRoleORM(user_id=user_id, role_name=role_name)
     session.add(role)
     await session.flush()
     return role
+
+
+async def set_global_role(
+    session: AsyncSession,
+    user_id: str,
+    role_name: str,
+    *,
+    granted_by: Optional[str] = None,
+) -> None:
+    """Set the user's single global role, syncing both stores.
+
+    Replaces all existing rows in ``user_roles`` AND all existing
+    global-scope rows in ``role_bindings`` for this user. The two
+    writes happen in one transaction so the legacy display and the
+    JWT claim cannot drift.
+
+    ``role_name`` must be in ``GLOBAL_ASSIGNABLE_ROLES`` — assigning
+    a workspace-template role globally is semantically meaningless
+    (no workspace context) and would silently grant nothing once the
+    resolver's category × scope filter runs.
+
+    Raises ``ValueError`` for an unsupported role name; the endpoint
+    layer maps that to 400.
+    """
+    if role_name not in GLOBAL_ASSIGNABLE_ROLES:
+        raise ValueError(
+            f"role_name must be one of {sorted(GLOBAL_ASSIGNABLE_ROLES)}, "
+            f"got {role_name!r}"
+        )
+
+    # 1. Legacy ``user_roles`` table — replace.
+    await session.execute(
+        delete(UserRoleORM).where(UserRoleORM.user_id == user_id)
+    )
+    session.add(UserRoleORM(user_id=user_id, role_name=role_name))
+
+    # 2. Canonical ``role_bindings`` — drop existing global bindings
+    #    for this user, insert the new one. Workspace-scope bindings
+    #    (set via the workspace-members endpoint) are left untouched
+    #    so promoting a workspace_admin to super_admin globally
+    #    doesn't yank their workspace memberships.
+    await session.execute(
+        delete(RoleBindingORM).where(
+            RoleBindingORM.subject_type == "user",
+            RoleBindingORM.subject_id == user_id,
+            RoleBindingORM.scope_type == "global",
+        )
+    )
+    session.add(RoleBindingORM(
+        subject_type="user",
+        subject_id=user_id,
+        role_name=role_name,
+        scope_type="global",
+        scope_id=None,
+        granted_by=granted_by,
+        source="local",
+    ))
+
+    await session.flush()
+
+
+async def clear_global_role(session: AsyncSession, user_id: str) -> None:
+    """Drop every global role row for this user, from both stores.
+
+    Used when a user is suspended / rejected and we want the next
+    login to surface zero permissions even if the legacy
+    ``user.role`` field falls back to the ``workspace_member``
+    sentinel.
+    """
+    await session.execute(
+        delete(UserRoleORM).where(UserRoleORM.user_id == user_id)
+    )
+    await session.execute(
+        delete(RoleBindingORM).where(
+            RoleBindingORM.subject_type == "user",
+            RoleBindingORM.subject_id == user_id,
+            RoleBindingORM.scope_type == "global",
+        )
+    )
+    await session.flush()
 
 
 async def get_user_roles(session: AsyncSession, user_id: str) -> list[str]:
@@ -434,14 +547,21 @@ async def has_pending_reset(session: AsyncSession, user_id: str) -> bool:
 
 # ── Role management ───────────────────────────────────────────────────
 
-async def replace_roles(session: AsyncSession, user_id: str, new_role: str) -> None:
-    """Remove all existing roles and assign a single new role."""
-    await session.execute(
-        delete(UserRoleORM).where(UserRoleORM.user_id == user_id)
-    )
-    role = UserRoleORM(user_id=user_id, role_name=new_role)
-    session.add(role)
-    await session.flush()
+async def replace_roles(
+    session: AsyncSession,
+    user_id: str,
+    new_role: str,
+    *,
+    granted_by: Optional[str] = None,
+) -> None:
+    """Replace the user's global role across both stores.
+
+    Thin wrapper over ``set_global_role`` kept under the legacy name
+    for existing call sites. New code should call ``set_global_role``
+    directly — the kwarg surface there matches the explicit two-table
+    write semantics.
+    """
+    await set_global_role(session, user_id, new_role, granted_by=granted_by)
 
 
 # ── Group membership shortcuts (RBAC Phase 1) ─────────────────────────

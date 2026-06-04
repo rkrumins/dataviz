@@ -71,7 +71,10 @@ class WorkspaceMemberSubject(BaseModel):
 class WorkspaceMemberResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     binding_id: str = Field(alias="bindingId")
-    role: str  # "admin" | "user" | "viewer"
+    # Phase 5+ taxonomy: workspace_admin | workspace_member |
+    # workspace_viewer, or any custom workspace-scoped role. See
+    # docs/RBAC.md.
+    role: str
     granted_at: str = Field(alias="grantedAt")
     granted_by: Optional[str] = Field(default=None, alias="grantedBy")
     subject: WorkspaceMemberSubject
@@ -82,7 +85,8 @@ class WorkspaceMemberCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     subject_type: str = Field(alias="subjectType")  # "user" | "group"
     subject_id: str = Field(alias="subjectId")
-    role: str  # "admin" | "user" | "viewer"
+    # See ``WorkspaceMemberResponse.role`` for the accepted set.
+    role: str
 
 
 # ── View grants (Layer-3 explicit shares) ───────────────────────────

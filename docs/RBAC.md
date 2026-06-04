@@ -1,7 +1,9 @@
 # RBAC
 
-> Phase 5 role taxonomy, permission catalogue, and operator recipes.
-> Last updated: 2026-06-03 (migration `20260603_1100_rbac_uplift`).
+> Phase 6 hardening notes folded into Phase 5 role taxonomy.
+> Last updated: 2026-06-04 (Phase 6 — dual-store sync, dropdown
+> safety, view-grants router gate, denial audit). The Phase-5
+> migration `20260603_1100_rbac_uplift` is unchanged.
 
 ## TL;DR
 
@@ -172,6 +174,79 @@ The resolver applies the same category × scope filter to custom
 roles; bundling `system:users:manage` into a workspace-scoped custom
 role will silently emit nothing when bound at workspace scope. Bundle
 permissions whose category matches the role's scope.
+
+## Phase 6 hardening — global role assignment
+
+The admin "Change role" flow had a dual-store footgun: it wrote to
+`user_roles` only, leaving `role_bindings` empty. The user's display
+role flipped but the resolver returned empty claims, so the freshly
+promoted "super_admin" 403'd on every permission check.
+
+Phase 6 fix: `user_repo.set_global_role(session, user_id, role_name)`
+writes both tables in one transaction. The endpoint at
+`PUT /admin/users/{user_id}/role` and the bootstrap admin path in
+`main.py` both go through it. Backed by a regression test
+(`test_change_role_writes_both_user_roles_and_role_bindings`).
+
+The `ChangeRoleRequest` DTO now restricts `role` to the **globally
+assignable** set:
+
+* `super_admin`
+* `org_admin`
+
+Workspace-tier roles (`workspace_admin` / `workspace_member` /
+`workspace_viewer`) are bound via the workspace-members endpoint,
+not here — they need a workspace context, and the resolver's category
+filter would drop them anyway. The AdminUsers UI dropdown enforces
+the same restriction and hides `super_admin` when the caller lacks
+`system:admin`.
+
+## Phase 6 hardening — view-grants router gate
+
+`/views/{view_id}/grants` previously enforced its "creator or
+workspace admin" rule inline. A regression that deleted the inline
+`_ensure_can_manage_grants()` call would silently open the endpoint;
+the grep-coverage tests in `test_rbac_endpoint_coverage.py` wouldn't
+catch it because they look for router-level `requires(...)`.
+
+Phase 6 promotes the check to a router-level FastAPI dependency
+`can_manage_view_grants` that:
+
+1. Loads the view (404 on miss).
+2. Allows the creator.
+3. Allows a workspace admin of the view's workspace.
+4. Allows `system:admin`.
+5. Otherwise 403s with the structured Phase-5 body.
+
+The dep returns the loaded view so handlers don't re-query. The
+inline helper `_ensure_can_manage_grants` stays as a pure function
+so the rule lives in one place.
+
+## Phase 6 hardening — denial audit
+
+Every `requires()` 403 emits a `user.access_denied` outbox event,
+sampled hourly per `(user, permission, scope)` to avoid drowning
+the audit signal under a hostile scripted scan. The sampling uses
+the existing revocation backend (Redis in prod, in-memory in tests).
+Emission is wrapped in try/except so the 403 is never blocked by an
+outbox or Redis failure — the audit is best-effort.
+
+Payload shape:
+
+```json
+{
+  "event_type": "user.access_denied",
+  "payload": {
+    "user_id": "usr_alice",
+    "permission": "workspace:datasource:read",
+    "scope": {"type": "workspace", "id": "ws_finance"},
+    "hour_bucket": 484321
+  }
+}
+```
+
+Operators wire this into their SIEM or log aggregator to drive
+"access-denied spikes" alerts.
 
 ## Migration map (Phase 5)
 

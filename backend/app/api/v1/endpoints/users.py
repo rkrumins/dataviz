@@ -116,10 +116,12 @@ async def approve_user(
     if user.status != "pending":
         raise HTTPException(status_code=409, detail=f"User is already '{user.status}', not pending")
 
-    # Activate user + assign default role (Phase 5: workspace_member is
-    # the new default "everyone is a workspace user" sentinel role).
+    # Activate user. Phase 6: no automatic role assignment — approval
+    # only marks the account as active; workspace access is granted
+    # separately via the workspace-members endpoint. The ``User.role``
+    # DTO field falls back to ``workspace_member`` via
+    # ``_primary_role`` for display when no rows exist.
     await user_repo.update_user_status(session, user_id, "active")
-    await user_repo.assign_role(session, user_id, "workspace_member")
 
     # Resolve approval record
     await user_repo.resolve_approval(
@@ -187,7 +189,19 @@ async def change_user_role(
     if user.id == admin.id:
         raise HTTPException(status_code=403, detail="Cannot change your own role")
 
-    await user_repo.replace_roles(session, user_id, body.role)
+    # Phase 6: ``replace_roles`` now writes both ``user_roles`` (legacy
+    # display) and ``role_bindings`` (canonical claims). The
+    # ChangeRoleRequest DTO restricts ``body.role`` to the
+    # globally-assignable set, but ``set_global_role`` re-validates so
+    # the contract is enforced at the repo boundary too — a defensive
+    # 400 covers the case where someone slips a workspace-template
+    # role past the DTO via a custom client.
+    try:
+        await user_repo.replace_roles(
+            session, user_id, body.role, granted_by=admin.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     await user_repo.create_outbox_event(
         session,
@@ -243,10 +257,10 @@ async def reactivate_user(
 
     await user_repo.update_user_status(session, user_id, "active")
 
-    # Ensure they have at least the workspace_member role.
-    roles = await user_repo.get_user_roles(session, user_id)
-    if not roles:
-        await user_repo.assign_role(session, user_id, "workspace_member")
+    # Phase 6: reactivation no longer auto-assigns a global role —
+    # any previous role_bindings / user_roles rows survived the
+    # suspend (we only flipped status), and the legacy display
+    # fallback covers the empty case.
 
     await user_repo.create_outbox_event(
         session,

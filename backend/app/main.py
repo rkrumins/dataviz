@@ -268,7 +268,15 @@ async def lifespan(_app: FastAPI):
                         last_name="Admin",
                         status="active",
                     )
-                    await user_repo.assign_role(session, user.id, "super_admin")
+                    # Phase 6: ``set_global_role`` writes both
+                    # ``user_roles`` (legacy display) and
+                    # ``role_bindings`` (canonical claims) so the
+                    # bootstrap admin actually has system:admin in
+                    # their JWT, not just on the User DTO.
+                    await user_repo.set_global_role(
+                        session, user.id, "super_admin",
+                        granted_by="system",
+                    )
                     await user_repo.create_approval(
                         session, user.id, status="approved", approved_by="system",
                     )

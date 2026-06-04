@@ -25,9 +25,13 @@ from typing import Callable, Optional
 import jwt as pyjwt
 from fastapi import Depends, HTTPException, Request, status
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from backend.auth_service.cookies import read_access_cookie
 from backend.auth_service.core.tokens import decode_token
 from backend.auth_service.interface import IdentityService, User
+from backend.app.db.engine import get_db_session
+from backend.app.db.repositories import user_repo
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
@@ -201,6 +205,68 @@ def get_permission_claims(request: Request) -> PermissionClaims:
     return PermissionClaims.from_jwt_dict(payload)
 
 
+async def _audit_access_denied(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    permission: str,
+    scope_obj: dict,
+) -> None:
+    """Emit one ``user.access_denied`` outbox event per (user, perm,
+    scope, hour). Best-effort — any failure is swallowed so the 403
+    is never blocked.
+
+    Sampling uses the existing revocation backend (Redis in prod, an
+    in-memory set in tests). Without sampling, a hostile script that
+    hammers a forbidden endpoint would generate one outbox row per
+    request and drown the audit signal. The hour bucket strikes a
+    balance: enough granularity to spot incidents in graphs, low
+    enough volume that the outbox table doesn't bloat.
+    """
+    try:
+        import time
+        scope_key = f"{scope_obj.get('type','global')}:{scope_obj.get('id') or '-'}"
+        hour_bucket = int(time.time()) // 3600
+        dedupe_key = (
+            f"rbac:denied:{user_id}:{permission}:{scope_key}:{hour_bucket}"
+        )
+
+        backend = get_revocation_service()._backend  # type: ignore[attr-defined]
+        try:
+            already = await backend.exists(dedupe_key)
+        except Exception:
+            # Sampling backend unavailable — fall through and emit.
+            # Better to over-audit on Redis outage than to lose the
+            # signal entirely.
+            already = False
+        if already:
+            return
+        try:
+            await backend.set_with_ttl(dedupe_key, 3600)
+        except Exception:
+            pass  # Sample mark is best-effort.
+
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.access_denied",
+            payload={
+                "user_id": user_id,
+                "permission": permission,
+                "scope": scope_obj,
+                "hour_bucket": hour_bucket,
+            },
+        )
+        # Commit — the dep doesn't own the handler's transaction, so
+        # we have to push our row through ourselves. Failures here
+        # are logged but never raised.
+        await session.commit()
+    except Exception as exc:
+        logger.warning(
+            "Failed to emit access_denied audit (user=%s perm=%s scope=%s): %s",
+            user_id, permission, scope_obj, exc,
+        )
+
+
 def requires(
     permission: str,
     *,
@@ -235,6 +301,13 @@ def requires(
         request: Request,
         user: User = Depends(get_current_user),
         claims: PermissionClaims = Depends(get_permission_claims),
+        # Audit-session: separate from any session the handler may
+        # take, since the handler's session is rolled back on a 403
+        # and would drop the audit row with it. FastAPI's dep cache
+        # gives the same instance to the handler if it also takes
+        # ``Depends(get_db_session)``, but we always commit on the
+        # success path here so the audit row outlives the rollback.
+        session: AsyncSession = Depends(get_db_session),
     ) -> User:
         # Revocation check.
         revocation = get_revocation_service()
@@ -286,6 +359,15 @@ def requires(
                 {"type": "workspace", "id": workspace_id}
                 if workspace_id is not None
                 else {"type": "global", "id": None}
+            )
+            # Phase 6: best-effort audit emission. Sampled hourly per
+            # (user, permission, scope) so a hammering script can't
+            # bloat the outbox. Never blocks the 403.
+            await _audit_access_denied(
+                session,
+                user_id=user.id,
+                permission=permission,
+                scope_obj=scope_obj,
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

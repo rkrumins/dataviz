@@ -101,13 +101,22 @@ async def signup(
     # 1. Password strength
     _check_password_strength(body.password)
 
-    # 2. Validate invite token (if provided)
+    # 2. Validate invite token (if provided). Phase 6: a valid invite
+    # auto-activates the account regardless of role. The optional
+    # ``role`` payload field carries a global role (super_admin /
+    # org_admin) that the inviter wanted granted on signup; anything
+    # else (a stale Phase-1 "user", a workspace template, etc.) is
+    # silently dropped so the signup doesn't 500 on a stale token.
+    invite_valid = False
     invite_role = None
     invite_admin = None
     if body.invite_token:
         try:
             payload = decode_invite_token(body.invite_token)
-            invite_role = payload.get("role", "user")
+            invite_valid = True
+            raw_role = payload.get("role")
+            if raw_role in ("super_admin", "org_admin"):
+                invite_role = raw_role
             invite_admin = payload.get("created_by")
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
             raise HTTPException(
@@ -120,14 +129,14 @@ async def signup(
     existing = await user_repo.get_user_by_email(session, body.email)
     if existing is not None:
         logger.debug("Signup attempt with existing email (suppressed)")
-        msg = "Account created and activated." if invite_role else "Account created. Awaiting administrator approval."
+        msg = "Account created and activated." if invite_valid else "Account created. Awaiting administrator approval."
         return SignUpResponse(message=msg)
 
     # 4. Hash password
     hashed = hash_password(body.password)
 
     # 5. Create user — auto-activate if invited, otherwise pending
-    user_status = "active" if invite_role else "pending"
+    user_status = "active" if invite_valid else "pending"
     user = await user_repo.create_user(
         session,
         email=body.email,
@@ -137,9 +146,16 @@ async def signup(
         status=user_status,
     )
 
-    if invite_role:
-        # Invited: assign the role from the invite and mark as approved
-        await user_repo.assign_role(session, user.id, invite_role)
+    if invite_valid:
+        # Invited: mark as approved + (optionally) grant a global role.
+        # Phase 6: ``set_global_role`` writes both ``user_roles`` and
+        # ``role_bindings`` so the invitee actually has the permission
+        # claim, not just a misleading display role.
+        if invite_role:
+            await user_repo.set_global_role(
+                session, user.id, invite_role,
+                granted_by=invite_admin,
+            )
         await user_repo.create_approval(
             session, user.id, status="approved", approved_by=invite_admin,
         )

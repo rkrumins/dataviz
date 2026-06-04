@@ -327,3 +327,75 @@ def test_has_permission_workspace_admin_in_claim_does_NOT_short_circuit_other_ws
     # And nothing in ws_B.
     assert not has_permission(claims, "workspace:admin", workspace_id="ws_B")
     assert not has_permission(claims, "workspace:view:read", workspace_id="ws_B")
+
+
+# ── Phase 6 — access-denial audit ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_audit_access_denied_emits_outbox_row(db_session):
+    """The audit helper emits one ``user.access_denied`` outbox event
+    per (user, perm, scope, hour). First call writes; second call in
+    the same hour is suppressed by the sampler."""
+    from backend.app.auth.dependencies import _audit_access_denied
+    from backend.app.db.models import OutboxEventORM
+    from backend.app.services.revocation_service import (
+        InMemoryBackend, RevocationService, configure_revocation_service,
+    )
+    from sqlalchemy import select
+
+    # Fresh in-memory sampler so the dedupe key is guaranteed unset.
+    configure_revocation_service(RevocationService(InMemoryBackend()))
+
+    scope_obj = {"type": "workspace", "id": "ws_F"}
+    await _audit_access_denied(
+        db_session,
+        user_id="usr_phase6",
+        permission="workspace:datasource:read",
+        scope_obj=scope_obj,
+    )
+
+    rows = (await db_session.execute(
+        select(OutboxEventORM).where(
+            OutboxEventORM.event_type == "user.access_denied",
+        )
+    )).scalars().all()
+    assert len(rows) == 1, rows
+    import json as _json
+    payload = _json.loads(rows[0].payload)
+    assert payload["user_id"] == "usr_phase6"
+    assert payload["permission"] == "workspace:datasource:read"
+    assert payload["scope"] == scope_obj
+
+    # Second call in the same hour: sampler suppresses.
+    await _audit_access_denied(
+        db_session,
+        user_id="usr_phase6",
+        permission="workspace:datasource:read",
+        scope_obj=scope_obj,
+    )
+    rows_after = (await db_session.execute(
+        select(OutboxEventORM).where(
+            OutboxEventORM.event_type == "user.access_denied",
+        )
+    )).scalars().all()
+    assert len(rows_after) == 1, "sampler should suppress duplicates within the hour"
+
+
+@pytest.mark.asyncio
+async def test_audit_access_denied_swallows_errors(db_session):
+    """Audit emission must never block the 403. If the outbox write
+    fails, the helper logs and returns normally."""
+    from backend.app.auth.dependencies import _audit_access_denied
+
+    class _BrokenSession:
+        async def commit(self):
+            raise RuntimeError("boom")
+
+    # Should not raise.
+    await _audit_access_denied(
+        _BrokenSession(),  # type: ignore[arg-type]
+        user_id="usr_x",
+        permission="workspace:view:read",
+        scope_obj={"type": "workspace", "id": "ws_X"},
+    )

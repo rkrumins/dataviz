@@ -52,11 +52,13 @@ class ChangeRoleRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        # Phase 5 taxonomy: see docs/RBAC.md.
-        allowed = {
-            "super_admin", "org_admin",
-            "workspace_admin", "workspace_member", "workspace_viewer",
-        }
+        # Phase 6: only globally-assignable roles. The three workspace
+        # tiers (workspace_admin/member/viewer) are bound via the
+        # workspace-members endpoint and don't make sense as a primary
+        # user role (they have no workspace context here). See
+        # ``user_repo.GLOBAL_ASSIGNABLE_ROLES`` for the source of truth
+        # and ``docs/RBAC.md`` for operator guidance.
+        allowed = {"super_admin", "org_admin"}
         if v not in allowed:
             raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
         return v
@@ -142,20 +144,26 @@ class ResetTokenResponse(BaseModel):
 
 
 class CreateInviteRequest(BaseModel):
-    """Admin creates an invite link with optional role and expiry."""
+    """Admin creates an invite link with optional role and expiry.
+
+    Phase 6: ``role`` is optional. ``None`` (the default) creates a
+    plain workspace-bound user — the new account activates with no
+    global role and gets bound to workspaces afterwards. Setting
+    ``role`` to ``super_admin`` or ``org_admin`` provisions a global
+    administrator on first signup (the same set the change-role
+    endpoint allows).
+    """
     model_config = ConfigDict(populate_by_name=True)
 
-    role: str = Field("user", min_length=1, max_length=50)
+    role: Optional[str] = Field(None, min_length=1, max_length=50)
     expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=720)
 
     @field_validator("role")
     @classmethod
-    def validate_role(cls, v: str) -> str:
-        # Phase 5 taxonomy: see docs/RBAC.md.
-        allowed = {
-            "super_admin", "org_admin",
-            "workspace_admin", "workspace_member", "workspace_viewer",
-        }
+    def validate_role(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        allowed = {"super_admin", "org_admin"}
         if v not in allowed:
             raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
         return v

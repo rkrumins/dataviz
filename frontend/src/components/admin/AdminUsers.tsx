@@ -17,6 +17,7 @@ import {
     RotateCcw, Lock, Copy, Check, Link2,
 } from 'lucide-react'
 import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
+import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -75,13 +76,15 @@ const ROLE_CONFIG: Record<string, { icon: typeof Shield; color: string; iconBg: 
     },
 }
 
-// Phase 5 taxonomy — see docs/RBAC.md for the full role descriptions.
+// Globally-assignable roles. The three workspace tiers
+// (workspace_admin / workspace_member / workspace_viewer) describe
+// powers inside a workspace and are bound via WorkspaceMembers, not
+// here — assigning them globally would have no workspace context and
+// the resolver's category × scope filter would drop them anyway.
+// See backend/app/db/repositories/user_repo.py:GLOBAL_ASSIGNABLE_ROLES.
 const AVAILABLE_ROLES = [
     { value: 'super_admin', label: 'Super Admin', description: 'Platform owner; every permission, every scope', icon: Shield },
     { value: 'org_admin', label: 'Org Admin', description: 'Manage every workspace; no user / SSO admin', icon: Shield },
-    { value: 'workspace_admin', label: 'Workspace Admin', description: 'Full powers in their bound workspaces', icon: UserCog },
-    { value: 'workspace_member', label: 'Member', description: 'Edit views and data sources in their workspaces', icon: UserCog },
-    { value: 'workspace_viewer', label: 'Viewer', description: 'Read-only access in their workspaces', icon: Eye },
 ]
 
 const KPI_CARDS = [
@@ -151,6 +154,20 @@ function SortHeader({ label, field, current, dir, onSort }: {
 // ── Main component ───────────────────────────────────────────────────
 
 export function AdminUsers() {
+    // Phase 6: only super_admins can grant super_admin. Org admins
+    // see ``org_admin`` only — the dropdown shouldn't tease a role
+    // they'd 403 on. Match the backend ``require_admin`` gate on
+    // ``PUT /admin/users/{id}/role`` (which checks ``system:admin``
+    // legacy + claim) so the FE filter agrees with the BE gate.
+    const canGrantSuperAdmin = usePermission('system:admin')
+    const assignableRoles = useMemo(
+        () =>
+            canGrantSuperAdmin
+                ? AVAILABLE_ROLES
+                : AVAILABLE_ROLES.filter(r => r.value !== 'super_admin'),
+        [canGrantSuperAdmin],
+    )
+
     const [users, setUsers] = useState<AdminUserResponse[]>([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
@@ -174,7 +191,11 @@ export function AdminUsers() {
     const [resetMode, setResetMode] = useState<'direct' | 'token'>('token')
 
     // Invite state
-    const [inviteRole, setInviteRole] = useState('workspace_member')
+    // Phase 6: invite role is optional. ``''`` (the default) means
+    // no global role — the new user activates as a regular account
+    // and gets bound to workspaces afterwards. Set to ``'super_admin'``
+    // or ``'org_admin'`` to provision a global admin on signup.
+    const [inviteRole, setInviteRole] = useState<string>('')
     const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
@@ -338,14 +359,14 @@ export function AdminUsers() {
         setResetMode('token')
         setInviteResult(null)
         setInviteCopied(false)
-        setInviteRole('workspace_member')
+        setInviteRole('')
     }
 
     const handleCreateInvite = async () => {
         setInviteLoading(true)
         setError(null)
         try {
-            const resp = await adminUserService.createInvite(inviteRole)
+            const resp = await adminUserService.createInvite(inviteRole || null)
             setInviteResult(resp)
             setSuccessMsg('Invite link generated')
         } catch (err: any) {
@@ -815,7 +836,7 @@ export function AdminUsers() {
                                         title="Change Role" subtitle={`Current: ${modal.currentRole}`} onClose={closeModal} />
                                     <UserPill name={modal.name} />
                                     <div className="space-y-2 mb-5">
-                                        {AVAILABLE_ROLES.map(r => {
+                                        {assignableRoles.map(r => {
                                             const RIcon = r.icon
                                             const isSelected = selectedRole === r.value
                                             return (
@@ -890,7 +911,7 @@ export function AdminUsers() {
                                                 Choose what role the invited user will receive.
                                             </p>
                                             <div className="space-y-2 mb-5">
-                                                {AVAILABLE_ROLES.map(r => {
+                                                {assignableRoles.map(r => {
                                                     const RIcon = r.icon
                                                     const isSelected = inviteRole === r.value
                                                     return (

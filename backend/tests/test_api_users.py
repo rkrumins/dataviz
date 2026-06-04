@@ -163,6 +163,78 @@ async def test_change_role(test_client: AsyncClient, db_session):
     assert "Role changed" in resp.json()["detail"]
 
 
+async def test_change_role_writes_both_user_roles_and_role_bindings(
+    test_client: AsyncClient, db_session,
+):
+    """Phase 6 regression: ``PUT /admin/users/{id}/role`` must keep
+    ``user_roles`` and ``role_bindings`` in sync.
+
+    Pre-fix: only ``user_roles`` was written; the legacy display field
+    flipped to ``super_admin`` but the resolver returned empty claims
+    because no ``role_bindings`` row existed. So
+    ``requires("system:admin")`` 403'd a freshly-promoted admin.
+    """
+    from backend.app.db.repositories import user_repo, binding_repo
+    from backend.app.services.permission_service import resolve
+
+    user = await user_repo.create_user(
+        db_session,
+        email="dual_sync@example.com",
+        password_hash="hash123",
+        first_name="Dual",
+        last_name="Sync",
+    )
+
+    resp = await test_client.put(
+        f"/api/v1/admin/users/{user.id}/role",
+        json={"role": "super_admin"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Legacy display table flipped.
+    roles = await user_repo.get_user_roles(db_session, user.id)
+    assert roles == ["super_admin"]
+
+    # Canonical binding table flipped too.
+    bindings = await binding_repo.list_for_subject(
+        db_session, subject_type="user", subject_id=user.id,
+    )
+    globals_ = [
+        b for b in bindings
+        if b.scope_type == "global" and b.role_name == "super_admin"
+    ]
+    assert len(globals_) == 1, bindings
+
+    # Resolver produces the real claim — system:admin is in
+    # ``global_perms`` so subsequent ``requires("system:admin")``
+    # checks pass instead of 403'ing.
+    claims = await resolve(db_session, user.id)
+    assert "system:admin" in claims.global_perms
+
+
+async def test_change_role_rejects_workspace_template_role(
+    test_client: AsyncClient, db_session,
+):
+    """Phase 6: workspace_admin / workspace_member / workspace_viewer
+    are not assignable globally — they need a workspace context, and
+    the resolver would drop their perms under the category × scope
+    filter anyway. Returns 422 from the DTO validator."""
+    from backend.app.db.repositories import user_repo
+
+    user = await user_repo.create_user(
+        db_session,
+        email="rejected_role@example.com",
+        password_hash="hash123",
+        first_name="X", last_name="Y",
+    )
+    for bad_role in ("workspace_admin", "workspace_member", "workspace_viewer"):
+        resp = await test_client.put(
+            f"/api/v1/admin/users/{user.id}/role",
+            json={"role": bad_role},
+        )
+        assert resp.status_code == 422, (bad_role, resp.text)
+
+
 async def test_change_own_role_forbidden(test_client: AsyncClient):
     """Admin cannot change their own role — returns 403.
 
@@ -172,7 +244,7 @@ async def test_change_own_role_forbidden(test_client: AsyncClient):
     """
     resp = await test_client.put(
         "/api/v1/admin/users/usr_test000000/role",
-        json={"role": "workspace_viewer"},
+        json={"role": "org_admin"},
     )
     assert resp.status_code == 403
 

@@ -80,10 +80,18 @@ export const adminUserService = {
         })
     },
 
-    createInvite(role: string = 'user', expiresInHours: number = 72): Promise<InviteResponse> {
+    createInvite(
+        role: string | null = null,
+        expiresInHours: number = 72,
+    ): Promise<InviteResponse> {
+        // Phase 6: ``role`` is optional. ``null`` creates a regular
+        // user invite (no global role granted); ``'super_admin'`` /
+        // ``'org_admin'`` provision a global admin on signup.
+        const body: Record<string, unknown> = { expiresInHours }
+        if (role) body.role = role
         return authFetch<InviteResponse>(`${ADMIN_USERS_API}/invite`, {
             method: 'POST',
-            body: JSON.stringify({ role, expiresInHours }),
+            body: JSON.stringify(body),
         })
     },
 }
