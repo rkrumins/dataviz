@@ -15,6 +15,7 @@ import {
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp, KeyRound, Eye, UserCog,
     RotateCcw, Lock, Copy, Check, Link2,
+    Crown, ShieldCheck, Building2, Globe, Sparkles, AtSign,
 } from 'lucide-react'
 import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
 import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
@@ -378,7 +379,7 @@ export function AdminUsers() {
 
     const handleCreateInvite = async (
         role: string | null,
-        opts: { workspaceId?: string | null; email?: string | null },
+        opts: { workspaceId?: string | null; email?: string | null; expiresInHours?: number },
     ) => {
         setInviteLoading(true)
         setError(null)
@@ -895,40 +896,14 @@ export function AdminUsers() {
                                         title="Invite by Link" subtitle="Generate a shareable signup link" onClose={closeModal} />
 
                                     {inviteResult ? (
-                                        <div className="space-y-4 mb-5">
-                                            <div className="p-4 rounded-xl bg-accent-lineage/5 border border-accent-lineage/20">
-                                                <p className="text-xs font-semibold uppercase tracking-wider text-accent-lineage mb-2">Invite Link</p>
-                                                <div className="flex items-center gap-2">
-                                                    <code className="flex-1 text-xs font-mono bg-black/5 dark:bg-white/5 px-3 py-2 rounded-lg break-all text-ink select-all">
-                                                        {inviteUrl}
-                                                    </code>
-                                                    <button onClick={handleCopyInvite}
-                                                        className="p-2 rounded-lg bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 transition-colors shrink-0">
-                                                        {inviteCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                                                    </button>
-                                                </div>
-                                                <p className="text-[11px] text-ink-muted mt-2">
-                                                    Role: <span className="font-semibold">{inviteResult.role ?? 'No role (plain account)'}</span>
-                                                    {inviteResult.workspaceId && <> &middot; Workspace: <span className="font-semibold">{inviteResult.workspaceId}</span></>}
-                                                    {' '}&middot; Expires: {formatDate(inviteResult.expiresAt)}
-                                                </p>
-                                                {inviteResult.email ? (
-                                                    <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
-                                                        Email-bound: only <span className="font-semibold">{inviteResult.email}</span> can accept this link.
-                                                    </p>
-                                                ) : (
-                                                    <p className="text-[11px] text-ink-muted mt-1">
-                                                        Share this link with the user. They will be auto-activated upon signup.
-                                                    </p>
-                                                )}
-                                            </div>
-                                            <div className="flex justify-end">
-                                                <button onClick={closeModal}
-                                                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-colors duration-150">
-                                                    Done
-                                                </button>
-                                            </div>
-                                        </div>
+                                        <InviteResultCard
+                                            result={inviteResult}
+                                            inviteUrl={inviteUrl}
+                                            copied={inviteCopied}
+                                            onCopy={handleCopyInvite}
+                                            onAnother={() => { setInviteResult(null); setInviteCopied(false); }}
+                                            onClose={closeModal}
+                                        />
                                     ) : (
                                         <InviteForm
                                             canGrantSuperAdmin={canGrantSuperAdmin}
@@ -1106,12 +1081,89 @@ function ModalFooter({ onCancel, onConfirm, confirmLabel, confirmIcon: Icon, con
 }
 
 
-// ── Phase 11: Invite form ────────────────────────────────────────────
-// Renders the full role catalogue (global + workspace + custom), a
-// workspace picker when a workspace-scoped role is chosen, and a
-// conditional email field that becomes required for privileged roles.
-// A user with NO role (or a basic global role) gets a shareable link
-// and zero workspace access until explicitly granted.
+// ── Phase 12: premium invite form ────────────────────────────────────
+// Visual language: icon-container per role tier, grouped sections
+// (Quick start / Built-in / Custom), animated workspace + privilege
+// reveals, chip-style workspace + expiry pickers, glass callouts.
+
+// Per-tier visual config — icon + colour family applied to the role
+// button's icon container. Mirrors the change-role modal pattern
+// (icon container + brand-coloured accent on select).
+const _ROLE_VISUAL: Record<string, {
+    icon: typeof Shield
+    bg: string         // icon container bg + text
+    accent: string     // text-color when selected
+}> = {
+    super_admin: {
+        icon: Crown,
+        bg: 'bg-amber-500/10 text-amber-600 border-amber-500/20',
+        accent: 'text-amber-600 dark:text-amber-400',
+    },
+    org_admin: {
+        icon: Shield,
+        bg: 'bg-violet-500/10 text-violet-600 border-violet-500/20',
+        accent: 'text-violet-600 dark:text-violet-400',
+    },
+    workspace_admin: {
+        icon: ShieldCheck,
+        bg: 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20',
+        accent: 'text-indigo-600 dark:text-indigo-400',
+    },
+    workspace_member: {
+        icon: UserCog,
+        bg: 'bg-sky-500/10 text-sky-600 border-sky-500/20',
+        accent: 'text-sky-600 dark:text-sky-400',
+    },
+    workspace_viewer: {
+        icon: Eye,
+        bg: 'bg-slate-500/10 text-slate-600 border-slate-500/20',
+        accent: 'text-slate-600 dark:text-slate-400',
+    },
+}
+const _ROLE_VISUAL_CUSTOM = {
+    icon: Sparkles,
+    bg: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
+    accent: 'text-emerald-600 dark:text-emerald-400',
+} as const
+const _ROLE_VISUAL_NONE = {
+    icon: Globe,
+    bg: 'bg-slate-500/10 text-slate-600 border-slate-500/20',
+    accent: 'text-slate-600 dark:text-slate-400',
+} as const
+
+const _BUILTIN_ORDER = [
+    'super_admin', 'org_admin',
+    'workspace_admin', 'workspace_member', 'workspace_viewer',
+]
+
+const _ROLE_LABEL: Record<string, string> = {
+    super_admin: 'Super Admin',
+    org_admin: 'Org Admin',
+    workspace_admin: 'Workspace Admin',
+    workspace_member: 'Member',
+    workspace_viewer: 'Viewer',
+}
+
+const _ROLE_FALLBACK_DESC: Record<string, string> = {
+    super_admin: 'Platform owner — every permission, every workspace.',
+    org_admin: 'Manage every workspace, create new ones. No user / SSO admin.',
+    workspace_admin: 'Full powers inside the bound workspace.',
+    workspace_member: 'Edit views and data sources in the bound workspace.',
+    workspace_viewer: 'Read-only access to the bound workspace.',
+}
+
+interface RoleOption {
+    value: string                 // '' = No role
+    label: string
+    sublabel: string
+    privileged: boolean
+    scoped: boolean
+    fixedWorkspaceId: string | null
+    visual: { icon: typeof Shield; bg: string; accent: string }
+    isBuiltin: boolean
+}
+
+
 function InviteForm({
     canGrantSuperAdmin, loading, onCancel, onSubmit,
 }: {
@@ -1120,16 +1172,17 @@ function InviteForm({
     onCancel: () => void
     onSubmit: (
         role: string | null,
-        opts: { workspaceId?: string | null; email?: string | null },
+        opts: { workspaceId?: string | null; email?: string | null; expiresInHours?: number },
     ) => void
 }) {
     const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
-    // '' = the explicit "No role" choice (a plain activated account
-    // with no workspace access until granted later).
     const [selectedRole, setSelectedRole] = useState<string>('')
     const [workspaceId, setWorkspaceId] = useState<string>('')
     const [email, setEmail] = useState<string>('')
+    // Phase 12: Permanent | 24h | 7d | 30d | 90d. ``''`` = permanent
+    // (we send the backend's max of 720h, 30d).
+    const [expiresIn, setExpiresIn] = useState<'' | '24h' | '7d' | '30d' | '90d'>('30d')
 
     useEffect(() => {
         permissionsService.listRoles()
@@ -1146,8 +1199,6 @@ function InviteForm({
     )
     const isPrivileged = roleObj ? roleIsPrivileged(roleObj.permissions) : false
     const isWorkspaceScoped = roleObj ? roleNeedsWorkspace(roleObj) : false
-    // Custom workspace roles fix the workspace to their own scope; the
-    // admin can't pick a different one.
     const fixedWorkspaceId = roleObj && roleObj.scopeType === 'workspace'
         ? roleObj.scopeId : null
     const needsWorkspacePick = isWorkspaceScoped && !fixedWorkspaceId
@@ -1158,114 +1209,232 @@ function InviteForm({
         (!needsWorkspacePick || !!workspaceId)
         && (!isPrivileged || emailValid)
 
+    const expiresInHours = (() => {
+        switch (expiresIn) {
+            case '24h': return 24
+            case '7d': return 24 * 7
+            case '30d': return 24 * 30
+            case '90d': return 24 * 90
+            default: return 24 * 30  // ~ "Permanent" maps to 30-day max practical
+        }
+    })()
+
     const submit = () => {
         if (!canSubmit) return
         onSubmit(selectedRole || null, {
             workspaceId: isWorkspaceScoped ? effectiveWorkspaceId : null,
             email: email.trim() ? email.trim() : null,
+            expiresInHours,
         })
     }
 
-    // Build the picker list: "No role" first, then the catalogue.
-    const roleOptions: Array<{
-        value: string; label: string; sublabel: string; privileged: boolean; scoped: boolean
-    }> = [
-        { value: '', label: 'No role', sublabel: 'Plain account — no workspace access until granted', privileged: false, scoped: false },
-        ...(roles ?? []).map(r => ({
-            value: r.name,
-            label: r.name,
-            sublabel: r.description
-                || (roleNeedsWorkspace(r) ? 'Workspace-scoped role' : 'Global role'),
-            privileged: roleIsPrivileged(r.permissions),
-            scoped: roleNeedsWorkspace(r),
-        })),
-    ]
+    // Build three role groups: Quick start (No role) / Built-in /
+    // Custom. Sort built-ins by canonical tier order; customs alpha.
+    const { quickStart, builtins, customs } = useMemo(() => {
+        const opt = (r: RoleDefinitionResponse): RoleOption => {
+            const isBuiltin = _BUILTIN_ORDER.includes(r.name)
+            const v = _ROLE_VISUAL[r.name] ?? _ROLE_VISUAL_CUSTOM
+            return {
+                value: r.name,
+                label: _ROLE_LABEL[r.name] ?? r.name,
+                sublabel: r.description?.trim()
+                    || _ROLE_FALLBACK_DESC[r.name]
+                    || (roleNeedsWorkspace(r) ? 'Workspace-scoped role.' : 'Global role.'),
+                privileged: roleIsPrivileged(r.permissions),
+                scoped: roleNeedsWorkspace(r),
+                fixedWorkspaceId: r.scopeType === 'workspace' ? r.scopeId : null,
+                visual: v,
+                isBuiltin,
+            }
+        }
+        const all = (roles ?? []).map(opt)
+        const builtins: RoleOption[] = []
+        const customs: RoleOption[] = []
+        for (const o of all) (o.isBuiltin ? builtins : customs).push(o)
+        builtins.sort((a, b) => _BUILTIN_ORDER.indexOf(a.value) - _BUILTIN_ORDER.indexOf(b.value))
+        customs.sort((a, b) => a.label.localeCompare(b.label))
+        const quickStart: RoleOption = {
+            value: '',
+            label: 'No role',
+            sublabel: 'Plain activated account — no workspace access until granted.',
+            privileged: false, scoped: false, fixedWorkspaceId: null,
+            visual: _ROLE_VISUAL_NONE, isBuiltin: false,
+        }
+        return { quickStart, builtins, customs }
+    }, [roles])
+
+    const fixedWorkspace = fixedWorkspaceId
+        ? workspaces?.find(w => w.id === fixedWorkspaceId)
+        : null
 
     return (
-        <>
-            <p className="text-sm text-ink-secondary mb-4">
-                Generate a link that lets a new user sign up and bypass the approval queue.
-                Pick the role they'll receive — any role works, including workspace and custom roles.
+        <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.18 }}
+        >
+            <p className="text-sm text-ink-secondary mb-5">
+                Generate a link that lets a new user sign up. Pick any role —
+                workspace tiers and custom roles work too.
             </p>
 
             {roles === null ? (
-                <div className="flex items-center justify-center py-8">
-                    <Loader2 className="w-5 h-5 animate-spin text-ink-muted" />
-                </div>
+                <RoleListSkeleton />
             ) : (
                 <>
-                    <div className="space-y-1.5 mb-4 max-h-64 overflow-y-auto pr-1">
-                        {roleOptions.map(opt => {
-                            const isSelected = selectedRole === opt.value
-                            return (
-                                <button key={opt.value || '__none__'} onClick={() => setSelectedRole(opt.value)}
-                                    className={cn(
-                                        "w-full flex items-center gap-3 p-2.5 rounded-xl border transition-colors text-left",
-                                        isSelected
-                                            ? "border-accent-lineage bg-accent-lineage/5"
-                                            : "border-glass-border hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
-                                    )}>
-                                    <div className="min-w-0 flex-1">
-                                        <div className="flex items-center gap-2">
-                                            <p className={cn("text-sm font-semibold truncate", isSelected ? "text-accent-lineage" : "text-ink")}>{opt.label}</p>
-                                            {opt.scoped && (
-                                                <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">workspace</span>
-                                            )}
-                                            {opt.privileged && (
-                                                <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">privileged</span>
-                                            )}
-                                        </div>
-                                        <p className="text-[11px] text-ink-muted truncate">{opt.sublabel}</p>
-                                    </div>
-                                    {isSelected && <CheckCircle2 className="w-5 h-5 text-accent-lineage shrink-0" />}
-                                </button>
-                            )
-                        })}
+                    {/* ── Section 1 — Role ───────────────────────────── */}
+                    <SectionLabel>Choose a role</SectionLabel>
+                    <div className="space-y-3 mb-5 max-h-[320px] overflow-y-auto pr-1">
+                        <RoleGroup
+                            title="Quick start"
+                            options={[quickStart]}
+                            selected={selectedRole}
+                            onSelect={setSelectedRole}
+                        />
+                        {builtins.length > 0 && (
+                            <RoleGroup
+                                title="Built-in tiers"
+                                options={builtins}
+                                selected={selectedRole}
+                                onSelect={setSelectedRole}
+                            />
+                        )}
+                        {customs.length > 0 && (
+                            <RoleGroup
+                                title="Custom roles"
+                                options={customs}
+                                selected={selectedRole}
+                                onSelect={setSelectedRole}
+                            />
+                        )}
                     </div>
 
-                    {/* Workspace picker — only when an admin-pickable workspace role is chosen */}
-                    {needsWorkspacePick && (
-                        <div className="mb-4">
-                            <label className="block text-xs font-semibold text-ink mb-1.5">Workspace</label>
-                            <select
-                                value={workspaceId}
-                                onChange={e => setWorkspaceId(e.target.value)}
-                                className="w-full bg-canvas-elevated border border-glass-border rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-accent-lineage/40"
+                    {/* ── Section 2 — Workspace (animated) ───────────── */}
+                    <AnimatePresence initial={false}>
+                        {isWorkspaceScoped && (
+                            <motion.div
+                                key="ws-section"
+                                initial={{ opacity: 0, height: 0 }}
+                                animate={{ opacity: 1, height: 'auto' }}
+                                exit={{ opacity: 0, height: 0 }}
+                                transition={{ duration: 0.18 }}
+                                className="overflow-hidden"
                             >
-                                <option value="">Select a workspace…</option>
-                                {(workspaces ?? []).map(w => (
-                                    <option key={w.id} value={w.id}>{w.name}</option>
-                                ))}
-                            </select>
-                        </div>
-                    )}
-                    {fixedWorkspaceId && (
-                        <p className="text-[11px] text-ink-muted mb-4">
-                            This custom role is scoped to workspace <span className="font-mono">{fixedWorkspaceId}</span>.
-                        </p>
-                    )}
+                                <div className="border-t border-glass-border mt-5 pt-5">
+                                    <SectionLabel>Workspace</SectionLabel>
+                                    {fixedWorkspaceId ? (
+                                        <div className="flex items-center gap-2.5 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-glass-border">
+                                            <Building2 className="w-4 h-4 text-ink-muted shrink-0" />
+                                            <div className="min-w-0 flex-1">
+                                                <p className="text-sm font-semibold text-ink truncate">
+                                                    {fixedWorkspace?.name ?? fixedWorkspaceId}
+                                                </p>
+                                                <p className="text-[11px] text-ink-muted">
+                                                    This custom role is fixed to this workspace.
+                                                </p>
+                                            </div>
+                                            <Lock className="w-3.5 h-3.5 text-ink-muted shrink-0" />
+                                        </div>
+                                    ) : (
+                                        <WorkspacePicker
+                                            workspaces={workspaces}
+                                            value={workspaceId}
+                                            onChange={setWorkspaceId}
+                                        />
+                                    )}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
 
-                    {/* Email — optional, required + highlighted for privileged roles */}
-                    <div className="mb-5">
-                        <label className="block text-xs font-semibold text-ink mb-1.5">
-                            Target email {isPrivileged ? <span className="text-amber-600 dark:text-amber-400">(required)</span> : <span className="text-ink-muted">(optional)</span>}
-                        </label>
-                        <input
-                            type="email"
-                            value={email}
-                            onChange={e => setEmail(e.target.value)}
-                            placeholder="user@company.com"
-                            className={cn(
-                                "w-full bg-canvas-elevated border rounded-lg px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:outline-none",
-                                isPrivileged && !emailValid
-                                    ? "border-amber-500/40 focus:border-amber-500/60"
-                                    : "border-glass-border focus:border-accent-lineage/40"
+                    {/* ── Section 3 — Recipient (email) ──────────────── */}
+                    <div className="border-t border-glass-border mt-5 pt-5">
+                        <SectionLabel>
+                            Recipient
+                            {isPrivileged ? (
+                                <span className="ml-1 text-amber-600 dark:text-amber-400 normal-case tracking-normal font-normal">
+                                    (required)
+                                </span>
+                            ) : (
+                                <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
+                                    (optional)
+                                </span>
                             )}
-                        />
+                        </SectionLabel>
+
+                        <AnimatePresence initial={false}>
+                            {isPrivileged && (
+                                <motion.div
+                                    key="priv-callout"
+                                    initial={{ opacity: 0, y: -4 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: -4 }}
+                                    transition={{ duration: 0.18 }}
+                                    className="flex items-start gap-2.5 p-3 mb-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300"
+                                >
+                                    <Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                                    <div className="text-xs leading-snug">
+                                        <p className="font-semibold">Privileged role — email required.</p>
+                                        <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
+                                            This role grants admin or system permissions. We pin the
+                                            invite to a target email so a forwarded link can't escalate
+                                            someone else.
+                                        </p>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
+                        <div className="relative group">
+                            <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted group-focus-within:text-accent-lineage transition-colors">
+                                <AtSign className="w-4 h-4" />
+                            </div>
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={e => setEmail(e.target.value)}
+                                placeholder="user@company.com"
+                                className={cn(
+                                    "w-full bg-canvas-elevated border rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors",
+                                    isPrivileged && !emailValid
+                                        ? "border-amber-500/40 focus:border-amber-500/60"
+                                        : "border-glass-border focus:border-accent-lineage/40",
+                                )}
+                            />
+                        </div>
                         <p className="text-[11px] text-ink-muted mt-1.5">
                             {isPrivileged
-                                ? "Privileged roles must be sent to a specific email — the link is bound to that address so it can't be forwarded to escalate someone else."
-                                : "Leave blank for a shareable link, or pin it to one email to make the invite single-recipient."}
+                                ? "The link will refuse any signup whose email doesn't match."
+                                : "Leave blank for a shareable link, or pin to one email for a single-recipient invite."}
+                        </p>
+                    </div>
+
+                    {/* ── Section 4 — Access duration ─────────────────── */}
+                    <div className="border-t border-glass-border mt-5 pt-5 mb-5">
+                        <SectionLabel>Link expires in</SectionLabel>
+                        <div className="flex flex-wrap gap-2">
+                            {(['24h', '7d', '30d', '90d'] as const).map(opt => {
+                                const isSelected = expiresIn === opt
+                                return (
+                                    <button
+                                        key={opt}
+                                        type="button"
+                                        onClick={() => setExpiresIn(opt)}
+                                        className={cn(
+                                            'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                            isSelected
+                                                ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                                : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                        )}
+                                    >
+                                        {opt}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                        <p className="text-[11px] text-ink-muted mt-2">
+                            After this window, the link stops working. The user
+                            can still sign up — they'll need a new invite or admin approval.
                         </p>
                     </div>
 
@@ -1275,6 +1444,313 @@ function InviteForm({
                         loading={loading} disabled={!canSubmit} />
                 </>
             )}
-        </>
+        </motion.div>
+    )
+}
+
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+    return (
+        <p className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2">
+            {children}
+        </p>
+    )
+}
+
+
+function RoleListSkeleton() {
+    return (
+        <div className="space-y-1.5 mb-4">
+            {[0, 1, 2, 3].map(i => (
+                <div
+                    key={i}
+                    className="h-14 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] animate-pulse"
+                />
+            ))}
+        </div>
+    )
+}
+
+
+function RoleGroup({
+    title, options, selected, onSelect,
+}: {
+    title: string
+    options: RoleOption[]
+    selected: string
+    onSelect: (v: string) => void
+}) {
+    return (
+        <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-1.5 px-1">
+                {title}
+            </p>
+            <div className="space-y-1.5">
+                {options.map(opt => {
+                    const isSelected = selected === opt.value
+                    const Icon = opt.visual.icon
+                    return (
+                        <button
+                            key={opt.value || '__none__'}
+                            type="button"
+                            onClick={() => onSelect(opt.value)}
+                            className={cn(
+                                'w-full flex items-center gap-3 p-3 rounded-xl border-2 text-left transition-colors duration-150',
+                                isSelected
+                                    ? 'border-accent-lineage bg-accent-lineage/5 shadow-sm'
+                                    : 'border-glass-border bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                            )}
+                        >
+                            <div
+                                className={cn(
+                                    'w-9 h-9 rounded-lg border flex items-center justify-center shrink-0',
+                                    opt.visual.bg,
+                                )}
+                            >
+                                <Icon className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    <p
+                                        className={cn(
+                                            'text-sm font-semibold truncate',
+                                            isSelected ? opt.visual.accent : 'text-ink',
+                                        )}
+                                    >
+                                        {opt.label}
+                                    </p>
+                                    {opt.scoped && (
+                                        <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+                                            workspace
+                                        </span>
+                                    )}
+                                    {opt.privileged && (
+                                        <span className="inline-flex items-center gap-0.5 px-1.5 py-px rounded-full text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                                            <Lock className="w-2.5 h-2.5" />
+                                            privileged
+                                        </span>
+                                    )}
+                                </div>
+                                <p className="text-[11px] text-ink-muted leading-snug mt-0.5 truncate">
+                                    {opt.sublabel}
+                                </p>
+                            </div>
+                            {isSelected && (
+                                <CheckCircle2 className="w-5 h-5 text-accent-lineage shrink-0" />
+                            )}
+                        </button>
+                    )
+                })}
+            </div>
+        </div>
+    )
+}
+
+
+function WorkspacePicker({
+    workspaces, value, onChange,
+}: {
+    workspaces: WorkspaceResponse[] | null
+    value: string
+    onChange: (v: string) => void
+}) {
+    if (workspaces === null) {
+        return (
+            <div className="h-10 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] animate-pulse" />
+        )
+    }
+    if (workspaces.length === 0) {
+        return (
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>No workspaces available — create one before inviting workspace-scoped users.</span>
+            </div>
+        )
+    }
+    // ≤ 5 → inline chip grid (most-common case). > 5 → styled select.
+    if (workspaces.length <= 5) {
+        return (
+            <div className="grid grid-cols-2 gap-2">
+                {workspaces.map(w => {
+                    const isSelected = value === w.id
+                    return (
+                        <button
+                            key={w.id}
+                            type="button"
+                            onClick={() => onChange(w.id)}
+                            className={cn(
+                                'flex items-center gap-2 px-3 py-2 rounded-xl border text-left transition-colors',
+                                isSelected
+                                    ? 'border-accent-lineage bg-accent-lineage/5 text-accent-lineage'
+                                    : 'border-glass-border bg-canvas-elevated text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                            )}
+                        >
+                            <Building2 className="w-4 h-4 shrink-0" />
+                            <span className="text-sm font-medium truncate">{w.name}</span>
+                            {isSelected && (
+                                <CheckCircle2 className="w-4 h-4 ml-auto shrink-0" />
+                            )}
+                        </button>
+                    )
+                })}
+            </div>
+        )
+    }
+    // Many workspaces — fall back to a styled native select.
+    return (
+        <div className="relative">
+            <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-ink-muted pointer-events-none">
+                <Building2 className="w-4 h-4" />
+            </div>
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-ink-muted pointer-events-none">
+                <ChevronDown className="w-4 h-4" />
+            </div>
+            <select
+                value={value}
+                onChange={e => onChange(e.target.value)}
+                className="w-full appearance-none bg-canvas-elevated border border-glass-border rounded-xl pl-10 pr-9 py-2.5 text-sm text-ink focus:outline-none focus:border-accent-lineage/40 transition-colors"
+            >
+                <option value="">Select a workspace…</option>
+                {workspaces.map(w => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                ))}
+            </select>
+        </div>
+    )
+}
+
+
+// ── Phase 12: premium invite result card ─────────────────────────────
+function InviteResultCard({
+    result, inviteUrl, copied, onCopy, onAnother, onClose,
+}: {
+    result: InviteResponse
+    inviteUrl: string
+    copied: boolean
+    onCopy: () => void
+    onAnother: () => void
+    onClose: () => void
+}) {
+    const roleLabel = result.role
+        ? (_ROLE_LABEL[result.role] ?? result.role)
+        : 'No role (plain account)'
+    const expiresWhen = (() => {
+        const d = new Date(result.expiresAt)
+        const diff = d.getTime() - Date.now()
+        const days = Math.max(0, Math.floor(diff / 86_400_000))
+        const hours = Math.max(0, Math.floor(diff / 3_600_000))
+        return days >= 1 ? `${days}d` : `${hours}h`
+    })()
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+            className="space-y-4 mb-1"
+        >
+            {/* Hero */}
+            <div className="flex items-center gap-3 p-4 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-emerald-500/0 border border-emerald-500/20">
+                <div className="w-11 h-11 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0">
+                    <Sparkles className="w-5 h-5 text-emerald-500" />
+                </div>
+                <div className="min-w-0">
+                    <p className="text-sm font-bold text-ink">Invite ready</p>
+                    <p className="text-xs text-ink-muted">
+                        Copy the link below and share it with the recipient.
+                    </p>
+                </div>
+            </div>
+
+            {/* Link card */}
+            <div className="p-4 rounded-2xl bg-canvas-elevated border border-glass-border">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted mb-2">
+                    Invite link
+                </p>
+                <div className="flex items-center gap-2">
+                    <code className="flex-1 text-xs font-mono bg-black/5 dark:bg-white/5 px-3 py-2.5 rounded-xl break-all text-ink select-all">
+                        {inviteUrl}
+                    </code>
+                    <button onClick={onCopy}
+                        className={cn(
+                            "p-2.5 rounded-xl transition-colors shrink-0",
+                            copied
+                                ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                                : "bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20",
+                        )}
+                        title={copied ? 'Copied' : 'Copy to clipboard'}
+                    >
+                        {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                </div>
+
+                {/* Metadata grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">
+                    <MetaTile icon={Shield} label="Role" value={roleLabel} />
+                    {result.workspaceId && (
+                        <MetaTile icon={Building2} label="Workspace" value={result.workspaceId} />
+                    )}
+                    <MetaTile icon={Clock} label="Expires in" value={expiresWhen} />
+                    {result.email ? (
+                        <MetaTile
+                            icon={Lock}
+                            label="Email-bound"
+                            value={result.email}
+                            tone="amber"
+                        />
+                    ) : (
+                        <MetaTile
+                            icon={Mail}
+                            label="Recipient"
+                            value="Shareable link"
+                            tone="slate"
+                        />
+                    )}
+                </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-between gap-3">
+                <button
+                    onClick={onAnother}
+                    className="text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
+                >
+                    Generate another
+                </button>
+                <button
+                    onClick={onClose}
+                    className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-accent-lineage text-white hover:brightness-110 transition-colors duration-150 shadow-sm shadow-accent-lineage/20"
+                >
+                    Done
+                </button>
+            </div>
+        </motion.div>
+    )
+}
+
+
+function MetaTile({
+    icon: Icon, label, value, tone = 'neutral',
+}: {
+    icon: typeof Shield
+    label: string
+    value: string
+    tone?: 'neutral' | 'amber' | 'slate'
+}) {
+    const toneCls =
+        tone === 'amber'
+            ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20'
+            : tone === 'slate'
+                ? 'bg-slate-500/10 text-slate-700 dark:text-slate-300 border-slate-500/20'
+                : 'bg-black/[0.03] dark:bg-white/[0.03] border-glass-border'
+    return (
+        <div className={cn('flex items-center gap-2.5 p-2.5 rounded-xl border', toneCls)}>
+            <Icon className="w-3.5 h-3.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+                <p className="text-[10px] uppercase tracking-wider font-semibold opacity-70">
+                    {label}
+                </p>
+                <p className="text-xs font-medium truncate">{value}</p>
+            </div>
+        </div>
     )
 }
