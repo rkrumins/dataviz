@@ -186,6 +186,11 @@ export const authService = {
         workspaceId?: string | null
         workspaceName?: string | null
         email?: string | null
+        /** Phase 13: groups attached on signup. ``groupIds`` mirrors
+         *  the token payload; ``groupNames`` is resolved server-side
+         *  so the banner can show friendly names. */
+        groupIds?: string[] | null
+        groupNames?: string[] | null
     }> {
         return request(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,

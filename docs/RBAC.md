@@ -324,6 +324,53 @@ Workspace roles see `workspace:*` + `resource:*` only; global
 roles see `system:*` + `resource:*` only. Switching scope mid-edit
 clears any silently-invalid selections.
 
+## Phase 13 — Standard vs Custom roles + Groups in invites
+
+The Phase-11 invite modal had two rough edges in the wild:
+
+* **Legacy system roles got mis-classified as Custom.** The
+  classifier used a hardcoded name list (`super_admin / org_admin /
+  workspace_admin / workspace_member / workspace_viewer`) — but a
+  dev DB where the Phase-5 migration never ran still has rows for
+  `admin / user / viewer` with `is_system=true`. Those legacy rows
+  fell into "Custom Roles" with the generic Sparkles icon.
+* **No way to add the new user to Groups.** Workspaces were
+  reachable via workspace-tier roles, but operators couldn't onboard
+  a user into `Engineering` + `Data Platform` in one step.
+
+Phase 13:
+
+* **Classify by `isSystem`, not by name.** Any role with
+  `is_system=true` lands in "Standard Roles" — the legacy ones and
+  any future system additions. Operator-created roles stay in
+  "Custom Roles". Smart icon/colour fallback (`getRoleVisual`) picks
+  a sensible visual for any role without a curated entry:
+  privileged → Shield/amber, workspace-scoped → UserCog/sky, global
+  system → Globe/slate, else Sparkles/emerald.
+
+* **Groups multi-select on invite.** Admin picks zero or more
+  groups from the live catalogue; on signup, the new user is added
+  to each via `group_repo.add_member`. Group memberships span every
+  workspace the group is bound to.
+
+* **Security rule:** any invite that attaches groups is
+  email-bound. Group bindings can reach across workspaces in ways
+  the inviter doesn't see at mint time — we won't let a forwarded
+  shareable link grant that. Protected groups (IdP-managed) are
+  refused at the create step.
+
+* **Live invite summary.** Above the Generate Link button, a small
+  receipt narrates the invite in plain English ("Activate a new
+  account, grant Workspace Admin in Finance, add to groups
+  Engineering, Data Platform. Email-bound to ada@x.com. Link
+  expires in 30d.") — adapts live as the form changes.
+
+* **No-role hero card** sits above the role catalogue as a clear
+  "skip this step" affordance rather than a stray role in the list.
+
+* **Signup banner** mentions groups: "You'll join the Engineering
+  and Data Platform groups."
+
 ## Phase 11 — Invite By Link supports all roles (tiered)
 
 Invites are no longer limited to the global admin tiers. An admin can

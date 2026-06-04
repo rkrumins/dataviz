@@ -175,6 +175,7 @@ def create_invite_token(
     *,
     workspace_id: str | None = None,
     email: str | None = None,
+    group_ids: list[str] | None = None,
 ) -> tuple[str, str]:
     """Create a signed invite JWT. Returns (token, expires_at_iso).
 
@@ -184,6 +185,10 @@ def create_invite_token(
     so a forwarded link can't escalate an unintended identity). Both
     are omitted from the payload when ``None`` so existing global,
     shareable invites are unchanged on the wire.
+
+    Phase 13: also optional ``group_ids`` — a list of internal Group
+    ids the new user should be added to on signup. Omitted from the
+    payload when ``None`` / empty.
     """
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=expires_in_hours)
@@ -200,6 +205,8 @@ def create_invite_token(
         payload["workspace_id"] = workspace_id
     if email is not None:
         payload["email"] = email
+    if group_ids:
+        payload["group_ids"] = list(group_ids)
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at.isoformat()
 

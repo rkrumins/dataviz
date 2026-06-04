@@ -178,6 +178,7 @@ async def signup(
     invite_admin = None
     invite_workspace_id = None
     invite_email = None
+    invite_group_ids: list[str] = []
     if body.invite_token:
         try:
             payload = decode_invite_token(body.invite_token)
@@ -186,6 +187,9 @@ async def signup(
             invite_admin = payload.get("created_by")
             invite_workspace_id = payload.get("workspace_id")
             invite_email = payload.get("email")
+            raw_groups = payload.get("group_ids") or []
+            if isinstance(raw_groups, list):
+                invite_group_ids = [g for g in raw_groups if isinstance(g, str)]
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -234,6 +238,33 @@ async def signup(
                 workspace_id=invite_workspace_id,
                 granted_by=invite_admin,
             )
+
+        # Phase 13: attach the user to each group from the invite.
+        # Best-effort: a group deleted after minting just logs +
+        # continues — we'd rather activate the user with partial
+        # group membership than 500 the signup.
+        attached_groups: list[str] = []
+        if invite_group_ids:
+            from backend.app.db.repositories import group_repo
+            for gid in invite_group_ids:
+                grp = await group_repo.get_group_by_id(session, gid)
+                if grp is None:
+                    logger.warning(
+                        "Invite group %s no longer exists; skipping for %s",
+                        gid, user.id,
+                    )
+                    continue
+                try:
+                    await group_repo.add_member(
+                        session, gid, user.id, added_by=invite_admin,
+                    )
+                    attached_groups.append(gid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to add %s to group %s: %s — continuing.",
+                        user.id, gid, exc,
+                    )
+
         await user_repo.create_approval(
             session, user.id, status="approved", approved_by=invite_admin,
         )
@@ -245,12 +276,13 @@ async def signup(
                 "email": user.email,
                 "role": invite_role,
                 "workspace_id": invite_workspace_id,
+                "group_ids": attached_groups,
                 "invited_by": invite_admin,
             },
         )
         logger.info(
-            "User signed up via invite: %s (role=%s ws=%s)",
-            user.id, invite_role, invite_workspace_id,
+            "User signed up via invite: %s (role=%s ws=%s groups=%d)",
+            user.id, invite_role, invite_workspace_id, len(attached_groups),
         )
         return SignUpResponse(message="Account created and activated. You can now sign in.")
     else:
@@ -367,10 +399,26 @@ async def verify_invite(
         if ws is not None:
             workspace_name = ws.name
 
+    # Phase 13: resolve group names so the signup page can render
+    # "You'll join the Engineering and Data Platform groups."
+    group_ids_raw = payload.get("group_ids") or []
+    group_ids: list[str] = (
+        [g for g in group_ids_raw if isinstance(g, str)]
+        if isinstance(group_ids_raw, list) else []
+    )
+    group_names: list[str] = []
+    if group_ids:
+        from backend.app.db.repositories import group_repo
+        for gid in group_ids:
+            grp = await group_repo.get_group_by_id(session, gid)
+            group_names.append(grp.name if grp else gid)
+
     return InviteVerifyResponse(
         valid=True,
         role=payload.get("role"),
         workspaceId=workspace_id,
         workspaceName=workspace_name,
         email=payload.get("email"),
+        groupIds=group_ids or None,
+        groupNames=group_names or None,
     )

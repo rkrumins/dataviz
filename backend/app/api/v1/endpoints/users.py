@@ -391,9 +391,47 @@ async def create_invite(
         another user.
     """
     from backend.app.auth.jwt import create_invite_token
-    from backend.app.db.repositories import role_repo, workspace_repo
+    from backend.app.db.repositories import group_repo, role_repo, workspace_repo
 
     resolved_workspace_id: Optional[str] = None
+    resolved_group_ids: list[str] = []
+
+    # Phase 13: validate any attached groups first. Reject unknown
+    # or protected groups (the latter exist to defend IdP-mapped
+    # collections from accidental admin additions; they can't be
+    # invite-targeted either).
+    if body.group_ids:
+        for gid in body.group_ids:
+            grp = await group_repo.get_group_by_id(session, gid)
+            if grp is None:
+                raise HTTPException(
+                    status_code=400, detail=f"Unknown group '{gid}'",
+                )
+            if getattr(grp, "is_protected", False):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Group '{grp.name}' is protected and cannot be "
+                        f"added through invite links."
+                    ),
+                )
+            resolved_group_ids.append(gid)
+
+    # Phase 13 — MVP privilege rule: any invite that attaches groups
+    # must be email-bound. A group's bindings can span workspaces in
+    # ways the inviter doesn't see, and a forwarded shareable link
+    # could let an unintended identity inherit them all. We may
+    # relax this once we wire a per-group privilege probe.
+    if resolved_group_ids and not body.email:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invites that attach groups must be sent to a specific "
+                "email address. Group memberships can grant access "
+                "beyond what's visible at invite time; we require the "
+                "link to be bound to one identity."
+            ),
+        )
 
     if body.role is not None:
         role = await role_repo.get_role(session, body.role)
@@ -481,6 +519,7 @@ async def create_invite(
         expires_in_hours=body.expires_in_hours,
         workspace_id=resolved_workspace_id,
         email=body.email,
+        group_ids=resolved_group_ids or None,
     )
 
     await user_repo.create_outbox_event(
@@ -490,19 +529,22 @@ async def create_invite(
             "role": body.role,
             "workspace_id": resolved_workspace_id,
             "email": body.email,
+            "group_ids": resolved_group_ids,
             "created_by": admin.id,
             "expires_at": expires_at,
         },
     )
 
     logger.info(
-        "Invite token created by admin %s (role=%s ws=%s email_bound=%s)",
-        admin.id, body.role, resolved_workspace_id, bool(body.email),
+        "Invite token created by admin %s (role=%s ws=%s groups=%d email_bound=%s)",
+        admin.id, body.role, resolved_workspace_id,
+        len(resolved_group_ids), bool(body.email),
     )
     return InviteTokenResponse(
         inviteToken=token,
         role=body.role,
         workspaceId=resolved_workspace_id,
         email=body.email,
+        groupIds=resolved_group_ids or None,
         expiresAt=expires_at,
     )

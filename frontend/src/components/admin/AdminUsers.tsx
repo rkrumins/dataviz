@@ -15,11 +15,12 @@ import {
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp, KeyRound, Eye, UserCog,
     RotateCcw, Lock, Copy, Check, Link2,
-    Crown, ShieldCheck, Building2, Globe, Sparkles, AtSign,
+    Crown, ShieldCheck, Building2, Globe, Sparkles, AtSign, Users2,
 } from 'lucide-react'
 import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
 import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
+import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 
@@ -379,7 +380,12 @@ export function AdminUsers() {
 
     const handleCreateInvite = async (
         role: string | null,
-        opts: { workspaceId?: string | null; email?: string | null; expiresInHours?: number },
+        opts: {
+            workspaceId?: string | null
+            email?: string | null
+            groupIds?: string[] | null
+            expiresInHours?: number
+        },
     ) => {
         setInviteLoading(true)
         setError(null)
@@ -1153,6 +1159,40 @@ const _ROLE_FALLBACK_DESC: Record<string, string> = {
 }
 
 
+/** Phase 13: pick a visual for any role — curated entry if we have
+ *  one for the exact name, else derive from the role's characteristics
+ *  so legacy / custom roles don't all render as a generic Sparkles
+ *  bubble. Priority: curated → privileged → workspace-scoped → global
+ *  → custom default. */
+function getRoleVisual(role: RoleDefinitionResponse): {
+    icon: typeof Shield; bg: string; accent: string
+} {
+    if (_ROLE_VISUAL[role.name]) return _ROLE_VISUAL[role.name]
+    if (roleIsPrivileged(role.permissions)) {
+        return {
+            icon: Shield,
+            bg: 'bg-amber-500/10 text-amber-600 border-amber-500/20',
+            accent: 'text-amber-600 dark:text-amber-400',
+        }
+    }
+    if (roleNeedsWorkspace(role)) {
+        return {
+            icon: UserCog,
+            bg: 'bg-sky-500/10 text-sky-600 border-sky-500/20',
+            accent: 'text-sky-600 dark:text-sky-400',
+        }
+    }
+    if (role.isSystem) {
+        return {
+            icon: Globe,
+            bg: 'bg-slate-500/10 text-slate-600 border-slate-500/20',
+            accent: 'text-slate-600 dark:text-slate-400',
+        }
+    }
+    return _ROLE_VISUAL_CUSTOM
+}
+
+
 /** Phase 12: pretty-format a custom role name. Splits on
  *  ``_`` / ``-`` / whitespace and Title-Cases each word. Built-in
  *  tiers have hand-curated labels in ``_ROLE_LABEL`` and skip this. */
@@ -1185,17 +1225,23 @@ function InviteForm({
     onCancel: () => void
     onSubmit: (
         role: string | null,
-        opts: { workspaceId?: string | null; email?: string | null; expiresInHours?: number },
+        opts: {
+            workspaceId?: string | null
+            email?: string | null
+            groupIds?: string[] | null
+            expiresInHours?: number
+        },
     ) => void
 }) {
     const [roles, setRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
+    const [groups, setGroups] = useState<GroupResponse[] | null>(null)
     const [selectedRole, setSelectedRole] = useState<string>('')
     const [workspaceId, setWorkspaceId] = useState<string>('')
+    const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
     const [email, setEmail] = useState<string>('')
-    // Phase 12: Permanent | 24h | 7d | 30d | 90d. ``''`` = permanent
-    // (we send the backend's max of 720h, 30d).
-    const [expiresIn, setExpiresIn] = useState<'' | '24h' | '7d' | '30d' | '90d'>('30d')
+    // Phase 12: 24h | 7d | 30d | 90d.
+    const [expiresIn, setExpiresIn] = useState<'24h' | '7d' | '30d' | '90d'>('30d')
 
     useEffect(() => {
         permissionsService.listRoles()
@@ -1204,6 +1250,7 @@ function InviteForm({
             ))
             .catch(() => setRoles([]))
         workspaceService.list().then(setWorkspaces).catch(() => setWorkspaces([]))
+        groupsService.list().then(setGroups).catch(() => setGroups([]))
     }, [canGrantSuperAdmin])
 
     const roleObj = useMemo(
@@ -1217,10 +1264,15 @@ function InviteForm({
     const needsWorkspacePick = isWorkspaceScoped && !fixedWorkspaceId
     const effectiveWorkspaceId = fixedWorkspaceId ?? (needsWorkspacePick ? workspaceId : null)
 
+    // Phase 13: any group attachment makes the invite privileged-by-
+    // policy on the backend; we mirror the UX here so the email field
+    // flips to required before submit.
+    const hasGroups = selectedGroups.size > 0
+    const needsEmail = isPrivileged || hasGroups
     const emailValid = /.+@.+\..+/.test(email.trim())
     const canSubmit =
         (!needsWorkspacePick || !!workspaceId)
-        && (!isPrivileged || emailValid)
+        && (!needsEmail || emailValid)
 
     const expiresInHours = (() => {
         switch (expiresIn) {
@@ -1228,7 +1280,6 @@ function InviteForm({
             case '7d': return 24 * 7
             case '30d': return 24 * 30
             case '90d': return 24 * 90
-            default: return 24 * 30  // ~ "Permanent" maps to 30-day max practical
         }
     })()
 
@@ -1237,20 +1288,27 @@ function InviteForm({
         onSubmit(selectedRole || null, {
             workspaceId: isWorkspaceScoped ? effectiveWorkspaceId : null,
             email: email.trim() ? email.trim() : null,
+            groupIds: hasGroups ? Array.from(selectedGroups) : null,
             expiresInHours,
         })
     }
 
-    // Phase 12: two clearly-named role groups —
-    //   * "Quick Start" — No role + every pre-defined / built-in tier
-    //     (the curated set most admins reach for).
-    //   * "Custom Roles" — anything operators created themselves.
-    // Built-ins keep their canonical tier order; customs sort alpha.
-    // Custom role names render Title-Cased for a polished display.
-    const { quickStart, customs } = useMemo(() => {
+    const toggleGroup = (id: string) => {
+        setSelectedGroups(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) next.delete(id); else next.add(id)
+            return next
+        })
+    }
+
+    // Phase 13: classify by ``isSystem`` (not a hardcoded name list)
+    // so legacy system roles like ``admin``/``user``/``viewer`` land
+    // in Standard Roles, not Custom. The smart-visual helper picks an
+    // icon/colour from role characteristics for any role without a
+    // curated entry.
+    const { standardRoles, customRoles, noRole } = useMemo(() => {
         const opt = (r: RoleDefinitionResponse): RoleOption => {
-            const isBuiltin = _BUILTIN_ORDER.includes(r.name)
-            const v = _ROLE_VISUAL[r.name] ?? _ROLE_VISUAL_CUSTOM
+            const v = getRoleVisual(r)
             return {
                 value: r.name,
                 label: _ROLE_LABEL[r.name] ?? toTitleCase(r.name),
@@ -1261,16 +1319,24 @@ function InviteForm({
                 scoped: roleNeedsWorkspace(r),
                 fixedWorkspaceId: r.scopeType === 'workspace' ? r.scopeId : null,
                 visual: v,
-                isBuiltin,
+                isBuiltin: r.isSystem,
             }
         }
         const all = (roles ?? []).map(opt)
-        const builtins: RoleOption[] = []
-        const customs: RoleOption[] = []
-        for (const o of all) (o.isBuiltin ? builtins : customs).push(o)
-        builtins.sort((a, b) => _BUILTIN_ORDER.indexOf(a.value) - _BUILTIN_ORDER.indexOf(b.value))
-        customs.sort((a, b) => a.label.localeCompare(b.label))
-        // Quick Start = "No role" sentinel + the curated built-ins.
+        const standardRoles: RoleOption[] = []
+        const customRoles: RoleOption[] = []
+        for (const o of all) (o.isBuiltin ? standardRoles : customRoles).push(o)
+        // Standard roles sort canonical first, then alpha for anything
+        // outside the canonical set (catches legacy admin/user/viewer).
+        standardRoles.sort((a, b) => {
+            const ia = _BUILTIN_ORDER.indexOf(a.value)
+            const ib = _BUILTIN_ORDER.indexOf(b.value)
+            if (ia >= 0 && ib >= 0) return ia - ib
+            if (ia >= 0) return -1
+            if (ib >= 0) return 1
+            return a.label.localeCompare(b.label)
+        })
+        customRoles.sort((a, b) => a.label.localeCompare(b.label))
         const noRole: RoleOption = {
             value: '',
             label: 'No role',
@@ -1278,11 +1344,25 @@ function InviteForm({
             privileged: false, scoped: false, fixedWorkspaceId: null,
             visual: _ROLE_VISUAL_NONE, isBuiltin: false,
         }
-        return { quickStart: [noRole, ...builtins], customs }
+        return { standardRoles, customRoles, noRole }
     }, [roles])
 
     const fixedWorkspace = fixedWorkspaceId
         ? workspaces?.find(w => w.id === fixedWorkspaceId)
+        : null
+
+    // Phase 13: live summary inputs for the receipt preview.
+    const selectedGroupNames = useMemo(() => {
+        if (!groups) return []
+        return Array.from(selectedGroups)
+            .map(id => groups.find(g => g.id === id)?.name)
+            .filter((n): n is string => !!n)
+    }, [groups, selectedGroups])
+    const summaryWorkspaceName = effectiveWorkspaceId
+        ? (workspaces?.find(w => w.id === effectiveWorkspaceId)?.name ?? effectiveWorkspaceId)
+        : null
+    const summaryRoleLabel = selectedRole
+        ? (_ROLE_LABEL[selectedRole] ?? toTitleCase(selectedRole))
         : null
 
     return (
@@ -1302,17 +1382,27 @@ function InviteForm({
                 <>
                     {/* ── Section 1 — Role ───────────────────────────── */}
                     <SectionLabel>Choose a role</SectionLabel>
-                    <div className="space-y-3 mb-5 max-h-[320px] overflow-y-auto pr-1">
-                        <RoleGroup
-                            title="Quick Start"
-                            options={quickStart}
-                            selected={selectedRole}
-                            onSelect={setSelectedRole}
-                        />
-                        {customs.length > 0 && (
+                    {/* No-role hero — separate from the catalogue so it
+                        reads as "skip this step" rather than just
+                        another role tile. */}
+                    <NoRoleCard
+                        option={noRole}
+                        selected={selectedRole === ''}
+                        onSelect={() => setSelectedRole('')}
+                    />
+                    <div className="space-y-3 mt-3 mb-5 max-h-[280px] overflow-y-auto pr-1">
+                        {standardRoles.length > 0 && (
+                            <RoleGroup
+                                title="Standard Roles"
+                                options={standardRoles}
+                                selected={selectedRole}
+                                onSelect={setSelectedRole}
+                            />
+                        )}
+                        {customRoles.length > 0 && (
                             <RoleGroup
                                 title="Custom Roles"
-                                options={customs}
+                                options={customRoles}
                                 selected={selectedRole}
                                 onSelect={setSelectedRole}
                             />
@@ -1357,11 +1447,32 @@ function InviteForm({
                         )}
                     </AnimatePresence>
 
-                    {/* ── Section 3 — Recipient (email) ──────────────── */}
+                    {/* ── Section 3 — Groups ─────────────────────────── */}
+                    <div className="border-t border-glass-border mt-5 pt-5">
+                        <SectionLabel>
+                            Add to Groups
+                            <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
+                                (optional)
+                            </span>
+                        </SectionLabel>
+                        <GroupsPicker
+                            groups={groups}
+                            selected={selectedGroups}
+                            onToggle={toggleGroup}
+                        />
+                        <p className="text-[11px] text-ink-muted mt-2">
+                            Group memberships apply across every workspace the
+                            group is bound to. Attaching groups makes the invite
+                            email-bound (we can't let a forwarded link grant
+                            unknown cross-workspace access).
+                        </p>
+                    </div>
+
+                    {/* ── Section 4 — Recipient (email) ──────────────── */}
                     <div className="border-t border-glass-border mt-5 pt-5">
                         <SectionLabel>
                             Recipient
-                            {isPrivileged ? (
+                            {needsEmail ? (
                                 <span className="ml-1 text-amber-600 dark:text-amber-400 normal-case tracking-normal font-normal">
                                     (required)
                                 </span>
@@ -1373,7 +1484,7 @@ function InviteForm({
                         </SectionLabel>
 
                         <AnimatePresence initial={false}>
-                            {isPrivileged && (
+                            {needsEmail && (
                                 <motion.div
                                     key="priv-callout"
                                     initial={{ opacity: 0, y: -4 }}
@@ -1384,11 +1495,15 @@ function InviteForm({
                                 >
                                     <Lock className="w-4 h-4 shrink-0 mt-0.5" />
                                     <div className="text-xs leading-snug">
-                                        <p className="font-semibold">Privileged role — email required.</p>
+                                        <p className="font-semibold">
+                                            {isPrivileged
+                                                ? 'Privileged role — email required.'
+                                                : 'Group attachments — email required.'}
+                                        </p>
                                         <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
-                                            This role grants admin or system permissions. We pin the
-                                            invite to a target email so a forwarded link can't escalate
-                                            someone else.
+                                            {isPrivileged
+                                                ? 'This role grants admin or system permissions. We pin the invite to a target email so a forwarded link can\'t escalate someone else.'
+                                                : 'Group memberships can reach across workspaces. We pin the invite to a target email so a forwarded link can\'t grant the wrong identity that access.'}
                                         </p>
                                     </div>
                                 </motion.div>
@@ -1406,14 +1521,14 @@ function InviteForm({
                                 placeholder="user@company.com"
                                 className={cn(
                                     "w-full bg-canvas-elevated border rounded-xl pl-10 pr-3 py-2.5 text-sm text-ink placeholder:text-ink-muted focus:outline-none transition-colors",
-                                    isPrivileged && !emailValid
+                                    needsEmail && !emailValid
                                         ? "border-amber-500/40 focus:border-amber-500/60"
                                         : "border-glass-border focus:border-accent-lineage/40",
                                 )}
                             />
                         </div>
                         <p className="text-[11px] text-ink-muted mt-1.5">
-                            {isPrivileged
+                            {needsEmail
                                 ? "The link will refuse any signup whose email doesn't match."
                                 : "Leave blank for a shareable link, or pin to one email for a single-recipient invite."}
                         </p>
@@ -1447,6 +1562,16 @@ function InviteForm({
                             can still sign up — they'll need a new invite or admin approval.
                         </p>
                     </div>
+
+                    {/* ── Live summary preview ───────────────────────── */}
+                    <InviteSummary
+                        roleLabel={summaryRoleLabel}
+                        workspaceName={summaryWorkspaceName}
+                        groupNames={selectedGroupNames}
+                        email={email.trim() || null}
+                        emailRequired={needsEmail}
+                        expiresIn={expiresIn}
+                    />
 
                     <ModalFooter onCancel={onCancel} onConfirm={submit}
                         confirmLabel="Generate Link" confirmIcon={Link2}
@@ -1630,6 +1755,183 @@ function WorkspacePicker({
 }
 
 
+// ── Phase 13: hero card for the "No role" option ─────────────────────
+// Sits above the standard / custom catalogue so it reads as "skip this
+// step entirely", not just another role in a list.
+function NoRoleCard({
+    option, selected, onSelect,
+}: {
+    option: RoleOption
+    selected: boolean
+    onSelect: () => void
+}) {
+    const Icon = option.visual.icon
+    return (
+        <button
+            type="button"
+            onClick={onSelect}
+            className={cn(
+                'w-full flex items-center gap-3 p-3.5 rounded-2xl border-2 text-left transition-colors duration-150',
+                selected
+                    ? 'border-accent-lineage bg-gradient-to-br from-accent-lineage/8 to-accent-lineage/0 shadow-sm'
+                    : 'border-glass-border bg-canvas-elevated hover:border-ink-muted/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+            )}
+        >
+            <div className={cn(
+                'w-10 h-10 rounded-xl border flex items-center justify-center shrink-0',
+                option.visual.bg,
+            )}>
+                <Icon className="w-5 h-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+                <p className={cn(
+                    'text-sm font-semibold',
+                    selected ? option.visual.accent : 'text-ink',
+                )}>
+                    {option.label}
+                </p>
+                <p className="text-[11px] text-ink-muted leading-snug mt-0.5">
+                    {option.sublabel}
+                </p>
+            </div>
+            {selected && (
+                <CheckCircle2 className="w-5 h-5 text-accent-lineage shrink-0" />
+            )}
+        </button>
+    )
+}
+
+
+// ── Phase 13: multi-select group picker ──────────────────────────────
+function GroupsPicker({
+    groups, selected, onToggle,
+}: {
+    groups: GroupResponse[] | null
+    selected: Set<string>
+    onToggle: (id: string) => void
+}) {
+    if (groups === null) {
+        return (
+            <div className="space-y-1.5">
+                {[0, 1].map(i => (
+                    <div
+                        key={i}
+                        className="h-12 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] animate-pulse"
+                    />
+                ))}
+            </div>
+        )
+    }
+    if (groups.length === 0) {
+        return (
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-dashed border-glass-border text-ink-muted text-xs">
+                <Users2 className="w-3.5 h-3.5 shrink-0" />
+                <span>No groups defined yet — create one in <span className="font-semibold">Admin → Groups</span> to add new users to it on signup.</span>
+            </div>
+        )
+    }
+    return (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[200px] overflow-y-auto pr-1">
+            {groups.map(g => {
+                const isSelected = selected.has(g.id)
+                return (
+                    <button
+                        key={g.id}
+                        type="button"
+                        onClick={() => onToggle(g.id)}
+                        className={cn(
+                            'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-colors',
+                            isSelected
+                                ? 'border-accent-lineage bg-accent-lineage/5'
+                                : 'border-glass-border bg-canvas-elevated hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                        )}
+                    >
+                        <div className={cn(
+                            'w-8 h-8 rounded-lg border flex items-center justify-center shrink-0',
+                            'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+                        )}>
+                            <Users2 className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <p className={cn(
+                                'text-sm font-semibold truncate',
+                                isSelected ? 'text-accent-lineage' : 'text-ink',
+                            )}>
+                                {g.name}
+                            </p>
+                            <p className="text-[11px] text-ink-muted">
+                                {g.memberCount} {g.memberCount === 1 ? 'member' : 'members'}
+                            </p>
+                        </div>
+                        {isSelected && (
+                            <CheckCircle2 className="w-4 h-4 text-accent-lineage shrink-0" />
+                        )}
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+
+// ── Phase 13: live invite summary preview ────────────────────────────
+// A small receipt above the Generate Link button that explains in
+// plain English what the invite will do. Builds entirely from the
+// form's live state so it adapts as the user changes anything.
+function InviteSummary({
+    roleLabel, workspaceName, groupNames, email, emailRequired, expiresIn,
+}: {
+    roleLabel: string | null
+    workspaceName: string | null
+    groupNames: string[]
+    email: string | null
+    emailRequired: boolean
+    expiresIn: string
+}) {
+    // Build a tiny sentence: "Activate a new account, [grant Role in
+    // Workspace], [add to groups X, Y]. [Email-bound to a@x.com] or
+    // [Shareable]. Expires in 30d."
+    const parts: string[] = ['Activate a new account']
+    if (roleLabel) {
+        if (workspaceName) {
+            parts.push(`grant ${roleLabel} in ${workspaceName}`)
+        } else {
+            parts.push(`grant ${roleLabel}`)
+        }
+    }
+    if (groupNames.length > 0) {
+        parts.push(`add to ${groupNames.length === 1 ? 'group' : 'groups'} ${groupNames.join(', ')}`)
+    }
+
+    const recipient = email
+        ? `Email-bound to ${email}.`
+        : (emailRequired
+            ? 'Email required.'
+            : 'Shareable link (no email pin).')
+
+    return (
+        <motion.div
+            key={parts.join('|') + '|' + recipient + '|' + expiresIn}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.15 }}
+            className="mt-2 mb-5 p-4 rounded-2xl bg-accent-lineage/5 border border-accent-lineage/20"
+        >
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-accent-lineage mb-1.5">
+                This invite will
+            </p>
+            <p className="text-xs text-ink leading-relaxed">
+                {parts.join(', ')}.{' '}
+                <span className={cn(emailRequired && !email && 'text-amber-600 dark:text-amber-400 font-medium')}>
+                    {recipient}
+                </span>
+                {' '}Link expires in <span className="font-semibold">{expiresIn}</span>.
+            </p>
+        </motion.div>
+    )
+}
+
+
 // ── Phase 12: premium invite result card ─────────────────────────────
 function InviteResultCard({
     result, inviteUrl, copied, onCopy, onAnother, onClose,
@@ -1698,6 +2000,13 @@ function InviteResultCard({
                     <MetaTile icon={Shield} label="Role" value={roleLabel} />
                     {result.workspaceId && (
                         <MetaTile icon={Building2} label="Workspace" value={result.workspaceId} />
+                    )}
+                    {result.groupIds && result.groupIds.length > 0 && (
+                        <MetaTile
+                            icon={Users2}
+                            label={result.groupIds.length === 1 ? 'Group' : 'Groups'}
+                            value={`${result.groupIds.length} attached`}
+                        />
                     )}
                     <MetaTile icon={Clock} label="Expires in" value={expiresWhen} />
                     {result.email ? (

@@ -171,6 +171,10 @@ class CreateInviteRequest(BaseModel):
     role: Optional[str] = Field(None, min_length=1, max_length=64)
     workspace_id: Optional[str] = Field(None, alias="workspaceId", max_length=64)
     email: Optional[str] = Field(None, max_length=254)
+    # Phase 13: optional group memberships to attach on signup. Each
+    # id is validated against the catalogue in the endpoint; protected
+    # groups are rejected.
+    group_ids: Optional[list[str]] = Field(None, alias="groupIds")
     expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=720)
 
     @field_validator("email")
@@ -198,6 +202,9 @@ class InviteTokenResponse(BaseModel):
     # render "Viewer in Finance, sent to alice@x.com".
     workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
     email: Optional[str] = None
+    # Phase 13: groups attached on signup, echoed back for the
+    # success card.
+    group_ids: Optional[list[str]] = Field(default=None, alias="groupIds")
     expires_at: str = Field(alias="expiresAt")
 
 
@@ -213,3 +220,7 @@ class InviteVerifyResponse(BaseModel):
     workspace_id: Optional[str] = Field(default=None, alias="workspaceId")
     workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
     email: Optional[str] = None
+    # Phase 13: group ids + friendly names so the signup banner can
+    # render "You'll join the Engineering and Data Platform groups."
+    group_ids: Optional[list[str]] = Field(default=None, alias="groupIds")
+    group_names: Optional[list[str]] = Field(default=None, alias="groupNames")

@@ -364,6 +364,158 @@ async def test_custom_global_role_grants_no_workspace_access(
     assert not has_permission(claims, "workspace:view:read", workspace_id="ws_x")
 
 
+# ── Phase 13 — group attachments on invite ───────────────────────────
+
+
+async def _seed_group(db_session, *, name="engineering", is_protected=False):
+    from backend.app.db.repositories import group_repo
+    grp = await group_repo.create_group(db_session, name=name)
+    if is_protected:
+        # ``is_protected`` may not be a create-arg; set directly.
+        grp.is_protected = True  # type: ignore[attr-defined]
+        await db_session.flush()
+    await db_session.commit()
+    return grp
+
+
+@pytest.mark.asyncio
+async def test_invite_no_role_with_groups_attaches_membership(
+    test_client: AsyncClient, db_session,
+):
+    """A pure-groups invite (no role) is email-bound, and on signup
+    the new user lands as a member of every attached group."""
+    from backend.app.db.repositories import group_repo
+    eng = await _seed_group(db_session, name="engineering")
+    data = await _seed_group(db_session, name="data-platform")
+
+    r = await _mint_invite(
+        test_client, groupIds=[eng.id, data.id], email="ada@example.com",
+    )
+    assert r.status_code == 201, r.text
+    assert sorted(r.json()["groupIds"]) == sorted([eng.id, data.id])
+
+    su = await _signup(test_client, email="ada@example.com", token=r.json()["inviteToken"])
+    assert su.status_code == 201, su.text
+
+    user = await user_repo.get_user_by_email(db_session, "ada@example.com")
+    member_groups = await group_repo.get_user_groups(db_session, user.id)
+    assert sorted(member_groups) == sorted([eng.id, data.id])
+    # No role binding because no role was attached.
+    bindings = await binding_repo.list_for_subject(
+        db_session, subject_type="user", subject_id=user.id,
+    )
+    assert bindings == []
+
+
+@pytest.mark.asyncio
+async def test_invite_role_plus_groups_applies_both(
+    test_client: AsyncClient, db_session,
+):
+    """An invite with role + groups applies both on signup."""
+    from backend.app.db.repositories import group_repo
+    ws = await _seed_workspace(db_session, ws_id="ws_combo", name="Combo")
+    grp = await _seed_group(db_session, name="qa-team")
+
+    r = await _mint_invite(
+        test_client, role="workspace_viewer", workspaceId=ws,
+        groupIds=[grp.id], email="bob@example.com",
+    )
+    assert r.status_code == 201, r.text
+
+    su = await _signup(test_client, email="bob@example.com", token=r.json()["inviteToken"])
+    assert su.status_code == 201, su.text
+
+    user = await user_repo.get_user_by_email(db_session, "bob@example.com")
+    # Role binding created.
+    bindings = await binding_repo.list_for_subject(
+        db_session, subject_type="user", subject_id=user.id,
+    )
+    assert any(b.role_name == "workspace_viewer" and b.scope_id == ws for b in bindings)
+    # Group membership created.
+    member_groups = await group_repo.get_user_groups(db_session, user.id)
+    assert grp.id in member_groups
+
+
+@pytest.mark.asyncio
+async def test_invite_with_groups_requires_email(
+    test_client: AsyncClient, db_session,
+):
+    """Group attachments make the invite privileged-by-policy —
+    a shareable forwardable link mustn't grant group memberships."""
+    grp = await _seed_group(db_session, name="ops")
+    r = await _mint_invite(test_client, groupIds=[grp.id])
+    assert r.status_code == 400, r.text
+    assert "email" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_invite_unknown_group_rejected(
+    test_client: AsyncClient, db_session,
+):
+    r = await _mint_invite(
+        test_client, groupIds=["grp_ghost"], email="x@example.com",
+    )
+    assert r.status_code == 400, r.text
+    assert "unknown group" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_invite_protected_group_rejected(
+    test_client: AsyncClient, db_session,
+):
+    """Protected groups (IdP-managed) can't be invite-targeted —
+    same defense as the SSO reconciler applies."""
+    grp = await _seed_group(db_session, name="elevated", is_protected=True)
+    r = await _mint_invite(
+        test_client, groupIds=[grp.id], email="x@example.com",
+    )
+    assert r.status_code == 400, r.text
+    assert "protected" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_signup_with_deleted_group_activates_without_membership(
+    test_client: AsyncClient, db_session,
+):
+    """A group deleted after invite minting must not 500 the signup;
+    the user is activated, the dead group is skipped."""
+    from backend.app.db.repositories import group_repo
+    grp = await _seed_group(db_session, name="temp")
+    r = await _mint_invite(
+        test_client, groupIds=[grp.id], email="ghost@example.com",
+    )
+    token = r.json()["inviteToken"]
+
+    # Delete the group between mint + signup.
+    await group_repo.soft_delete_group(db_session, grp.id)
+    await db_session.commit()
+
+    su = await _signup(test_client, email="ghost@example.com", token=token)
+    assert su.status_code == 201, su.text
+    user = await user_repo.get_user_by_email(db_session, "ghost@example.com")
+    assert user.status == "active"
+    memberships = await group_repo.get_user_groups(db_session, user.id)
+    assert grp.id not in memberships
+
+
+@pytest.mark.asyncio
+async def test_verify_invite_returns_group_names(
+    test_client: AsyncClient, db_session,
+):
+    eng = await _seed_group(db_session, name="engineering")
+    r = await _mint_invite(
+        test_client, groupIds=[eng.id], email="z@example.com",
+    )
+    token = r.json()["inviteToken"]
+
+    v = await test_client.get("/api/v1/auth/verify-invite", params={"token": token})
+    assert v.status_code == 200, v.text
+    body = v.json()
+    assert body["valid"] is True
+    assert body["groupIds"] == [eng.id]
+    assert body["groupNames"] == ["engineering"]
+
+
 # ── verify-invite surfaces scope + email ─────────────────────────────
 
 

@@ -48,6 +48,8 @@ export function SignUpPage() {
     // Phase 11: workspace context + email pin from the invite token.
     const [inviteWorkspaceName, setInviteWorkspaceName] = useState<string | null>(null)
     const [inviteEmail, setInviteEmail] = useState<string | null>(null)
+    // Phase 13: groups the user will be added to on signup.
+    const [inviteGroupNames, setInviteGroupNames] = useState<string[] | null>(null)
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
@@ -66,6 +68,7 @@ export function SignUpPage() {
             setInviteValid(res.valid)
             setInviteRole(res.role)
             setInviteWorkspaceName(res.workspaceName ?? null)
+            setInviteGroupNames(res.groupNames ?? null)
             // Email-bound invite: prefill + lock the email field so the
             // user signs up with the address the link is pinned to.
             if (res.email) {
@@ -178,6 +181,15 @@ export function SignUpPage() {
                                 {inviteWorkspaceName ? (
                                     <> in <span className="font-semibold">{inviteWorkspaceName}</span></>
                                 ) : null}.
+                                {inviteGroupNames && inviteGroupNames.length > 0 ? (
+                                    <>
+                                        {' '}You'll join the{' '}
+                                        <span className="font-semibold">
+                                            {inviteGroupNames.join(' and ')}
+                                        </span>
+                                        {' '}{inviteGroupNames.length > 1 ? 'groups' : 'group'}.
+                                    </>
+                                ) : null}
                                 {inviteEmail ? (
                                     <> This invite is for <span className="font-semibold">{inviteEmail}</span>.</>
                                 ) : null}

@@ -31,12 +31,16 @@ export interface InviteResponse {
      *  invites). Both null for a global shareable invite. */
     workspaceId: string | null
     email: string | null
+    /** Phase 13: groups the new user is added to on signup. */
+    groupIds: string[] | null
     expiresAt: string
 }
 
 export interface CreateInviteOptions {
     workspaceId?: string | null
     email?: string | null
+    /** Phase 13: optional list of group ids to attach on signup. */
+    groupIds?: string[] | null
     expiresInHours?: number
 }
 
@@ -106,6 +110,7 @@ export const adminUserService = {
         if (role) body.role = role
         if (opts.workspaceId) body.workspaceId = opts.workspaceId
         if (opts.email) body.email = opts.email
+        if (opts.groupIds && opts.groupIds.length > 0) body.groupIds = opts.groupIds
         return authFetch<InviteResponse>(`${ADMIN_USERS_API}/invite`, {
             method: 'POST',
             body: JSON.stringify(body),
