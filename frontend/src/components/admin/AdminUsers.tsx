@@ -1152,6 +1152,19 @@ const _ROLE_FALLBACK_DESC: Record<string, string> = {
     workspace_viewer: 'Read-only access to the bound workspace.',
 }
 
+
+/** Phase 12: pretty-format a custom role name. Splits on
+ *  ``_`` / ``-`` / whitespace and Title-Cases each word. Built-in
+ *  tiers have hand-curated labels in ``_ROLE_LABEL`` and skip this. */
+function toTitleCase(s: string): string {
+    return s
+        .replace(/[_-]+/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(' ')
+}
+
 interface RoleOption {
     value: string                 // '' = No role
     label: string
@@ -1228,15 +1241,19 @@ function InviteForm({
         })
     }
 
-    // Build three role groups: Quick start (No role) / Built-in /
-    // Custom. Sort built-ins by canonical tier order; customs alpha.
-    const { quickStart, builtins, customs } = useMemo(() => {
+    // Phase 12: two clearly-named role groups —
+    //   * "Quick Start" — No role + every pre-defined / built-in tier
+    //     (the curated set most admins reach for).
+    //   * "Custom Roles" — anything operators created themselves.
+    // Built-ins keep their canonical tier order; customs sort alpha.
+    // Custom role names render Title-Cased for a polished display.
+    const { quickStart, customs } = useMemo(() => {
         const opt = (r: RoleDefinitionResponse): RoleOption => {
             const isBuiltin = _BUILTIN_ORDER.includes(r.name)
             const v = _ROLE_VISUAL[r.name] ?? _ROLE_VISUAL_CUSTOM
             return {
                 value: r.name,
-                label: _ROLE_LABEL[r.name] ?? r.name,
+                label: _ROLE_LABEL[r.name] ?? toTitleCase(r.name),
                 sublabel: r.description?.trim()
                     || _ROLE_FALLBACK_DESC[r.name]
                     || (roleNeedsWorkspace(r) ? 'Workspace-scoped role.' : 'Global role.'),
@@ -1253,14 +1270,15 @@ function InviteForm({
         for (const o of all) (o.isBuiltin ? builtins : customs).push(o)
         builtins.sort((a, b) => _BUILTIN_ORDER.indexOf(a.value) - _BUILTIN_ORDER.indexOf(b.value))
         customs.sort((a, b) => a.label.localeCompare(b.label))
-        const quickStart: RoleOption = {
+        // Quick Start = "No role" sentinel + the curated built-ins.
+        const noRole: RoleOption = {
             value: '',
             label: 'No role',
             sublabel: 'Plain activated account — no workspace access until granted.',
             privileged: false, scoped: false, fixedWorkspaceId: null,
             visual: _ROLE_VISUAL_NONE, isBuiltin: false,
         }
-        return { quickStart, builtins, customs }
+        return { quickStart: [noRole, ...builtins], customs }
     }, [roles])
 
     const fixedWorkspace = fixedWorkspaceId
@@ -1286,22 +1304,14 @@ function InviteForm({
                     <SectionLabel>Choose a role</SectionLabel>
                     <div className="space-y-3 mb-5 max-h-[320px] overflow-y-auto pr-1">
                         <RoleGroup
-                            title="Quick start"
-                            options={[quickStart]}
+                            title="Quick Start"
+                            options={quickStart}
                             selected={selectedRole}
                             onSelect={setSelectedRole}
                         />
-                        {builtins.length > 0 && (
-                            <RoleGroup
-                                title="Built-in tiers"
-                                options={builtins}
-                                selected={selectedRole}
-                                onSelect={setSelectedRole}
-                            />
-                        )}
                         {customs.length > 0 && (
                             <RoleGroup
-                                title="Custom roles"
+                                title="Custom Roles"
                                 options={customs}
                                 selected={selectedRole}
                                 onSelect={setSelectedRole}
@@ -1632,7 +1642,7 @@ function InviteResultCard({
     onClose: () => void
 }) {
     const roleLabel = result.role
-        ? (_ROLE_LABEL[result.role] ?? result.role)
+        ? (_ROLE_LABEL[result.role] ?? toTitleCase(result.role))
         : 'No role (plain account)'
     const expiresWhen = (() => {
         const d = new Date(result.expiresAt)
