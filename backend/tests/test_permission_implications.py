@@ -56,13 +56,17 @@ def test_workspace_admin_implied_by_admins_only() -> None:
     ]
 
 
-def test_workspace_leaf_implied_by_all_three_shortcuts() -> None:
+def test_workspace_leaf_implied_by_all_shortcuts() -> None:
     """Phase 18 entry — the exact case that was broken pre-fix.
     workspace:provider:read sits in _WORKSPACE_CATEGORY_LEAVES, so
-    workspace:admin implies it. Both global shortcuts also apply."""
+    workspace:admin implies it. Both global shortcuts also apply.
+
+    Phase 6 added ``system:org-viewer`` between ``system:org-admin``
+    and ``workspace:admin`` because the perm ends in ``:read``."""
     assert compute_implied_by("workspace:provider:read", "workspace") == [
         "system:admin",
         "system:org-admin",
+        "system:org-viewer",
         "workspace:admin",
     ]
 
@@ -73,9 +77,46 @@ def test_workspace_leaf_not_in_category_excludes_workspace_admin() -> None:
     we don't want workspace:admin to auto-grant) should still be
     implied by the two global shortcuts but NOT by workspace:admin.
     Use a synthetic id so the test doesn't depend on which perms
-    are currently excluded."""
+    are currently excluded. The synthetic id ends in ``:manage`` so
+    ``system:org-viewer`` does not imply it either."""
     out = compute_implied_by("workspace:secret:manage", "workspace")
     assert out == ["system:admin", "system:org-admin"]
+
+
+def test_org_viewer_only_implies_read_perms() -> None:
+    """Phase 6 invariant: ``system:org-viewer`` MUST NEVER imply a
+    workspace ``manage`` / ``edit`` / ``create`` / ``delete`` perm —
+    only ``*:read``. Guards the org_auditor role against accidental
+    write-grant drift if someone adds a new mutating perm without
+    thinking about the read/write split."""
+    for write_perm in [
+        "workspace:ontology:manage",
+        "workspace:catalog:manage",
+        "workspace:datasource:manage",
+        "workspace:view:create",
+        "workspace:view:edit",
+        "workspace:view:delete",
+    ]:
+        out = compute_implied_by(write_perm, "workspace")
+        assert "system:org-viewer" not in out, (
+            f"system:org-viewer must not imply {write_perm!r} — that "
+            f"would silently grant write to the org_auditor role."
+        )
+
+
+def test_org_viewer_implied_only_by_system_admin() -> None:
+    """``system:org-viewer`` is in the system category, so the
+    workspace-only shortcuts don't apply — only system:admin implies
+    it. Mirrors the same property of system:org-admin."""
+    assert compute_implied_by("system:org-viewer", "system") == ["system:admin"]
+
+
+def test_org_viewer_does_not_imply_workspace_admin_itself() -> None:
+    """``workspace:admin`` doesn't end in ``:read``, so ``system:org-viewer``
+    cannot reach it — admin grants member-management, which is a
+    write-class capability."""
+    out = compute_implied_by("workspace:admin", "workspace")
+    assert "system:org-viewer" not in out
 
 
 # ── Drift guard — keep the resolver in lockstep with the catalogue ──

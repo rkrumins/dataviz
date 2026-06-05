@@ -98,7 +98,7 @@ def _permission_to_response(p) -> PermissionResponse:
     response_model_by_alias=True,
 )
 async def list_permissions(
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:bindings:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return the full permission catalogue.
@@ -198,7 +198,7 @@ async def list_roles(
     scope_type: Optional[str] = Query(default=None, alias="scopeType"),
     scope_id: Optional[str] = Query(default=None, alias="scopeId"),
     include_system: bool = Query(default=True, alias="includeSystem"),
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:bindings:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return each role and the permissions it bundles.
@@ -528,7 +528,7 @@ async def compute_user_access(
 )
 async def get_user_access(
     user_id: str = Path(...),
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:bindings:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Compute every binding the user holds (direct or via group) and

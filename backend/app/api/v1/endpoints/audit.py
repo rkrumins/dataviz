@@ -386,7 +386,7 @@ async def list_audit_events(
             "firehose."
         ),
     ),
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:audit:read")),
     session: AsyncSession = Depends(get_db_session),
 ) -> AuditListResponse:
     """Filter + paginate the outbox-events audit trail.
@@ -504,7 +504,7 @@ async def list_audit_events(
     response_model=list[str],
 )
 async def list_event_types(
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:audit:read")),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
     """Distinct event types that have ever been emitted into the

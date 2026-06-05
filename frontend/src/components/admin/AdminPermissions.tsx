@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase,
+    KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase, ScrollText,
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
     ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
     Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink, Navigation,
@@ -126,6 +126,23 @@ const ROLE_VISUAL: Record<string, {
         gradient: 'from-slate-500/20 to-slate-500/0',
         iconBg: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
     },
+    // Phase 6 additions: workspace_data_engineer + org_auditor.
+    workspace_data_engineer: {
+        label: 'Data engineer',
+        icon: Database,
+        accent: 'emerald',
+        badge: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+        gradient: 'from-emerald-500/20 to-emerald-500/0',
+        iconBg: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
+    },
+    org_auditor: {
+        label: 'Org auditor',
+        icon: ScrollText,
+        accent: 'violet',
+        badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
+        gradient: 'from-violet-500/20 to-violet-500/0',
+        iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
+    },
     // Pre-uplift legacy names — kept so any rogue reference doesn't
     // fall through to the "Custom" badge with the wrong colour.
     admin: {
@@ -154,17 +171,23 @@ const ROLE_VISUAL: Record<string, {
     },
 }
 
-// Used for any custom (non-system) role. The icon is overridden to
-// ``Sparkles`` at the call-site to mark it visually distinct from
-// built-ins.
-const CUSTOM_ROLE_VISUAL = {
-    label: 'Custom',
+// Base visual for any non-built-in role. The Sparkles icon marks it
+// visually distinct from system roles. Use ``customRoleVisual(name)``
+// below at call sites — that copy preserves the chip styling but
+// shows the role's actual name instead of the static "Custom" label,
+// which is what users want to see in the matrix / catalog / member
+// lists.
+const CUSTOM_ROLE_VISUAL_BASE = {
     icon: Sparkles,
     accent: 'violet',
     badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
     gradient: 'from-violet-500/20 to-violet-500/0',
     iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
 } as const
+
+function customRoleVisual(roleName: string) {
+    return { ...CUSTOM_ROLE_VISUAL_BASE, label: roleName }
+}
 
 const CATEGORY_VISUAL: Record<string, {
     label: string
@@ -504,7 +527,7 @@ function FeatureAccessRow({
                         <span className="text-xs text-ink-muted italic">No role grants this yet</span>
                     ) : (
                         satisfying.map((r) => {
-                            const visual = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                            const visual = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                             return (
                                 <button
                                     key={r.name}
@@ -660,7 +683,7 @@ function RoleMatrixTab({
                                     </span>
                                 </th>
                                 {roles.map(r => {
-                                    const v = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                                    const v = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                                     const RoleIcon = r.isSystem ? v.icon : Sparkles
                                     const labelText = r.isSystem
                                         ? v.label
@@ -777,7 +800,7 @@ function RoleMatrixTab({
                                                     {/* Role cells */}
                                                     {roles.map(r => {
                                                         const has = rolePerms[r.name]?.has(p.id) ?? false
-                                                        const v = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                                                        const v = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                                                         return (
                                                             <td key={r.name} className="px-3 py-2.5 text-center">
                                                                 {has ? (
@@ -1042,7 +1065,7 @@ function PermissionDetailDrawer({
                         ) : (
                             <div className="flex flex-wrap gap-2">
                                 {grantedTo.map(r => {
-                                    const v = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                                    const v = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                                     const RoleIcon = v.icon
                                     return (
                                         <span
@@ -1251,7 +1274,7 @@ function PermissionCatalogTab({
                                                         <span className="text-[11px] italic text-ink-muted">No role</span>
                                                     ) : (
                                                         inRoles.map(rname => {
-                                                            const v = ROLE_VISUAL[rname] ?? CUSTOM_ROLE_VISUAL
+                                                            const v = ROLE_VISUAL[rname] ?? customRoleVisual(rname)
                                                             const RoleIcon = v.icon
                                                             return (
                                                                 <span
@@ -1707,7 +1730,7 @@ function WorkspaceMembersDetail({
                 ) : (
                     <div className="rounded-xl border border-glass-border bg-glass-base/20 divide-y divide-glass-border">
                         {members.map(m => {
-                            const v = ROLE_VISUAL[m.role] ?? CUSTOM_ROLE_VISUAL
+                            const v = ROLE_VISUAL[m.role] ?? customRoleVisual(m.role)
                             const RoleIcon = v.icon
                             const name = m.subject.displayName ?? m.subject.id
                             const isUser = m.subject.type === 'user'
@@ -1868,7 +1891,7 @@ function RoleEditorDrawer({
         }
     }
 
-    const v = ROLE_VISUAL[role.name] ?? CUSTOM_ROLE_VISUAL
+    const v = ROLE_VISUAL[role.name] ?? customRoleVisual(role.name)
     const RoleIcon = isSystem ? v.icon : Sparkles
     const labelText = isSystem ? v.label : role.name
 

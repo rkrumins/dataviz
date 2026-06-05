@@ -290,6 +290,12 @@ def compute_implied_by(perm_id: str, category: str) -> list[str]:
     if category == "workspace":
         if perm_id != "system:org-admin":
             out.append("system:org-admin")  # implies every workspace:* in any workspace.
+        # Phase 6: system:org-viewer is the read-only sibling of
+        # system:org-admin. It short-circuits workspace:*:read but
+        # NOT manage/write — exactly what the org_auditor role needs
+        # to inspect every workspace without being able to mutate.
+        if perm_id.endswith(":read"):
+            out.append("system:org-viewer")
         if (
             perm_id != "workspace:admin"
             and perm_id in _WORKSPACE_CATEGORY_LEAVES
@@ -338,6 +344,16 @@ def has_permission(
     ):
         return True
 
+    # 3. Phase 6: org-viewer — the read-only cousin of org-admin.
+    #    Short-circuits every workspace:*:read across every workspace
+    #    but NOT manage/write. Drives the ``org_auditor`` role.
+    if (
+        workspace_id is not None
+        and permission.endswith(":read")
+        and "system:org-viewer" in claims.global_perms
+    ):
+        return True
+
     if workspace_id is None:
         return permission in claims.global_perms
 
@@ -375,6 +391,16 @@ def has_permission_any_workspace(
     if "system:admin" in claims.global_perms:
         return True
     if "system:org-admin" in claims.global_perms:
+        return True
+    # Phase 6: org-viewer covers the workspace_any flow for any
+    # ``*:read`` permission so the auditor sees every workspace's
+    # provider / ontology / catalog listings without needing a
+    # per-workspace binding. Mirrors the same-named shortcut in
+    # ``has_permission``.
+    if (
+        permission.endswith(":read")
+        and "system:org-viewer" in claims.global_perms
+    ):
         return True
     for ws_id in claims.ws_perms.keys():
         if has_permission(claims, permission, workspace_id=ws_id):
