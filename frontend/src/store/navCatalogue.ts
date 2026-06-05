@@ -89,16 +89,20 @@ export const useNavCatalogueStore = create<NavCatalogueState>()((set) => ({
 /** Live visibility spec for a top-level sidebar tab. Falls back to a
  *  hidden-by-default ``perm`` on an unknown key so a typo never opens
  *  a section. */
+// Stable fallback for unknown keys — fails closed. MUST be a module
+// constant, not an inline literal: the selectors below feed
+// ``useSyncExternalStore``, which treats a fresh object each call as a
+// changed snapshot and spins into an infinite render loop. (RequireNav
+// calls both selectors every render, so one always gets a key that's
+// absent from its map and hits this fallback.)
+const HIDDEN_SPEC: NavPermissionSpec = { kind: 'perm', perm: '__unknown__' }
+
 export function useSidebarSpec(tab: NavigationTab): NavPermissionSpec {
-    return useNavCatalogueStore(
-        (s) => s.sidebar[tab] ?? { kind: 'perm', perm: '__unknown__' },
-    )
+    return useNavCatalogueStore((s) => s.sidebar[tab] ?? HIDDEN_SPEC)
 }
 
 /** Live visibility spec for an admin sub-section (keyed by route
  *  segment). Unknown keys fail closed. */
 export function useAdminSectionSpec(path: string): NavPermissionSpec {
-    return useNavCatalogueStore(
-        (s) => s.adminSections[path] ?? { kind: 'perm', perm: '__unknown__' },
-    )
+    return useNavCatalogueStore((s) => s.adminSections[path] ?? HIDDEN_SPEC)
 }
