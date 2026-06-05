@@ -72,6 +72,22 @@ def _has_constraint(bind, table: str, name: str) -> bool:
     return row is not None
 
 
+def _has_index(bind, name: str) -> bool:
+    """Return True if a relation of kind 'i' (index) with this name
+    exists in the current search path. Used to make ``create_index``
+    calls idempotent when 0001_baseline's ``Base.metadata.create_all``
+    has already materialised the index from the ORM."""
+    row = bind.execute(
+        sa.text(
+            "SELECT 1 FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind = 'i' AND c.relname = :name"
+        ),
+        {"name": name},
+    ).first()
+    return row is not None
+
+
 def upgrade() -> None:  # noqa: C901 — migration is one logical unit
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -266,27 +282,41 @@ def upgrade() -> None:  # noqa: C901 — migration is one logical unit
         # Replace the Phase-2 uniqueness key with two: one per target
         # type. The OLD key (idp_group, scope_type, scope_id, role_name)
         # is dropped; new keys include provider_id.
+        #
+        # All creates are guarded individually because 0001_baseline's
+        # ``Base.metadata.create_all`` materialises every constraint/
+        # index from the current ORM up-front. When that happens, this
+        # migration must converge by skipping the creates rather than
+        # crashing on DuplicateTable/DuplicateObject.
         if _has_constraint(bind, "idp_group_role_mappings", "uq_idp_group_role_mapping"):
             op.drop_constraint(
                 "uq_idp_group_role_mapping",
                 "idp_group_role_mappings",
                 type_="unique",
             )
-        op.create_unique_constraint(
-            "uq_idp_group_role_mapping_role",
-            "idp_group_role_mappings",
-            ["provider_id", "idp_group", "scope_type", "scope_id", "role_name"],
-        )
-        op.create_unique_constraint(
+        if not _has_constraint(
+            bind, "idp_group_role_mappings", "uq_idp_group_role_mapping_role",
+        ):
+            op.create_unique_constraint(
+                "uq_idp_group_role_mapping_role",
+                "idp_group_role_mappings",
+                ["provider_id", "idp_group", "scope_type", "scope_id", "role_name"],
+            )
+        if not _has_constraint(
+            bind, "idp_group_role_mappings",
             "uq_idp_group_role_mapping_group_membership",
-            "idp_group_role_mappings",
-            ["provider_id", "idp_group", "target_group_id"],
-        )
-        op.create_index(
-            "idx_idp_group_role_mapping_provider_group",
-            "idp_group_role_mappings",
-            ["provider_id", "idp_group"],
-        )
+        ):
+            op.create_unique_constraint(
+                "uq_idp_group_role_mapping_group_membership",
+                "idp_group_role_mappings",
+                ["provider_id", "idp_group", "target_group_id"],
+            )
+        if not _has_index(bind, "idx_idp_group_role_mapping_provider_group"):
+            op.create_index(
+                "idx_idp_group_role_mapping_provider_group",
+                "idp_group_role_mappings",
+                ["provider_id", "idp_group"],
+            )
 
         # Replace the Phase 2 CHECK with the v2 shape check that
         # accommodates both target types.
@@ -306,26 +336,34 @@ def upgrade() -> None:  # noqa: C901 — migration is one logical unit
                 "ck_idp_group_role_mappings_scope_consistency",
                 "idp_group_role_mappings", type_="check",
             )
-        op.create_check_constraint(
+        if not _has_constraint(
+            bind, "idp_group_role_mappings",
             "ck_idp_group_role_mappings_target_type",
-            "idp_group_role_mappings",
-            "target_type IN ('role_binding', 'group_membership')",
-        )
-        op.create_check_constraint(
+        ):
+            op.create_check_constraint(
+                "ck_idp_group_role_mappings_target_type",
+                "idp_group_role_mappings",
+                "target_type IN ('role_binding', 'group_membership')",
+            )
+        if not _has_constraint(
+            bind, "idp_group_role_mappings",
             "ck_idp_group_role_mappings_target_shape",
-            "idp_group_role_mappings",
-            "(target_type = 'role_binding' "
-            " AND role_name IS NOT NULL "
-            " AND scope_type IN ('global', 'workspace') "
-            " AND ((scope_type = 'global' AND scope_id IS NULL) "
-            "      OR (scope_type = 'workspace' AND scope_id IS NOT NULL)) "
-            " AND target_group_id IS NULL) "
-            "OR (target_type = 'group_membership' "
-            "    AND target_group_id IS NOT NULL "
-            "    AND role_name IS NULL "
-            "    AND scope_type IS NULL "
-            "    AND scope_id IS NULL)",
-        )
+        ):
+            op.create_check_constraint(
+                "ck_idp_group_role_mappings_target_shape",
+                "idp_group_role_mappings",
+                "(target_type = 'role_binding' "
+                " AND role_name IS NOT NULL "
+                " AND scope_type IN ('global', 'workspace') "
+                " AND ((scope_type = 'global' AND scope_id IS NULL) "
+                "      OR (scope_type = 'workspace' AND scope_id IS NOT NULL)) "
+                " AND target_group_id IS NULL) "
+                "OR (target_type = 'group_membership' "
+                "    AND target_group_id IS NOT NULL "
+                "    AND role_name IS NULL "
+                "    AND scope_type IS NULL "
+                "    AND scope_id IS NULL)",
+            )
 
     # 6. groups.is_protected + group_members.source -----------------------
     if _has_table(inspector, "groups") and not _has_column(inspector, "groups", "is_protected"):
@@ -347,6 +385,12 @@ def upgrade() -> None:  # noqa: C901 — migration is one logical unit
                 nullable=False, server_default="local",
             ),
         )
+    # CHECK is guarded separately so a partial prior run that added
+    # the column but not the CHECK (or a baseline that materialised
+    # both from the ORM) converges instead of crashing.
+    if _has_table(inspector, "group_members") and not _has_constraint(
+        bind, "group_members", "ck_group_members_source",
+    ):
         op.create_check_constraint(
             "ck_group_members_source",
             "group_members",

@@ -165,6 +165,18 @@ def _has_table(inspector, name: str) -> bool:
     return name in inspector.get_table_names()
 
 
+def _has_constraint(bind, table: str, name: str) -> bool:
+    row = bind.execute(
+        sa.text(
+            "SELECT 1 FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "WHERE t.relname = :table AND c.conname = :name"
+        ),
+        {"table": table, "name": name},
+    ).first()
+    return row is not None
+
+
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -355,10 +367,23 @@ def upgrade() -> None:
         )
 
     # 6. Rewrite the legacy ``user_roles`` table (Phase-0 global roles
-    #    table; still consulted by ``require_admin``). The CHECK
-    #    constraint there (``ck_user_roles_role_name``) was dropped in
-    #    Phase 3 — so an UPDATE is safe.
+    #    table; still consulted by ``require_admin``).
+    #
+    #    The original comment here said "the CHECK constraint was
+    #    dropped in Phase 3 — so an UPDATE is safe", but that wasn't
+    #    true on databases whose ``user_roles`` table was materialised
+    #    by ``0001_baseline``'s ``Base.metadata.create_all`` from an
+    #    older ORM (when the CHECK only allowed 'admin'/'user'/'viewer').
+    #    On those DBs the UPDATE to 'super_admin' violates the still-
+    #    present CHECK.
+    #
+    #    Drop the CHECK before mutating, then recreate it with the
+    #    post-uplift allowed set — matches the current ORM declaration.
     if _has_table(inspector, "user_roles"):
+        if _has_constraint(bind, "user_roles", "ck_user_roles_role_name"):
+            op.drop_constraint(
+                "ck_user_roles_role_name", "user_roles", type_="check",
+            )
         bind.execute(
             sa.text(
                 "UPDATE user_roles SET role_name = 'super_admin' "
@@ -373,6 +398,19 @@ def upgrade() -> None:
                 "DELETE FROM user_roles WHERE role_name IN ('user', 'viewer')"
             )
         )
+        # Recreate the CHECK with the post-uplift allowed set so the
+        # schema converges to what ``UserRoleORM`` (models.py:1170)
+        # declares. Guarded so a fresh-baseline run (where the new
+        # CHECK is already present) doesn't double-create.
+        if not _has_constraint(bind, "user_roles", "ck_user_roles_role_name"):
+            op.create_check_constraint(
+                "ck_user_roles_role_name",
+                "user_roles",
+                "role_name IN ("
+                "'super_admin', 'org_admin', "
+                "'workspace_admin', 'workspace_member', 'workspace_viewer'"
+                ")",
+            )
 
     # 7. Drop the old role rows.
     bind.execute(

@@ -274,6 +274,30 @@ def _known_leaves_for_prefix(prefix: str) -> frozenset[str]:
     return _SEED_LEAVES.get(prefix, frozenset())
 
 
+def compute_implied_by(perm_id: str, category: str) -> list[str]:
+    """Return the roles/perms whose grant auto-implies ``perm_id``
+    in the same scope. Pure projection of ``has_permission``'s
+    shortcuts — used by ``GET /admin/permissions`` so the FE's
+    Feature Access tab can compute role satisfaction without a
+    duplicate ``WORKSPACE_LEAVES`` constant of its own.
+
+    Order is documentation-stable (most-privileged first) so the FE
+    can render chips in a predictable order.
+    """
+    out: list[str] = []
+    if perm_id != "system:admin":
+        out.append("system:admin")          # implies every perm, every scope.
+    if category == "workspace":
+        if perm_id != "system:org-admin":
+            out.append("system:org-admin")  # implies every workspace:* in any workspace.
+        if (
+            perm_id != "workspace:admin"
+            and perm_id in _WORKSPACE_CATEGORY_LEAVES
+        ):
+            out.append("workspace:admin")   # implies every leaf in the same workspace.
+    return out
+
+
 # ── Claim-side helpers (used by ``requires(...)``) ────────────────────
 
 def has_permission(

@@ -70,6 +70,23 @@ def _has_constraint(bind, table: str, name: str) -> bool:
     return row is not None
 
 
+def _has_index(bind, name: str) -> bool:
+    """Preflight check for ``CREATE INDEX``. Cannot use try/except
+    around the create call: Postgres aborts the transaction on the
+    duplicate-relation error, and every subsequent statement in the
+    same migration (including alembic's own ``UPDATE alembic_version``)
+    fails with InFailedSqlTransaction. Always preflight."""
+    row = bind.execute(
+        sa.text(
+            "SELECT 1 FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind = 'i' AND c.relname = :name"
+        ),
+        {"name": name},
+    ).first()
+    return row is not None
+
+
 def _now_iso(bind) -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -138,13 +155,15 @@ def upgrade() -> None:
             "                  'admin_created', 'admin_linked')",
         )
     # Lookup index for "show me every JIT-provisioned user from
-    # provider X" admin queries.
-    try:
+    # provider X" admin queries. Preflight rather than try/except —
+    # Postgres aborts the whole migration's transaction on the
+    # DuplicateRelation error, so swallowing it in Python still
+    # poisons every later statement (including alembic's own
+    # ``UPDATE alembic_version``).
+    if not _has_index(bind, "idx_users_signup_source"):
         op.create_index(
             "idx_users_signup_source", "users", ["signup_source"]
         )
-    except Exception:  # noqa: BLE001 — partial reruns may have it already
-        pass
 
     # 2. user_external_attributes table ---------------------------------
     if not _has_table(inspector, "user_external_attributes"):
@@ -240,10 +259,10 @@ def downgrade() -> None:
 
     if _has_constraint(bind, "users", "ck_users_signup_source"):
         op.drop_constraint("ck_users_signup_source", "users", type_="check")
-    try:
+    # Preflight rather than try/except — same Postgres transaction-poison
+    # constraint that bit the upgrade path. ``_has_index`` is cheap.
+    if _has_index(bind, "idx_users_signup_source"):
         op.drop_index("idx_users_signup_source", table_name="users")
-    except Exception:  # noqa: BLE001
-        pass
     if _has_column(inspector, "users", "signup_provider_id"):
         op.drop_column("users", "signup_provider_id")
     if _has_column(inspector, "users", "signup_source"):

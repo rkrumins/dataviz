@@ -228,6 +228,13 @@ class PermissionResponse(BaseModel):
     category: str  # "system" | "workspace" | "resource"
     long_description: Optional[str] = Field(default=None, alias="longDescription")
     examples: list[str] = Field(default_factory=list)
+    # Roles holding ANY perm in this list auto-grant ``id`` (in the
+    # same scope). Mirrors the shortcuts in ``has_permission`` — e.g.
+    # every non-``system:admin`` perm is implied by ``system:admin``;
+    # ``workspace:*`` leaves are implied by ``workspace:admin`` /
+    # ``system:org-admin``. The FE consumes this to compute "which
+    # roles can reach this section?" without duplicating BE logic.
+    implied_by: list[str] = Field(default_factory=list, alias="impliedBy")
 
 
 class PermissionUpdateRequest(BaseModel):

@@ -348,8 +348,8 @@ export function AdminPermissions() {
                             highlightedPermissionId={highlightedPermissionId}
                         />
                     )}
-                    {roles && tab === 'features' && (
-                        <FeatureAccessTab roles={roles} onEditRole={setEditingRole} />
+                    {permissions && roles && tab === 'features' && (
+                        <FeatureAccessTab roles={roles} permissions={permissions} onEditRole={setEditingRole} />
                     )}
                     {permissions && tab === 'byUser' && (
                         <ByUserTab
@@ -432,14 +432,16 @@ function FeatureAccessRow({
     label,
     spec,
     roles,
+    permissions,
     onEditRole,
 }: {
     label: string
     spec: NavPermissionSpec
     roles: RoleDefinitionResponse[]
+    permissions: PermissionResponse[]
     onEditRole: (r: RoleDefinitionResponse) => void
 }) {
-    const satisfying = roles.filter((r) => roleSatisfiesSpec(r.permissions, spec))
+    const satisfying = roles.filter((r) => roleSatisfiesSpec(r.permissions, spec, permissions))
     return (
         <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-3 md:gap-6 py-3.5 border-b border-glass-border last:border-b-0">
             <div className="min-w-0">
@@ -479,9 +481,11 @@ function FeatureAccessRow({
 
 function FeatureAccessTab({
     roles,
+    permissions,
     onEditRole,
 }: {
     roles: RoleDefinitionResponse[]
+    permissions: PermissionResponse[]
     onEditRole: (r: RoleDefinitionResponse) => void
 }) {
     const sidebar = useNavCatalogueStore((s) => s.sidebar)
@@ -523,6 +527,7 @@ function FeatureAccessTab({
                                 label={group.labels[key] ?? humanizeKey(key)}
                                 spec={spec}
                                 roles={roles}
+                                permissions={permissions}
                                 onEditRole={onEditRole}
                             />
                         ))}

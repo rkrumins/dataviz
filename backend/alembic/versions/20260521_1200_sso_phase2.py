@@ -73,7 +73,12 @@ def upgrade() -> None:
     inspector = sa.inspect(bind)
 
     # 1. users.auth_provider CHECK: drop + re-add to include 'custom'.
-    if _USERS_TABLE in inspector.get_table_names():
+    #    Defensive: the column is dropped by SSO Phase 3. On a schema
+    #    built from the current ORM (post-Phase-3), the column is
+    #    absent at this point and the CHECK cannot be created. Skip
+    #    silently — matches the no-op semantics of the surrounding
+    #    column-presence guards.
+    if _has_column(inspector, _USERS_TABLE, "auth_provider"):
         if _has_constraint(bind, _USERS_TABLE, _USERS_CHECK):
             op.drop_constraint(_USERS_CHECK, _USERS_TABLE, type_="check")
         op.create_check_constraint(
@@ -151,8 +156,10 @@ def downgrade() -> None:
         if _has_column(inspector, _BINDINGS_TABLE, "source"):
             op.drop_column(_BINDINGS_TABLE, "source")
 
-    # 1. users.auth_provider CHECK rollback.
-    if _USERS_TABLE in inspector.get_table_names():
+    # 1. users.auth_provider CHECK rollback. Symmetric defensive guard
+    #    — on a post-Phase-3 schema the column is gone and the CHECK
+    #    cannot be re-created.
+    if _has_column(inspector, _USERS_TABLE, "auth_provider"):
         if _has_constraint(bind, _USERS_TABLE, _USERS_CHECK):
             op.drop_constraint(_USERS_CHECK, _USERS_TABLE, type_="check")
         op.create_check_constraint(

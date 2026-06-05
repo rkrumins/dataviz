@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Sequence, Union
 
 from alembic import op
+import sqlalchemy as sa
 
 
 revision: str = "20260605_1200_phase18_workspace_reads"
@@ -166,14 +167,21 @@ def upgrade() -> None:
     conn = op.get_bind()
 
     # 1. Insert the new permission rows (with descriptions + examples).
+    # NB on the API: use ``conn.execute(sa.text(...), {...})`` — NOT
+    # ``conn.exec_driver_sql(...)``. The latter is the raw psycopg2
+    # path; it expects ``%(name)s`` placeholders and crashes on
+    # SQLAlchemy-style ``:name``. ``sa.text`` is what every other
+    # migration in this codebase uses for parameterised INSERTs.
     import json as _json
     for perm_id, category, short_desc in _NEW_PERMISSIONS:
-        conn.exec_driver_sql(
-            """
-            INSERT INTO permissions (id, description, category, long_description, examples)
-            VALUES (:id, :description, :category, :long_description, :examples)
-            ON CONFLICT (id) DO NOTHING
-            """,
+        conn.execute(
+            sa.text(
+                """
+                INSERT INTO permissions (id, description, category, long_description, examples)
+                VALUES (:id, :description, :category, :long_description, :examples)
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
             {
                 "id": perm_id,
                 "description": short_desc,
@@ -185,12 +193,14 @@ def upgrade() -> None:
 
     # 2. Grant the new perms to the appropriate roles.
     for role_name, perm_id in _NEW_ROLE_PERMISSIONS:
-        conn.exec_driver_sql(
-            """
-            INSERT INTO role_permissions (role_name, permission_id)
-            VALUES (:role_name, :permission_id)
-            ON CONFLICT (role_name, permission_id) DO NOTHING
-            """,
+        conn.execute(
+            sa.text(
+                """
+                INSERT INTO role_permissions (role_name, permission_id)
+                VALUES (:role_name, :permission_id)
+                ON CONFLICT (role_name, permission_id) DO NOTHING
+                """
+            ),
             {"role_name": role_name, "permission_id": perm_id},
         )
 
@@ -203,11 +213,11 @@ def downgrade() -> None:
     # the rows explicitly first so the downgrade is safe even if the
     # CASCADE policy is ever changed.
     for perm_id in perm_ids:
-        conn.exec_driver_sql(
-            "DELETE FROM role_permissions WHERE permission_id = :id",
+        conn.execute(
+            sa.text("DELETE FROM role_permissions WHERE permission_id = :id"),
             {"id": perm_id},
         )
-        conn.exec_driver_sql(
-            "DELETE FROM permissions WHERE id = :id",
+        conn.execute(
+            sa.text("DELETE FROM permissions WHERE id = :id"),
             {"id": perm_id},
         )

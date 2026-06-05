@@ -15,6 +15,7 @@
  * directly — they exist only as the seed.
  */
 import type { NavigationTab } from '@/store/navigation'
+import type { PermissionResponse } from '@/services/permissionsService'
 
 /**
  * A visibility rule. Components consume these via ``useNavPermission``
@@ -78,28 +79,38 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
 
 
 // ── Role → spec evaluation (for the admin Feature Access map) ────────
-// Mirrors the backend resolver's implications so the admin map shows
-// which roles can reach each section accurately:
-//   * ``system:admin`` implies every permission.
-//   * ``workspace:admin`` implies every other ``workspace:*`` leaf.
-// Kept here next to the spec type so the semantics live in one place.
-
-const WORKSPACE_LEAVES = [
-    'workspace:admin',
-    'workspace:datasource:manage',
-    'workspace:datasource:read',
-    'workspace:view:create',
-    'workspace:view:edit',
-    'workspace:view:delete',
-    'workspace:view:read',
-]
+// Source of truth is the backend permission catalogue (served by
+// ``GET /admin/permissions``). Each catalogue entry carries an
+// ``impliedBy`` list — the perms whose grant auto-implies it in the
+// same scope. We previously kept a hardcoded ``WORKSPACE_LEAVES``
+// array here, but it drifted when Phase 18 added new workspace perms
+// and the BE updated its resolver while the FE was forgotten. Now
+// implications come from the catalogue; the FE has no leaf list.
 
 /** Expand a role's granted permission list to its effective set,
- *  applying the same implications the backend resolver does. */
-export function roleEffectivePermissions(perms: string[]): Set<string> {
+ *  applying the same implications the backend resolver does. The
+ *  ``catalog`` argument is the array returned by ``listPermissions()``
+ *  — typically the same one already loaded into ``AdminPermissions``
+ *  for the Role Matrix and custom-role builder. */
+export function roleEffectivePermissions(
+    perms: string[],
+    catalog: PermissionResponse[],
+): Set<string> {
     const set = new Set(perms)
-    if (set.has('workspace:admin')) {
-        for (const leaf of WORKSPACE_LEAVES) set.add(leaf)
+    // Fixed-point expansion in case future catalogue entries chain
+    // (e.g. workspace:admin → leaf → …). Today the chain is depth-1,
+    // but the loop keeps the call site safe and matches how the
+    // backend resolver builds effective claims.
+    let grew = true
+    while (grew) {
+        grew = false
+        for (const p of catalog) {
+            if (set.has(p.id)) continue
+            if (p.impliedBy.some((src) => set.has(src))) {
+                set.add(p.id)
+                grew = true
+            }
+        }
     }
     return set
 }
@@ -108,6 +119,8 @@ function permSatisfied(effective: Set<string>, perm: string): boolean {
     if (effective.has('system:admin')) return true
     if (effective.has(perm)) return true
     // Wildcard grant (e.g. ``workspace:view:*``) covers its leaves.
+    // Kept for backwards-compatibility with any legacy role grants
+    // that still use the wildcard form; orthogonal to ``impliedBy``.
     for (const granted of effective) {
         if (granted.endsWith(':*') && perm.startsWith(granted.slice(0, -2) + ':')) {
             return true
@@ -119,8 +132,12 @@ function permSatisfied(effective: Set<string>, perm: string): boolean {
 /** Would a role with these granted permissions satisfy a nav spec?
  *  Used by the read-only Feature Access map to list, per section, the
  *  roles that unlock it. Pure — no claims, no store. */
-export function roleSatisfiesSpec(perms: string[], spec: NavPermissionSpec): boolean {
-    const eff = roleEffectivePermissions(perms)
+export function roleSatisfiesSpec(
+    perms: string[],
+    spec: NavPermissionSpec,
+    catalog: PermissionResponse[],
+): boolean {
+    const eff = roleEffectivePermissions(perms, catalog)
     switch (spec.kind) {
         case 'always':
             return true

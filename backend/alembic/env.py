@@ -87,6 +87,44 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _widen_alembic_version_column(connection) -> None:
+    """Ensure ``alembic_version.version_num`` can hold long revision ids.
+
+    Alembic creates this column as ``VARCHAR(32)`` by default. Revision
+    ids longer than 32 chars (e.g. ``20260605_1200_phase18_workspace_reads``
+    at 37 chars) cause a ``StringDataRightTruncation`` on the post-
+    migration ``UPDATE alembic_version``, silently rolling back the
+    migration that just ran. This is exactly the trap the
+    ``20260527_1200_sso_phase4`` docstring describes.
+
+    Widen to 128 unconditionally. The check + alter is microsecond-fast
+    on a one-row table, and it's a no-op when the column is already
+    wide enough.
+    """
+    from sqlalchemy import inspect as sa_inspect, text
+
+    inspector = sa_inspect(connection)
+    if not inspector.has_table("alembic_version"):
+        return  # Fresh DB — alembic will create the table; we re-run on next boot.
+    cols = {c["name"]: c for c in inspector.get_columns("alembic_version")}
+    col = cols.get("version_num")
+    if col is None:
+        return
+    # SQLAlchemy reports the length on the type object for VARCHAR.
+    current_len = getattr(col["type"], "length", None)
+    if current_len is not None and current_len >= 128:
+        return
+    logger.info(
+        "Widening alembic_version.version_num from VARCHAR(%s) to VARCHAR(128) "
+        "so long revision ids don't truncate.", current_len,
+    )
+    connection.execute(text(
+        "ALTER TABLE alembic_version "
+        "ALTER COLUMN version_num TYPE VARCHAR(128)"
+    ))
+    connection.commit()
+
+
 def _reset_stale_alembic_version(connection) -> None:
     """If alembic_version points to a deleted revision, stamp to baseline.
 
@@ -95,12 +133,16 @@ def _reset_stale_alembic_version(connection) -> None:
     Alembic cannot locate on disk, causing 'Can't locate revision' on
     every startup.
 
-    This detects the stale state and resets to 0001_baseline so the
-    normal upgrade path can proceed. Safe because 0001_baseline uses
-    Base.metadata.create_all(checkfirst=True) — it won't recreate
-    existing tables.
+    Only resets when the recorded revision is genuinely missing from
+    the on-disk script chain — a valid in-chain revision is left alone
+    and Alembic resumes from there normally. Previously this function
+    treated any version != '0001_baseline' as stale, which silently
+    reset valid pointers and forced every run to re-walk the whole
+    chain, masking real failures behind the noise of re-applied
+    migrations.
     """
     from sqlalchemy import inspect as sa_inspect, text
+    from alembic.script import ScriptDirectory
 
     inspector = sa_inspect(connection)
     if not inspector.has_table("alembic_version"):
@@ -111,17 +153,24 @@ def _reset_stale_alembic_version(connection) -> None:
         return  # Table exists but empty
 
     current_version = row[0]
-    if current_version == "0001_baseline":
-        return  # Already at baseline
-
-    logger.warning(
-        "Stale alembic_version detected: '%s' — resetting to '0001_baseline'",
-        current_version,
-    )
-    connection.execute(text(
-        "UPDATE alembic_version SET version_num = '0001_baseline'"
-    ))
-    connection.commit()
+    script = ScriptDirectory.from_config(config)
+    try:
+        script.get_revision(current_version)
+        return  # Revision is in the on-disk chain — nothing to fix.
+    except Exception:
+        # ScriptDirectory raises ResolutionError (a subclass of
+        # CommandError) for unknown revisions. Catch broadly because
+        # the exact exception type varies across alembic versions and
+        # the recovery action is the same regardless.
+        logger.warning(
+            "Stale alembic_version detected: '%s' (not in script chain) — "
+            "resetting to '0001_baseline'.",
+            current_version,
+        )
+        connection.execute(text(
+            "UPDATE alembic_version SET version_num = '0001_baseline'"
+        ))
+        connection.commit()
 
 
 def run_migrations_online() -> None:
@@ -142,6 +191,11 @@ def run_migrations_online() -> None:
         connect_args={"connect_timeout": connect_timeout},
     )
     with connectable.connect() as connection:
+        # Widen version_num BEFORE the migration body runs — otherwise
+        # alembic's own UPDATE alembic_version at the end of a long-id
+        # revision crashes with StringDataRightTruncation and silently
+        # rolls back the migration.
+        _widen_alembic_version_column(connection)
         # Fix stale revision pointers BEFORE Alembic reads the chain.
         _reset_stale_alembic_version(connection)
 

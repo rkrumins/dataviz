@@ -41,10 +41,24 @@ def _has_constraint(inspector) -> bool:
     return _CONSTRAINT in names
 
 
+def _has_column(inspector, table: str, column: str) -> bool:
+    return any(c["name"] == column for c in inspector.get_columns(table))
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     if _TABLE not in inspector.get_table_names():
+        return
+    # Defensive: the constraint references columns that the later SSO
+    # Phase 3 migration drops. On a schema built from the current ORM
+    # (which no longer declares these columns), they will be absent
+    # here and this migration must no-op rather than crash. Mirrors
+    # the column-presence guards used by the sibling SSO migrations.
+    if not (
+        _has_column(inspector, _TABLE, "auth_provider")
+        and _has_column(inspector, _TABLE, "external_id")
+    ):
         return
     if _has_constraint(inspector):
         return

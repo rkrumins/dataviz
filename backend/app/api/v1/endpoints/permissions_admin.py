@@ -40,8 +40,11 @@ from backend.app.db.repositories.role_repo import (
     RoleScopeError,
     UnknownPermissionError,
 )
-from backend.app.services.permission_service import resolve as resolve_claims
-from backend.app.services.permission_service import simulate_for_user
+from backend.app.services.permission_service import (
+    compute_implied_by,
+    resolve as resolve_claims,
+    simulate_for_user,
+)
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ImpactPreviewResponse,
@@ -85,6 +88,7 @@ def _permission_to_response(p) -> PermissionResponse:
         category=p.category,
         long_description=getattr(p, "long_description", None),
         examples=examples,
+        implied_by=compute_implied_by(p.id, p.category),
     )
 
 
