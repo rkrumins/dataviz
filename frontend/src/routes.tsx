@@ -3,7 +3,8 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
-import { RequirePermission } from '@/components/auth/RequirePermission'
+import { RequireNav } from '@/components/auth/RequireNav'
+import { SIDEBAR_PERMISSIONS, ADMIN_SECTION_PERMISSIONS } from '@/lib/navPermissions'
 
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
@@ -83,7 +84,14 @@ export const router = createBrowserRouter([
       { path: 'dashboard', element: <Lazy><Dashboard /></Lazy> },
 
       // Top-level Ingestion (pipeline control plane: providers, assets, jobs)
-      { path: 'ingestion', element: <Lazy><IngestionPage /></Lazy> },
+      {
+        path: 'ingestion',
+        element: (
+          <RequireNav spec={SIDEBAR_PERMISSIONS.ingestion}>
+            <Lazy><IngestionPage /></Lazy>
+          </RequireNav>
+        ),
+      },
 
       // Top-level Workspaces (listing + detail/management). Workspace visuals
       // are view-driven — see /views and /explorer; there is no standalone canvas.
@@ -98,8 +106,22 @@ export const router = createBrowserRouter([
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context
       // from URL search params (?workspaceId=X&dataSourceId=Y).
-      { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
-      { path: 'schema/:ontologyId', element: <Lazy><OntologySchemaPage /></Lazy> },
+      {
+        path: 'schema',
+        element: (
+          <RequireNav spec={SIDEBAR_PERMISSIONS.schema}>
+            <Lazy><OntologySchemaPage /></Lazy>
+          </RequireNav>
+        ),
+      },
+      {
+        path: 'schema/:ontologyId',
+        element: (
+          <RequireNav spec={SIDEBAR_PERMISSIONS.schema}>
+            <Lazy><OntologySchemaPage /></Lazy>
+          </RequireNav>
+        ),
+      },
       // CanvasLayout gates these routes behind a schema fetch so the heavy
       // ontology data only loads when the user navigates to a canvas section.
       {
@@ -113,21 +135,82 @@ export const router = createBrowserRouter([
       },
       {
         path: 'admin',
+        // Parent guard: any user holding ONE of the admin sub-page
+        // permissions can enter. Each sub-route below has its own
+        // guard so a delegated admin (e.g. groups-only) lands on the
+        // page they have access to and gets an explicit denied panel
+        // on routes they don't.
         element: (
-          <RequirePermission perm="system:admin">
+          <RequireNav spec={SIDEBAR_PERMISSIONS.admin}>
             <Lazy><AdminPage /></Lazy>
-          </RequirePermission>
+          </RequireNav>
         ),
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
-          { path: 'overview', element: <Lazy><AdminOverview /></Lazy> },
-          { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
-          { path: 'users', element: <Lazy><AdminUsers /></Lazy> },
-          { path: 'groups', element: <Lazy><AdminGroups /></Lazy> },
-          { path: 'permissions', element: <Lazy><AdminPermissions /></Lazy> },
-          { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
-          { path: 'sso', element: <Lazy><AdminSso /></Lazy> },
-          { path: 'audit', element: <Lazy><AdminAudit /></Lazy> },
+          {
+            path: 'overview',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.overview}>
+                <Lazy><AdminOverview /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'features',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.features}>
+                <Lazy><AdminFeatures /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'users',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.users}>
+                <Lazy><AdminUsers /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'groups',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.groups}>
+                <Lazy><AdminGroups /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'permissions',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.permissions}>
+                <Lazy><AdminPermissions /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'announcements',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.announcements}>
+                <Lazy><AdminAnnouncements /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'sso',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.sso}>
+                <Lazy><AdminSso /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'audit',
+            element: (
+              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.audit}>
+                <Lazy><AdminAudit /></Lazy>
+              </RequireNav>
+            ),
+          },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

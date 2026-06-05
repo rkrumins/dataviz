@@ -26,6 +26,7 @@ import {
     readUserCache,
     writeUserCache,
 } from '@/store/userCache'
+import type { NavPermissionSpec } from '@/lib/navPermissions'
 
 export type { PermissionClaims }
 
@@ -359,4 +360,77 @@ export function usePermission(
  *  derive multiple checks from the same render. */
 export function usePermissionClaims(): PermissionClaims {
     return useAuthStore((s) => s.permissions)
+}
+
+/**
+ * Any-of global permission check. Re-renders when the permissions
+ * slice changes.
+ */
+export function useAnyPermission(perms: string[]): boolean {
+    return useAuthStore((s) => s.canAny(perms))
+}
+
+/**
+ * True when the permission is satisfied in ANY workspace bucket the
+ * user holds — useful for sidebar items that point at workspace-bound
+ * features (e.g. Ingestion needs ``workspace:datasource:manage`` in
+ * at least one workspace to be worth showing).
+ *
+ * Honours the same global short-circuits + wildcard expansion that
+ * ``checkPermission`` already applies.
+ */
+export function useAnyWorkspacePermission(perm: string): boolean {
+    return useAuthStore((s) => {
+        const claims = s.permissions
+        if (claims.global.includes('system:admin')) return true
+        if (claims.global.includes('system:org-admin')) return true
+        for (const wsId of Object.keys(claims.ws)) {
+            if (checkPermission(claims, perm, wsId)) return true
+        }
+        return false
+    })
+}
+
+/**
+ * Dispatch helper for ``NavPermissionSpec``. Sidebars and the
+ * ``RequireNav`` route wrapper consume this so they don't have to
+ * branch on the spec kind themselves.
+ */
+export function useNavPermission(spec: NavPermissionSpec): boolean {
+    const can = useAuthStore((s) => s.can)
+    const canAny = useAuthStore((s) => s.canAny)
+    const claims = useAuthStore((s) => s.permissions)
+
+    switch (spec.kind) {
+        case 'always':
+            return true
+        case 'perm':
+            return can(spec.perm)
+        case 'anyPerm': {
+            // ``canAny`` only checks the global bucket — which is what
+            // we want for the sidebar shortcuts. The ``workspaceAny``
+            // case below covers the workspace-scoped half explicitly.
+            if (canAny(spec.perms)) return true
+            // Allow workspace-scoped perms in the list to satisfy via
+            // ANY workspace bucket (so "workspace:datasource:manage"
+            // in any one ws is enough to show Ingestion). Filter to
+            // workspace-prefixed perms only — global ones already
+            // checked above.
+            for (const p of spec.perms) {
+                if (!p.startsWith('workspace:')) continue
+                for (const wsId of Object.keys(claims.ws)) {
+                    if (checkPermission(claims, p, wsId)) return true
+                }
+            }
+            return false
+        }
+        case 'workspaceAny': {
+            if (claims.global.includes('system:admin')) return true
+            if (claims.global.includes('system:org-admin')) return true
+            for (const wsId of Object.keys(claims.ws)) {
+                if (checkPermission(claims, spec.perm, wsId)) return true
+            }
+            return false
+        }
+    }
 }
