@@ -25,6 +25,7 @@ import { catalogService, type CatalogItemResponse } from '@/services/catalogServ
 import { workspaceService } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
+import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
 import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
@@ -1246,10 +1247,11 @@ export function RegistryAssets() {
                                     </div>
                                 </div>
                             ) : assetsError ? (
-                                <div className="flex flex-col items-center justify-center h-full text-red-500 py-12 gap-3">
-                                    <AlertTriangle className="w-8 h-8" />
-                                    <p className="text-sm font-semibold">{assetsError}</p>
-                                </div>
+                                <AccessDeniedNotice
+                                    error={assetsError}
+                                    variant="card"
+                                    feature="view data assets for this provider"
+                                />
                             ) : filteredAssets.length === 0 ? (
                                 <div className="flex flex-col items-center justify-center h-full text-ink-muted py-12 gap-3">
                                     <Filter className="w-10 h-10 opacity-20" />

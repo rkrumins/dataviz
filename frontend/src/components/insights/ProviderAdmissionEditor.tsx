@@ -13,6 +13,7 @@ import {
     type ProviderAdmissionConfig,
     type ProviderAdmissionConfigResponse,
 } from '@/services/insightsAdminService'
+import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
 import { cn } from '@/lib/utils'
 
 interface Props {
@@ -156,8 +157,13 @@ export function ProviderAdmissionEditor({ providerId, embedded }: Props) {
             </div>
 
             {error && (
-                <div className="mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-600 dark:text-red-400">
-                    {error}
+                <div className="mt-3">
+                    <AccessDeniedNotice
+                        error={error}
+                        variant="compact"
+                        feature="manage provider admission control"
+                        onRetry={load}
+                    />
                 </div>
             )}
 
