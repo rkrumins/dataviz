@@ -824,7 +824,7 @@ export function AdminUsers() {
                                 // summary) and needs more horizontal room for the
                                 // two-column layout. Other modals stay compact.
                                 modal.kind === 'invite'
-                                    ? "max-w-3xl max-h-[90vh] flex flex-col"
+                                    ? "max-w-4xl max-h-[90vh] flex flex-col"
                                     : "max-w-md"
                             )}>
 
@@ -1555,8 +1555,8 @@ function InviteForm({
                                             </p>
                                             <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
                                                 {isPrivileged
-                                                    ? 'This role grants admin or system permissions. We pin the invite to a target email so a forwarded link can\'t escalate someone else.'
-                                                    : 'Group memberships can reach across workspaces. We pin the invite to a target email so a forwarded link can\'t grant the wrong identity that access.'}
+                                                    ? 'This role grants admin or system perms. Pinning to an email stops a forwarded link from escalating someone else.'
+                                                    : 'Group memberships can reach across workspaces. Pinning to an email stops a forwarded link from granting the wrong identity that access.'}
                                             </p>
                                             {/* Override link — only when the
                                                 requirement is solely from groups
@@ -1595,14 +1595,11 @@ function InviteForm({
                                                         <div className="text-xs leading-snug flex-1 min-w-0">
                                                             <p className="font-bold">Override the email pin?</p>
                                                             <p className="mt-1 text-ink-secondary">
-                                                                Anyone with this link will be able to sign up and
-                                                                join {selectedGroupNames.length === 1 ? 'the group' : 'these groups'}:{' '}
+                                                                Anyone with this link can sign up and join{' '}
                                                                 <span className="font-semibold text-ink">
                                                                     {selectedGroupNames.join(', ')}
-                                                                </span>.
-                                                                The link is forwardable and reusable. Only override
-                                                                for low-stakes, broadly-shared groups
-                                                                (e.g. "Designers", "Engineering").
+                                                                </span>. Forwardable and reusable — only override for
+                                                                low-stakes, broadly-shared groups.
                                                             </p>
                                                             <label className="mt-2.5 flex items-start gap-2 cursor-pointer select-none">
                                                                 <input
@@ -1616,14 +1613,14 @@ function InviteForm({
                                                                     by multiple people.
                                                                 </span>
                                                             </label>
-                                                            <div className="mt-3 flex items-center gap-2">
+                                                            <div className="mt-3 flex items-center gap-2 flex-wrap">
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => {
                                                                         setOverrideConfirmOpen(false)
                                                                         setOverrideAck(false)
                                                                     }}
-                                                                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                                                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors whitespace-nowrap"
                                                                 >
                                                                     Cancel
                                                                 </button>
@@ -1635,14 +1632,14 @@ function InviteForm({
                                                                         setOverrideConfirmOpen(false)
                                                                     }}
                                                                     className={cn(
-                                                                        "inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors",
+                                                                        "inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors whitespace-nowrap",
                                                                         overrideAck
                                                                             ? "bg-amber-500 text-white hover:brightness-110"
                                                                             : "bg-amber-500/30 text-amber-700 dark:text-amber-300 cursor-not-allowed",
                                                                     )}
                                                                 >
                                                                     <Lock className="w-3 h-3" />
-                                                                    Make it shareable
+                                                                    Make shareable
                                                                 </button>
                                                             </div>
                                                         </div>
@@ -2019,7 +2016,7 @@ function GroupsPicker({
         )
     }
     return (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[200px] overflow-y-auto pr-1">
+        <div className="grid grid-cols-1 gap-2 max-h-[200px] overflow-y-auto pr-1">
             {groups.map(g => {
                 const isSelected = selected.has(g.id)
                 return (
