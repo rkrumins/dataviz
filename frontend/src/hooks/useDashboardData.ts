@@ -140,12 +140,18 @@ export function useDashboardData() {
         fetchAllStats()
     }, [workspaces])
 
-    // Fetch Templates
+    // Fetch Templates + Ontologies. Both routers are system:admin-gated;
+    // the dashboard probes them to render counts for admins and silently
+    // shows zero for non-admins. ``silent403`` keeps the global denial
+    // modal from popping on every non-admin dashboard load — the
+    // affected sections just render empty.
     useEffect(() => {
         const fetchTemplates = async () => {
             setIsLoadingTemplates(true)
             try {
-                const res = await fetchWithTimeout('/api/v1/admin/context-model-templates')
+                const res = await fetchWithTimeout('/api/v1/admin/context-model-templates', {
+                    silent403: true,
+                })
                 if (res.ok) {
                     const data = await res.json()
                     setTemplates(data || [])
@@ -159,12 +165,13 @@ export function useDashboardData() {
         fetchTemplates()
     }, [])
 
-    // Fetch Ontologies
     useEffect(() => {
         const fetchOntologies = async () => {
             setIsLoadingOntologies(true)
             try {
-                const res = await fetchWithTimeout('/api/v1/admin/ontologies')
+                const res = await fetchWithTimeout('/api/v1/admin/ontologies', {
+                    silent403: true,
+                })
                 if (res.ok) {
                     const data = await res.json()
                     setOntologies(data || [])

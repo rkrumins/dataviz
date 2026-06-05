@@ -12,7 +12,10 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { useHealthStore } from '@/store/health'
 
-export async function authFetch<T>(url: string, init?: RequestInit): Promise<T> {
+export async function authFetch<T>(
+    url: string,
+    init?: RequestInit & { silent403?: boolean },
+): Promise<T> {
     let res: Response
     try {
         res = await fetchWithTimeout(url, init)

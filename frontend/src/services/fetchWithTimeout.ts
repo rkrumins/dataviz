@@ -324,9 +324,9 @@ async function runOnce(
 
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init?: RequestInit & { timeoutMs?: number },
+  init?: RequestInit & { timeoutMs?: number; silent403?: boolean },
 ): Promise<Response> {
-  const { timeoutMs = TIMEOUTS.DEFAULT_MS, ...fetchInit } = init ?? {}
+  const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, ...fetchInit } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
 
   let res: Response
@@ -382,7 +382,13 @@ export async function fetchWithTimeout(
   // Response and can shape its own error handling — we just announce
   // the denial centrally so the user sees a clear "you don't have X"
   // message instead of a generic toast.
-  if (res.status === 403) {
+  //
+  // Callers can opt out with ``silent403: true`` when the 403 is an
+  // expected outcome for a user tier (a background probe firing an
+  // admin-only endpoint to render counts, for example). The Response
+  // still flows through so the service can degrade gracefully — only
+  // the global modal is suppressed.
+  if (res.status === 403 && !silent403) {
     void notifyAccessDenied(res, urlPath(input))
   }
 

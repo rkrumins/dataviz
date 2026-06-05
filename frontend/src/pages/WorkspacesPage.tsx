@@ -42,6 +42,15 @@ export function WorkspacesPage() {
     // store so we can call it inline for each row without violating
     // the rules of hooks.
     const can = useAuthStore(s => s.can)
+    // Platform-admin gate for the admin-only reads (providers,
+    // catalog, ontologies). Non-admins still see their workspaces
+    // (workspaceService.list is workspace-scoped), they just don't
+    // probe the admin-tier endpoints that would 403 anyway.
+    const isPlatformAdmin = useAuthStore(s => s.can('system:admin'))
+    // Workspace-create button visibility — the POST handler requires
+    // system:workspaces:create (workspaces.py:100). Hiding the CTA for
+    // users who can't create avoids a wizard-open → submit → 403 dance.
+    const canCreateWorkspace = useAuthStore(s => s.can('system:workspaces:create'))
 
     useEffect(() => {
         document.title = 'Workspaces · Synodic'
@@ -211,16 +220,27 @@ export function WorkspacesPage() {
             // Per-call timeout so a slow provider listing (or any other
             // slow backend) does not pin the whole workspaces page on
             // a spinner. Render with whatever lists settled in time.
+            //
+            // The catalog/providers/ontology lists are admin-only at
+            // the router; non-admins skip them entirely so a viewer
+            // never burns a network round trip on a guaranteed 403.
+            // The workspace list is workspace-scoped and accessible to
+            // everyone with at least one binding.
+            const adminProbes: Array<Promise<unknown>> = isPlatformAdmin
+                ? [
+                    withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
+                    withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
+                    withTimeout(ontologyDefinitionService.list(), TIMEOUTS.ADMIN_LIST_MS, 'ontology.list'),
+                ]
+                : [Promise.resolve([]), Promise.resolve([]), Promise.resolve([])]
             const settled = await Promise.allSettled([
                 withTimeout(workspaceService.list(), TIMEOUTS.ADMIN_LIST_MS, 'workspaces.list'),
-                withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
-                withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
-                withTimeout(ontologyDefinitionService.list(), TIMEOUTS.ADMIN_LIST_MS, 'ontology.list'),
+                ...adminProbes,
             ])
-            const wsList = settled[0].status === 'fulfilled' ? settled[0].value : ([] as WorkspaceResponse[])
-            const catList = settled[1].status === 'fulfilled' ? settled[1].value : ([] as CatalogItemResponse[])
-            const provList = settled[2].status === 'fulfilled' ? settled[2].value : ([] as ProviderResponse[])
-            const ontoList = settled[3].status === 'fulfilled' ? settled[3].value : ([] as OntologyDefinitionResponse[])
+            const wsList = settled[0].status === 'fulfilled' ? settled[0].value as WorkspaceResponse[] : ([] as WorkspaceResponse[])
+            const catList = settled[1].status === 'fulfilled' ? settled[1].value as CatalogItemResponse[] : ([] as CatalogItemResponse[])
+            const provList = settled[2].status === 'fulfilled' ? settled[2].value as ProviderResponse[] : ([] as ProviderResponse[])
+            const ontoList = settled[3].status === 'fulfilled' ? settled[3].value as OntologyDefinitionResponse[] : ([] as OntologyDefinitionResponse[])
             setWorkspaces(wsList)
             setCatalogItems(catList)
             setProviders(provList)
@@ -259,13 +279,18 @@ export function WorkspacesPage() {
             setDsStats(statsMap)
         } catch (err) { console.error('Failed to load workspaces', err) }
         finally { setIsLoading(false) }
-    }, [])
+    }, [isPlatformAdmin])
 
     useEffect(() => { loadData() }, [loadData])
 
     useEffect(() => {
+        // Wizard catalog picker — only fetch when the wizard is open and
+        // the user can actually create workspaces. The bindings endpoint
+        // is admin-only; firing it on every page-load for a non-admin
+        // would silently 403.
+        if (!showWizard || !canCreateWorkspace) return
         catalogService.listWithBindings().then(setCatalogBindings).catch(console.error)
-    }, [showWizard])
+    }, [showWizard, canCreateWorkspace])
 
     /* ── Actions ── */
     const handleDelete = async (wsId: string) => {
@@ -375,7 +400,11 @@ export function WorkspacesPage() {
         return result
     }, [workspaces, searchQuery, healthFilter, sortKey, dsStats])
 
-    const showPipelineNudge = !isLoading && providers.length === 0
+    // The pipeline nudge points to /ingestion?tab=providers — a route
+    // only platform admins can act on. For non-admins, an empty
+    // providers list is expected (they never fetched it), so the nudge
+    // would mislead them into clicking a CTA they can't use.
+    const showPipelineNudge = !isLoading && isPlatformAdmin && providers.length === 0
 
     /* ── Render ── */
     return (
@@ -399,9 +428,11 @@ export function WorkspacesPage() {
                         <p className="text-[11px] text-ink-muted">Your data domains — group sources, govern schemas, and power team views</p>
                     </div>
                 </div>
-                <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
-                    <Plus className="w-4 h-4" /> Create Workspace
-                </button>
+                {canCreateWorkspace && (
+                    <button onClick={() => { resetWizard(); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200">
+                        <Plus className="w-4 h-4" /> Create Workspace
+                    </button>
+                )}
             </div>
 
             {/* Pipeline nudge when no providers exist */}

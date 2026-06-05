@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { Server, Layers, Activity, DatabaseZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
+import { usePermission } from '@/store/auth'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
@@ -12,8 +13,20 @@ import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 
 type IngestionTab = 'providers' | 'assets' | 'jobs'
 
-const TABS: { id: IngestionTab; label: string; icon: typeof Server; desc: string }[] = [
-    { id: 'providers', label: 'Providers', icon: Server, desc: 'Manage provider credentials and health' },
+interface TabDef {
+    id: IngestionTab
+    label: string
+    icon: typeof Server
+    desc: string
+    /** Admin-only tabs are hidden from non-admins. Providers + catalog
+     *  CRUD is system:admin-gated at the router (see api.py:49-55), so
+     *  there's no degraded view we can offer a workspace member — hide
+     *  the tab entirely rather than render an empty-on-403 page. */
+    adminOnly?: boolean
+}
+
+const ALL_TABS: TabDef[] = [
+    { id: 'providers', label: 'Providers', icon: Server, desc: 'Manage provider credentials and health', adminOnly: true },
     { id: 'assets', label: 'Data Sources', icon: Layers, desc: 'Register and configure data sources' },
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
 ]
@@ -21,8 +34,19 @@ const TABS: { id: IngestionTab; label: string; icon: typeof Server; desc: string
 export function IngestionPage() {
     const navigate = useNavigate()
     const [searchParams, setSearchParams] = useSearchParams()
+    const isPlatformAdmin = usePermission('system:admin')
+
+    // Visible tabs reflect what the current claim set can actually use.
+    // Non-admins land on Data Sources first since Providers is hidden.
+    const visibleTabs = useMemo(
+        () => ALL_TABS.filter(t => !t.adminOnly || isPlatformAdmin),
+        [isPlatformAdmin],
+    )
+
     const rawTab = searchParams.get('tab')
-    const activeTab: IngestionTab = TABS.some(t => t.id === rawTab) ? (rawTab as IngestionTab) : 'providers'
+    const activeTab: IngestionTab = visibleTabs.some(t => t.id === rawTab)
+        ? (rawTab as IngestionTab)
+        : (visibleTabs[0]?.id ?? 'assets')
 
     const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
     const [loadError, setLoadError] = useState<string | null>(null)
@@ -34,19 +58,31 @@ export function IngestionPage() {
     useEffect(() => {
         let cancelled = false
         setLoadError(null)
-        Promise.allSettled([
-            providerService.list(),
-            catalogService.list(),
-            workspaceService.list(),
-        ]).then(([providersResult, catalogsResult, workspacesResult]) => {
+        // Providers + catalog are system:admin-only. For non-admins, skip
+        // the fetch entirely — the OnboardingProgress card only needs the
+        // workspace count for them (the provider/catalog stages don't
+        // apply to their role).
+        const fetches: [Promise<unknown>, Promise<unknown>, Promise<unknown>] = isPlatformAdmin
+            ? [providerService.list(), catalogService.list(), workspaceService.list()]
+            : [Promise.resolve(null), Promise.resolve([]), workspaceService.list()]
+        Promise.allSettled(fetches).then(([providersResult, catalogsResult, workspacesResult]) => {
             if (cancelled) return
-            const providers = providersResult.status === 'fulfilled' ? providersResult.value : null
-            const catalogs = catalogsResult.status === 'fulfilled' ? catalogsResult.value : []
-            const workspaces = workspacesResult.status === 'fulfilled' ? workspacesResult.value : []
+            const providers = providersResult.status === 'fulfilled'
+                ? (providersResult.value as { length: number } | null)
+                : null
+            const catalogs = catalogsResult.status === 'fulfilled'
+                ? (catalogsResult.value as { length: number })
+                : { length: 0 }
+            const workspaces = workspacesResult.status === 'fulfilled'
+                ? (workspacesResult.value as Array<{ dataSources?: Array<{ ontologyId?: string | null }> }>)
+                : []
 
+            // Only surface load errors for fetches we actually attempted —
+            // a non-admin "couldn't load providers" message would be
+            // confusing and incorrect.
             const errors: string[] = []
-            if (providersResult.status === 'rejected') errors.push('providers')
-            if (catalogsResult.status === 'rejected') errors.push('catalog items')
+            if (isPlatformAdmin && providersResult.status === 'rejected') errors.push('providers')
+            if (isPlatformAdmin && catalogsResult.status === 'rejected') errors.push('catalog items')
             if (workspacesResult.status === 'rejected') errors.push('workspaces')
 
             const hasOntology = workspaces.some(ws =>
@@ -65,19 +101,23 @@ export function IngestionPage() {
             )
         })
         return () => { cancelled = true }
-    }, [activeTab])
+    }, [activeTab, isPlatformAdmin])
 
     const handleStageClick = (tab: string) => {
         if (tab === 'workspaces') {
             navigate('/workspaces')
             return
         }
-        if (tab === 'providers' || tab === 'assets') {
+        if ((tab === 'providers' && isPlatformAdmin) || tab === 'assets') {
             setSearchParams({ tab })
         }
     }
 
-    if (counts.providers === -1 && !loadError) return null
+    // Wait for the workspace fetch to settle before painting — the
+    // providers sentinel is -1 only for admins (we never fetch it for
+    // non-admins, so it stays 0 immediately). Gate on workspaces
+    // instead so non-admins don't flash an empty state either.
+    if (isPlatformAdmin && counts.providers === -1 && !loadError) return null
 
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 
@@ -103,14 +143,20 @@ export function IngestionPage() {
                         </div>
                     )}
 
-                    {/* Onboarding Progress */}
-                    <OnboardingProgress
-                        providerCount={Math.max(counts.providers, 0)}
-                        catalogItemCount={counts.catalogs}
-                        workspaceCount={counts.workspaces}
-                        hasOntology={counts.hasOntology}
-                        onStageClick={handleStageClick}
-                    />
+                    {/* Onboarding Progress — admin-only because the first
+                        two stages (providers, catalog) are admin-tier
+                        concerns. Non-admins arrive at Ingestion to manage
+                        data sources inside their workspaces; the
+                        onboarding ladder doesn't apply to them. */}
+                    {isPlatformAdmin && (
+                        <OnboardingProgress
+                            providerCount={Math.max(counts.providers, 0)}
+                            catalogItemCount={counts.catalogs}
+                            workspaceCount={counts.workspaces}
+                            hasOntology={counts.hasOntology}
+                            onStageClick={handleStageClick}
+                        />
+                    )}
 
                     {/* Tabs */}
                     <div
@@ -118,7 +164,7 @@ export function IngestionPage() {
                         aria-label="Ingestion sections"
                         className="flex items-center gap-1 border-b border-glass-border"
                     >
-                        {TABS.map(tab => {
+                        {visibleTabs.map(tab => {
                             const Icon = tab.icon
                             const isActive = activeTab === tab.id
                             return (
@@ -161,7 +207,7 @@ export function IngestionPage() {
                     <RegistryJobHistory />
                 ) : (
                     <div className="px-8 py-6 max-w-7xl mx-auto">
-                        {activeTab === 'providers' && <RegistryConnections />}
+                        {activeTab === 'providers' && isPlatformAdmin && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
                     </div>
                 )}
