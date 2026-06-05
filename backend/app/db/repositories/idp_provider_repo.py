@@ -31,7 +31,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import IdpProviderORM
 # Reuse the existing Fernet helper rather than introducing a second
 # envelope. ``_get_fernet`` reads CREDENTIAL_ENCRYPTION_KEY.
-from backend.app.db.repositories.connection_repo import _get_fernet
+from backend.app.db.repositories.connection_repo import (
+    _get_fernet,
+    require_encryption_or_plaintext_ok,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,7 @@ def encrypt_settings(settings: dict) -> str:
     raw = json.dumps(settings, sort_keys=True)
     fernet = _get_fernet()
     if fernet is None:
+        require_encryption_or_plaintext_ok()  # fail closed in prod
         logger.warning(
             "idp_providers: CREDENTIAL_ENCRYPTION_KEY unset — storing "
             "settings as plaintext JSON. DO NOT run this configuration "

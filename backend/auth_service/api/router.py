@@ -180,6 +180,35 @@ def _read_link_intent(request: Request, *, provider_id: str) -> Optional[str]:
     return user_id if isinstance(user_id, str) and user_id else None
 
 
+async def _resolve_link_intent(
+    request: Request, svc, *, provider_id: str
+) -> Optional[str]:
+    """Return the link-intent user_id only when it matches the live
+    session.
+
+    Defense-in-depth: the signed ``nx_link_intent`` cookie carries the
+    user_id captured when the link flow started, but the SSO callback
+    must not blindly trust it. If the cookie were replayed in a
+    different session (or no session is active), honouring it would bind
+    the returned IdP identity to an account the current caller does not
+    control. We therefore re-validate the access-cookie session and only
+    keep the intent when its user_id matches. On mismatch we drop the
+    intent (the flow falls through to a normal login) — the caller still
+    clears the stale cookie."""
+    intent_user_id = _read_link_intent(request, provider_id=provider_id)
+    if intent_user_id is None:
+        return None
+    session_user = await svc.validate_session(read_access_cookie(request))
+    if session_user is None or session_user.id != intent_user_id:
+        logger.warning(
+            "link-intent rejected: cookie user=%s does not match live "
+            "session user=%s (provider=%s)",
+            intent_user_id, getattr(session_user, "id", None), provider_id,
+        )
+        return None
+    return intent_user_id
+
+
 async def _require_sso_enabled(request: Request) -> None:
     """Raise 404 when the platform master kill-switch is off. We use
     404 (not 503) so an attacker can't probe the toggle's state."""
@@ -510,7 +539,9 @@ async def oidc_callback(
     except Exception as exc:  # noqa: BLE001 — OidcError etc.
         return _fail(f"token_or_idtoken:{exc}")
 
-    link_intent_user_id = _read_link_intent(request, provider_id=snap.id)
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
 
     try:
         user, tokens = await svc.complete_sso_login(
@@ -531,7 +562,9 @@ async def oidc_callback(
     )
     set_session_cookies(response, tokens)
     clear_oidc_cookie(response)
-    if link_intent_user_id:
+    # Clear whenever a link-intent cookie was presented — matched or
+    # rejected — so a stale/replayed cookie can't be reused.
+    if read_link_intent_cookie(request) is not None:
         clear_link_intent_cookie(response)
     logger.info("OIDC login succeeded (slug=%s, user=%s)", slug, user.id)
     return response
@@ -602,7 +635,9 @@ async def saml_acs(slug: str, request: Request):
     except Exception as exc:  # noqa: BLE001
         return _fail(f"saml_validate:{exc}")
 
-    link_intent_user_id = _read_link_intent(request, provider_id=snap.id)
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
 
     try:
         user, tokens = await svc.complete_sso_login(
@@ -623,7 +658,9 @@ async def saml_acs(slug: str, request: Request):
     )
     set_session_cookies(response, tokens)
     clear_saml_cookie(response)
-    if link_intent_user_id:
+    # Clear whenever a link-intent cookie was presented — matched or
+    # rejected — so a stale/replayed cookie can't be reused.
+    if read_link_intent_cookie(request) is not None:
         clear_link_intent_cookie(response)
     logger.info("SAML login succeeded (slug=%s, user=%s)", slug, user.id)
     return response
@@ -735,7 +772,9 @@ async def _custom_login_flow(
     except CustomIdentityError as exc:
         return _fail(f"envelope_invalid:{exc}")
 
-    link_intent_user_id = _read_link_intent(request, provider_id=snap.id)
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
 
     try:
         user, tokens = await svc.complete_sso_login(
@@ -751,7 +790,9 @@ async def _custom_login_flow(
     response = RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
     set_session_cookies(response, tokens)
     clear_mock_identity_cookie(response)
-    if link_intent_user_id:
+    # Clear whenever a link-intent cookie was presented — matched or
+    # rejected — so a stale/replayed cookie can't be reused.
+    if read_link_intent_cookie(request) is not None:
         clear_link_intent_cookie(response)
     logger.info("Custom IdP login succeeded (slug=%s, user=%s)", slug, user.id)
     return response

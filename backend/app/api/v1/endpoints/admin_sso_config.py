@@ -17,6 +17,7 @@ The PATCH endpoint guards against operator self-lockout:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -27,11 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
+    GroupMemberORM,
+    RoleBindingORM,
     UserIdentityORM,
     UserORM,
-    UserRoleORM,
 )
 from backend.app.db.repositories import app_auth_config_repo, user_repo
+from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.db.repositories.app_auth_config_repo import (
     ConflictingVersion,
 )
@@ -80,29 +83,60 @@ async def get_config(
     )
 
 
+async def _super_admin_user_ids(session: AsyncSession) -> set[str]:
+    """User ids that effectively hold ``super_admin`` (the role carrying
+    ``system:admin``) via the canonical ``role_bindings`` table.
+
+    Phase 5 renamed ``admin`` -> ``super_admin`` and moved authority from
+    the legacy ``user_roles`` table to ``role_bindings``. This resolves
+    both direct user bindings and indirect bindings via group membership,
+    skipping expired (time-bound) bindings.
+    """
+    now = datetime.now(timezone.utc)
+    bindings = await session.execute(
+        select(RoleBindingORM).where(
+            RoleBindingORM.role_name == "super_admin",
+            RoleBindingORM.scope_type == "global",
+        )
+    )
+    direct_user_ids: set[str] = set()
+    group_ids: set[str] = set()
+    for b in bindings.scalars().all():
+        if _is_expired(b.expires_at, now=now):
+            continue
+        if b.subject_type == "user":
+            direct_user_ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            group_ids.add(b.subject_id)
+
+    user_ids = set(direct_user_ids)
+    if group_ids:
+        members = await session.execute(
+            select(GroupMemberORM.user_id).where(
+                GroupMemberORM.group_id.in_(group_ids)
+            )
+        )
+        user_ids.update(members.scalars().all())
+    return user_ids
+
+
 async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
-    """Return the (id, email) of every active admin who has neither a
-    usable password nor any SSO identity. Used to refuse the toggle
-    ``allow_local_login=false`` when it would produce a lockout."""
-    # Pull admins by user_roles where role_name='admin'.
+    """Return the (id, email) of every active super-admin who has no SSO
+    identity. Used to refuse the toggle ``allow_local_login=false`` when
+    it would produce a lockout (once local login is off, an admin MUST
+    have at least one SSO identity to get back in)."""
+    user_ids = await _super_admin_user_ids(session)
+    if not user_ids:
+        return []
     admin_q = await session.execute(
-        select(UserORM)
-        .join(UserRoleORM, UserRoleORM.user_id == UserORM.id)
-        .where(
-            UserRoleORM.role_name == "admin",
+        select(UserORM).where(
+            UserORM.id.in_(user_ids),
             UserORM.status == "active",
             UserORM.deleted_at.is_(None),
         )
     )
-    admins = list(admin_q.scalars().all())
     offending: list[dict] = []
-    for admin in admins:
-        # If they have a password, they're fine for local-login OFF
-        # (they can still log in via SSO too, just not via password).
-        # Wait — the toggle is allow_local_login. When OFF, password
-        # login is refused. So admins MUST have at least one SSO
-        # identity; having a password is irrelevant once local login
-        # is forbidden.
+    for admin in admin_q.scalars().all():
         ident = await session.execute(
             select(UserIdentityORM.id).where(UserIdentityORM.user_id == admin.id)
         )
