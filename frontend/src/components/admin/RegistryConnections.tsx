@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
+import { usePermission } from '@/store/auth'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
@@ -73,7 +74,7 @@ function syntheticMetaFromSweep(
     }
 }
 
-function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
+function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; canManage: boolean; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
     const config = getProviderConfig(provider.providerType)
     const [expanded, setExpanded] = useState(false)
     const statusDot = { checking: 'bg-amber-400 animate-pulse', healthy: 'bg-emerald-400', unhealthy: 'bg-red-400', unknown: 'bg-gray-400' }[health.status]
@@ -108,19 +109,27 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                     </div>
                 )}
                 <div className="flex items-center gap-2">
-                    <button onClick={onTest} disabled={health.status === 'checking'} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors disabled:opacity-50">
-                        {health.status === 'checking' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />} Test
-                    </button>
-                    <button onClick={onScan} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 transition-colors"><RefreshCw className="w-3 h-3" /> Discover Sources</button>
-                    <button onClick={onEdit} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors"><Edit2 className="w-3 h-3" /> Edit</button>
-                    <button
-                        onClick={onDelete}
-                        aria-label={`Delete provider ${provider.name}`}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors ml-auto"
-                    >
-                        <Trash2 className="w-3 h-3" />
-                    </button>
-                    <button onClick={() => setExpanded(!expanded)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
+                    {canManage && (
+                        <button onClick={onTest} disabled={health.status === 'checking'} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors disabled:opacity-50">
+                            {health.status === 'checking' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />} Test
+                        </button>
+                    )}
+                    {canManage && (
+                        <button onClick={onScan} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 transition-colors"><RefreshCw className="w-3 h-3" /> Discover Sources</button>
+                    )}
+                    {canManage && (
+                        <button onClick={onEdit} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors"><Edit2 className="w-3 h-3" /> Edit</button>
+                    )}
+                    {canManage && (
+                        <button
+                            onClick={onDelete}
+                            aria-label={`Delete provider ${provider.name}`}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors ml-auto"
+                        >
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    )}
+                    <button onClick={() => setExpanded(!expanded)} className={cn("p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors", !canManage && "ml-auto")}>
                         {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                     </button>
                 </div>
@@ -143,6 +152,10 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
 
 export function RegistryConnections() {
     const navigate = useNavigate()
+    // Phase 18: providers are visible to anyone with workspace:provider:read,
+    // but write paths (register / edit / delete / test / discover) stay
+    // platform-admin-only because the rows carry credentials.
+    const canManage = usePermission('system:admin')
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     // Backend-published per-provider status — populated by the global
@@ -232,9 +245,11 @@ export function RegistryConnections() {
                     <h2 className="text-xl font-bold text-ink">Providers</h2>
                     <p className="text-sm text-ink-muted mt-1">Manage database providers and catalog availability.</p>
                 </div>
-                <button onClick={() => { setEditingProvider(null); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
-                    <Plus className="w-4 h-4" /> Register Provider
-                </button>
+                {canManage && (
+                    <button onClick={() => { setEditingProvider(null); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
+                        <Plus className="w-4 h-4" /> Register Provider
+                    </button>
+                )}
             </div>
 
             {/* Health Summary */}
@@ -349,6 +364,7 @@ export function RegistryConnections() {
                                 key={p.id}
                                 provider={p}
                                 health={resolved}
+                                canManage={canManage}
                                 onTest={() => { void testOne(p.id) }}
                                 onEdit={() => handleEditProvider(p)}
                                 onDelete={() => handleDeleteClick(p)}

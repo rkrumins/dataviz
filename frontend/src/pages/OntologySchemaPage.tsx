@@ -24,6 +24,7 @@ import { cn } from '@/lib/utils'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { EntityTypeSummary, EdgeTypeSummary } from '@/providers/GraphDataProvider'
 
+import { useAnyWorkspacePermission, usePermission } from '@/store/auth'
 import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntologies'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
@@ -99,6 +100,14 @@ export function OntologySchemaPage() {
   const rawTab = searchParams.get('tab') || 'overview'
   const activeTab = (LEGACY_TAB_MAP[rawTab] || rawTab) as OntologyTab
   const dashboardMode = searchParams.get('view') === 'dashboard'
+
+  // Phase 18: readers see ontologies but can't edit. ``canManage`` is
+  // the lever for hiding Create / Edit / Delete / Publish / Import /
+  // Clone affordances. workspace:ontology:manage is implied by
+  // workspace:admin and the platform globals.
+  const isPlatformAdmin = usePermission('system:admin')
+  const canManage =
+    isPlatformAdmin || useAnyWorkspacePermission('workspace:ontology:manage')
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -1114,6 +1123,7 @@ export function OntologySchemaPage() {
             workspaces={workspaces}
             isLoading={isLoadingOntologies}
             isSuggesting={isSuggesting}
+            canManage={canManage}
             onCreateDraft={() => setShowCreateDialog(true)}
             onSuggest={handleSuggestOntology}
             dashboardMode={dashboardMode}
@@ -1167,6 +1177,7 @@ export function OntologySchemaPage() {
               <OntologyDetailHeader
                 ontology={selectedOntology}
                 isImmutable={isImmutable}
+                canManage={canManage}
                 hasPendingChanges={hasPendingChanges}
                 isSaving={isSaving}
                 workspaces={workspaces}

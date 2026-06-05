@@ -45,17 +45,19 @@ api_router.include_router(
 )
 
 # ── Admin routers (workspace-centric) ───────────────────────────────
+# Phase 18: router-level ``system:admin`` gates dropped from providers /
+# catalog / ontologies. Each route now declares its own gate (read paths
+# use ``workspace:*:read`` with ``workspace_any=True``; write paths
+# escalate to ``workspace:*:manage`` or ``system:admin``). Handlers
+# filter list results to what the caller's workspaces touch.
 api_router.include_router(
     providers.router, prefix="/admin/providers", tags=["admin:providers"],
-    dependencies=[Depends(requires("system:admin"))],
 )
 api_router.include_router(
     catalog.router, prefix="/admin/catalog", tags=["admin:catalog"],
-    dependencies=[Depends(requires("system:admin"))],
 )
 api_router.include_router(
     ontologies.router, prefix="/admin/ontologies", tags=["admin:ontologies"],
-    dependencies=[Depends(requires("system:admin"))],
 )
 api_router.include_router(
     workspaces.router, prefix="/admin/workspaces", tags=["admin:workspaces"],

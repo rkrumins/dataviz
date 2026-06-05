@@ -225,6 +225,20 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
         "workspace:datasource:manage",
         "workspace:datasource:read",
     }),
+    # Phase 18: read+manage split for ontology / catalog; provider
+    # stays read-only here (manage is platform-admin-only because
+    # provider rows carry credentials).
+    "workspace:ontology": frozenset({
+        "workspace:ontology:read",
+        "workspace:ontology:manage",
+    }),
+    "workspace:catalog": frozenset({
+        "workspace:catalog:read",
+        "workspace:catalog:manage",
+    }),
+    "workspace:provider": frozenset({
+        "workspace:provider:read",
+    }),
 }
 
 # Phase 5 — every ``workspace:*`` leaf known to the seed catalogue.
@@ -234,6 +248,12 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
 # and deletion" perm; bundling it auto-implies "and everything else
 # you can do in this workspace as a side effect" — matches operator
 # intuition (Phase 5 user decision).
+#
+# Phase 18 additions: workspace_admin implies workspace:ontology:* and
+# workspace:catalog:* (read + manage). Provider manage is deliberately
+# omitted — provider credentials remain platform-admin-only — but
+# workspace:provider:read is included so a workspace_admin can see the
+# providers their workspace touches.
 _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:admin",
     "workspace:datasource:manage",
@@ -242,6 +262,11 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:view:edit",
     "workspace:view:delete",
     "workspace:view:read",
+    "workspace:ontology:read",
+    "workspace:ontology:manage",
+    "workspace:catalog:read",
+    "workspace:catalog:manage",
+    "workspace:provider:read",
 })
 
 
@@ -302,6 +327,34 @@ def has_permission(
             prefix = granted[:-2]
             if permission.startswith(prefix + ":"):
                 return True
+    return False
+
+
+def has_permission_any_workspace(
+    claims: PermissionClaims,
+    permission: str,
+) -> bool:
+    """True if ``claims`` grants ``permission`` in **any** workspace.
+
+    Phase 18 introduced workspace-scoped reads on otherwise-global
+    resources (ontologies, providers, catalog items). The list/get
+    endpoints don't have a workspace id on the URL — the user just
+    needs the perm *somewhere* to read the catalogue (handler then
+    filters results to their visible workspaces). This helper drives
+    the ``workspace_any=True`` mode of ``requires(...)``.
+
+    Honours the standard short-circuits:
+      * ``system:admin`` implies every permission.
+      * ``system:org-admin`` implies every workspace-scoped permission
+        in every workspace.
+    """
+    if "system:admin" in claims.global_perms:
+        return True
+    if "system:org-admin" in claims.global_perms:
+        return True
+    for ws_id in claims.ws_perms.keys():
+        if has_permission(claims, permission, workspace_id=ws_id):
+            return True
     return False
 
 

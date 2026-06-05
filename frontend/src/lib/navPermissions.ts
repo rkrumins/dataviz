@@ -47,8 +47,12 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     dashboard:  { kind: 'always' },
     explore:    { kind: 'always' },
     workspaces: { kind: 'always' },
-    ingestion:  { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:datasource:manage'] },
-    schema:     { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:datasource:read'] },
+    // Phase 18: Ingestion + Semantic Layers open to workspace-bound
+    // readers via the new workspace:provider:read /
+    // workspace:ontology:read perms; pages render filtered results and
+    // gate edit affordances separately.
+    ingestion:  { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:provider:read', 'workspace:datasource:manage'] },
+    schema:     { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:ontology:read'] },
     admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage'] },
 }
 

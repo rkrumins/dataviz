@@ -16,6 +16,9 @@ interface OntologySidebarProps {
   workspaces: WorkspaceResponse[]
   isLoading: boolean
   isSuggesting?: boolean
+  /** Phase 18: when ``false`` (reader), hide the Create Draft + Suggest
+   *  affordances. The catalogue stays visible and selectable. */
+  canManage?: boolean
   onCreateDraft: () => void
   onSuggest?: () => void
   dashboardMode?: boolean
@@ -110,6 +113,7 @@ export function OntologySidebar({
   assignmentCountMap,
   workspaces,
   isLoading,
+  canManage = true,
   onCreateDraft,
   dashboardMode,
   onToggleDashboard,
@@ -462,6 +466,7 @@ export function OntologySidebar({
 
         {/* Collapsed actions */}
         <div className="border-t border-glass-border/60 p-1.5 space-y-1">
+          {canManage && (
           <button
             onClick={onCreateDraft}
             className="w-full flex items-center justify-center p-2 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
@@ -469,6 +474,7 @@ export function OntologySidebar({
           >
             <Plus className="w-4 h-4" />
           </button>
+          )}
         </div>
 
         {/* Portal tooltip — renders at document.body so it's never clipped */}
@@ -996,6 +1002,7 @@ export function OntologySidebar({
       </div>
 
       {/* Bottom — single compact "New" button (CTAs live in the dashboard hero now) */}
+      {canManage && (
       <div className="border-t border-glass-border/60 p-3">
         <button
           onClick={onCreateDraft}
@@ -1005,6 +1012,7 @@ export function OntologySidebar({
           New Semantic Layer
         </button>
       </div>
+      )}
 
       {/* Resize handle */}
       <div

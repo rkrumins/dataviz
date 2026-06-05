@@ -52,8 +52,12 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     "dashboard":  ("Dashboard",     NavSpecAlways()),
     "explore":    ("Explore",       NavSpecAlways()),
     "workspaces": ("Workspaces",    NavSpecAlways()),
-    "ingestion":  ("Ingestion",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:datasource:manage"])),
-    "schema":     ("Semantic Layers", NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:datasource:read"])),
+    # Phase 18: Ingestion and Semantic Layers open to any workspace-bound
+    # user holding the matching workspace:*:read perm. Their pages render
+    # filtered results (workspace-scoped); edit affordances are gated
+    # separately by the manage perm at the component level.
+    "ingestion":  ("Ingestion",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:provider:read", "workspace:datasource:manage"])),
+    "schema":     ("Semantic Layers", NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:ontology:read"])),
     "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage"])),
 }
 

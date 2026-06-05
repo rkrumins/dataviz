@@ -42,11 +42,17 @@ export function WorkspacesPage() {
     // store so we can call it inline for each row without violating
     // the rules of hooks.
     const can = useAuthStore(s => s.can)
-    // Platform-admin gate for the admin-only reads (providers,
-    // catalog, ontologies). Non-admins still see their workspaces
-    // (workspaceService.list is workspace-scoped), they just don't
-    // probe the admin-tier endpoints that would 403 anyway.
+    // Phase 18: providers / catalog / ontologies are now workspace-scoped
+    // reads on the backend. Allow the probes for any workspace-bound
+    // user; the BE returns the filtered subset they can see.
     const isPlatformAdmin = useAuthStore(s => s.can('system:admin'))
+    const canReadProviders = useAuthStore(s => {
+        if (s.can('system:admin') || s.can('system:org-admin')) return true
+        for (const wsId of Object.keys(s.permissions.ws)) {
+            if (s.can('workspace:provider:read', wsId)) return true
+        }
+        return false
+    })
     // Workspace-create button visibility — the POST handler requires
     // system:workspaces:create (workspaces.py:100). Hiding the CTA for
     // users who can't create avoids a wizard-open → submit → 403 dance.
@@ -221,12 +227,13 @@ export function WorkspacesPage() {
             // slow backend) does not pin the whole workspaces page on
             // a spinner. Render with whatever lists settled in time.
             //
-            // The catalog/providers/ontology lists are admin-only at
-            // the router; non-admins skip them entirely so a viewer
-            // never burns a network round trip on a guaranteed 403.
-            // The workspace list is workspace-scoped and accessible to
-            // everyone with at least one binding.
-            const adminProbes: Array<Promise<unknown>> = isPlatformAdmin
+            // Phase 18: catalog / providers / ontology endpoints are now
+            // workspace-scoped reads. Fire the probes for any workspace-
+            // bound user (the backend filters the response to what their
+            // workspaces touch). The ``canReadProviders`` guard skips the
+            // call for a user with literally no workspace bindings — they
+            // would 403 cleanly anyway.
+            const adminProbes: Array<Promise<unknown>> = canReadProviders
                 ? [
                     withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
                     withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
@@ -279,7 +286,7 @@ export function WorkspacesPage() {
             setDsStats(statsMap)
         } catch (err) { console.error('Failed to load workspaces', err) }
         finally { setIsLoading(false) }
-    }, [isPlatformAdmin])
+    }, [canReadProviders])
 
     useEffect(() => { loadData() }, [loadData])
 

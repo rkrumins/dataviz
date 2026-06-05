@@ -81,9 +81,12 @@ _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
 # implications) PLUS the real workspace-scoped permission that gates
 # the section's surface. We assert that workspace-scoped leg is enforced
 # somewhere — that's the entry's substantive gate.
+#
+# Phase 18: Ingestion + Semantic Layers now lean on the new
+# read-tier perms (workspace:provider:read / workspace:ontology:read).
 _SIDEBAR_WORKSPACE_LEG: dict[str, str] = {
-    "ingestion": "workspace:datasource:manage",
-    "schema":    "workspace:datasource:read",
+    "ingestion": "workspace:provider:read",
+    "schema":    "workspace:ontology:read",
 }
 
 

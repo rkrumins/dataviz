@@ -35,6 +35,7 @@ from backend.app.db.repositories import user_repo
 from backend.app.services.permission_service import (
     PermissionClaims,
     has_permission,
+    has_permission_any_workspace,
 )
 from backend.app.services.revocation_service import (
     RevocationBackendError,
@@ -284,6 +285,7 @@ def requires(
     permission: str,
     *,
     workspace: Optional[str] = None,
+    workspace_any: bool = False,
 ) -> Callable:
     """Build a FastAPI dependency that enforces ``permission``.
 
@@ -299,6 +301,16 @@ def requires(
     id — the dependency reads it from ``request.path_params``. Pass
     ``None`` for global permissions.
 
+    Phase 18: ``workspace_any=True`` enforces a workspace-scoped perm
+    **without** a workspace path param — the caller must hold the perm
+    in any one of their workspace buckets (or the
+    ``system:admin``/``system:org-admin`` global shortcuts). Used by
+    the list/get endpoints on otherwise-global resources (ontologies,
+    providers, catalog) where the URL has no workspace context but a
+    workspace-bound user is allowed to read the catalogue (results are
+    then filtered server-side to the workspaces they touch).
+    ``workspace`` and ``workspace_any`` are mutually exclusive.
+
     The dependency:
       1. Resolves ``get_current_user`` (401 on miss)
       2. Reads the permission claims from the JWT
@@ -306,8 +318,14 @@ def requires(
          permissions, fail-open for read paths (see
          ``_FAIL_CLOSED_PERMISSIONS``).
       4. Checks ``has_permission(claims, permission, workspace_id=...)``
+         (or ``has_permission_any_workspace`` when ``workspace_any=True``)
          and 403s on miss.
     """
+    if workspace is not None and workspace_any:
+        raise ValueError(
+            "requires(): pass either `workspace=<path_param>` or "
+            "`workspace_any=True`, not both"
+        )
     fail_closed = permission in _FAIL_CLOSED_PERMISSIONS
 
     async def _dependency(
@@ -359,7 +377,11 @@ def requires(
                     f"is missing on {request.url.path!r}"
                 )
 
-        if not has_permission(claims, permission, workspace_id=workspace_id):
+        if workspace_any:
+            allowed = has_permission_any_workspace(claims, permission)
+        else:
+            allowed = has_permission(claims, permission, workspace_id=workspace_id)
+        if not allowed:
             # Phase 5: structured 403 body so the FE can route by
             # ``detail.error`` instead of regex-matching on the prose.
             # The ``detail`` string is kept as-is so existing
@@ -398,5 +420,6 @@ def requires(
     # actually enforces it. Harmless metadata; no runtime effect.
     _dependency.required_permission = permission  # type: ignore[attr-defined]
     _dependency.workspace_param = workspace  # type: ignore[attr-defined]
+    _dependency.workspace_any = workspace_any  # type: ignore[attr-defined]
 
     return _dependency

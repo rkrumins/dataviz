@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
-import { usePermission } from '@/store/auth'
+import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
@@ -18,15 +18,10 @@ interface TabDef {
     label: string
     icon: typeof Server
     desc: string
-    /** Admin-only tabs are hidden from non-admins. Providers + catalog
-     *  CRUD is system:admin-gated at the router (see api.py:49-55), so
-     *  there's no degraded view we can offer a workspace member — hide
-     *  the tab entirely rather than render an empty-on-403 page. */
-    adminOnly?: boolean
 }
 
 const ALL_TABS: TabDef[] = [
-    { id: 'providers', label: 'Providers', icon: Server, desc: 'Manage provider credentials and health', adminOnly: true },
+    { id: 'providers', label: 'Providers', icon: Server, desc: 'View provider credentials and health' },
     { id: 'assets', label: 'Data Sources', icon: Layers, desc: 'Register and configure data sources' },
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
 ]
@@ -35,12 +30,19 @@ export function IngestionPage() {
     const navigate = useNavigate()
     const [searchParams, setSearchParams] = useSearchParams()
     const isPlatformAdmin = usePermission('system:admin')
+    // Phase 18: readers (workspace:provider:read) can now see the
+    // Providers tab read-only. Edit/create/delete buttons in
+    // RegistryConnections stay gated by system:admin.
+    const canReadProviders =
+        isPlatformAdmin || useAnyWorkspacePermission('workspace:provider:read')
+    const canReadCatalog =
+        isPlatformAdmin || useAnyWorkspacePermission('workspace:catalog:read')
 
     // Visible tabs reflect what the current claim set can actually use.
-    // Non-admins land on Data Sources first since Providers is hidden.
+    // Non-readers (no workspace bindings) skip Providers entirely.
     const visibleTabs = useMemo(
-        () => ALL_TABS.filter(t => !t.adminOnly || isPlatformAdmin),
-        [isPlatformAdmin],
+        () => ALL_TABS.filter(t => t.id !== 'providers' || canReadProviders),
+        [canReadProviders],
     )
 
     const rawTab = searchParams.get('tab')
@@ -58,13 +60,15 @@ export function IngestionPage() {
     useEffect(() => {
         let cancelled = false
         setLoadError(null)
-        // Providers + catalog are system:admin-only. For non-admins, skip
-        // the fetch entirely — the OnboardingProgress card only needs the
-        // workspace count for them (the provider/catalog stages don't
-        // apply to their role).
-        const fetches: [Promise<unknown>, Promise<unknown>, Promise<unknown>] = isPlatformAdmin
-            ? [providerService.list(), catalogService.list(), workspaceService.list()]
-            : [Promise.resolve(null), Promise.resolve([]), workspaceService.list()]
+        // Phase 18: providers + catalog reads are workspace-scoped. The
+        // backend filters to what the caller's workspaces touch; the FE
+        // skips the call when the user holds neither read perm so the
+        // onboarding card stays accurate.
+        const fetches: [Promise<unknown>, Promise<unknown>, Promise<unknown>] = [
+            canReadProviders ? providerService.list() : Promise.resolve(null),
+            canReadCatalog ? catalogService.list() : Promise.resolve([]),
+            workspaceService.list(),
+        ]
         Promise.allSettled(fetches).then(([providersResult, catalogsResult, workspacesResult]) => {
             if (cancelled) return
             const providers = providersResult.status === 'fulfilled'
@@ -77,12 +81,10 @@ export function IngestionPage() {
                 ? (workspacesResult.value as Array<{ dataSources?: Array<{ ontologyId?: string | null }> }>)
                 : []
 
-            // Only surface load errors for fetches we actually attempted —
-            // a non-admin "couldn't load providers" message would be
-            // confusing and incorrect.
+            // Only surface load errors for fetches we actually attempted.
             const errors: string[] = []
-            if (isPlatformAdmin && providersResult.status === 'rejected') errors.push('providers')
-            if (isPlatformAdmin && catalogsResult.status === 'rejected') errors.push('catalog items')
+            if (canReadProviders && providersResult.status === 'rejected') errors.push('providers')
+            if (canReadCatalog && catalogsResult.status === 'rejected') errors.push('catalog items')
             if (workspacesResult.status === 'rejected') errors.push('workspaces')
 
             const hasOntology = workspaces.some(ws =>
@@ -101,23 +103,21 @@ export function IngestionPage() {
             )
         })
         return () => { cancelled = true }
-    }, [activeTab, isPlatformAdmin])
+    }, [activeTab, canReadProviders, canReadCatalog])
 
     const handleStageClick = (tab: string) => {
         if (tab === 'workspaces') {
             navigate('/workspaces')
             return
         }
-        if ((tab === 'providers' && isPlatformAdmin) || tab === 'assets') {
+        if ((tab === 'providers' && canReadProviders) || tab === 'assets') {
             setSearchParams({ tab })
         }
     }
 
-    // Wait for the workspace fetch to settle before painting — the
-    // providers sentinel is -1 only for admins (we never fetch it for
-    // non-admins, so it stays 0 immediately). Gate on workspaces
-    // instead so non-admins don't flash an empty state either.
-    if (isPlatformAdmin && counts.providers === -1 && !loadError) return null
+    // Wait for the providers fetch to settle before painting (the
+    // sentinel is -1 only when we attempted the fetch).
+    if (canReadProviders && counts.providers === -1 && !loadError) return null
 
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 
@@ -156,6 +156,16 @@ export function IngestionPage() {
                             hasOntology={counts.hasOntology}
                             onStageClick={handleStageClick}
                         />
+                    )}
+
+                    {/* Phase 18: Provider write paths stay system:admin.
+                        Readers see the rows but get a banner explaining
+                        edit lives with admins. */}
+                    {!isPlatformAdmin && canReadProviders && activeTab === 'providers' && (
+                        <div className="mb-4 rounded-xl border border-glass-border bg-glass-base/30 px-4 py-2.5 text-xs text-ink-secondary">
+                            You're viewing the providers your workspaces use. To register,
+                            edit, or delete a provider, ask a platform administrator.
+                        </div>
                     )}
 
                     {/* Tabs */}
@@ -207,7 +217,7 @@ export function IngestionPage() {
                     <RegistryJobHistory />
                 ) : (
                     <div className="px-8 py-6 max-w-7xl mx-auto">
-                        {activeTab === 'providers' && isPlatformAdmin && <RegistryConnections />}
+                        {activeTab === 'providers' && canReadProviders && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
                     </div>
                 )}

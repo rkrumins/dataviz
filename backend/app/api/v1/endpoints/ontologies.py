@@ -8,9 +8,15 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import ontology_definition_repo
 from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.workspace_visibility import (
+    compute_visible_ontology_ids,
+    ensure_ontology_visible,
+)
 from backend.app.ontology.resolver import (
     parse_entity_definitions,
     parse_relationship_definitions,
@@ -37,6 +43,16 @@ from backend.common.models.graph import GraphSchemaStats
 from backend.app.ontology import gate as ontology_gate
 
 router = APIRouter()
+
+
+# Phase 18 — per-endpoint gates. Reads are open to any workspace-bound
+# user holding ``workspace:ontology:read`` (per-id lookups also enforce
+# visibility — a viewer only sees ontologies referenced by a data
+# source in one of their workspaces). Writes need ``workspace:ontology:manage``
+# AND the same visibility check (a workspace_admin can only edit
+# ontologies tied to a workspace they administer).
+_REQUIRES_ONTOLOGY_READ = requires("workspace:ontology:read", workspace_any=True)
+_REQUIRES_ONTOLOGY_MANAGE = requires("workspace:ontology:manage", workspace_any=True)
 
 
 async def _invalidate_ontology_caches(
@@ -77,17 +93,33 @@ async def list_ontologies(
     all_versions: bool = False,
     include_deleted: bool = Query(False, description="Include soft-deleted ontologies"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
-    """List ontologies. By default returns only the latest version of each."""
+    """List ontologies visible to the caller. By default returns only the latest version of each."""
     if all_versions:
-        return await ontology_definition_repo.list_ontologies(session, include_deleted=include_deleted)
-    return await ontology_definition_repo.list_latest_ontologies(session, include_deleted=include_deleted)
+        items = await ontology_definition_repo.list_ontologies(session, include_deleted=include_deleted)
+    else:
+        items = await ontology_definition_repo.list_latest_ontologies(session, include_deleted=include_deleted)
+    visible_ids = await compute_visible_ontology_ids(session, claims)
+    if visible_ids is None:
+        return items
+    # ``visible_ids`` is keyed on the latest-version id stored on
+    # workspace_data_sources. For ``all_versions=True`` we also surface
+    # historical rows of the same schema lineage; expand the visible
+    # set to include every version whose ``schema_id`` matches.
+    if all_versions:
+        latest = [it for it in items if it.id in visible_ids]
+        schema_ids = {getattr(it, "schema_id", None) or it.id for it in latest}
+        return [it for it in items if (getattr(it, "schema_id", None) or it.id) in schema_ids]
+    return [it for it in items if it.id in visible_ids]
 
 
 @router.post("", response_model=OntologyDefinitionResponse, status_code=201)
 async def create_ontology(
     req: OntologyCreateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
     result = await ontology_definition_repo.create_ontology(session, req)
@@ -99,11 +131,14 @@ async def create_ontology(
 async def list_ontology_versions(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """List all versions of an ontology (grouped by schema_id)."""
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
     schema_id = getattr(orm, 'schema_id', None) or orm.id
     return await ontology_definition_repo.list_versions_by_schema(session, schema_id)
 
@@ -112,11 +147,14 @@ async def list_ontology_versions(
 async def get_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """Get a specific ontology by ID."""
     ontology = await ontology_definition_repo.get_ontology(session, ontology_id)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
     return ontology
 
 
@@ -124,6 +162,8 @@ async def get_ontology(
 async def export_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """
     Export a full ontology definition as a downloadable JSON file.
@@ -136,6 +176,7 @@ async def export_ontology(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
 
     export_data = {
         "id": orm.id,
@@ -170,11 +211,14 @@ async def update_ontology(
     ontology_id: str = Path(...),
     req: OntologyUpdateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Update an ontology. If published, creates a new version instead.
     Returns the updated or newly created ontology.
     """
+    await ensure_ontology_visible(session, claims, ontology_id)
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
     if not ontology:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
@@ -192,11 +236,14 @@ async def update_ontology(
 async def delete_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Delete an ontology. Rejects if data sources still reference it or if it's a system ontology."""
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
     if orm.is_system:
         raise HTTPException(
             status_code=409,
@@ -215,6 +262,7 @@ async def delete_ontology(
 async def restore_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Restore a soft-deleted ontology."""
     restored = await ontology_definition_repo.restore_ontology(session, ontology_id)
@@ -229,6 +277,8 @@ async def publish_ontology(
     ontology_id: str = Path(...),
     force: bool = Query(False, description="Bypass evolution_policy check (admin only)."),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Mark an ontology as published (immutable after this).
@@ -237,8 +287,9 @@ async def publish_ontology(
     publish would remove existing types, the request is blocked with HTTP 409.
     Pass ?force=true to skip this guard (use with caution).
     """
+    await ensure_ontology_visible(session, claims, ontology_id)
     if not force:
-        impact = await get_ontology_impact(ontology_id, session)
+        impact = await get_ontology_impact(ontology_id, session, claims=claims)
         if not impact["allowed"]:
             raise HTTPException(
                 status_code=409,
@@ -256,6 +307,8 @@ async def publish_ontology(
 async def clone_ontology(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Clone an existing ontology into a new editable draft.
@@ -264,6 +317,7 @@ async def clone_ontology(
     source = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not source:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
 
     import json
     req = OntologyCreateRequest(
@@ -287,6 +341,8 @@ async def clone_ontology(
 async def create_new_version(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Create a new draft version of an existing ontology within the same schema lineage.
@@ -298,6 +354,7 @@ async def create_new_version(
     source = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not source:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
     if not source.is_published and not source.is_system:
         raise HTTPException(
             status_code=409,
@@ -319,6 +376,8 @@ async def create_new_version(
 async def validate_ontology_endpoint(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """
     Validate an ontology's entity and relationship definitions.
@@ -328,6 +387,7 @@ async def validate_ontology_endpoint(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
 
     import json
     entity_defs = parse_entity_definitions(json.loads(orm.entity_type_definitions or "{}"))
@@ -350,12 +410,15 @@ async def get_ontology_coverage(
     ontology_id: str = Path(...),
     stats: GraphSchemaStats = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """
     Analyse coverage of this ontology against a graph's schema stats.
     The caller provides GraphSchemaStats (from the /schema/stats endpoint).
     Returns which entity and relationship types are covered vs. uncovered.
     """
+    await ensure_ontology_visible(session, claims, ontology_id)
     repo = SQLAlchemyOntologyRepository(session)
     svc = LocalOntologyService(repo)
     report = await svc.check_coverage(ontology_id, stats)
@@ -379,6 +442,8 @@ async def check_ontology_resolution(
     ontology_id: str = Path(...),
     stats: GraphSchemaStats = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """Run the ontology-resolution gate against an arbitrary set of
     introspected graph stats.
@@ -394,6 +459,7 @@ async def check_ontology_resolution(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
 
     introspected_entity_ids = [s.id for s in stats.entity_type_stats if getattr(s, "id", None)]
     introspected_edge_ids = [s.id for s in stats.edge_type_stats if getattr(s, "id", None)]
@@ -444,6 +510,8 @@ async def check_ontology_resolution(
 async def get_ontology_impact(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: Optional[PermissionClaims] = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """
     Simulate the impact of publishing this ontology version.
@@ -463,6 +531,11 @@ async def get_ontology_impact(
     draft_row = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not draft_row:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    # ``claims`` is None when called internally (e.g. from publish_ontology
+    # which authorised the caller already). When it's populated (the HTTP
+    # path), enforce visibility too.
+    if claims is not None:
+        await ensure_ontology_visible(session, claims, ontology_id)
     if draft_row.is_published:
         raise HTTPException(status_code=409, detail="Ontology is already published.")
 
@@ -531,6 +604,8 @@ async def get_ontology_impact(
 async def get_ontology_assignments(
     ontology_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """
     List all data sources (across all workspaces) currently assigned to this ontology.
@@ -539,6 +614,7 @@ async def get_ontology_assignments(
     row = await ontology_definition_repo.get_ontology(session, ontology_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
     return await ontology_definition_repo.get_assignments(session, ontology_id)
 
 
@@ -549,6 +625,8 @@ async def get_ontology_audit_log(
     limit: int = Query(100, ge=1, le=500, description="Max results per page"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
     """
     Return the audit trail for an ontology (all versions sharing the same schema_id).
@@ -558,6 +636,7 @@ async def get_ontology_audit_log(
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
     schema_id = getattr(orm, "schema_id", None) or orm.id
     return await ontology_definition_repo.get_audit_log(
         session, schema_id, action=action, limit=limit, offset=offset,
@@ -568,6 +647,7 @@ async def get_ontology_audit_log(
 async def import_ontology_new(
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Import a semantic layer from exported JSON, creating a new draft.
@@ -586,6 +666,8 @@ async def import_ontology_into(
     ontology_id: str = Path(...),
     req: OntologyImportRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Import a semantic layer from exported JSON into an existing ontology.
@@ -597,6 +679,7 @@ async def import_ontology_into(
     - System target → rejected (clone first).
     - No changes detected → returns status="no_changes" without modification.
     """
+    await ensure_ontology_visible(session, claims, ontology_id)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
         await _invalidate_ontology_caches(session, ontology_id)
@@ -613,6 +696,7 @@ async def suggest_ontology(
     stats: GraphSchemaStats = Body(...),
     base_ontology_id: Optional[str] = None,
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """
     Suggest an ontology definition from graph schema stats.

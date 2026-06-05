@@ -5,7 +5,7 @@ import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
-import { usePermission } from '@/store/auth'
+import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import type { ViewConfiguration } from '@/types/schema'
 
 const EMPTY_VIEWS: ViewConfiguration[] = []
@@ -150,6 +150,12 @@ export function useDashboardData() {
     // as belt-and-suspenders in the rare case admin demotion races a
     // refresh while the effect is mid-flight.
     const isPlatformAdmin = usePermission('system:admin')
+    // Phase 18: ontologies are now workspace-scoped reads (backend
+    // filters to the user's visible set). Allow the fetch for anyone
+    // holding workspace:ontology:read in any workspace. Templates stay
+    // platform-admin (no workspace-scoped read path on the backend).
+    const canReadOntologies =
+        isPlatformAdmin || useAnyWorkspacePermission('workspace:ontology:read')
 
     useEffect(() => {
         if (!isPlatformAdmin) {
@@ -177,7 +183,7 @@ export function useDashboardData() {
     }, [isPlatformAdmin])
 
     useEffect(() => {
-        if (!isPlatformAdmin) {
+        if (!canReadOntologies) {
             setOntologies([])
             setIsLoadingOntologies(false)
             return
@@ -199,7 +205,7 @@ export function useDashboardData() {
             }
         }
         fetchOntologies()
-    }, [isPlatformAdmin])
+    }, [canReadOntologies])
 
     // Derive recent and popular views — memoized so downstream effects get stable refs
     const recentViews = useMemo(
