@@ -21,8 +21,8 @@ import { useCanvasStore } from '@/store/canvas'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
-import { SIDEBAR_PERMISSIONS } from '@/lib/navPermissions'
 import { useNavPermission } from '@/store/auth'
+import { useSidebarSpec } from '@/store/navCatalogue'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -356,16 +356,17 @@ export function SidebarNav() {
     }
   }
 
-  // Permission gate per nav item, driven by the centralised
-  // ``SIDEBAR_PERMISSIONS`` catalogue. Hooks are called in static
-  // order matching ``NAV_ITEMS_CONFIG`` (module-scope constant), so
-  // hook-rules stay satisfied across renders.
-  const dashboardVisible  = useNavPermission(SIDEBAR_PERMISSIONS.dashboard)
-  const exploreVisible    = useNavPermission(SIDEBAR_PERMISSIONS.explore)
-  const workspacesVisible = useNavPermission(SIDEBAR_PERMISSIONS.workspaces)
-  const ingestionVisible  = useNavPermission(SIDEBAR_PERMISSIONS.ingestion)
-  const schemaVisible     = useNavPermission(SIDEBAR_PERMISSIONS.schema)
-  const adminVisible      = useNavPermission(SIDEBAR_PERMISSIONS.admin)
+  // Permission gate per nav item, driven by the centralised nav
+  // catalogue served from the backend (seeded by bundled defaults).
+  // Hooks are called in static order matching ``NAV_ITEMS_CONFIG``
+  // (module-scope constant), so hook-rules stay satisfied across
+  // renders. ``useSidebarSpec`` resolves the live spec from the store.
+  const dashboardVisible  = useNavPermission(useSidebarSpec('dashboard'))
+  const exploreVisible    = useNavPermission(useSidebarSpec('explore'))
+  const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
+  const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
+  const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
+  const adminVisible      = useNavPermission(useSidebarSpec('admin'))
 
   const visibility: Record<NavigationTab, boolean> = {
     dashboard:  dashboardVisible,

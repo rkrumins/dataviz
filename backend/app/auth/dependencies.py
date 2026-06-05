@@ -392,4 +392,11 @@ def requires(
             )
         return user
 
+    # Phase 16: tag the closure so the live FastAPI route graph is
+    # introspectable. The nav-catalogue drift test walks app.routes and
+    # reads these to assert each catalogue entry matches the gate that
+    # actually enforces it. Harmless metadata; no runtime effect.
+    _dependency.required_permission = permission  # type: ignore[attr-defined]
+    _dependency.workspace_param = workspace  # type: ignore[attr-defined]
+
     return _dependency

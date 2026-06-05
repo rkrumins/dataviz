@@ -24,7 +24,7 @@ import {
     KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase,
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
     ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
-    Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink,
+    Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink, Navigation,
 } from 'lucide-react'
 import {
     permissionsService,
@@ -47,11 +47,13 @@ import { ImpactPreviewModal } from './ImpactPreviewModal'
 import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { Link, useNavigate } from 'react-router-dom'
+import { useNavCatalogueStore } from '@/store/navCatalogue'
+import { roleSatisfiesSpec, type NavPermissionSpec } from '@/lib/navPermissions'
 
 
 // ── Shared types ─────────────────────────────────────────────────────
 
-type TabKey = 'roles' | 'catalog' | 'byUser' | 'byWorkspace'
+type TabKey = 'roles' | 'catalog' | 'byUser' | 'byWorkspace' | 'features'
 
 interface TabDef {
     key: TabKey
@@ -63,6 +65,7 @@ interface TabDef {
 const TABS: TabDef[] = [
     { key: 'roles', label: 'Role matrix', icon: GitBranch, hint: 'What does each role bundle?' },
     { key: 'catalog', label: 'Permissions', icon: BookOpen, hint: 'Browse the permission catalogue' },
+    { key: 'features', label: 'Feature access', icon: Navigation, hint: 'Which roles can reach each app section' },
     { key: 'byUser', label: 'By user', icon: UserCog, hint: 'See everything one user has access to' },
     { key: 'byWorkspace', label: 'By workspace', icon: Layers, hint: 'See who has access to a workspace' },
 ]
@@ -345,6 +348,9 @@ export function AdminPermissions() {
                             highlightedPermissionId={highlightedPermissionId}
                         />
                     )}
+                    {roles && tab === 'features' && (
+                        <FeatureAccessTab roles={roles} onEditRole={setEditingRole} />
+                    )}
                     {permissions && tab === 'byUser' && (
                         <ByUserTab
                             permissions={permissions}
@@ -382,6 +388,147 @@ export function AdminPermissions() {
                     />
                 )}
             </AnimatePresence>
+        </div>
+    )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Tab — Feature access (read-only section→permission→roles map)
+// ─────────────────────────────────────────────────────────────────────
+
+function humanizeKey(key: string): string {
+    return key.charAt(0).toUpperCase() + key.slice(1).replace(/[-_]/g, ' ')
+}
+
+/** Render the permission requirement of a spec as inline code chips. */
+function SpecRequirement({ spec }: { spec: NavPermissionSpec }) {
+    if (spec.kind === 'always') {
+        return (
+            <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <Globe className="w-3 h-3" /> Every authenticated user
+            </span>
+        )
+    }
+    const perms = spec.kind === 'perm' || spec.kind === 'workspaceAny' ? [spec.perm] : spec.perms
+    return (
+        <span className="inline-flex flex-wrap items-center gap-1">
+            {perms.map((p, i) => (
+                <span key={p} className="inline-flex items-center">
+                    {i > 0 && <span className="text-[10px] text-ink-muted mx-1">or</span>}
+                    <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-glass-base/50 border border-glass-border text-ink-secondary">
+                        {p}
+                    </code>
+                </span>
+            ))}
+            {spec.kind === 'workspaceAny' && (
+                <span className="text-[10px] text-ink-muted ml-1">in any workspace</span>
+            )}
+        </span>
+    )
+}
+
+function FeatureAccessRow({
+    label,
+    spec,
+    roles,
+    onEditRole,
+}: {
+    label: string
+    spec: NavPermissionSpec
+    roles: RoleDefinitionResponse[]
+    onEditRole: (r: RoleDefinitionResponse) => void
+}) {
+    const satisfying = roles.filter((r) => roleSatisfiesSpec(r.permissions, spec))
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-3 md:gap-6 py-3.5 border-b border-glass-border last:border-b-0">
+            <div className="min-w-0">
+                <p className="text-sm font-semibold text-ink truncate">{label}</p>
+                <div className="mt-1"><SpecRequirement spec={spec} /></div>
+            </div>
+            <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted mb-1.5">
+                    {satisfying.length} {satisfying.length === 1 ? 'role' : 'roles'} can reach this
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                    {satisfying.length === 0 ? (
+                        <span className="text-xs text-ink-muted italic">No role grants this yet</span>
+                    ) : (
+                        satisfying.map((r) => {
+                            const visual = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                            return (
+                                <button
+                                    key={r.name}
+                                    onClick={() => onEditRole(r)}
+                                    title={r.isSystem ? 'System role (immutable)' : 'Edit role'}
+                                    className={cn(
+                                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border transition-colors hover:brightness-110',
+                                        visual.badge,
+                                    )}
+                                >
+                                    {r.name}
+                                </button>
+                            )
+                        })
+                    )}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+function FeatureAccessTab({
+    roles,
+    onEditRole,
+}: {
+    roles: RoleDefinitionResponse[]
+    onEditRole: (r: RoleDefinitionResponse) => void
+}) {
+    const sidebar = useNavCatalogueStore((s) => s.sidebar)
+    const adminSections = useNavCatalogueStore((s) => s.adminSections)
+    const sidebarLabels = useNavCatalogueStore((s) => s.sidebarLabels)
+    const adminLabels = useNavCatalogueStore((s) => s.adminLabels)
+
+    const sections: { title: string; entries: [string, NavPermissionSpec][]; labels: Record<string, string> }[] = [
+        { title: 'Navigation', entries: Object.entries(sidebar), labels: sidebarLabels },
+        { title: 'Administration', entries: Object.entries(adminSections), labels: adminLabels },
+    ]
+
+    return (
+        <div className="space-y-6">
+            {/* Explainer — clarifies this is the centralised, role-driven map */}
+            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/15">
+                <Info className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+                <div className="text-xs text-ink-secondary leading-relaxed">
+                    <p className="font-semibold text-ink">Sections are unlocked by the permissions their features need.</p>
+                    <p className="mt-0.5">
+                        This map is served from the central catalogue
+                        (<code className="font-mono text-[11px]">GET /me/nav</code>) and mirrors the backend
+                        enforcement. It's read-only — to change who can reach a section, grant or remove the
+                        relevant permission on a role in the <span className="font-medium">Role matrix</span>.
+                        Any role (including custom ones) that holds the permission gets access automatically.
+                    </p>
+                </div>
+            </div>
+
+            {sections.map((group) => (
+                <div key={group.title} className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                    <div className="px-5 py-3 border-b border-glass-border bg-glass-base/30">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-ink-secondary">{group.title}</h3>
+                    </div>
+                    <div className="px-5">
+                        {group.entries.map(([key, spec]) => (
+                            <FeatureAccessRow
+                                key={key}
+                                label={group.labels[key] ?? humanizeKey(key)}
+                                spec={spec}
+                                roles={roles}
+                                onEditRole={onEditRole}
+                            />
+                        ))}
+                    </div>
+                </div>
+            ))}
         </div>
     )
 }

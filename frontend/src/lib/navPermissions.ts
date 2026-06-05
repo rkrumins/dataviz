@@ -1,13 +1,18 @@
 /**
- * Centralised navigation visibility catalogue.
+ * Navigation visibility defaults (compile-time seed).
  *
- * One place that maps every sidebar entry + admin sub-page to the
- * permission(s) the user must hold to see it. Mirrors the backend
- * endpoint gates so the FE never drifts.
+ * Phase 16: the authoritative section→permission catalogue now lives
+ * in the backend (``backend/app/services/nav_catalogue.py``) and is
+ * served via ``GET /me/nav`` into ``store/navCatalogue.ts``. These
+ * records are the **fallback** the FE ships with so the shell renders
+ * synchronously before the fetch resolves (and if the endpoint is
+ * briefly unavailable). They must mirror the backend; a drift test
+ * (``backend/tests/test_nav_catalogue.py``) guards the backend side,
+ * and the store reconciles to the served values once loaded.
  *
- * When a backend gate changes (e.g. a new admin section gets its own
- * ``requires(...)`` decorator), update the matching entry here — that's
- * the only place the FE needs to learn about it.
+ * Consumers should read live specs from the catalogue store
+ * (``useSidebarSpec`` / ``useAdminSectionSpec``), not import these
+ * directly — they exist only as the seed.
  */
 import type { NavigationTab } from '@/store/navigation'
 
@@ -38,7 +43,7 @@ export type NavPermissionSpec =
  * ``useAnyWorkspacePermission``. Listing both explicitly here keeps
  * the spec greppable.
  */
-export const SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpec> = {
+export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpec> = {
     dashboard:  { kind: 'always' },
     explore:    { kind: 'always' },
     workspaces: { kind: 'always' },
@@ -56,7 +61,7 @@ export const SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpec> = {
  * has its own ``system:groups:manage`` permission so a delegated
  * groups admin can land there without being a full super-admin.
  */
-export const ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec> = {
+export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec> = {
     overview:      { kind: 'perm', perm: 'system:admin' },
     features:      { kind: 'perm', perm: 'system:admin' },
     announcements: { kind: 'perm', perm: 'system:admin' },
@@ -65,4 +70,61 @@ export const ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec> = {
     permissions:   { kind: 'perm', perm: 'system:admin' },
     sso:           { kind: 'perm', perm: 'system:admin' },
     audit:         { kind: 'perm', perm: 'system:admin' },
+}
+
+
+// ── Role → spec evaluation (for the admin Feature Access map) ────────
+// Mirrors the backend resolver's implications so the admin map shows
+// which roles can reach each section accurately:
+//   * ``system:admin`` implies every permission.
+//   * ``workspace:admin`` implies every other ``workspace:*`` leaf.
+// Kept here next to the spec type so the semantics live in one place.
+
+const WORKSPACE_LEAVES = [
+    'workspace:admin',
+    'workspace:datasource:manage',
+    'workspace:datasource:read',
+    'workspace:view:create',
+    'workspace:view:edit',
+    'workspace:view:delete',
+    'workspace:view:read',
+]
+
+/** Expand a role's granted permission list to its effective set,
+ *  applying the same implications the backend resolver does. */
+export function roleEffectivePermissions(perms: string[]): Set<string> {
+    const set = new Set(perms)
+    if (set.has('workspace:admin')) {
+        for (const leaf of WORKSPACE_LEAVES) set.add(leaf)
+    }
+    return set
+}
+
+function permSatisfied(effective: Set<string>, perm: string): boolean {
+    if (effective.has('system:admin')) return true
+    if (effective.has(perm)) return true
+    // Wildcard grant (e.g. ``workspace:view:*``) covers its leaves.
+    for (const granted of effective) {
+        if (granted.endsWith(':*') && perm.startsWith(granted.slice(0, -2) + ':')) {
+            return true
+        }
+    }
+    return false
+}
+
+/** Would a role with these granted permissions satisfy a nav spec?
+ *  Used by the read-only Feature Access map to list, per section, the
+ *  roles that unlock it. Pure — no claims, no store. */
+export function roleSatisfiesSpec(perms: string[], spec: NavPermissionSpec): boolean {
+    const eff = roleEffectivePermissions(perms)
+    switch (spec.kind) {
+        case 'always':
+            return true
+        case 'perm':
+            return permSatisfied(eff, spec.perm)
+        case 'anyPerm':
+            return spec.perms.some((p) => permSatisfied(eff, p))
+        case 'workspaceAny':
+            return permSatisfied(eff, spec.perm)
+    }
 }

@@ -4,7 +4,6 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { RequireNav } from '@/components/auth/RequireNav'
-import { SIDEBAR_PERMISSIONS, ADMIN_SECTION_PERMISSIONS } from '@/lib/navPermissions'
 
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
@@ -87,7 +86,7 @@ export const router = createBrowserRouter([
       {
         path: 'ingestion',
         element: (
-          <RequireNav spec={SIDEBAR_PERMISSIONS.ingestion}>
+          <RequireNav group="sidebar" sectionKey="ingestion">
             <Lazy><IngestionPage /></Lazy>
           </RequireNav>
         ),
@@ -109,7 +108,7 @@ export const router = createBrowserRouter([
       {
         path: 'schema',
         element: (
-          <RequireNav spec={SIDEBAR_PERMISSIONS.schema}>
+          <RequireNav group="sidebar" sectionKey="schema">
             <Lazy><OntologySchemaPage /></Lazy>
           </RequireNav>
         ),
@@ -117,7 +116,7 @@ export const router = createBrowserRouter([
       {
         path: 'schema/:ontologyId',
         element: (
-          <RequireNav spec={SIDEBAR_PERMISSIONS.schema}>
+          <RequireNav group="sidebar" sectionKey="schema">
             <Lazy><OntologySchemaPage /></Lazy>
           </RequireNav>
         ),
@@ -141,7 +140,7 @@ export const router = createBrowserRouter([
         // page they have access to and gets an explicit denied panel
         // on routes they don't.
         element: (
-          <RequireNav spec={SIDEBAR_PERMISSIONS.admin}>
+          <RequireNav group="sidebar" sectionKey="admin">
             <Lazy><AdminPage /></Lazy>
           </RequireNav>
         ),
@@ -150,7 +149,7 @@ export const router = createBrowserRouter([
           {
             path: 'overview',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.overview}>
+              <RequireNav group="admin" sectionKey="overview">
                 <Lazy><AdminOverview /></Lazy>
               </RequireNav>
             ),
@@ -158,7 +157,7 @@ export const router = createBrowserRouter([
           {
             path: 'features',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.features}>
+              <RequireNav group="admin" sectionKey="features">
                 <Lazy><AdminFeatures /></Lazy>
               </RequireNav>
             ),
@@ -166,7 +165,7 @@ export const router = createBrowserRouter([
           {
             path: 'users',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.users}>
+              <RequireNav group="admin" sectionKey="users">
                 <Lazy><AdminUsers /></Lazy>
               </RequireNav>
             ),
@@ -174,7 +173,7 @@ export const router = createBrowserRouter([
           {
             path: 'groups',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.groups}>
+              <RequireNav group="admin" sectionKey="groups">
                 <Lazy><AdminGroups /></Lazy>
               </RequireNav>
             ),
@@ -182,7 +181,7 @@ export const router = createBrowserRouter([
           {
             path: 'permissions',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.permissions}>
+              <RequireNav group="admin" sectionKey="permissions">
                 <Lazy><AdminPermissions /></Lazy>
               </RequireNav>
             ),
@@ -190,7 +189,7 @@ export const router = createBrowserRouter([
           {
             path: 'announcements',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.announcements}>
+              <RequireNav group="admin" sectionKey="announcements">
                 <Lazy><AdminAnnouncements /></Lazy>
               </RequireNav>
             ),
@@ -198,7 +197,7 @@ export const router = createBrowserRouter([
           {
             path: 'sso',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.sso}>
+              <RequireNav group="admin" sectionKey="sso">
                 <Lazy><AdminSso /></Lazy>
               </RequireNav>
             ),
@@ -206,7 +205,7 @@ export const router = createBrowserRouter([
           {
             path: 'audit',
             element: (
-              <RequireNav spec={ADMIN_SECTION_PERMISSIONS.audit}>
+              <RequireNav group="admin" sectionKey="audit">
                 <Lazy><AdminAudit /></Lazy>
               </RequireNav>
             ),

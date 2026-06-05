@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -481,3 +481,63 @@ class RBACSearchHit(BaseModel):
     display_name: str = Field(alias="displayName")
     secondary: Optional[str] = None
     score: int
+
+
+# ── Nav catalogue (Phase 16) ────────────────────────────────────────
+# The section→permission visibility specs served by ``GET /me/nav``.
+# Mirror the FE ``NavPermissionSpec`` discriminated union one-for-one;
+# ``kind`` is the discriminator. Defined here (not in the service) so
+# both the endpoint response and the catalogue module share one shape.
+
+class NavSpecAlways(BaseModel):
+    """Visible to every authenticated user."""
+    kind: Literal["always"] = "always"
+
+
+class NavSpecPerm(BaseModel):
+    """Requires a single global permission."""
+    kind: Literal["perm"] = "perm"
+    perm: str
+
+
+class NavSpecAnyPerm(BaseModel):
+    """Visible when the user holds any one of ``perms``.
+
+    Global perms are checked against the global claim bucket;
+    workspace-scoped perms in the list are matched against ANY
+    workspace bucket (so the section shows for a member who holds it
+    in one workspace).
+    """
+    kind: Literal["anyPerm"] = "anyPerm"
+    perms: list[str]
+
+
+class NavSpecWorkspaceAny(BaseModel):
+    """Requires ``perm`` held in at least one workspace bucket."""
+    kind: Literal["workspaceAny"] = "workspaceAny"
+    perm: str
+
+
+# Discriminated on ``kind`` so the wire shape stays flat
+# (``{kind, perm?, perms?}``) and round-trips through model_dump.
+NavSpec = Annotated[
+    Union[NavSpecAlways, NavSpecPerm, NavSpecAnyPerm, NavSpecWorkspaceAny],
+    Field(discriminator="kind"),
+]
+
+
+class NavSection(BaseModel):
+    """One catalogue entry: a stable key, a display label, and the
+    visibility spec the frontend evaluates against the caller's
+    claims."""
+    model_config = ConfigDict(populate_by_name=True)
+    key: str
+    label: str
+    spec: NavSpec
+
+
+class NavCatalogueResponse(BaseModel):
+    """Wire shape of ``GET /me/nav`` — the full section catalogue."""
+    model_config = ConfigDict(populate_by_name=True)
+    sidebar: dict[str, NavSection]
+    admin_sections: dict[str, NavSection] = Field(alias="adminSections")

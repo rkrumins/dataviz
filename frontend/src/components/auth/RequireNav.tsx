@@ -1,22 +1,38 @@
 /**
- * Spec-driven route guard. Consumes a ``NavPermissionSpec`` from the
- * centralised catalogue (``lib/navPermissions``) so the route + the
- * sidebar item that points at it share one source of truth.
+ * Section-driven route guard. Resolves the visibility spec from the
+ * centralised nav catalogue store (backend-served, seeded by bundled
+ * defaults) so the route + the sidebar item that points at it share
+ * one runtime source of truth.
+ *
+ * Pass a section reference (``group`` + ``sectionKey``) so the guard
+ * reads the live spec from the store — the route definitions stay
+ * static while the gate stays in sync with the served catalogue.
  */
 import type { ReactNode } from 'react'
 import { ShieldOff } from 'lucide-react'
 import { useNavPermission } from '@/store/auth'
+import { useSidebarSpec, useAdminSectionSpec } from '@/store/navCatalogue'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
+import type { NavigationTab } from '@/store/navigation'
 
 
 interface RequireNavProps {
-    spec: NavPermissionSpec
+    /** Which catalogue the ``sectionKey`` belongs to. */
+    group: 'sidebar' | 'admin'
+    /** Catalogue key: a ``NavigationTab`` for ``sidebar`` or an admin
+     *  route segment (overview / groups / …) for ``admin``. */
+    sectionKey: string
     fallback?: ReactNode
     children: ReactNode
 }
 
 
-export function RequireNav({ spec, fallback, children }: RequireNavProps) {
+export function RequireNav({ group, sectionKey, fallback, children }: RequireNavProps) {
+    // Both hooks run every render (hook-rules); only the relevant one's
+    // result is used. Cheap — each is a single store selector.
+    const sidebarSpec = useSidebarSpec(sectionKey as NavigationTab)
+    const adminSpec = useAdminSectionSpec(sectionKey)
+    const spec = group === 'sidebar' ? sidebarSpec : adminSpec
     const allowed = useNavPermission(spec)
     if (allowed) return <>{children}</>
     return <>{fallback ?? <DeniedPanel spec={spec} />}</>

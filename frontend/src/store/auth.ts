@@ -27,6 +27,7 @@ import {
     writeUserCache,
 } from '@/store/userCache'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
+import { useNavCatalogueStore } from '@/store/navCatalogue'
 
 export type { PermissionClaims }
 
@@ -233,6 +234,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // doesn't unauthenticate the user, it just means the FE
             // gates fall closed until next refresh.
             await hydratePermissions(set)
+            // Phase 16: pull the nav catalogue (section→permission map)
+            // once so the sidebar + route guards read live specs.
+            // Seeded with bundled defaults, so this is non-fatal.
+            void useNavCatalogueStore.getState().hydrate()
         } catch {
             // Any failure (no cookie, expired, server down) →
             // unauthenticated. Wipe the cache so the next boot in
@@ -251,6 +256,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
             await hydratePermissions(set)
+            // Phase 16: load the nav catalogue post-login (see bootstrap).
+            void useNavCatalogueStore.getState().hydrate()
             return true
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Login failed'

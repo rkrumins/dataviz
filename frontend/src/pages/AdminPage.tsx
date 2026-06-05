@@ -12,8 +12,8 @@ import {
     UserCog, Users2, KeyRound, Network, History,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { ADMIN_SECTION_PERMISSIONS } from '@/lib/navPermissions'
 import { useNavPermission } from '@/store/auth'
+import { useAdminSectionSpec } from '@/store/navCatalogue'
 
 // Administration sidebar is split into two sections — "System" for
 // platform-wide configuration and "Identity & Access" for the people
@@ -55,17 +55,19 @@ export function AdminPage() {
     const location = useLocation()
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
-    // Permission gate per admin sub-item, driven by
-    // ``ADMIN_SECTION_PERMISSIONS``. Hooks called in fixed order;
-    // entries the user lacks perms for drop out of the group.
-    const overviewVisible      = useNavPermission(ADMIN_SECTION_PERMISSIONS.overview)
-    const featuresVisible      = useNavPermission(ADMIN_SECTION_PERMISSIONS.features)
-    const announcementsVisible = useNavPermission(ADMIN_SECTION_PERMISSIONS.announcements)
-    const usersVisible         = useNavPermission(ADMIN_SECTION_PERMISSIONS.users)
-    const groupsVisible        = useNavPermission(ADMIN_SECTION_PERMISSIONS.groups)
-    const permissionsVisible   = useNavPermission(ADMIN_SECTION_PERMISSIONS.permissions)
-    const ssoVisible           = useNavPermission(ADMIN_SECTION_PERMISSIONS.sso)
-    const auditVisible         = useNavPermission(ADMIN_SECTION_PERMISSIONS.audit)
+    // Permission gate per admin sub-item, driven by the centralised nav
+    // catalogue served from the backend (seeded by bundled defaults).
+    // Hooks called in fixed order; entries the user lacks perms for
+    // drop out of the group. ``useAdminSectionSpec`` resolves the live
+    // spec from the store.
+    const overviewVisible      = useNavPermission(useAdminSectionSpec('overview'))
+    const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
+    const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
+    const usersVisible         = useNavPermission(useAdminSectionSpec('users'))
+    const groupsVisible        = useNavPermission(useAdminSectionSpec('groups'))
+    const permissionsVisible   = useNavPermission(useAdminSectionSpec('permissions'))
+    const ssoVisible           = useNavPermission(useAdminSectionSpec('sso'))
+    const auditVisible         = useNavPermission(useAdminSectionSpec('audit'))
 
     const itemVisibility: Record<string, boolean> = {
         overview:      overviewVisible,

@@ -24,9 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.endpoints.permissions_admin import compute_user_access
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
 from backend.app.db.engine import get_db_session
+from backend.app.services.nav_catalogue import get_catalogue
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
-from backend.common.models.rbac import UserAccessResponse
+from backend.common.models.rbac import NavCatalogueResponse, UserAccessResponse
 
 
 router = APIRouter()
@@ -95,3 +96,23 @@ async def get_my_access(
         # mid-request; treat as 404 rather than 500.
         raise HTTPException(status_code=404, detail="User not found")
     return response
+
+
+@router.get(
+    "/nav",
+    response_model=NavCatalogueResponse,
+    response_model_by_alias=True,
+)
+async def get_nav_catalogue(
+    _user: User = Depends(get_current_user),
+) -> NavCatalogueResponse:
+    """Return the navigation visibility catalogue (Phase 16).
+
+    The section→permission map the frontend uses to gate sidebar and
+    admin nav items. Static (not personalised) — every authenticated
+    user gets the same catalogue and evaluates each spec against their
+    own claims client-side. Centralising it here means the FE no
+    longer hardcodes these gates and can't drift from the backend
+    ``requires(...)`` enforcement (see ``test_nav_catalogue.py``).
+    """
+    return get_catalogue()
