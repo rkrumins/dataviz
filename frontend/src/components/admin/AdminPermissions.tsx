@@ -81,6 +81,53 @@ const ROLE_VISUAL: Record<string, {
     gradient: string
     iconBg: string
 }> = {
+    // Phase 5 post-uplift built-ins (super/org/workspace tiers). The
+    // backend migration ``20260603_1100_rbac_uplift`` renamed
+    // ``admin/user/viewer`` to these. Keep the legacy entries below for
+    // backwards-compat with any data that still references the old
+    // names (custom roles, audit log entries, etc.).
+    super_admin: {
+        label: 'Super admin',
+        icon: Shield,
+        accent: 'amber',
+        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+        gradient: 'from-amber-500/20 to-amber-500/0',
+        iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
+    },
+    org_admin: {
+        label: 'Org admin',
+        icon: Shield,
+        accent: 'rose',
+        badge: 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20',
+        gradient: 'from-rose-500/20 to-rose-500/0',
+        iconBg: 'bg-rose-500/10 text-rose-500 border-rose-500/20',
+    },
+    workspace_admin: {
+        label: 'Workspace admin',
+        icon: Shield,
+        accent: 'indigo',
+        badge: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+        gradient: 'from-indigo-500/20 to-indigo-500/0',
+        iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
+    },
+    workspace_member: {
+        label: 'Workspace member',
+        icon: UserCog,
+        accent: 'sky',
+        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
+        gradient: 'from-sky-500/20 to-sky-500/0',
+        iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
+    },
+    workspace_viewer: {
+        label: 'Workspace viewer',
+        icon: Eye,
+        accent: 'slate',
+        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
+        gradient: 'from-slate-500/20 to-slate-500/0',
+        iconBg: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
+    },
+    // Pre-uplift legacy names — kept so any rogue reference doesn't
+    // fall through to the "Custom" badge with the wrong colour.
     admin: {
         label: 'Admin',
         icon: Shield,
@@ -995,7 +1042,7 @@ function PermissionDetailDrawer({
                         ) : (
                             <div className="flex flex-wrap gap-2">
                                 {grantedTo.map(r => {
-                                    const v = ROLE_VISUAL[r.name] ?? ROLE_VISUAL.user
+                                    const v = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
                                     const RoleIcon = v.icon
                                     return (
                                         <span
@@ -1204,7 +1251,7 @@ function PermissionCatalogTab({
                                                         <span className="text-[11px] italic text-ink-muted">No role</span>
                                                     ) : (
                                                         inRoles.map(rname => {
-                                                            const v = ROLE_VISUAL[rname] ?? ROLE_VISUAL.user
+                                                            const v = ROLE_VISUAL[rname] ?? CUSTOM_ROLE_VISUAL
                                                             const RoleIcon = v.icon
                                                             return (
                                                                 <span
@@ -1660,7 +1707,7 @@ function WorkspaceMembersDetail({
                 ) : (
                     <div className="rounded-xl border border-glass-border bg-glass-base/20 divide-y divide-glass-border">
                         {members.map(m => {
-                            const v = ROLE_VISUAL[m.role] ?? ROLE_VISUAL.user
+                            const v = ROLE_VISUAL[m.role] ?? CUSTOM_ROLE_VISUAL
                             const RoleIcon = v.icon
                             const name = m.subject.displayName ?? m.subject.id
                             const isUser = m.subject.type === 'user'
