@@ -96,10 +96,15 @@ function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete,
                         <StatusChip meta={syntheticMetaFromSweep(health, provider.id)} compact />
                     </div>
                 </div>
-                <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
-                    {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
-                    {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
-                </div>
+                {/* Connection endpoint (host:port + TLS) is a connection
+                    detail — only managers see it. Readers see name, type,
+                    and status only. */}
+                {canManage && (
+                    <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
+                        {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
+                        {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
+                    </div>
+                )}
                 {health.status === 'unhealthy' && health.error && (
                     <div className="mb-4 p-3 rounded-xl bg-red-500/5 border border-red-500/15 text-sm text-red-600 dark:text-red-400 leading-relaxed">
                         <div className="flex items-start gap-2">
@@ -137,13 +142,17 @@ function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete,
             {expanded && (
                 <div className="px-5 pb-5 pt-3 border-t border-glass-border animate-in slide-in-from-top-2 fade-in duration-200 space-y-4">
                     <dl className="grid grid-cols-2 gap-3 text-xs">
-                        <div><dt className="text-ink-muted font-medium">Provider ID</dt><dd className="font-mono text-ink mt-0.5 truncate">{provider.id}</dd></div>
+                        {/* Provider ID is an internal connection detail. */}
+                        {canManage && <div><dt className="text-ink-muted font-medium">Provider ID</dt><dd className="font-mono text-ink mt-0.5 truncate">{provider.id}</dd></div>}
                         <div><dt className="text-ink-muted font-medium">Status</dt><dd className={cn("mt-0.5 font-semibold", provider.isActive ? "text-emerald-500" : "text-red-500")}>{provider.isActive ? 'Active' : 'Inactive'}</dd></div>
                         <div><dt className="text-ink-muted font-medium">Created</dt><dd className="text-ink mt-0.5">{new Date(provider.createdAt).toLocaleDateString()}</dd></div>
                         <div><dt className="text-ink-muted font-medium">Last Updated</dt><dd className="text-ink mt-0.5">{new Date(provider.updatedAt).toLocaleDateString()}</dd></div>
                         {health.error && <div className="col-span-2"><dt className="text-red-500 font-medium">Error</dt><dd className="text-red-400 mt-0.5 font-mono text-[11px] break-all">{health.error}</dd></div>}
                     </dl>
-                    <ProviderAdmissionEditor providerId={provider.id} />
+                    {/* Admission control hits a system:admin-only endpoint —
+                        only render it for managers (also avoids a 403 per
+                        expanded card for readers). */}
+                    {canManage && <ProviderAdmissionEditor providerId={provider.id} />}
                 </div>
             )}
         </div>
@@ -263,9 +272,11 @@ export function RegistryConnections() {
                             <WifiOff className="w-3 h-3" /> {unhealthyCount} Disconnected
                         </div>
                     )}
-                    <button onClick={() => { void refreshHealth() }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-ink-muted hover:text-ink transition-colors ml-auto">
-                        <RefreshCw className="w-3 h-3" /> Re-test All
-                    </button>
+                    {canManage && (
+                        <button onClick={() => { void refreshHealth() }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-ink-muted hover:text-ink transition-colors ml-auto">
+                            <RefreshCw className="w-3 h-3" /> Re-test All
+                        </button>
+                    )}
                 </div>
             )}
 
