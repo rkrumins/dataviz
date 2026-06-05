@@ -121,6 +121,16 @@ export function enableProviderStatusPolling() {
   startPolling()
 }
 
+/** Tear the poller down — called when the user lacks ``system:admin``
+ *  (or is demoted mid-session). The endpoint is admin-only, so a
+ *  non-admin would just 403 every poll without this. Symmetric with
+ *  ``enable``; idempotent — the visibilitychange handler already
+ *  respects ``authReady``. */
+export function disableProviderStatusPolling() {
+  authReady = false
+  stopPolling()
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

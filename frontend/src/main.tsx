@@ -6,8 +6,11 @@ import { router } from './routes'
 import './styles/globals.css'
 import { GraphProvider } from '@/providers/GraphProviderContext'
 import { BackendHealthBanner } from '@/components/layout/BackendHealthBanner'
-import { useAuthStore } from '@/store/auth'
-import { enableProviderStatusPolling } from '@/store/providerStatus'
+import { useAuthStore, usePermission } from '@/store/auth'
+import {
+  enableProviderStatusPolling,
+  disableProviderStatusPolling,
+} from '@/store/providerStatus'
 import { enableProviderHealthPolling } from '@/store/providerHealth'
 
 const queryClient = new QueryClient({
@@ -42,6 +45,14 @@ export function getQueryClient(): QueryClient | null {
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const status = useAuthStore((s) => s.status)
+  // Phase 17: provider-status polling hits ``/admin/providers/status``
+  // (system:admin-gated). Subscribe to the claim so the poller starts
+  // for an admin once claims hydrate AND tears down on demotion.
+  // Bootstrap flips ``status → 'authenticated'`` BEFORE awaiting
+  // hydratePermissions, so an inline ``can()`` check at status-flip
+  // time would be empty — the effect re-runs when claims land.
+  const canPollProviders = usePermission('system:admin')
+
   useEffect(() => {
     void bootstrap()
     const onSessionLost = () => useAuthStore.getState().handleSessionLost()
@@ -49,14 +60,18 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('auth:session-lost', onSessionLost)
   }, [bootstrap])
 
+  useEffect(() => {
+    if (status !== 'authenticated') return
+    // Public endpoint — every authenticated user.
+    enableProviderHealthPolling()
+    // Admin-only endpoint — only super_admin. Toggle in both
+    // directions so a mid-session demotion stops the timer.
+    if (canPollProviders) enableProviderStatusPolling()
+    else disableProviderStatusPolling()
+  }, [status, canPollProviders])
+
   // Block rendering until auth resolves — prevents premature API calls
   if (status === 'idle' || status === 'loading') return null
-
-  // Start background pollers only once auth confirms user is logged in
-  if (status === 'authenticated') {
-    enableProviderStatusPolling()
-    enableProviderHealthPolling()
-  }
 
   return <>{children}</>
 }

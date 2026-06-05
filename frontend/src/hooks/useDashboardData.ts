@@ -5,6 +5,7 @@ import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
+import { usePermission } from '@/store/auth'
 import type { ViewConfiguration } from '@/types/schema'
 
 const EMPTY_VIEWS: ViewConfiguration[] = []
@@ -140,12 +141,22 @@ export function useDashboardData() {
         fetchAllStats()
     }, [workspaces])
 
-    // Fetch Templates + Ontologies. Both routers are system:admin-gated;
-    // the dashboard probes them to render counts for admins and silently
-    // shows zero for non-admins. ``silent403`` keeps the global denial
-    // modal from popping on every non-admin dashboard load — the
-    // affected sections just render empty.
+    // Phase 17: Templates + Ontologies live behind system:admin gates.
+    // Skip the fetch entirely for non-admins — the dashboard tiles and
+    // the global-search Template/Semantic-Layer categories already
+    // handle empty arrays, so the UI stays consistent (just no admin
+    // probe + no 403 in the console). Re-fires when the claim flips
+    // (login, silent-refresh after promotion). ``silent403`` is kept
+    // as belt-and-suspenders in the rare case admin demotion races a
+    // refresh while the effect is mid-flight.
+    const isPlatformAdmin = usePermission('system:admin')
+
     useEffect(() => {
+        if (!isPlatformAdmin) {
+            setTemplates([])
+            setIsLoadingTemplates(false)
+            return
+        }
         const fetchTemplates = async () => {
             setIsLoadingTemplates(true)
             try {
@@ -163,9 +174,14 @@ export function useDashboardData() {
             }
         }
         fetchTemplates()
-    }, [])
+    }, [isPlatformAdmin])
 
     useEffect(() => {
+        if (!isPlatformAdmin) {
+            setOntologies([])
+            setIsLoadingOntologies(false)
+            return
+        }
         const fetchOntologies = async () => {
             setIsLoadingOntologies(true)
             try {
@@ -183,7 +199,7 @@ export function useDashboardData() {
             }
         }
         fetchOntologies()
-    }, [])
+    }, [isPlatformAdmin])
 
     // Derive recent and popular views — memoized so downstream effects get stable refs
     const recentViews = useMemo(
