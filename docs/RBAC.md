@@ -324,6 +324,60 @@ Workspace roles see `workspace:*` + `resource:*` only; global
 roles see `system:*` + `resource:*` only. Switching scope mid-edit
 clears any silently-invalid selections.
 
+## Phase 14 — Two-column invite modal + shareable-group override
+
+* **Modal layout.** The Phase-13 invite modal stacked every
+  section vertically and used the default `max-w-md` shell, so
+  with No-role + Standard Roles + Workspace + Groups + Recipient +
+  Expiry + Summary present it overflowed the viewport and the
+  Generate Link button scrolled off-screen.
+
+  Phase 14 widens the shell to `max-w-3xl` only for the invite
+  modal, caps it at `90vh`, splits the body into a responsive
+  two-column grid (LEFT = role catalogue, RIGHT = Workspace +
+  Groups + Recipient), and pins the Cancel / Generate Link
+  buttons in a sticky footer. The summary preview spans full
+  width below the grid. The page now fits comfortably in a
+  standard laptop viewport, with the role list scrolling
+  internally if there are many custom roles.
+
+* **Shareable-group override.** Phase 13's rule "groups attached
+  → email required" treats every group invite the same. Real
+  enterprise workflows include things like "everyone on the
+  Design Slack click this link to join the Designers group" —
+  there's no per-person email to pin.
+
+  Phase 14 adds an opt-in escape hatch:
+
+  * `CreateInviteRequest.allow_shareable_with_groups` (alias
+    `allowShareableWithGroups`). Default `False` — the safe rule
+    stands.
+  * The frontend exposes the override as a small inline
+    "→ Make this a shareable group invite" link inside the
+    amber email-required callout. Clicking it opens an inline
+    confirmation panel with the exact group names being
+    granted, an "I understand this link can be shared and
+    reused" checkbox, and Cancel / Make-it-shareable buttons.
+  * Once confirmed, the amber callout flips to a softer slate
+    "Shareable group invite" notice with a clear ✕ to revert.
+    Email becomes truly optional; Generate Link enables.
+  * The override is automatically revoked if conditions change
+    (a privileged role gets added, all groups get removed).
+
+* **What the override does NOT bypass.**
+
+  * **Privileged roles** (`workspace:admin`, any `system:*`)
+    still require an email pin even with the override on. A
+    workspace-admin grant is a per-identity escalation; the
+    override only relaxes the groups-cross-workspace rule.
+  * **Protected groups** (IdP-managed) are still refused.
+
+* **Audit trail.** Override invites emit a distinct event type
+  `user.invite_created_shareable_with_groups` (vs the standard
+  `user.invite_created`), so an auditor can review who used the
+  override. The payload includes the role, group ids, and
+  `shareable_groups_override: true` for filtering.
+
 ## Phase 13 — Standard vs Custom roles + Groups in invites
 
 The Phase-11 invite modal had two rough edges in the wild:

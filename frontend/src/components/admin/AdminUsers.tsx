@@ -384,6 +384,7 @@ export function AdminUsers() {
             workspaceId?: string | null
             email?: string | null
             groupIds?: string[] | null
+            allowShareableWithGroups?: boolean
             expiresInHours?: number
         },
     ) => {
@@ -816,7 +817,16 @@ export function AdminUsers() {
                         <motion.div initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.96, opacity: 0 }} transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
-                            className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md p-6">
+                            className={cn(
+                                "relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6",
+                                // Phase 14: the invite modal carries more sections
+                                // (role + workspace + groups + recipient + expiry +
+                                // summary) and needs more horizontal room for the
+                                // two-column layout. Other modals stay compact.
+                                modal.kind === 'invite'
+                                    ? "max-w-3xl max-h-[90vh] flex flex-col"
+                                    : "max-w-md"
+                            )}>
 
                             {/* ── Reject modal ── */}
                             {modal.kind === 'reject' && (
@@ -1229,6 +1239,7 @@ function InviteForm({
             workspaceId?: string | null
             email?: string | null
             groupIds?: string[] | null
+            allowShareableWithGroups?: boolean
             expiresInHours?: number
         },
     ) => void
@@ -1242,6 +1253,14 @@ function InviteForm({
     const [email, setEmail] = useState<string>('')
     // Phase 12: 24h | 7d | 30d | 90d.
     const [expiresIn, setExpiresIn] = useState<'24h' | '7d' | '30d' | '90d'>('30d')
+    // Phase 14: opt-in override for shareable group invites. Default
+    // OFF (groups → email required); flips to ON only after the admin
+    // explicitly acknowledges the warning. Re-disables automatically
+    // when groups are cleared or a privileged role is added.
+    const [allowShareableGroups, setAllowShareableGroups] = useState<boolean>(false)
+    // Inline confirmation panel inside the email callout.
+    const [overrideConfirmOpen, setOverrideConfirmOpen] = useState<boolean>(false)
+    const [overrideAck, setOverrideAck] = useState<boolean>(false)
 
     useEffect(() => {
         permissionsService.listRoles()
@@ -1267,8 +1286,26 @@ function InviteForm({
     // Phase 13: any group attachment makes the invite privileged-by-
     // policy on the backend; we mirror the UX here so the email field
     // flips to required before submit.
+    // Phase 14: the admin can opt out of the groups-email rule by
+    // toggling ``allowShareableGroups`` (the override). The override
+    // does NOT relax the role-privilege rule — privileged roles still
+    // require email even with the override on.
     const hasGroups = selectedGroups.size > 0
-    const needsEmail = isPrivileged || hasGroups
+    const groupsRequireEmail = hasGroups && !allowShareableGroups
+    const needsEmail = isPrivileged || groupsRequireEmail
+    const overrideAvailable = hasGroups && !isPrivileged
+    const overrideActive = allowShareableGroups && overrideAvailable
+
+    // Reset the override if the conditions change — privileged role
+    // added, or groups cleared — so a stale toggle can't leak through.
+    useEffect(() => {
+        if (!overrideAvailable && allowShareableGroups) {
+            setAllowShareableGroups(false)
+            setOverrideConfirmOpen(false)
+            setOverrideAck(false)
+        }
+    }, [overrideAvailable, allowShareableGroups])
+
     const emailValid = /.+@.+\..+/.test(email.trim())
     const canSubmit =
         (!needsWorkspacePick || !!workspaceId)
@@ -1289,6 +1326,7 @@ function InviteForm({
             workspaceId: isWorkspaceScoped ? effectiveWorkspaceId : null,
             email: email.trim() ? email.trim() : null,
             groupIds: hasGroups ? Array.from(selectedGroups) : null,
+            allowShareableWithGroups: overrideActive,
             expiresInHours,
         })
     }
@@ -1370,44 +1408,55 @@ function InviteForm({
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.18 }}
+            // Phase 14: claim the full vertical budget of the modal
+            // shell so the body can scroll internally and the footer
+            // stays sticky.
+            className="flex-1 flex flex-col min-h-0 -mx-6"
         >
-            <p className="text-sm text-ink-secondary mb-5">
+            <p className="text-sm text-ink-secondary mb-4 px-6">
                 Generate a link that lets a new user sign up. Pick any role —
                 workspace tiers and custom roles work too.
             </p>
 
             {roles === null ? (
-                <RoleListSkeleton />
+                <div className="px-6"><RoleListSkeleton /></div>
             ) : (
                 <>
-                    {/* ── Section 1 — Role ───────────────────────────── */}
-                    <SectionLabel>Choose a role</SectionLabel>
-                    {/* No-role hero — separate from the catalogue so it
-                        reads as "skip this step" rather than just
-                        another role tile. */}
-                    <NoRoleCard
-                        option={noRole}
-                        selected={selectedRole === ''}
-                        onSelect={() => setSelectedRole('')}
-                    />
-                    <div className="space-y-3 mt-3 mb-5 max-h-[280px] overflow-y-auto pr-1">
-                        {standardRoles.length > 0 && (
-                            <RoleGroup
-                                title="Standard Roles"
-                                options={standardRoles}
-                                selected={selectedRole}
-                                onSelect={setSelectedRole}
-                            />
-                        )}
-                        {customRoles.length > 0 && (
-                            <RoleGroup
-                                title="Custom Roles"
-                                options={customRoles}
-                                selected={selectedRole}
-                                onSelect={setSelectedRole}
-                            />
-                        )}
-                    </div>
+                    {/* Scrollable body — wraps the role pickers + the
+                        two-column config grid + the live summary. The
+                        footer below sits outside this scroll region. */}
+                    <div className="flex-1 overflow-y-auto px-6">
+                        <div className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr] gap-x-6 gap-y-0">
+                            {/* ── LEFT column — Role catalogue ─────────── */}
+                            <div>
+                                <SectionLabel>Choose a role</SectionLabel>
+                                <NoRoleCard
+                                    option={noRole}
+                                    selected={selectedRole === ''}
+                                    onSelect={() => setSelectedRole('')}
+                                />
+                                <div className="space-y-3 mt-3 max-h-[360px] overflow-y-auto pr-1">
+                                    {standardRoles.length > 0 && (
+                                        <RoleGroup
+                                            title="Standard Roles"
+                                            options={standardRoles}
+                                            selected={selectedRole}
+                                            onSelect={setSelectedRole}
+                                        />
+                                    )}
+                                    {customRoles.length > 0 && (
+                                        <RoleGroup
+                                            title="Custom Roles"
+                                            options={customRoles}
+                                            selected={selectedRole}
+                                            onSelect={setSelectedRole}
+                                        />
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* ── RIGHT column — Workspace + Groups + Email ── */}
+                            <div className="space-y-0 md:border-l md:border-glass-border md:pl-6 mt-5 md:mt-0">
 
                     {/* ── Section 2 — Workspace (animated) ───────────── */}
                     <AnimatePresence initial={false}>
@@ -1420,7 +1469,7 @@ function InviteForm({
                                 transition={{ duration: 0.18 }}
                                 className="overflow-hidden"
                             >
-                                <div className="border-t border-glass-border mt-5 pt-5">
+                                <div>
                                     <SectionLabel>Workspace</SectionLabel>
                                     {fixedWorkspaceId ? (
                                         <div className="flex items-center gap-2.5 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-glass-border">
@@ -1448,7 +1497,7 @@ function InviteForm({
                     </AnimatePresence>
 
                     {/* ── Section 3 — Groups ─────────────────────────── */}
-                    <div className="border-t border-glass-border mt-5 pt-5">
+                    <div className="mt-5">
                         <SectionLabel>
                             Add to Groups
                             <span className="ml-1 text-ink-muted normal-case tracking-normal font-normal">
@@ -1469,7 +1518,7 @@ function InviteForm({
                     </div>
 
                     {/* ── Section 4 — Recipient (email) ──────────────── */}
-                    <div className="border-t border-glass-border mt-5 pt-5">
+                    <div className="mt-5">
                         <SectionLabel>
                             Recipient
                             {needsEmail ? (
@@ -1484,6 +1533,9 @@ function InviteForm({
                         </SectionLabel>
 
                         <AnimatePresence initial={false}>
+                            {/* Amber email-required callout — only when the
+                                requirement is active (privileged role or
+                                groups-without-override). */}
                             {needsEmail && (
                                 <motion.div
                                     key="priv-callout"
@@ -1491,21 +1543,145 @@ function InviteForm({
                                     animate={{ opacity: 1, y: 0 }}
                                     exit={{ opacity: 0, y: -4 }}
                                     transition={{ duration: 0.18 }}
-                                    className="flex items-start gap-2.5 p-3 mb-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300"
+                                    className="p-3 mb-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300"
                                 >
-                                    <Lock className="w-4 h-4 shrink-0 mt-0.5" />
-                                    <div className="text-xs leading-snug">
-                                        <p className="font-semibold">
-                                            {isPrivileged
-                                                ? 'Privileged role — email required.'
-                                                : 'Group attachments — email required.'}
-                                        </p>
-                                        <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
-                                            {isPrivileged
-                                                ? 'This role grants admin or system permissions. We pin the invite to a target email so a forwarded link can\'t escalate someone else.'
-                                                : 'Group memberships can reach across workspaces. We pin the invite to a target email so a forwarded link can\'t grant the wrong identity that access.'}
+                                    <div className="flex items-start gap-2.5">
+                                        <Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                                        <div className="text-xs leading-snug flex-1 min-w-0">
+                                            <p className="font-semibold">
+                                                {isPrivileged
+                                                    ? 'Privileged role — email required.'
+                                                    : 'Group attachments — email required.'}
+                                            </p>
+                                            <p className="mt-0.5 text-amber-700/80 dark:text-amber-300/80">
+                                                {isPrivileged
+                                                    ? 'This role grants admin or system permissions. We pin the invite to a target email so a forwarded link can\'t escalate someone else.'
+                                                    : 'Group memberships can reach across workspaces. We pin the invite to a target email so a forwarded link can\'t grant the wrong identity that access.'}
+                                            </p>
+                                            {/* Override link — only when the
+                                                requirement is solely from groups
+                                                (not a privileged role) AND the
+                                                confirmation panel isn't already
+                                                open. */}
+                                            {overrideAvailable && !overrideConfirmOpen && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setOverrideConfirmOpen(true)
+                                                        setOverrideAck(false)
+                                                    }}
+                                                    className="mt-1.5 inline-flex items-center gap-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:underline"
+                                                >
+                                                    Make this a shareable group invite →
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Inline confirmation panel. */}
+                                    <AnimatePresence initial={false}>
+                                        {overrideConfirmOpen && (
+                                            <motion.div
+                                                key="override-panel"
+                                                initial={{ opacity: 0, height: 0 }}
+                                                animate={{ opacity: 1, height: 'auto' }}
+                                                exit={{ opacity: 0, height: 0 }}
+                                                transition={{ duration: 0.18 }}
+                                                className="overflow-hidden"
+                                            >
+                                                <div className="mt-3 p-3 rounded-xl bg-canvas-elevated border border-amber-500/40 text-ink">
+                                                    <div className="flex items-start gap-2.5">
+                                                        <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                                        <div className="text-xs leading-snug flex-1 min-w-0">
+                                                            <p className="font-bold">Override the email pin?</p>
+                                                            <p className="mt-1 text-ink-secondary">
+                                                                Anyone with this link will be able to sign up and
+                                                                join {selectedGroupNames.length === 1 ? 'the group' : 'these groups'}:{' '}
+                                                                <span className="font-semibold text-ink">
+                                                                    {selectedGroupNames.join(', ')}
+                                                                </span>.
+                                                                The link is forwardable and reusable. Only override
+                                                                for low-stakes, broadly-shared groups
+                                                                (e.g. "Designers", "Engineering").
+                                                            </p>
+                                                            <label className="mt-2.5 flex items-start gap-2 cursor-pointer select-none">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={overrideAck}
+                                                                    onChange={e => setOverrideAck(e.target.checked)}
+                                                                    className="mt-0.5 accent-amber-500 cursor-pointer"
+                                                                />
+                                                                <span className="text-[11px] text-ink-secondary">
+                                                                    I understand this link can be shared and reused
+                                                                    by multiple people.
+                                                                </span>
+                                                            </label>
+                                                            <div className="mt-3 flex items-center gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setOverrideConfirmOpen(false)
+                                                                        setOverrideAck(false)
+                                                                    }}
+                                                                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                                                >
+                                                                    Cancel
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={!overrideAck}
+                                                                    onClick={() => {
+                                                                        setAllowShareableGroups(true)
+                                                                        setOverrideConfirmOpen(false)
+                                                                    }}
+                                                                    className={cn(
+                                                                        "inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-colors",
+                                                                        overrideAck
+                                                                            ? "bg-amber-500 text-white hover:brightness-110"
+                                                                            : "bg-amber-500/30 text-amber-700 dark:text-amber-300 cursor-not-allowed",
+                                                                    )}
+                                                                >
+                                                                    <Lock className="w-3 h-3" />
+                                                                    Make it shareable
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                </motion.div>
+                            )}
+
+                            {/* Slate notice — shown when the override is
+                                active. Replaces the amber callout. */}
+                            {overrideActive && (
+                                <motion.div
+                                    key="override-active"
+                                    initial={{ opacity: 0, y: -4 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: -4 }}
+                                    transition={{ duration: 0.18 }}
+                                    className="flex items-start gap-2.5 p-3 mb-3 rounded-xl bg-slate-500/10 border border-slate-500/20 text-slate-700 dark:text-slate-300"
+                                >
+                                    <Users2 className="w-4 h-4 shrink-0 mt-0.5" />
+                                    <div className="text-xs leading-snug flex-1 min-w-0">
+                                        <p className="font-semibold">Shareable group invite</p>
+                                        <p className="mt-0.5 text-slate-700/80 dark:text-slate-300/80">
+                                            Anyone with this link can sign up and join the
+                                            selected {selectedGroupNames.length === 1 ? 'group' : 'groups'}.
+                                            Email is optional.
                                         </p>
                                     </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setAllowShareableGroups(false)}
+                                        className="p-1 -m-1 rounded-md text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+                                        title="Require email instead"
+                                    >
+                                        <X className="w-3.5 h-3.5" />
+                                    </button>
                                 </motion.div>
                             )}
                         </AnimatePresence>
@@ -1530,11 +1706,17 @@ function InviteForm({
                         <p className="text-[11px] text-ink-muted mt-1.5">
                             {needsEmail
                                 ? "The link will refuse any signup whose email doesn't match."
-                                : "Leave blank for a shareable link, or pin to one email for a single-recipient invite."}
+                                : overrideActive
+                                    ? "Optional — the link is shareable and reusable."
+                                    : "Leave blank for a shareable link, or pin to one email for a single-recipient invite."}
                         </p>
                     </div>
+                            {/* ── close RIGHT column ────────────────── */}
+                            </div>
+                        {/* ── close two-column grid ─────────────────── */}
+                        </div>
 
-                    {/* ── Section 4 — Access duration ─────────────────── */}
+                    {/* ── Section 5 — Access duration (full width) ───── */}
                     <div className="border-t border-glass-border mt-5 pt-5 mb-5">
                         <SectionLabel>Link expires in</SectionLabel>
                         <div className="flex flex-wrap gap-2">
@@ -1563,20 +1745,26 @@ function InviteForm({
                         </p>
                     </div>
 
-                    {/* ── Live summary preview ───────────────────────── */}
+                    {/* ── Live summary preview (full width) ──────────── */}
                     <InviteSummary
                         roleLabel={summaryRoleLabel}
                         workspaceName={summaryWorkspaceName}
                         groupNames={selectedGroupNames}
                         email={email.trim() || null}
                         emailRequired={needsEmail}
+                        shareable={overrideActive}
                         expiresIn={expiresIn}
                     />
+                    {/* ── close scroll body ──────────────────────────── */}
+                    </div>
 
-                    <ModalFooter onCancel={onCancel} onConfirm={submit}
-                        confirmLabel="Generate Link" confirmIcon={Link2}
-                        confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
-                        loading={loading} disabled={!canSubmit} />
+                    {/* ── Sticky footer ──────────────────────────────── */}
+                    <div className="px-6 pt-4 mt-0 border-t border-glass-border bg-canvas-elevated/95 backdrop-blur">
+                        <ModalFooter onCancel={onCancel} onConfirm={submit}
+                            confirmLabel="Generate Link" confirmIcon={Link2}
+                            confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
+                            loading={loading} disabled={!canSubmit} />
+                    </div>
                 </>
             )}
         </motion.div>
@@ -1879,13 +2067,17 @@ function GroupsPicker({
 // plain English what the invite will do. Builds entirely from the
 // form's live state so it adapts as the user changes anything.
 function InviteSummary({
-    roleLabel, workspaceName, groupNames, email, emailRequired, expiresIn,
+    roleLabel, workspaceName, groupNames, email, emailRequired, shareable, expiresIn,
 }: {
     roleLabel: string | null
     workspaceName: string | null
     groupNames: string[]
     email: string | null
     emailRequired: boolean
+    /** Phase 14: when true, the invite is explicitly a shareable
+     *  group invite — the summary narrates that instead of
+     *  "Shareable link (no email pin)." */
+    shareable: boolean
     expiresIn: string
 }) {
     // Build a tiny sentence: "Activate a new account, [grant Role in
@@ -1905,9 +2097,11 @@ function InviteSummary({
 
     const recipient = email
         ? `Email-bound to ${email}.`
-        : (emailRequired
-            ? 'Email required.'
-            : 'Shareable link (no email pin).')
+        : shareable
+            ? 'Shareable group invite — anyone with the link can sign up.'
+            : (emailRequired
+                ? 'Email required.'
+                : 'Shareable link (no email pin).')
 
     return (
         <motion.div

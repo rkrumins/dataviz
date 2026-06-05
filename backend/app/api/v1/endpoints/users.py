@@ -417,41 +417,61 @@ async def create_invite(
                 )
             resolved_group_ids.append(gid)
 
-    # Phase 13 — MVP privilege rule: any invite that attaches groups
-    # must be email-bound. A group's bindings can span workspaces in
-    # ways the inviter doesn't see, and a forwarded shareable link
-    # could let an unintended identity inherit them all. We may
-    # relax this once we wire a per-group privilege probe.
-    if resolved_group_ids and not body.email:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invites that attach groups must be sent to a specific "
-                "email address. Group memberships can grant access "
-                "beyond what's visible at invite time; we require the "
-                "link to be bound to one identity."
-            ),
-        )
-
+    # Phase 14: classify the role's privilege up-front so we can apply
+    # the right email rule below. ``role_is_privileged`` only true when
+    # a role is attached AND it carries workspace:admin or system:*.
+    role = None
+    role_is_privileged = False
     if body.role is not None:
         role = await role_repo.get_role(session, body.role)
         if role is None:
             raise HTTPException(
                 status_code=400, detail=f"Unknown role '{body.role}'",
             )
-
-        # Privilege classification from the role's permission bundle.
         bundles = await role_repo.role_names_with_permissions(session, [body.role])
         perms = bundles.get(body.role, [])
-        if _role_is_privileged(perms) and not body.email:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "This role is privileged and must be sent to a specific "
-                    "email address — a shareable link could be forwarded to "
-                    "escalate another identity. Provide a target email."
-                ),
-            )
+        role_is_privileged = _role_is_privileged(perms)
+
+    # Email rules, most restrictive first:
+    # 1. Privileged role → email always required (override doesn't
+    #    apply; this is a per-identity escalation vector).
+    if role_is_privileged and not body.email:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This role is privileged and must be sent to a specific "
+                "email address — a shareable link could be forwarded to "
+                "escalate another identity. Provide a target email."
+            ),
+        )
+    # 2. Phase 14: groups → email required UNLESS the admin opts into
+    #    a shareable group invite. The override is intentional and
+    #    audit-logged; it serves the "everyone on the team click this
+    #    to join the Designers group" workflow.
+    if (
+        resolved_group_ids
+        and not body.email
+        and not body.allow_shareable_with_groups
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invites that attach groups must be sent to a specific "
+                "email address. To create a shareable group invite, "
+                "explicitly set ``allowShareableWithGroups: true`` — "
+                "the link will be forwardable and reusable, so only "
+                "use it for low-stakes groups."
+            ),
+        )
+    # Track whether the override is actually being used so we can
+    # emit the distinct audit event below.
+    is_shareable_groups_override = bool(
+        resolved_group_ids
+        and not body.email
+        and body.allow_shareable_with_groups
+    )
+
+    if role is not None:
 
         # Scope classification.
         is_workspace_role = (
@@ -522,23 +542,34 @@ async def create_invite(
         group_ids=resolved_group_ids or None,
     )
 
+    # Phase 14: distinct audit event when the shareable-groups override
+    # was used, so an auditor can review who bypassed the email-pin
+    # rule for group invites. Regular email-bound or no-groups invites
+    # keep the standard event type.
+    audit_event_type = (
+        "user.invite_created_shareable_with_groups"
+        if is_shareable_groups_override
+        else "user.invite_created"
+    )
     await user_repo.create_outbox_event(
         session,
-        event_type="user.invite_created",
+        event_type=audit_event_type,
         payload={
             "role": body.role,
             "workspace_id": resolved_workspace_id,
             "email": body.email,
             "group_ids": resolved_group_ids,
+            "shareable_groups_override": is_shareable_groups_override,
             "created_by": admin.id,
             "expires_at": expires_at,
         },
     )
 
     logger.info(
-        "Invite token created by admin %s (role=%s ws=%s groups=%d email_bound=%s)",
+        "Invite token created by admin %s (role=%s ws=%s groups=%d email_bound=%s override=%s)",
         admin.id, body.role, resolved_workspace_id,
         len(resolved_group_ids), bool(body.email),
+        is_shareable_groups_override,
     )
     return InviteTokenResponse(
         inviteToken=token,

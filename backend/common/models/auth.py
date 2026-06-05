@@ -175,6 +175,16 @@ class CreateInviteRequest(BaseModel):
     # id is validated against the catalogue in the endpoint; protected
     # groups are rejected.
     group_ids: Optional[list[str]] = Field(None, alias="groupIds")
+    # Phase 14: opt-in escape hatch for shareable group invites.
+    # Default ``False`` keeps the safe default (groups require an
+    # email pin). Setting ``True`` skips the groups-email check on the
+    # endpoint side, lets the link be forwarded, and emits a distinct
+    # audit event so the override is reviewable. Privileged-role
+    # invites still require email regardless — the override only
+    # relaxes the groups rule.
+    allow_shareable_with_groups: Optional[bool] = Field(
+        False, alias="allowShareableWithGroups",
+    )
     expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=720)
 
     @field_validator("email")

@@ -41,6 +41,12 @@ export interface CreateInviteOptions {
     email?: string | null
     /** Phase 13: optional list of group ids to attach on signup. */
     groupIds?: string[] | null
+    /** Phase 14: opt-in escape hatch for shareable group invites.
+     *  Default ``false`` keeps the safe behavior (groups → email
+     *  required). Setting ``true`` bypasses the groups-email check
+     *  on the backend and emits a distinct audit event. It does NOT
+     *  bypass the privileged-role email requirement. */
+    allowShareableWithGroups?: boolean
     expiresInHours?: number
 }
 
@@ -111,6 +117,7 @@ export const adminUserService = {
         if (opts.workspaceId) body.workspaceId = opts.workspaceId
         if (opts.email) body.email = opts.email
         if (opts.groupIds && opts.groupIds.length > 0) body.groupIds = opts.groupIds
+        if (opts.allowShareableWithGroups) body.allowShareableWithGroups = true
         return authFetch<InviteResponse>(`${ADMIN_USERS_API}/invite`, {
             method: 'POST',
             body: JSON.stringify(body),

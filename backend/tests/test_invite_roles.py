@@ -516,6 +516,87 @@ async def test_verify_invite_returns_group_names(
     assert body["groupNames"] == ["engineering"]
 
 
+# ── Phase 14 — shareable-groups override ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_shareable_groups_override_permits_no_email(
+    test_client: AsyncClient, db_session,
+):
+    """With ``allowShareableWithGroups=true``, an invite that
+    attaches groups + has no email is accepted. The link is
+    reusable / shareable and any signup gets the memberships."""
+    from backend.app.db.repositories import group_repo
+    grp = await _seed_group(db_session, name="designers")
+
+    r = await _mint_invite(
+        test_client, groupIds=[grp.id], allowShareableWithGroups=True,
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["email"] is None  # truly shareable
+
+    # ANY email can sign up + lands in the group.
+    su = await _signup(test_client, email="anyone@example.com", token=body["inviteToken"])
+    assert su.status_code == 201, su.text
+    user = await user_repo.get_user_by_email(db_session, "anyone@example.com")
+    memberships = await group_repo.get_user_groups(db_session, user.id)
+    assert grp.id in memberships
+
+
+@pytest.mark.asyncio
+async def test_shareable_groups_without_override_still_rejected(
+    test_client: AsyncClient, db_session,
+):
+    """Regression: dropping the override flag still requires email."""
+    grp = await _seed_group(db_session, name="ops")
+    r = await _mint_invite(test_client, groupIds=[grp.id])
+    assert r.status_code == 400
+    assert "email" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_shareable_groups_override_does_not_bypass_privileged_role(
+    test_client: AsyncClient, db_session,
+):
+    """The override only relaxes the GROUPS-email rule. A privileged
+    role still requires an email pin regardless — that's a per-
+    identity escalation vector with a different threat model."""
+    ws = await _seed_workspace(db_session)
+    grp = await _seed_group(db_session, name="elev")
+    r = await _mint_invite(
+        test_client, role="workspace_admin", workspaceId=ws,
+        groupIds=[grp.id], allowShareableWithGroups=True,
+    )
+    assert r.status_code == 400, r.text
+    assert "privileged" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_shareable_groups_override_emits_distinct_audit_event(
+    test_client: AsyncClient, db_session,
+):
+    """The override path emits ``user.invite_created_shareable_with_groups``
+    so an auditor can review who bypassed the email-pin rule."""
+    grp = await _seed_group(db_session, name="auditable")
+    r = await _mint_invite(
+        test_client, groupIds=[grp.id], allowShareableWithGroups=True,
+    )
+    assert r.status_code == 201
+
+    audit = await test_client.get(
+        "/api/v1/admin/audit",
+        params={"eventType": "user.invite_created_shareable_with_groups"},
+    )
+    assert audit.status_code == 200
+    events = audit.json()["events"]
+    assert any(
+        e["payload"].get("group_ids") == [grp.id]
+        and e["payload"].get("shareable_groups_override") is True
+        for e in events
+    ), [e["payload"] for e in events]
+
+
 # ── verify-invite surfaces scope + email ─────────────────────────────
 
 
