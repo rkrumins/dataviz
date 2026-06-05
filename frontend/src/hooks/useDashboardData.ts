@@ -154,8 +154,12 @@ export function useDashboardData() {
     // filters to the user's visible set). Allow the fetch for anyone
     // holding workspace:ontology:read in any workspace. Templates stay
     // platform-admin (no workspace-scoped read path on the backend).
-    const canReadOntologies =
-        isPlatformAdmin || useAnyWorkspacePermission('workspace:ontology:read')
+    //
+    // NOTE: hooks must be called unconditionally (Rules of Hooks) — do
+    // NOT short-circuit with `||`. Always call the workspace probe and
+    // OR the boolean result.
+    const hasOntologyRead = useAnyWorkspacePermission('workspace:ontology:read')
+    const canReadOntologies = isPlatformAdmin || hasOntologyRead
 
     useEffect(() => {
         if (!isPlatformAdmin) {

@@ -105,9 +105,12 @@ export function OntologySchemaPage() {
   // the lever for hiding Create / Edit / Delete / Publish / Import /
   // Clone affordances. workspace:ontology:manage is implied by
   // workspace:admin and the platform globals.
+  //
+  // Rules of Hooks: call both probes unconditionally and OR the
+  // booleans — never short-circuit a hook call with ``||``.
   const isPlatformAdmin = usePermission('system:admin')
-  const canManage =
-    isPlatformAdmin || useAnyWorkspacePermission('workspace:ontology:manage')
+  const hasOntologyManage = useAnyWorkspacePermission('workspace:ontology:manage')
+  const canManage = isPlatformAdmin || hasOntologyManage
 
   // ── Workspace context ──────────────────────────────────────────────
   const workspaces = useWorkspacesStore(s => s.workspaces)

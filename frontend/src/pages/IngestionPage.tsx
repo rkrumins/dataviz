@@ -33,10 +33,14 @@ export function IngestionPage() {
     // Phase 18: readers (workspace:provider:read) can now see the
     // Providers tab read-only. Edit/create/delete buttons in
     // RegistryConnections stay gated by system:admin.
-    const canReadProviders =
-        isPlatformAdmin || useAnyWorkspacePermission('workspace:provider:read')
-    const canReadCatalog =
-        isPlatformAdmin || useAnyWorkspacePermission('workspace:catalog:read')
+    //
+    // Rules of Hooks: always call the workspace probes (don't
+    // short-circuit with ``||``) — the hook count must be stable
+    // across renders even when ``isPlatformAdmin`` flips.
+    const hasProviderRead = useAnyWorkspacePermission('workspace:provider:read')
+    const hasCatalogRead = useAnyWorkspacePermission('workspace:catalog:read')
+    const canReadProviders = isPlatformAdmin || hasProviderRead
+    const canReadCatalog = isPlatformAdmin || hasCatalogRead
 
     // Visible tabs reflect what the current claim set can actually use.
     // Non-readers (no workspace bindings) skip Providers entirely.
