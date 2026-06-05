@@ -13,7 +13,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, CheckCircle2, XCircle, Clock, Shield, AlertCircle,
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
-    ChevronDown, ChevronUp, KeyRound, Eye, UserCog,
+    ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
+    KeyRound, Eye, UserCog,
     RotateCcw, Lock, Copy, Check, Link2,
     Crown, ShieldCheck, Building2, Globe, Sparkles, AtSign, Users2,
 } from 'lucide-react'
@@ -1995,6 +1996,30 @@ function GroupsPicker({
     selected: Set<string>
     onToggle: (id: string) => void
 }) {
+    // Phase 14.1: client-side search + 5-per-page pagination so the
+    // picker scales to 50+ groups without overwhelming the modal.
+    // Selected groups stay pinned as chips above the picker so they
+    // never disappear when the user pages / filters away from them.
+    const [search, setSearch] = useState('')
+    const [page, setPage] = useState(0)
+    const PAGE_SIZE = 5
+
+    // Reset to page 0 whenever the search term changes — otherwise
+    // we'd land on a non-existent page after typing a narrower query.
+    useEffect(() => { setPage(0) }, [search])
+
+    const filtered = useMemo(() => {
+        if (!groups) return [] as GroupResponse[]
+        const q = search.trim().toLowerCase()
+        if (!q) return groups
+        return groups.filter(g => g.name.toLowerCase().includes(q))
+    }, [groups, search])
+
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+    const safePage = Math.min(page, totalPages - 1)
+    const pageStart = safePage * PAGE_SIZE
+    const pageItems = filtered.slice(pageStart, pageStart + PAGE_SIZE)
+
     if (groups === null) {
         return (
             <div className="space-y-1.5">
@@ -2015,45 +2040,140 @@ function GroupsPicker({
             </div>
         )
     }
+
+    // Build the "selected chips" row from the full groups list (not
+    // the filtered slice) so chips stay visible across pages.
+    const selectedGroups = groups.filter(g => selected.has(g.id))
+    const showPagination = filtered.length > PAGE_SIZE
+    const showSearch = groups.length > PAGE_SIZE
+
     return (
-        <div className="grid grid-cols-1 gap-2 max-h-[200px] overflow-y-auto pr-1">
-            {groups.map(g => {
-                const isSelected = selected.has(g.id)
-                return (
-                    <button
-                        key={g.id}
-                        type="button"
-                        onClick={() => onToggle(g.id)}
-                        className={cn(
-                            'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-colors',
-                            isSelected
-                                ? 'border-accent-lineage bg-accent-lineage/5'
-                                : 'border-glass-border bg-canvas-elevated hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
-                        )}
-                    >
-                        <div className={cn(
-                            'w-8 h-8 rounded-lg border flex items-center justify-center shrink-0',
-                            'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
-                        )}>
-                            <Users2 className="w-4 h-4" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                            <p className={cn(
-                                'text-sm font-semibold truncate',
-                                isSelected ? 'text-accent-lineage' : 'text-ink',
-                            )}>
-                                {g.name}
-                            </p>
-                            <p className="text-[11px] text-ink-muted">
-                                {g.memberCount} {g.memberCount === 1 ? 'member' : 'members'}
-                            </p>
-                        </div>
-                        {isSelected && (
-                            <CheckCircle2 className="w-4 h-4 text-accent-lineage shrink-0" />
-                        )}
-                    </button>
-                )
-            })}
+        <div className="space-y-2">
+            {/* Selected-group chips — always visible. */}
+            {selectedGroups.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                    {selectedGroups.map(g => (
+                        <button
+                            key={g.id}
+                            type="button"
+                            onClick={() => onToggle(g.id)}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20 hover:bg-accent-lineage/15 transition-colors"
+                            title="Remove from invite"
+                        >
+                            <Users2 className="w-3 h-3" />
+                            {g.name}
+                            <X className="w-2.5 h-2.5 opacity-70 hover:opacity-100" />
+                        </button>
+                    ))}
+                </div>
+            )}
+
+            {/* Search — only when there are enough groups to warrant it. */}
+            {showSearch && (
+                <div className="relative">
+                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted">
+                        <Search className="w-3.5 h-3.5" />
+                    </div>
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        placeholder="Search groups…"
+                        className="w-full bg-canvas-elevated border border-glass-border rounded-xl pl-9 pr-3 py-2 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40 transition-colors"
+                    />
+                </div>
+            )}
+
+            {/* Page contents — fixed PAGE_SIZE rows so the modal
+                doesn't shift height as the user types. */}
+            <div className="grid grid-cols-1 gap-1.5">
+                {pageItems.length === 0 ? (
+                    <div className="flex items-center gap-2 p-3 rounded-xl bg-black/[0.02] dark:bg-white/[0.02] border border-dashed border-glass-border text-ink-muted text-xs">
+                        <Search className="w-3.5 h-3.5 shrink-0" />
+                        <span>No groups match "{search}".</span>
+                    </div>
+                ) : (
+                    pageItems.map(g => {
+                        const isSelected = selected.has(g.id)
+                        return (
+                            <button
+                                key={g.id}
+                                type="button"
+                                onClick={() => onToggle(g.id)}
+                                className={cn(
+                                    'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-colors',
+                                    isSelected
+                                        ? 'border-accent-lineage bg-accent-lineage/5'
+                                        : 'border-glass-border bg-canvas-elevated hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                )}
+                            >
+                                <div className={cn(
+                                    'w-8 h-8 rounded-lg border flex items-center justify-center shrink-0',
+                                    'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+                                )}>
+                                    <Users2 className="w-4 h-4" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className={cn(
+                                        'text-sm font-semibold truncate',
+                                        isSelected ? 'text-accent-lineage' : 'text-ink',
+                                    )}>
+                                        {g.name}
+                                    </p>
+                                    <p className="text-[11px] text-ink-muted">
+                                        {g.memberCount} {g.memberCount === 1 ? 'member' : 'members'}
+                                    </p>
+                                </div>
+                                {isSelected && (
+                                    <CheckCircle2 className="w-4 h-4 text-accent-lineage shrink-0" />
+                                )}
+                            </button>
+                        )
+                    })
+                )}
+            </div>
+
+            {/* Pagination controls — only when more than one page. */}
+            {showPagination && (
+                <div className="flex items-center justify-between pt-1">
+                    <p className="text-[11px] text-ink-muted">
+                        {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} of {filtered.length}
+                    </p>
+                    <div className="flex items-center gap-1">
+                        <button
+                            type="button"
+                            disabled={safePage === 0}
+                            onClick={() => setPage(p => Math.max(0, p - 1))}
+                            className={cn(
+                                'inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors',
+                                safePage === 0
+                                    ? 'border-glass-border text-ink-muted/40 cursor-not-allowed'
+                                    : 'border-glass-border text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                            )}
+                            title="Previous page"
+                        >
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="text-[11px] font-semibold text-ink-secondary px-1.5 min-w-[3rem] text-center">
+                            {safePage + 1} / {totalPages}
+                        </span>
+                        <button
+                            type="button"
+                            disabled={safePage >= totalPages - 1}
+                            onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                            className={cn(
+                                'inline-flex items-center justify-center w-7 h-7 rounded-lg border transition-colors',
+                                safePage >= totalPages - 1
+                                    ? 'border-glass-border text-ink-muted/40 cursor-not-allowed'
+                                    : 'border-glass-border text-ink-secondary hover:text-ink hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                            )}
+                            title="Next page"
+                        >
+                            <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
