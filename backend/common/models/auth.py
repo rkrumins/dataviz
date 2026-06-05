@@ -185,7 +185,10 @@ class CreateInviteRequest(BaseModel):
     allow_shareable_with_groups: Optional[bool] = Field(
         False, alias="allowShareableWithGroups",
     )
-    expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=720)
+    # Cap matches the longest preset the FE exposes ("90d" = 2160h).
+    # Beyond that, the admin should generate a fresh invite — anything
+    # multi-month becomes a real audit/lifecycle concern.
+    expires_in_hours: int = Field(72, alias="expiresInHours", ge=1, le=2160)
 
     @field_validator("email")
     @classmethod

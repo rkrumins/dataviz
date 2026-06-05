@@ -597,6 +597,27 @@ async def test_shareable_groups_override_emits_distinct_audit_event(
     ), [e["payload"] for e in events]
 
 
+@pytest.mark.asyncio
+async def test_invite_accepts_90d_expiry_preset(
+    test_client: AsyncClient, db_session,
+):
+    """Regression: the ``90d`` FE preset sends ``expiresInHours=2160``.
+    The DTO cap was ``le=720`` (30d), which 422'd valid 90-day
+    invites — bumped to 2160 to match what the picker exposes."""
+    r = await _mint_invite(test_client, expiresInHours=2160)
+    assert r.status_code == 201, r.text
+
+
+@pytest.mark.asyncio
+async def test_invite_rejects_expiry_past_cap(
+    test_client: AsyncClient, db_session,
+):
+    """Above 2160h (90d) we 422 — multi-month invite links are an
+    audit/lifecycle concern; admins regenerate instead."""
+    r = await _mint_invite(test_client, expiresInHours=2161)
+    assert r.status_code == 422, r.text
+
+
 # ── verify-invite surfaces scope + email ─────────────────────────────
 
 
