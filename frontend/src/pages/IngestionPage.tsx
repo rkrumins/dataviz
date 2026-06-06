@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { Server, Layers, Activity, DatabaseZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -61,53 +61,67 @@ export function IngestionPage() {
         document.title = 'Ingestion · Synodic'
     }, [])
 
-    useEffect(() => {
-        let cancelled = false
+    // Phase 18: providers + catalog reads are workspace-scoped. The
+    // backend filters to what the caller's workspaces touch; the FE
+    // skips the call when the user holds neither read perm so the
+    // onboarding card stays accurate. Lifted into a stable callback
+    // so the ``permissions:changed`` listener can call it without
+    // re-creating the listener every render.
+    const loadCounts = useCallback(async () => {
         setLoadError(null)
-        // Phase 18: providers + catalog reads are workspace-scoped. The
-        // backend filters to what the caller's workspaces touch; the FE
-        // skips the call when the user holds neither read perm so the
-        // onboarding card stays accurate.
         const fetches: [Promise<unknown>, Promise<unknown>, Promise<unknown>] = [
             canReadProviders ? providerService.list() : Promise.resolve(null),
             canReadCatalog ? catalogService.list() : Promise.resolve([]),
             workspaceService.list(),
         ]
-        Promise.allSettled(fetches).then(([providersResult, catalogsResult, workspacesResult]) => {
+        const [providersResult, catalogsResult, workspacesResult] = await Promise.allSettled(fetches)
+        const providers = providersResult.status === 'fulfilled'
+            ? (providersResult.value as { length: number } | null)
+            : null
+        const catalogs = catalogsResult.status === 'fulfilled'
+            ? (catalogsResult.value as { length: number })
+            : { length: 0 }
+        const workspaces = workspacesResult.status === 'fulfilled'
+            ? (workspacesResult.value as Array<{ dataSources?: Array<{ ontologyId?: string | null }> }>)
+            : []
+
+        const errors: string[] = []
+        if (canReadProviders && providersResult.status === 'rejected') errors.push('providers')
+        if (canReadCatalog && catalogsResult.status === 'rejected') errors.push('catalog items')
+        if (workspacesResult.status === 'rejected') errors.push('workspaces')
+
+        const hasOntology = workspaces.some(ws =>
+            ws.dataSources?.some(ds => !!ds.ontologyId)
+        )
+        setCounts({
+            providers: providers ? providers.length : 0,
+            catalogs: catalogs.length,
+            workspaces: workspaces.length,
+            hasOntology,
+        })
+        setLoadError(
+            errors.length > 0
+                ? `Could not load ${errors.join(', ')}. Showing partial data.`
+                : null,
+        )
+    }, [canReadProviders, canReadCatalog])
+
+    useEffect(() => {
+        let cancelled = false
+        void loadCounts().then(() => {
             if (cancelled) return
-            const providers = providersResult.status === 'fulfilled'
-                ? (providersResult.value as { length: number } | null)
-                : null
-            const catalogs = catalogsResult.status === 'fulfilled'
-                ? (catalogsResult.value as { length: number })
-                : { length: 0 }
-            const workspaces = workspacesResult.status === 'fulfilled'
-                ? (workspacesResult.value as Array<{ dataSources?: Array<{ ontologyId?: string | null }> }>)
-                : []
-
-            // Only surface load errors for fetches we actually attempted.
-            const errors: string[] = []
-            if (canReadProviders && providersResult.status === 'rejected') errors.push('providers')
-            if (canReadCatalog && catalogsResult.status === 'rejected') errors.push('catalog items')
-            if (workspacesResult.status === 'rejected') errors.push('workspaces')
-
-            const hasOntology = workspaces.some(ws =>
-                ws.dataSources?.some(ds => !!ds.ontologyId)
-            )
-            setCounts({
-                providers: providers ? providers.length : 0,
-                catalogs: catalogs.length,
-                workspaces: workspaces.length,
-                hasOntology,
-            })
-            setLoadError(
-                errors.length > 0
-                    ? `Could not load ${errors.join(', ')}. Showing partial data.`
-                    : null,
-            )
         })
         return () => { cancelled = true }
-    }, [activeTab, canReadProviders, canReadCatalog])
+    }, [activeTab, loadCounts])
+
+    // Refresh when a permissions change is announced (silent refresh,
+    // 60s poller, or cross-tab BroadcastChannel). Without this, the
+    // page keeps showing the pre-revocation counts while open.
+    useEffect(() => {
+        const onChange = () => { void loadCounts() }
+        window.addEventListener('permissions:changed', onChange)
+        return () => window.removeEventListener('permissions:changed', onChange)
+    }, [loadCounts])
 
     const handleStageClick = (tab: string) => {
         if (tab === 'workspaces') {

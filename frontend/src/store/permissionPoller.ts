@@ -147,3 +147,9 @@ if (typeof document !== 'undefined') {
         })()
     })
 }
+
+// Test-only escape hatch. Tests need to exercise a single tick of
+// ``pollOnce`` without waiting for a real setTimeout; the production
+// API only exposes ``enable`` / ``disable``. Importing this name from
+// non-test code is a smell — use the public surface instead.
+export const __pollOnce__ = pollOnce

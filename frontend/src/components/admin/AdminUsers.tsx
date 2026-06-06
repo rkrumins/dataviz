@@ -258,6 +258,15 @@ export function AdminUsers() {
 
     useEffect(() => { fetchUsers() }, [fetchUsers])
 
+    // Refresh on a permissions change (silent refresh, 60s poller, or
+    // cross-tab BroadcastChannel) so a binding/role mutation made
+    // elsewhere refreshes this page in place without a manual reload.
+    useEffect(() => {
+        const onChange = () => { void fetchUsers() }
+        window.addEventListener('permissions:changed', onChange)
+        return () => window.removeEventListener('permissions:changed', onChange)
+    }, [fetchUsers])
+
     // Auto-dismiss success message
     useEffect(() => {
         if (!successMsg) return

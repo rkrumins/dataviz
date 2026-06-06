@@ -5,6 +5,7 @@
  * in ``RequirePermission`` keeps the UI hidden from non-admins.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const ADMIN = '/api/v1/admin'
 
@@ -146,13 +147,10 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     })
     if (!res.ok) {
         const text = await res.text()
-        let detail = res.statusText
-        try {
-            const body = JSON.parse(text)
-            detail = body.detail || JSON.stringify(body)
-        } catch {
-            detail = text || res.statusText
-        }
+        // Use the shared extractor so structured permission /
+        // validation envelopes land as readable strings instead of
+        // "[object Object]" via ``new Error(dict)`` coercion.
+        const detail = extractErrorMessageFromText(text, res.statusText)
         throw new Error(detail)
     }
     if (res.status === 204) return undefined as T

@@ -3,13 +3,12 @@
  * Modern tabbed dashboard with hero header, data source grid, views,
  * aggregation, and ontology sections.
  */
-import { useState, useEffect, useMemo } from 'react'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
     Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
-    Users,
+    Users, ShieldOff, Send,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ShieldAlert } from 'lucide-react'
@@ -18,7 +17,8 @@ import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpa
 import { aggregationService } from '@/services/aggregationService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { useToast } from '@/components/ui/toast'
-import { usePermission } from '@/store/auth'
+import { usePermission, usePermissionClaims } from '@/store/auth'
+import { accessRequestsService } from '@/services/accessRequestsService'
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
@@ -97,6 +97,19 @@ export function WorkspaceDetailPage() {
         viewsByDs, allWorkspaceViews, readinessMap, healthStatus,
         aggregateStats, isLoading, isRefreshing, reload
     } = useWorkspaceDetailData(wsId)
+
+    // Track whether the workspace was ever loaded successfully for
+    // this session, so we can distinguish "access revoked while open"
+    // from "never existed / URL typo" in the no-workspace branch
+    // below. Reset when navigating to a different wsId.
+    const hadAccessRef = useRef(false)
+    const claims = usePermissionClaims()
+    useEffect(() => {
+        if (workspace?.id === wsId) hadAccessRef.current = true
+    }, [workspace, wsId])
+    useEffect(() => {
+        hadAccessRef.current = false
+    }, [wsId])
 
     // ── Edit header state ──────────────────────────────────
     const [editingHeader, setEditingHeader] = useState(false)
@@ -261,23 +274,23 @@ export function WorkspaceDetailPage() {
     const handleReaggregate = async (ds: DataSourceResponse) => {
         if (!wsId) return
         try {
-            const res = await fetchWithTimeout(`/api/v1/admin/data-sources/${ds.id}/aggregation-jobs?triggerSource=manual`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    projectionMode: ds.projectionMode || 'in_source',
-                    batchSize: 1000
-                })
-            })
-            if (!res.ok) {
-                const text = await res.text()
-                const detail = (() => { try { return JSON.parse(text).detail } catch { return text } })()
-                throw new Error(detail || `HTTP ${res.status}`)
-            }
+            // Use the canonical service path (``aggregationService``)
+            // so the structured backend error envelope —
+            // ``{detail: {error, permission, scope, message}}`` — gets
+            // unpacked correctly by ``authFetch``. The previous
+            // hand-rolled raw-fetch path coerced the structured
+            // ``detail`` object into ``"[object Object]"`` via
+            // ``new Error(object)`` and the user saw that in their
+            // toast.
+            await aggregationService.triggerAggregation(ds.id, {
+                projectionMode: ds.projectionMode || 'in_source',
+                batchSize: 1000,
+            }, 'manual')
             showToast('success', `Aggregation triggered for "${ds.label || 'data source'}"`)
             reload()
-        } catch (err: any) {
-            showToast('error', err?.message ?? 'Failed to trigger aggregation')
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'Failed to trigger aggregation'
+            showToast('error', msg)
         }
     }
 
@@ -377,6 +390,23 @@ export function WorkspaceDetailPage() {
     }
 
     if (!workspace) {
+        // Detect "had access but lost it" vs. "never existed".
+        // ``hadAccessRef`` is set once when the workspace first loads
+        // successfully. If it's now gone AND the current claims no
+        // longer include this ``wsId``, the most likely cause is that
+        // an admin revoked the user's binding while they were on the
+        // page. Render a friendlier "Access revoked" view instead of a
+        // generic 404, and offer to request access back.
+        const claimsHaveWs = !!wsId && !!claims.ws?.[wsId]
+        const accessRevoked = hadAccessRef.current && !claimsHaveWs
+        if (accessRevoked && wsId) {
+            return (
+                <AccessRevokedPanel
+                    wsId={wsId}
+                    onNavigateHome={() => navigate('/workspaces')}
+                />
+            )
+        }
         return (
             <div className="flex flex-col items-center justify-center h-full">
                 <p className="text-ink-muted">Workspace not found.</p>
@@ -695,6 +725,110 @@ export function WorkspaceDetailPage() {
                 onClose={() => setSelectedDsId(null)}
             />
         </div>
+        </div>
+    )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Access-revoked panel — rendered when the user had access to this
+// workspace earlier in the session but doesn't any more (admin
+// revoked their binding while they were on the page). Offers a
+// "Request access" CTA that submits via accessRequestsService, and
+// auto-redirects home after a short countdown so they aren't stuck
+// on a 404-looking screen.
+// ─────────────────────────────────────────────────────────────────────
+
+const REDIRECT_AFTER_SECONDS = 8
+
+function AccessRevokedPanel({
+    wsId,
+    onNavigateHome,
+}: {
+    wsId: string
+    onNavigateHome: () => void
+}) {
+    const { showToast } = useToast()
+    const [secondsLeft, setSecondsLeft] = useState(REDIRECT_AFTER_SECONDS)
+    const [requested, setRequested] = useState(false)
+    const [submitting, setSubmitting] = useState(false)
+    // Pause the countdown if the user is interacting (clicked the
+    // request button). Cancelled redirects let the user read the
+    // confirmation toast without being yanked away mid-action.
+    const [paused, setPaused] = useState(false)
+
+    useEffect(() => {
+        if (paused) return
+        if (secondsLeft <= 0) {
+            onNavigateHome()
+            return
+        }
+        const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000)
+        return () => clearTimeout(t)
+    }, [secondsLeft, paused, onNavigateHome])
+
+    const handleRequest = async () => {
+        setPaused(true)
+        setSubmitting(true)
+        try {
+            await accessRequestsService.submit({
+                targetType: 'workspace',
+                targetId: wsId,
+                requestedRole: 'workspace_member',
+                justification: 'Requesting access again after losing membership.',
+            })
+            setRequested(true)
+            showToast('success', 'Access request sent to the workspace admin.')
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Failed to send request')
+            setPaused(false)
+        } finally {
+            setSubmitting(false)
+        }
+    }
+
+    return (
+        <div className="flex items-center justify-center h-full p-6">
+            <div className="max-w-md w-full rounded-2xl border border-amber-500/30 bg-amber-500/5 p-6 text-center">
+                <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto mb-4">
+                    <ShieldOff className="w-6 h-6 text-amber-500" />
+                </div>
+                <h2 className="text-lg font-bold text-ink">Access revoked</h2>
+                <p className="text-sm text-ink-muted mt-2">
+                    Your access to this workspace was removed. You're being
+                    redirected to your workspaces list
+                    {!paused && (
+                        <> in <span className="font-semibold text-ink">{secondsLeft}s</span></>
+                    )}
+                    .
+                </p>
+                <div className="mt-5 flex flex-col gap-2">
+                    {!requested ? (
+                        <button
+                            onClick={handleRequest}
+                            disabled={submitting}
+                            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white text-sm font-semibold transition-colors"
+                        >
+                            {submitting ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                                <Send className="w-4 h-4" />
+                            )}
+                            Request access again
+                        </button>
+                    ) : (
+                        <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                            Request sent. The workspace admin will review it.
+                        </p>
+                    )}
+                    <button
+                        onClick={onNavigateHome}
+                        className="w-full px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                    >
+                        Go to workspaces
+                    </button>
+                </div>
+            </div>
         </div>
     )
 }

@@ -244,6 +244,16 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
     useEffect(() => { void fetchMembers() }, [fetchMembers])
 
+    // Refresh on a permissions change (silent refresh, 60s poller, or
+    // cross-tab BroadcastChannel) so a binding mutation made elsewhere
+    // (admin removed a member in another tab, group binding revoked,
+    // etc.) refreshes this page in place.
+    useEffect(() => {
+        const onChange = () => { void fetchMembers() }
+        window.addEventListener('permissions:changed', onChange)
+        return () => window.removeEventListener('permissions:changed', onChange)
+    }, [fetchMembers])
+
 
     // ── KPIs + filtering + sort ─────────────────────────────────────
 

@@ -13,6 +13,7 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const AUTH_API = '/api/v1/auth'
 const ME_API = '/api/v1/me'
@@ -110,13 +111,10 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     })
     if (!res.ok) {
         const text = await res.text()
-        let detail = res.statusText
-        try {
-            const body = JSON.parse(text)
-            detail = body.detail || JSON.stringify(body)
-        } catch {
-            detail = text || res.statusText
-        }
+        // Use the shared extractor so the structured permission /
+        // validation error envelopes land as readable strings instead
+        // of "[object Object]" via ``new Error(dict)`` coercion.
+        const detail = extractErrorMessageFromText(text, res.statusText)
         throw new Error(detail)
     }
     if (res.status === 204) return undefined as T

@@ -41,13 +41,25 @@
  *  ``window.addEventListener('permissions:changed', ...)``. */
 export const PERMISSIONS_CHANGED_EVENT = 'permissions:changed'
 
-/** Call after the auth store has been updated with new claims AND
- *  React Query has been invalidated. Refreshes the Zustand stores
- *  that hold permission-scoped data, and emits a window event for
- *  page-level caches to opt into. Dynamic imports avoid the circular
- *  dependency that would form if this module pulled in the stores
- *  directly (some of those stores import from this one transitively). */
-export async function notifyPermissionsChanged(): Promise<void> {
+/** Cross-tab sync. When Tab A's silent-refresh chain fires, every
+ *  other tab on the same origin needs to react too — otherwise Tab B
+ *  keeps its stale workspaces list for up to 60s (until its own
+ *  poller fires) or until the user clicks something. BroadcastChannel
+ *  has 100% support on every Synodic-targeted browser; we gate on
+ *  feature-detect just to keep tests / SSR happy. */
+const BROADCAST_CHANNEL_NAME = 'rbac-permissions'
+
+const broadcastChannel: BroadcastChannel | null =
+    typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined'
+        ? new BroadcastChannel(BROADCAST_CHANNEL_NAME)
+        : null
+
+/** Local-only variant of the reload-everything hook. Used by both the
+ *  public entry point AND the cross-tab message handler — the message
+ *  handler MUST NOT re-broadcast (it would echo forever between two
+ *  open tabs). The store reload + window dispatch are identical
+ *  regardless of whether the trigger was local or cross-tab. */
+async function notifyPermissionsChangedLocal(): Promise<void> {
     // 1. Workspaces Zustand store — used by CommandPalette and the
     //    active-workspace fallback. The action does its own
     //    "active workspace no longer exists" handling.
@@ -69,6 +81,38 @@ export async function notifyPermissionsChanged(): Promise<void> {
             window.dispatchEvent(new CustomEvent(PERMISSIONS_CHANGED_EVENT))
         } catch {
             // ignore — older browsers / SSR shouldn't reach here.
+        }
+    }
+}
+
+if (broadcastChannel) {
+    broadcastChannel.onmessage = (event: MessageEvent) => {
+        // Filter on the kind tag so an unrelated channel message can't
+        // trigger us. ``data`` may be undefined if some other code on
+        // the same origin posts to the same channel name.
+        if (event?.data?.kind === 'changed') {
+            void notifyPermissionsChangedLocal()
+        }
+    }
+}
+
+/** Call after the auth store has been updated with new claims AND
+ *  React Query has been invalidated. Refreshes the Zustand stores
+ *  that hold permission-scoped data, emits a window event for
+ *  page-level caches to opt into, AND broadcasts to other tabs so
+ *  they catch up without waiting for their next poll. Dynamic imports
+ *  avoid the circular dependency that would form if this module
+ *  pulled in the stores directly. */
+export async function notifyPermissionsChanged(): Promise<void> {
+    await notifyPermissionsChangedLocal()
+    // 3. Cross-tab broadcast. Other tabs receive the message in
+    //    ``onmessage`` above and run ``notifyPermissionsChangedLocal``
+    //    — which DOES NOT re-broadcast (preventing a feedback loop).
+    if (broadcastChannel) {
+        try {
+            broadcastChannel.postMessage({ kind: 'changed' })
+        } catch {
+            // best-effort — single-tab usage continues to work.
         }
     }
 }
