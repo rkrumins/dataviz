@@ -37,6 +37,7 @@ import { useAuthStore } from './auth'
 import { authService, type PermissionClaims } from '@/services/authService'
 import { getQueryClient } from '@/main'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
+import { notifyPermissionsChanged } from './permissionChangeBus'
 
 const POLL_INTERVAL_MS = POLLING_INTERVALS.permissions
 
@@ -82,6 +83,12 @@ async function pollOnce(): Promise<void> {
         lastSnapshot = next
         useAuthStore.getState().setPermissions(claims)
         invalidateAllQueries()
+        // Reload Zustand stores + emit the global change event so
+        // surfaces that aren't backed by React Query (CommandPalette
+        // workspaces list, page-level useState caches) also refresh.
+        // Without this, the auth store gets the new claims but the
+        // sidebar keeps showing workspaces the user has just lost.
+        void notifyPermissionsChanged()
     } catch {
         // Network / 401 / backend hiccup — swallow. The next tick (or
         // the silent refresh path on a real request) will pick it up.

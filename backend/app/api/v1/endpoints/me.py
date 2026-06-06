@@ -54,15 +54,28 @@ class PermissionsResponse(BaseModel):
     response_model_by_alias=True,
 )
 async def get_my_permissions(
+    # ``get_current_user`` runs FIRST in the dependency chain and is
+    # the only place that checks the Redis revocation set. Without it
+    # here, a revoked session (binding removed, user dropped from a
+    # group) would still get a 200 here because the JWT itself is
+    # syntactically valid and ``get_permission_claims`` just decodes
+    # it — no revocation check. This endpoint is polled every 60s by
+    # the FE permission poller (``store/permissionPoller.ts``) to
+    # catch idle-user permission updates, so it has to honour the
+    # revocation set: a revoked sid here triggers a 401, which the
+    # FE's silent refresh path catches, rotates the JWT with fresh DB
+    # claims, and the next poll returns the new state.
+    _user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> PermissionsResponse:
     """Return the caller's effective permissions across all scopes.
 
-    Read directly from the access JWT — no DB hit. The frontend uses
-    this to gate UI controls (hide the admin link, show the Share
-    button only when the user can change visibility, etc.). Backend
-    enforcement still happens in ``requires(...)``; the frontend
-    treats this response as advisory.
+    Read directly from the access JWT — no DB hit beyond the
+    revocation lookup that ``get_current_user`` does for us. The
+    frontend uses this to gate UI controls (hide the admin link,
+    show the Share button only when the user can change visibility,
+    etc.). Backend enforcement still happens in ``requires(...)``;
+    the frontend treats this response as advisory.
     """
     return PermissionsResponse(
         sid=claims.sid,

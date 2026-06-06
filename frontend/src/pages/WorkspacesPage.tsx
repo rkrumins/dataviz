@@ -290,6 +290,16 @@ export function WorkspacesPage() {
 
     useEffect(() => { loadData() }, [loadData])
 
+    // Refresh when a permissions change is announced (silent refresh
+    // or the 60s poller). Without this, the page keeps showing the
+    // pre-revocation workspace list while it's open. The event is
+    // dispatched by ``store/permissionChangeBus.notifyPermissionsChanged``.
+    useEffect(() => {
+        const onChange = () => { void loadData() }
+        window.addEventListener('permissions:changed', onChange)
+        return () => window.removeEventListener('permissions:changed', onChange)
+    }, [loadData])
+
     useEffect(() => {
         // Wizard catalog picker — only fetch when the wizard is open and
         // the user can actually create workspaces. The bindings endpoint

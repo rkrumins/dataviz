@@ -126,6 +126,17 @@ async function tryRefresh(): Promise<boolean> {
               // best-effort — the next user-triggered render still
               // resolves fresh data within React Query's staleTime.
             }
+            // Reload Zustand stores + emit ``permissions:changed``
+            // for page-level caches. Without this, the sidebar /
+            // CommandPalette / open page would keep their pre-
+            // revocation cache because they don't live in React
+            // Query. See store/permissionChangeBus.ts.
+            try {
+              const busMod = await import('@/store/permissionChangeBus')
+              await busMod.notifyPermissionsChanged()
+            } catch {
+              // best-effort
+            }
           } catch {
             // best-effort
           }
