@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func, delete, update
+from sqlalchemy import select, func, delete, update, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -1158,6 +1158,246 @@ class GraphVersioningService:
             if _edge_src_tgt(p)[0] in nodes and _edge_src_tgt(p)[1] in nodes
         ]
         return {"nodes": out_nodes, "edges": out_edges}
+
+    async def _branch_read_seqs(
+        self, s, graph_id: str, branch_id: str, main_id: str, as_of_seq: Optional[int],
+    ) -> Tuple[int, Optional[int]]:
+        """The two sequence bounds a branch read composes over: the discovery cap on the
+        shared ``main`` base and the overlay cap on the branch. ``main`` itself has no
+        overlay (``None``); ``as_of_seq`` caps both for time-travel."""
+        if branch_id == main_id:
+            g = await s.get(GraphORM, graph_id)
+            head = g.main_head_commit_seq if g else 0
+            return (head if as_of_seq is None else min(head, as_of_seq)), None
+        b = await s.get(BranchORM, branch_id)
+        base_seq = b.base_commit_seq or 0
+        base = base_seq if as_of_seq is None else min(base_seq, as_of_seq)
+        overlay = (1 << 62) if as_of_seq is None else as_of_seq
+        return base, overlay
+
+    async def _latest_live_ids(
+        self, s, model, graph_id: str, branch_id: str, seq: int,
+        *, where: Optional[Callable] = None, limit: Optional[int] = None,
+    ) -> List[str]:
+        """Entity ids whose latest version on ``branch_id`` at ``commit_seq <= seq`` is live
+        (not a tombstone), optionally narrowed by ``where`` (predicates over the denormalised
+        version columns). DISTINCT ON picks the latest row per entity *before* the live/where
+        filter, so a stale revision can never shadow the current one. Bounded by ``limit`` and
+        ordered by entity_id for a stable window."""
+        latest = (
+            select(model)
+            .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                   model.commit_seq <= seq)
+            .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+            .distinct(model.entity_id)
+            .subquery()
+        )
+        stmt = select(latest.c.entity_id).where(latest.c.op != "delete")
+        if where is not None:
+            preds = where(latest.c)
+            if preds:
+                stmt = stmt.where(*preds)
+        stmt = stmt.order_by(latest.c.entity_id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return list((await s.execute(stmt)).scalars().all())
+
+    async def _eids_for_urns(
+        self, s, graph_id: str, branch_id: str, urns, as_of_seq: Optional[int] = None,
+    ) -> set:
+        """Resolve a small set of seed urns to live entity_ids on a branch (bounded)."""
+        out: set = set()
+        for u in urns or []:
+            eid = await self._eid_for_urn(s, graph_id, branch_id, u, as_of_seq)
+            if eid is not None:
+                out.add(eid)
+        return out
+
+    async def get_node_from_state(
+        self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
+        as_of_seq: Optional[int] = None,
+    ) -> Optional[dict]:
+        """A single node by urn on a branch (default ``main``), branch/as-of composed — the
+        draft/as-of counterpart of the provider's ``get_node``. Reader-shaped or ``None``."""
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            eid = await self._eid_for_urn(s, graph_id, branch_id, urn, as_of_seq)
+            if eid is None:
+                return None
+            p = (await self._current_values(s, graph_id, branch_id, [eid], as_of_seq)).get(eid)
+        if p is None or _is_edge_payload(p):
+            return None
+        return _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
+
+    async def get_nodes_from_state(
+        self, *, graph_id: str, branch_id: Optional[str] = None,
+        as_of_seq: Optional[int] = None, urns: Optional[Sequence[str]] = None,
+        entity_types: Optional[Sequence[str]] = None,
+        search_query: Optional[str] = None, limit: int = 100, offset: int = 0,
+    ) -> List[dict]:
+        """Branch- and as-of-aware node filter read, served from Postgres — the draft/as-of
+        counterpart of the provider's ``get_nodes``, so a user working in a draft sees their
+        draft's view, not ``main``'s. Bounded: discover candidate ids from the shared ``main``
+        base (pushed-down denorm-column filters, capped) ∪ the draft's tiny overlay, compose
+        the authoritative value via ``_current_values``, then re-apply the predicate (so an
+        overlay edit that flips whether a base node matches is honoured). Never composes full
+        state. Reader-shaped GraphNode dicts, sorted by display name.
+
+        Pagination is exact for a page that fits the fetch window (the common draft case); a
+        very large filtered set at a deep ``offset`` is best-effort — the hot, deeply-paged
+        path is ``main`` via FalkorDB, not this fallback."""
+        urn_set = set(urns) if urns else None
+        type_set = set(entity_types) if entity_types else None
+        q = (search_query or "").strip().lower()
+
+        def matches(p: dict) -> bool:
+            if urn_set is not None and p.get("urn") not in urn_set:
+                return False
+            if type_set is not None and p.get("entityType") not in type_set:
+                return False
+            if q:
+                hay = " ".join(str(p.get(k) or "")
+                               for k in ("displayName", "qualifiedName", "urn")).lower()
+                if q not in hay:
+                    return False
+            return True
+
+        def where(c):
+            preds = []
+            if type_set is not None:
+                preds.append(c.entity_type.in_(list(type_set)))
+            if urn_set is not None:
+                preds.append(c.urn.in_(list(urn_set)))
+            if q:
+                like = f"%{q}%"
+                preds.append(or_(func.lower(c.display_name).like(like),
+                                 func.lower(c.qualified_name).like(like),
+                                 func.lower(c.urn).like(like)))
+            return preds
+
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            base_seq, overlay_seq = await self._branch_read_seqs(
+                s, graph_id, branch_id, main_id, as_of_seq)
+            overlay_ids: List[str] = []
+            if overlay_seq is not None:
+                overlay_ids = list((await s.execute(
+                    select(NodeVersionORM.entity_id).where(
+                        NodeVersionORM.graph_id == graph_id,
+                        NodeVersionORM.branch_id == branch_id,
+                        NodeVersionORM.commit_seq <= overlay_seq,
+                    ).distinct()
+                )).scalars().all())
+            window = offset + limit + len(overlay_ids) + 1
+            cand = set(await self._latest_live_ids(
+                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
+            cand.update(overlay_ids)
+            vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+
+        rows = [
+            _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
+            for eid, p in vals.items()
+            if p is not None and not _is_edge_payload(p) and matches(p)
+        ]
+        rows.sort(key=lambda r: ((r.get("displayName") or ""), r["entityId"]))
+        return rows[offset: offset + limit]
+
+    async def search_from_state(
+        self, *, graph_id: str, query: str, branch_id: Optional[str] = None,
+        as_of_seq: Optional[int] = None, limit: int = 25,
+    ) -> List[dict]:
+        """Name/qualified-name/urn substring search on a branch (default ``main``) — the
+        draft/as-of counterpart of the provider's search. Thin wrapper over
+        ``get_nodes_from_state``."""
+        return await self.get_nodes_from_state(
+            graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq,
+            search_query=query, limit=limit)
+
+    async def get_edges_from_state(
+        self, *, graph_id: str, branch_id: Optional[str] = None,
+        as_of_seq: Optional[int] = None, source_urns: Optional[Sequence[str]] = None,
+        target_urns: Optional[Sequence[str]] = None, any_urns: Optional[Sequence[str]] = None,
+        edge_types: Optional[Sequence[str]] = None, min_confidence: Optional[float] = None,
+        limit: int = 100, offset: int = 0,
+    ) -> List[dict]:
+        """Branch- and as-of-aware edge filter read, served from Postgres — the draft/as-of
+        counterpart of the provider's ``get_edges``. With endpoint urns it walks the
+        endpoints' incident live edges (bounded by degree via ix_ev_source/ix_ev_target);
+        otherwise it discovers edges by type from the shared base ∪ the draft overlay.
+        Endpoints are resolved to urns for reader-shaped GraphEdge dicts."""
+        et = set(edge_types) if edge_types else None
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            main_id = await self._main_branch_id(s, graph_id)
+
+            src_ids = await self._eids_for_urns(s, graph_id, branch_id, source_urns, as_of_seq) if source_urns else None
+            tgt_ids = await self._eids_for_urns(s, graph_id, branch_id, target_urns, as_of_seq) if target_urns else None
+            any_ids = await self._eids_for_urns(s, graph_id, branch_id, any_urns, as_of_seq) if any_urns else None
+
+            cand_edges: Dict[str, dict] = {}
+            if src_ids is not None or tgt_ids is not None or any_ids is not None:
+                seeds: set = set()
+                for grp in (src_ids, tgt_ids, any_ids):
+                    if grp:
+                        seeds.update(grp)
+                inc = await self._incident_live_edges(s, graph_id, branch_id, seeds, as_of_seq)
+                for eid, p in inc.items():
+                    a, b = _edge_src_tgt(p)
+                    if src_ids is not None and a not in src_ids:
+                        continue
+                    if tgt_ids is not None and b not in tgt_ids:
+                        continue
+                    if any_ids is not None and not (a in any_ids or b in any_ids):
+                        continue
+                    cand_edges[eid] = p
+            else:
+                base_seq, overlay_seq = await self._branch_read_seqs(
+                    s, graph_id, branch_id, main_id, as_of_seq)
+                overlay_ids: List[str] = []
+                if overlay_seq is not None:
+                    overlay_ids = list((await s.execute(
+                        select(EdgeVersionORM.entity_id).where(
+                            EdgeVersionORM.graph_id == graph_id,
+                            EdgeVersionORM.branch_id == branch_id,
+                            EdgeVersionORM.commit_seq <= overlay_seq,
+                        ).distinct()
+                    )).scalars().all())
+                window = offset + limit + len(overlay_ids) + 1
+                cand = set(await self._latest_live_ids(
+                    s, EdgeVersionORM, graph_id, main_id, base_seq,
+                    where=(lambda c: [c.edge_type.in_(list(et))]) if et is not None else None,
+                    limit=window))
+                cand.update(overlay_ids)
+                vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+                cand_edges = {eid: p for eid, p in vals.items()
+                              if p is not None and _is_edge_payload(p)}
+
+            sel: Dict[str, dict] = {}
+            for eid, p in cand_edges.items():
+                if et is not None and p.get("edgeType") not in et:
+                    continue
+                if min_confidence is not None and (p.get("confidence") or 0.0) < min_confidence:
+                    continue
+                sel[eid] = p
+
+            endpoint_ids: set = set()
+            for p in sel.values():
+                a, b = _edge_src_tgt(p)
+                endpoint_ids.add(a)
+                endpoint_ids.add(b)
+            node_vals = await self._current_values(s, graph_id, branch_id, endpoint_ids, as_of_seq)
+
+        urn_of = {
+            eid: ((p.get("urn") if (p is not None and not _is_edge_payload(p)) else None) or f"gv:{eid}")
+            for eid, p in node_vals.items()
+        }
+        out = [_graphedge_dict(eid, p, urn_of) for eid, p in sel.items()]
+        out.sort(key=lambda r: r["id"])
+        return out[offset: offset + limit]
 
     async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
         """Full revision timeline of one entity (plan §7 tier 1)."""
