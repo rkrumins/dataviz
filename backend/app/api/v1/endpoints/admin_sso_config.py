@@ -35,6 +35,7 @@ from backend.app.db.models import (
 )
 from backend.app.db.repositories import app_auth_config_repo, user_repo
 from backend.app.db.repositories.binding_repo import _is_expired
+from backend.common.roles import RoleName
 from backend.app.db.repositories.app_auth_config_repo import (
     ConflictingVersion,
 )
@@ -95,7 +96,7 @@ async def _super_admin_user_ids(session: AsyncSession) -> set[str]:
     now = datetime.now(timezone.utc)
     bindings = await session.execute(
         select(RoleBindingORM).where(
-            RoleBindingORM.role_name == "super_admin",
+            RoleBindingORM.role_name == RoleName.SUPER_ADMIN.value,
             RoleBindingORM.scope_type == "global",
         )
     )

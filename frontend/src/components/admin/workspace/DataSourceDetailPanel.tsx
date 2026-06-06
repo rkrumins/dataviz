@@ -170,6 +170,12 @@ export function DataSourceDetailPanel({
     const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views'>('insights')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
+    // Aggregation mutations (config save / re-trigger / purge) require
+    // workspace:datasource:manage. system:admin is implied through
+    // has_permission's shortcut chain.
+    const canManageDs = usePermission(
+        'workspace:datasource:manage', wsId,
+    )
 
     // ── Aggregation tab: pending edits live entirely in local state until the
     //    user clicks Save. This avoids per-keystroke API calls and full-page
@@ -496,7 +502,7 @@ export function DataSourceDetailPanel({
                                     )}
 
                                     {/* Save / Discard bar — sticky feel, only when dirty */}
-                                    {isDirty && (
+                                    {isDirty && canManageDs && (
                                         <div className="flex items-center justify-end gap-2 p-3 rounded-lg bg-amber-500/[0.06] border border-amber-500/20 animate-in slide-in-from-top-1 fade-in duration-150">
                                             <button
                                                 onClick={handleDiscardConfig}
@@ -518,40 +524,42 @@ export function DataSourceDetailPanel({
                                         </div>
                                     )}
 
-                                    <div className="mt-4 pt-4 border-t border-glass-border space-y-2">
-                                        <button onClick={onReaggregate} disabled={isDirty}
-                                            title={isDirty ? 'Save your config changes before re-triggering aggregation.' : undefined}
-                                            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                                            <Settings2 className="w-4 h-4" /> Re-Trigger Aggregation
-                                        </button>
+                                    {canManageDs && (
+                                        <div className="mt-4 pt-4 border-t border-glass-border space-y-2">
+                                            <button onClick={onReaggregate} disabled={isDirty}
+                                                title={isDirty ? 'Save your config changes before re-triggering aggregation.' : undefined}
+                                                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 font-semibold text-sm hover:bg-indigo-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                                                <Settings2 className="w-4 h-4" /> Re-Trigger Aggregation
+                                            </button>
 
-                                        {ds.aggregationStatus === 'ready' && (
-                                            !purgeConfirm ? (
-                                                <button onClick={() => setPurgeConfirm(true)}
-                                                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors">
-                                                    <Trash2 className="w-4 h-4" /> Purge Aggregated Edges
-                                                </button>
-                                            ) : (
-                                                <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2.5">
-                                                    <div className="flex items-start gap-2">
-                                                        <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-                                                        <p className="text-xs text-red-400 leading-relaxed">
-                                                            This will remove all materialized aggregated edges and reset aggregation status. This cannot be undone.
-                                                        </p>
+                                            {ds.aggregationStatus === 'ready' && (
+                                                !purgeConfirm ? (
+                                                    <button onClick={() => setPurgeConfirm(true)}
+                                                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors">
+                                                        <Trash2 className="w-4 h-4" /> Purge Aggregated Edges
+                                                    </button>
+                                                ) : (
+                                                    <div className="p-3 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2.5">
+                                                        <div className="flex items-start gap-2">
+                                                            <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
+                                                            <p className="text-xs text-red-400 leading-relaxed">
+                                                                This will remove all materialized aggregated edges and reset aggregation status. This cannot be undone.
+                                                            </p>
+                                                        </div>
+                                                        <div className="flex justify-end gap-2">
+                                                            <button onClick={() => setPurgeConfirm(false)} disabled={purgeLoading}
+                                                                className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
+                                                            <button onClick={async () => { setPurgeLoading(true); try { await onPurge() } finally { setPurgeLoading(false); setPurgeConfirm(false) } }}
+                                                                disabled={purgeLoading}
+                                                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 shadow-sm shadow-red-500/25">
+                                                                {purgeLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />} Confirm Purge
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                    <div className="flex justify-end gap-2">
-                                                        <button onClick={() => setPurgeConfirm(false)} disabled={purgeLoading}
-                                                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
-                                                        <button onClick={async () => { setPurgeLoading(true); try { await onPurge() } finally { setPurgeLoading(false); setPurgeConfirm(false) } }}
-                                                            disabled={purgeLoading}
-                                                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50 shadow-sm shadow-red-500/25">
-                                                            {purgeLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />} Confirm Purge
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            )
-                                        )}
-                                    </div>
+                                                )
+                                            )}
+                                        </div>
+                                    )}
 
                                     <div className="mt-6 pt-4 border-t border-glass-border">
                                         <AggregationHistory dataSourceId={ds.id} />

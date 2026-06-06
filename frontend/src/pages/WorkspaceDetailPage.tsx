@@ -147,6 +147,13 @@ export function WorkspaceDetailPage() {
     // `usePermission` re-renders this component on permission changes
     // (e.g. after silent refresh), so the tab appears/disappears live.
     const canManageMembers = usePermission('workspace:admin', wsId ?? null)
+    // Data-source mutations (Add / Edit / Delete / Re-aggregate / Purge)
+    // gate on workspace:datasource:manage. Edit + Delete are gated
+    // inside the detail panel itself; Add lives here. system:admin is
+    // implied by has_permission's shortcut chain so we don't OR it in.
+    const canManageDataSources = usePermission(
+        'workspace:datasource:manage', wsId ?? null,
+    )
 
     // Sync activeSection back to the URL so refresh / back navigation
     // preserves the tab. Only writes when the value actually differs to
@@ -522,10 +529,12 @@ export function WorkspaceDetailPage() {
 
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>
-                        <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
-                            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-500 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
-                            <Plus className="w-4 h-4" /> Add Source
-                        </button>
+                        {canManageDataSources && (
+                            <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
+                                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500/10 text-indigo-500 text-sm font-semibold hover:bg-indigo-500/20 transition-colors">
+                                <Plus className="w-4 h-4" /> Add Source
+                            </button>
+                        )}
                     </div>
 
                     {workspace.dataSources.length === 0 ? (
@@ -541,10 +550,12 @@ export function WorkspaceDetailPage() {
                                 <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">3</span> Run aggregation</span>
                                 <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center text-[9px] font-bold">4</span> Create views</span>
                             </div>
-                            <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
-                                className="flex items-center gap-2 px-4 py-2 mt-5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
-                                <Plus className="w-4 h-4" /> Add First Source
-                            </button>
+                            {canManageDataSources && (
+                                <button onClick={() => { resetAddDs(); setShowAddDs(true) }}
+                                    className="flex items-center gap-2 px-4 py-2 mt-5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white text-sm font-semibold">
+                                    <Plus className="w-4 h-4" /> Add First Source
+                                </button>
+                            )}
                         </div>
                     ) : (
                         <>

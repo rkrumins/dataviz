@@ -27,6 +27,7 @@ import {
     Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink, Navigation,
 } from 'lucide-react'
 import { ROLE_VISUAL, customRoleVisual } from '@/lib/roleVisual'
+import { ROLE_NAMES } from '@/lib/roleNames'
 import {
     permissionsService,
     type PermissionResponse,
@@ -1464,9 +1465,9 @@ function ByWorkspaceTab({
             // UI keys these as 'admin'/'user'/'viewer' for short
             // KPI labels but the underlying data uses the canonical
             // workspace_* names.
-            admin: members.filter(m => m.role === 'workspace_admin').length,
-            user: members.filter(m => m.role === 'workspace_member').length,
-            viewer: members.filter(m => m.role === 'workspace_viewer').length,
+            admin: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_ADMIN).length,
+            user: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_MEMBER).length,
+            viewer: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_VIEWER).length,
             groups: members.filter(m => m.subject.type === 'group').length,
             users: members.filter(m => m.subject.type === 'user').length,
         }

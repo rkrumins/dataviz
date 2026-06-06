@@ -364,13 +364,24 @@ export function ExplorerPage() {
     setShareView({ id: view.id, name: view.name, visibility: view.visibility })
   }, [])
 
+  // BE rule (views.py: can_delete_view): creator OR
+  // workspace:view:delete on the view's workspace. Mirror that
+  // here so the row/grid/preview Delete affordance disappears for
+  // users who'd just get a 403 toast on click.
+  const canDeleteView = useCallback((view: View): boolean => {
+    if (currentUser?.id && view.createdBy === currentUser.id) return true
+    return useAuthStore.getState().can('workspace:view:delete', view.workspaceId)
+  }, [currentUser?.id])
+
   const handleDeleteRequest = useCallback((view: View) => {
+    if (!canDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount })
-  }, [])
+  }, [canDeleteView])
 
   const handlePermanentDeleteRequest = useCallback((view: View) => {
+    if (!canDeleteView(view)) return
     setDeleteView({ id: view.id, name: view.name, favouriteCount: view.favouriteCount, permanent: true })
-  }, [])
+  }, [canDeleteView])
 
   const handleDeleted = useCallback(() => {
     if (!deleteView) return
@@ -397,6 +408,18 @@ export function ExplorerPage() {
     if (selectedIds.size === 0) return
     setShowBulkDelete(true)
   }, [selectedIds])
+
+  // Bulk delete is only offered when every selected view passes
+  // canDeleteView — otherwise some rows would 403 and the operation
+  // would partially succeed.
+  const canBulkDelete = useMemo(() => {
+    if (selectedIds.size === 0) return false
+    for (const v of views) {
+      if (!selectedIds.has(v.id)) continue
+      if (!canDeleteView(v)) return false
+    }
+    return true
+  }, [selectedIds, views, canDeleteView])
 
   const handleBulkDeleted = useCallback(() => {
     const ids = Array.from(selectedIds)
@@ -653,7 +676,7 @@ export function ExplorerPage() {
                     onPreview={() => setPreviewView(v)}
                     onEdit={() => openViewEditor(v.id)}
                     editDisabled={false}
-                    onDelete={() => handleDeleteRequest(v)}
+                    onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                     onRestore={() => handleRestore(v)}
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                     onTagClick={handleTagClick}
@@ -739,7 +762,7 @@ export function ExplorerPage() {
                       onPreview={() => setPreviewView(v)}
                       onEdit={() => openViewEditor(v.id)}
                       editDisabled={false}
-                      onDelete={() => handleDeleteRequest(v)}
+                      onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                       onRestore={() => handleRestore(v)}
                       onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                       onTagClick={handleTagClick}
@@ -779,7 +802,7 @@ export function ExplorerPage() {
                   onPreview={() => setPreviewView(v)}
                   onEdit={() => openViewEditor(v.id)}
                   editDisabled={false}
-                  onDelete={() => handleDeleteRequest(v)}
+                  onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                   onRestore={() => handleRestore(v)}
                   onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
@@ -811,12 +834,14 @@ export function ExplorerPage() {
         onShare={() => previewView && handleShareDialog(previewView)}
         onEdit={previewView ? () => { setPreviewView(null); openViewEditor(previewView.id) } : undefined}
         editDisabled={false}
-        onDelete={() => previewView && handleDeleteRequest(previewView)}
+        onDelete={previewView && canDeleteView(previewView)
+          ? () => handleDeleteRequest(previewView)
+          : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}
-        onDelete={handleBulkDelete}
+        onDelete={canBulkDelete ? handleBulkDelete : undefined}
         onChangeVisibility={handleBulkVisibility}
         onClearSelection={() => setSelectedIds(new Set())}
       />

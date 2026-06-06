@@ -8,7 +8,10 @@ import { cn } from '@/lib/utils'
 
 interface ExplorerBulkActionsProps {
   selectedCount: number
-  onDelete: () => void
+  /** Hidden when undefined — used to suppress the affordance for callers
+   *  that can't delete every selected view (creator OR
+   *  workspace:view:delete in each view's workspace). */
+  onDelete?: () => void
   onChangeVisibility: (visibility: 'private' | 'workspace' | 'enterprise') => void
   onClearSelection: () => void
 }
@@ -117,15 +120,19 @@ export function ExplorerBulkActions({
               </AnimatePresence>
             </div>
 
-            <button
-              onClick={onDelete}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors duration-150"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              Delete ({selectedCount})
-            </button>
+            {onDelete && (
+              <>
+                <button
+                  onClick={onDelete}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium text-red-500 hover:bg-red-500/10 transition-colors duration-150"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete ({selectedCount})
+                </button>
 
-            <div className="w-px h-5 bg-glass-border" />
+                <div className="w-px h-5 bg-glass-border" />
+              </>
+            )}
 
             <button
               onClick={onClearSelection}

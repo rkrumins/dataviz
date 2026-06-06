@@ -198,9 +198,15 @@ api_router.include_router(
     announcements.router, prefix="/announcements", tags=["announcements"],
 )
 # Aggregation service: /api/v1/admin/...
+# Phase 19: per-endpoint workspace-scoped gates inside the router
+# (see ``aggregation.py: _require_ds_perm``). The router-level
+# ``system:admin`` dependency was too coarse — workspace admins
+# couldn't trigger or manage aggregation on their own data sources
+# without being elevated to platform admin. Each endpoint now picks
+# the right gate based on the action (manage for mutations, read for
+# GETs, system:admin only for genuinely cross-workspace operations).
 api_router.include_router(
     aggregation.router, prefix="/admin", tags=["admin:aggregation"],
-    dependencies=[Depends(requires("system:admin"))],
 )
 # Stats service: /api/v1/admin/stats-polling
 api_router.include_router(

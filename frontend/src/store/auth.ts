@@ -27,6 +27,7 @@ import {
     writeUserCache,
 } from '@/store/userCache'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
+import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
 
 export type { PermissionClaims }
@@ -51,23 +52,17 @@ const EMPTY_CLAIMS: PermissionClaims = { sid: '', global: [], ws: {} }
  *   * ``workspace_member``— workspace, manage views + data sources
  *   * ``workspace_viewer``— workspace, read-only
  */
-export type SystemRole =
-    | 'super_admin'
-    | 'org_admin'
-    | 'org_auditor'
-    | 'workspace_admin'
-    | 'workspace_data_engineer'
-    | 'workspace_member'
-    | 'workspace_viewer'
+export type SystemRole = RoleName
 
 export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
-    super_admin: 'Super Admin',
-    org_admin: 'Org Admin',
-    org_auditor: 'Org Auditor',
-    workspace_admin: 'Workspace Admin',
-    workspace_data_engineer: 'Data Engineer',
-    workspace_member: 'Member',
-    workspace_viewer: 'Viewer',
+    [ROLE_NAMES.SUPER_ADMIN]: 'Super Admin',
+    [ROLE_NAMES.ORG_ADMIN]: 'Org Admin',
+    [ROLE_NAMES.ORG_AUDITOR]: 'Org Auditor',
+    [ROLE_NAMES.USER]: 'User',
+    [ROLE_NAMES.WORKSPACE_ADMIN]: 'Workspace Admin',
+    [ROLE_NAMES.WORKSPACE_DATA_ENGINEER]: 'Data Engineer',
+    [ROLE_NAMES.WORKSPACE_MEMBER]: 'Member',
+    [ROLE_NAMES.WORKSPACE_VIEWER]: 'Viewer',
 }
 
 /**
@@ -136,19 +131,19 @@ export function effectiveRoleFor(
     claims: PermissionClaims,
     workspaceId?: string | null,
 ): SystemRole | null {
-    if (claims.global.includes('system:admin')) return 'super_admin'
-    if (claims.global.includes('system:org-admin')) return 'org_admin'
+    if (claims.global.includes('system:admin')) return ROLE_NAMES.SUPER_ADMIN
+    if (claims.global.includes('system:org-admin')) return ROLE_NAMES.ORG_ADMIN
     if (!workspaceId) return null
     const bucket = claims.ws[workspaceId]
     if (!bucket) return null
-    if (bucket.includes('workspace:admin')) return 'workspace_admin'
+    if (bucket.includes('workspace:admin')) return ROLE_NAMES.WORKSPACE_ADMIN
     // Use wildcard-aware checks so a 'workspace:view:*' / 'workspace:view:edit'
     // claim correctly resolves to "member".
     if (checkPermission(claims, 'workspace:view:edit', workspaceId)) {
-        return 'workspace_member'
+        return ROLE_NAMES.WORKSPACE_MEMBER
     }
     if (checkPermission(claims, 'workspace:view:read', workspaceId)) {
-        return 'workspace_viewer'
+        return ROLE_NAMES.WORKSPACE_VIEWER
     }
     return null
 }
