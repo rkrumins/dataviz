@@ -13,6 +13,7 @@ import {
   Clock,
   ArrowRight,
   BookOpen,
+  Sparkles,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useNavigationStore, type NavigationTab } from '@/store/navigation'
@@ -446,8 +447,28 @@ export function SidebarNav() {
         </div>
       )}
 
+      {/* User Guide link */}
+      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 pt-2" : "px-2.5 pt-2")}>
+        <a
+          href="/guide"
+          className={cn(
+            "flex items-center rounded-lg transition-all duration-150 text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]",
+            sidebarCollapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2"
+          )}
+          title="User Guide"
+        >
+          <div className={cn(
+            "flex items-center justify-center rounded-lg shrink-0 bg-gradient-to-br from-indigo-500 to-violet-600 text-white",
+            sidebarCollapsed ? "w-8 h-8" : "w-7 h-7"
+          )}>
+            <Sparkles className={cn(sidebarCollapsed ? "w-4 h-4" : "w-3.5 h-3.5")} />
+          </div>
+          {!sidebarCollapsed && <span className="text-xs font-medium">User Guide</span>}
+        </a>
+      </div>
+
       {/* Documentation link */}
-      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-2")}>
+      <div className={cn(sidebarCollapsed ? "px-1.5 pb-2" : "px-2.5 pb-2")}>
         <a
           href="/docs"
           target="_blank"

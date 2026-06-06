@@ -1,10 +1,16 @@
 import { useState, useEffect } from 'react'
-import type { DocEntry } from '@/components/docs/docsConfig'
+
+// Minimal shape needed to load a Markdown document — satisfied by both the
+// docs `DocEntry` and the guide `GuideEntry`, so both reuse this loader.
+export interface LoadableDoc {
+  slug: string
+  importFn: () => Promise<{ default: string }>
+}
 
 // Module-level cache — docs loaded once per session
 const cache = new Map<string, string>()
 
-export function useDocsLoader(entry: DocEntry | undefined) {
+export function useDocsLoader(entry: LoadableDoc | undefined) {
   const [content, setContent] = useState<string | null>(
     entry ? cache.get(entry.slug) ?? null : null,
   )

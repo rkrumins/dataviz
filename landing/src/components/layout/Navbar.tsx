@@ -12,6 +12,7 @@ const NAV_LINKS = [
   { label: 'Architecture', href: '#architecture' },
   { label: 'Compare', href: '#comparison' },
   { label: 'FAQ', href: '#faq' },
+  { label: 'Guide', href: '/guide' },
 ]
 
 const SECTION_IDS = ['hero', 'features', 'showcase', 'how-it-works', 'ai-assistant', 'universal-lineage', 'architecture', 'comparison', 'testimonials', 'integrations', 'faq', 'community']
