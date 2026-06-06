@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.password import hash_password
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
+from backend.common.roles import INVITE_GLOBAL_TIER
 from backend.common.models.auth import (
     SignUpRequest,
     SignUpResponse,
@@ -89,8 +90,10 @@ async def _build_user_response(session: AsyncSession, user) -> UserPublicRespons
 
 # Phase 11: workspace-template system roles are bound at workspace
 # scope on invite; super_admin/org_admin go through set_global_role
-# (which also writes the legacy user_roles display row).
-_INVITE_GLOBAL_TIER = frozenset({"super_admin", "org_admin"})
+# (which also writes the legacy user_roles display row). Canonical
+# set lives in ``backend.common.roles.INVITE_GLOBAL_TIER`` — local
+# alias kept so the existing module-internal name keeps working.
+_INVITE_GLOBAL_TIER = INVITE_GLOBAL_TIER
 
 
 async def _grant_invite_role(

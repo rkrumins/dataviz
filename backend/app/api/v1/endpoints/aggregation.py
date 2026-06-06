@@ -26,10 +26,21 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_permission_claims,
+    requires,
+)
 from backend.app.db.engine import get_db_session
+from backend.app.db.repositories import data_source_repo
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 from backend.app.services.aggregation.schemas import ResumeOverrides
+from backend.app.services.permission_service import (
+    PermissionClaims,
+    has_permission,
+)
+from backend.auth_service.interface import User
 from backend.common.models.management import (
     OntologyResolutionResponse,
     OntologyResolutionRelGap,
@@ -109,6 +120,71 @@ def _get_svc(request: Request):
     return svc
 
 
+# ── Per-data-source permission gate ────────────────────────────────
+#
+# Aggregation routes are addressed by ``ds_id`` (data source id), but
+# the permissions are workspace-scoped (``workspace:datasource:read``
+# / ``workspace:datasource:manage``). The ``requires(...)`` built-in
+# reads a workspace id directly from a path param, which doesn't work
+# here — we need to look up the data source's workspace first.
+#
+# This factory returns a dependency that:
+#   1. Resolves the workspace id from ``ds_id`` via ``data_source_repo``.
+#   2. 404s if the data source doesn't exist (matches FastAPI's
+#      "missing resource" convention so we don't leak the existence of
+#      data sources outside the caller's workspaces).
+#   3. Checks ``has_permission(claims, permission, workspace_id=ws_id)``
+#      and 403s with the same structured envelope ``requires(...)`` uses,
+#      so the FE's error-handling code path is unchanged.
+#
+# ``system:admin`` and ``system:org-admin`` are short-circuited by
+# ``has_permission`` itself, so platform admins keep universal access.
+
+
+def _require_ds_perm(permission: str):
+    """Build a FastAPI dependency that enforces ``permission`` on the
+    workspace that owns ``ds_id`` (a path param)."""
+
+    async def _dep(
+        ds_id: str,
+        user: User = Depends(get_current_user),
+        claims: PermissionClaims = Depends(get_permission_claims),
+        session: AsyncSession = Depends(get_db_session),
+    ) -> User:
+        ds = await data_source_repo.get_data_source(session, ds_id)
+        if ds is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Data source {ds_id!r} not found",
+            )
+        if not has_permission(claims, permission, workspace_id=ds.workspaceId):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "missing_permission",
+                    "permission": permission,
+                    "scope": {"type": "workspace", "id": ds.workspaceId},
+                    "message": f"Missing permission: {permission}",
+                },
+            )
+        return user
+
+    return _dep
+
+
+# Convenience aliases for the two permission tiers used across the
+# aggregation routes — read for inspection, manage for mutation.
+_REQUIRE_DS_READ = _require_ds_perm("workspace:datasource:read")
+_REQUIRE_DS_MANAGE = _require_ds_perm("workspace:datasource:manage")
+
+
+# Gate for endpoints that don't have a ``ds_id`` path param but still
+# operate on a single data source (e.g. ``DELETE /aggregation-jobs/{job_id}``
+# resolves the data source from the job row). For those we keep
+# ``system:admin`` until we add a job→data source lookup helper.
+_REQUIRE_SYSTEM_ADMIN = requires("system:admin")
+
+
 # ── Lazy imports for direct mode (avoid importing if proxy-only) ────
 
 def _direct_imports():
@@ -130,7 +206,11 @@ def _direct_imports():
 
 # ── GET /aggregation-jobs/summary ───────────────────────────────────
 
-@router.get("/aggregation-jobs/summary", summary="Get aggregation job summary stats (KPIs)")
+@router.get(
+    "/aggregation-jobs/summary",
+    summary="Get aggregation job summary stats (KPIs)",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
 async def get_jobs_summary(
     request: Request,
     svc=Depends(_get_svc),
@@ -143,7 +223,11 @@ async def get_jobs_summary(
 
 # ── GET /aggregation-jobs (global) ──────────────────────────────────
 
-@router.get("/aggregation-jobs", summary="List all aggregation jobs (global)")
+@router.get(
+    "/aggregation-jobs",
+    summary="List all aggregation jobs (global)",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
 async def list_jobs_global(
     request: Request,
     svc=Depends(_get_svc),
@@ -233,6 +317,7 @@ async def list_jobs_global(
     "/data-sources/{ds_id}/aggregation-jobs",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Trigger aggregation for a data source",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def trigger_aggregation(
     ds_id: str,
@@ -382,6 +467,7 @@ def _report_to_response(
     "/data-sources/{ds_id}/ontology-resolution",
     response_model=OntologyResolutionResponse,
     summary="Inspect the ontology-resolution gate for a data source",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
 )
 async def get_ontology_resolution(
     ds_id: str,
@@ -423,7 +509,11 @@ async def get_ontology_resolution(
 
 # ── GET /data-sources/{ds_id}/readiness ─────────────────────────────
 
-@router.get("/data-sources/{ds_id}/readiness", summary="Get aggregation readiness")
+@router.get(
+    "/data-sources/{ds_id}/readiness",
+    summary="Get aggregation readiness",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
+)
 async def get_readiness(
     ds_id: str,
     request: Request,
@@ -441,7 +531,11 @@ async def get_readiness(
 
 # ── GET /data-sources/{ds_id}/aggregation-jobs ──────────────────────
 
-@router.get("/data-sources/{ds_id}/aggregation-jobs", summary="List aggregation jobs")
+@router.get(
+    "/data-sources/{ds_id}/aggregation-jobs",
+    summary="List aggregation jobs",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
+)
 async def list_jobs(
     ds_id: str,
     request: Request,
@@ -461,7 +555,11 @@ async def list_jobs(
 
 # ── GET /data-sources/{ds_id}/aggregation-jobs/{job_id} ─────────────
 
-@router.get("/data-sources/{ds_id}/aggregation-jobs/{job_id}", summary="Get job status")
+@router.get(
+    "/data-sources/{ds_id}/aggregation-jobs/{job_id}",
+    summary="Get job status",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
+)
 async def get_job(
     ds_id: str,
     job_id: str,
@@ -525,6 +623,7 @@ async def get_job(
 @router.get(
     "/data-sources/{ds_id}/aggregation-jobs/{job_id}/events",
     summary="Server-Sent Events stream of job progress",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
 )
 async def stream_job_events(
     ds_id: str,
@@ -612,6 +711,7 @@ async def stream_job_events(
     "/data-sources/{ds_id}/aggregation-jobs/{job_id}/resume",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Resume a failed aggregation job",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def resume_job(
     ds_id: str,
@@ -646,6 +746,7 @@ async def resume_job(
 @router.post(
     "/data-sources/{ds_id}/aggregation-jobs/{job_id}/cancel",
     summary="Cancel an aggregation job",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def cancel_job(
     ds_id: str,
@@ -671,6 +772,7 @@ async def cancel_job(
     "/aggregation-jobs/{job_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a terminal aggregation job",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
 )
 async def delete_job(
     job_id: str,
@@ -695,6 +797,7 @@ async def delete_job(
     "/data-sources/{ds_id}/purge-aggregation",
     status_code=status.HTTP_202_ACCEPTED,
     summary="Purge aggregated edges (asynchronous)",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def purge_aggregation(
     ds_id: str,
@@ -842,7 +945,11 @@ async def purge_aggregation(
 
 # ── POST /data-sources/{ds_id}/skip-aggregation ────────────────────
 
-@router.post("/data-sources/{ds_id}/skip-aggregation", summary="Skip aggregation")
+@router.post(
+    "/data-sources/{ds_id}/skip-aggregation",
+    summary="Skip aggregation",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
+)
 async def skip_aggregation(
     ds_id: str,
     request: Request,
@@ -870,6 +977,7 @@ async def skip_aggregation(
     "/data-sources/{ds_id}/aggregation-schedule",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Set aggregation schedule",
+    dependencies=[Depends(_REQUIRE_DS_MANAGE)],
 )
 async def set_schedule(
     ds_id: str,
@@ -892,7 +1000,11 @@ async def set_schedule(
 
 # ── GET /data-sources/{ds_id}/check-drift ──────────────────────────
 
-@router.get("/data-sources/{ds_id}/check-drift", summary="Check for graph drift")
+@router.get(
+    "/data-sources/{ds_id}/check-drift",
+    summary="Check for graph drift",
+    dependencies=[Depends(_REQUIRE_DS_READ)],
+)
 async def check_drift(
     ds_id: str,
     request: Request,

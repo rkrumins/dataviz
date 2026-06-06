@@ -26,21 +26,25 @@ import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
+import {
+    ROLE_NAMES,
+    PLATFORM_ADMIN_ROLES,
+    WORKSPACE_TEMPLATE_ROLE_SET,
+    type RoleName,
+} from '@/lib/roleNames'
 
 
 // Phase 11: classify a role for invite purposes from its catalogue
 // entry. Mirrors the backend rules so the modal can drive the
 // workspace-picker + email-required UX before the request is sent.
-const _WORKSPACE_TEMPLATE_ROLES = new Set([
-    'workspace_admin', 'workspace_member', 'workspace_viewer',
-])
+const _WORKSPACE_TEMPLATE_ROLES = WORKSPACE_TEMPLATE_ROLE_SET
 
 function roleIsPrivileged(perms: string[]): boolean {
     return perms.some(p => p === 'workspace:admin' || p.startsWith('system:'))
 }
 
 function roleNeedsWorkspace(role: RoleDefinitionResponse): boolean {
-    return _WORKSPACE_TEMPLATE_ROLES.has(role.name) || role.scopeType === 'workspace'
+    return _WORKSPACE_TEMPLATE_ROLES.has(role.name as RoleName) || role.scopeType === 'workspace'
 }
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -95,10 +99,10 @@ const STATUS_CONFIG: Record<string, { badge: string; dot: string; label: string 
 // privileges, but they can still be invited into specific workspaces".
 // See backend/app/db/repositories/user_repo.py:GLOBAL_ASSIGNABLE_ROLES.
 const AVAILABLE_ROLES = [
-    { value: 'user', label: 'User', description: 'A standard team member. No organization-wide privileges; can be invited to specific workspaces.', icon: UserCog },
-    { value: 'org_auditor', label: 'Org Auditor', description: 'Can see every workspace and the activity log, but can\'t make changes anywhere.', icon: ScrollText },
-    { value: 'org_admin', label: 'Org Admin', description: 'Manages every workspace and creates new ones. Doesn\'t manage user accounts or sign-in settings.', icon: Shield },
-    { value: 'super_admin', label: 'Super Admin', description: 'Full administrator with unrestricted access across the whole organization.', icon: Shield },
+    { value: ROLE_NAMES.USER, label: 'User', description: 'A standard team member. No organization-wide privileges; can be invited to specific workspaces.', icon: UserCog },
+    { value: ROLE_NAMES.ORG_AUDITOR, label: 'Org Auditor', description: 'Can see every workspace and the activity log, but can\'t make changes anywhere.', icon: ScrollText },
+    { value: ROLE_NAMES.ORG_ADMIN, label: 'Org Admin', description: 'Manages every workspace and creates new ones. Doesn\'t manage user accounts or sign-in settings.', icon: Shield },
+    { value: ROLE_NAMES.SUPER_ADMIN, label: 'Super Admin', description: 'Full administrator with unrestricted access across the whole organization.', icon: Shield },
 ]
 
 const KPI_CARDS = [
@@ -178,7 +182,7 @@ export function AdminUsers() {
         () =>
             canGrantSuperAdmin
                 ? AVAILABLE_ROLES
-                : AVAILABLE_ROLES.filter(r => r.value !== 'super_admin'),
+                : AVAILABLE_ROLES.filter(r => r.value !== ROLE_NAMES.SUPER_ADMIN),
         [canGrantSuperAdmin],
     )
 
@@ -285,7 +289,7 @@ export function AdminUsers() {
         // this number — they're not "platform" admins, just workspace
         // admins. Surface that distinction in the tooltip on the KPI.
         admins: users.filter(
-            u => u.role === 'super_admin' || u.role === 'org_admin',
+            u => PLATFORM_ADMIN_ROLES.has(u.role as RoleName),
         ).length,
     }), [users])
 
@@ -1380,20 +1384,20 @@ const _ROLE_VISUAL_NONE = {
     accent: 'text-slate-600 dark:text-slate-400',
 } as const
 
-const _BUILTIN_ORDER = [
-    'super_admin', 'org_admin', 'org_auditor',
-    'workspace_admin', 'workspace_data_engineer',
-    'workspace_member', 'workspace_viewer',
+const _BUILTIN_ORDER: readonly string[] = [
+    ROLE_NAMES.SUPER_ADMIN, ROLE_NAMES.ORG_ADMIN, ROLE_NAMES.ORG_AUDITOR,
+    ROLE_NAMES.WORKSPACE_ADMIN, ROLE_NAMES.WORKSPACE_DATA_ENGINEER,
+    ROLE_NAMES.WORKSPACE_MEMBER, ROLE_NAMES.WORKSPACE_VIEWER,
 ]
 
 const _ROLE_FALLBACK_DESC: Record<string, string> = {
-    super_admin: 'Full administrator. Unrestricted access across the whole organization.',
-    org_admin: 'Manages every workspace and creates new ones. Doesn\'t manage user accounts or sign-in.',
-    org_auditor: 'Read-only access to every workspace and the activity log.',
-    workspace_admin: 'Full control inside the workspace — members, settings, and content.',
-    workspace_data_engineer: 'Owns data sources, semantic layers, and views inside the workspace.',
-    workspace_member: 'Day-to-day contributor. Creates and edits views and data sources.',
-    workspace_viewer: 'Read-only access to the workspace.',
+    [ROLE_NAMES.SUPER_ADMIN]: 'Full administrator. Unrestricted access across the whole organization.',
+    [ROLE_NAMES.ORG_ADMIN]: 'Manages every workspace and creates new ones. Doesn\'t manage user accounts or sign-in.',
+    [ROLE_NAMES.ORG_AUDITOR]: 'Read-only access to every workspace and the activity log.',
+    [ROLE_NAMES.WORKSPACE_ADMIN]: 'Full control inside the workspace — members, settings, and content.',
+    [ROLE_NAMES.WORKSPACE_DATA_ENGINEER]: 'Owns data sources, semantic layers, and views inside the workspace.',
+    [ROLE_NAMES.WORKSPACE_MEMBER]: 'Day-to-day contributor. Creates and edits views and data sources.',
+    [ROLE_NAMES.WORKSPACE_VIEWER]: 'Read-only access to the workspace.',
 }
 
 
@@ -1462,7 +1466,7 @@ function InviteForm({
     useEffect(() => {
         permissionsService.listRoles()
             .then(rs => setRoles(
-                canGrantSuperAdmin ? rs : rs.filter(r => r.name !== 'super_admin'),
+                canGrantSuperAdmin ? rs : rs.filter(r => r.name !== ROLE_NAMES.SUPER_ADMIN),
             ))
             .catch(() => setRoles([]))
         workspaceService.list().then(setWorkspaces).catch(() => setWorkspaces([]))

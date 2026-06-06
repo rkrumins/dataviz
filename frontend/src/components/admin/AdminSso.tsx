@@ -23,6 +23,7 @@ import {
 } from '@/services/ssoAdminService'
 import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
 
 type Tab = 'providers' | 'mappings' | 'settings' | 'lookup'
@@ -313,7 +314,7 @@ function MappingsTab() {
             // to auto-grant via SSO (per ``FORBIDDEN_AUTO_ROLE`` in
             // ``idp_group_mapping_repo``). super_admin is the only one
             // currently on the list.
-            setAvailableRoles(r.filter(role => role.name !== 'super_admin'))
+            setAvailableRoles(r.filter(role => !FORBIDDEN_AUTO_GRANT_ROLES.has(role.name as RoleName)))
             setError(null)
         } catch (err) {
             setError((err as Error).message)

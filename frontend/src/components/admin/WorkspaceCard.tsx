@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Shield, Trash2, ChevronRight, ChevronDown, ChevronUp, FolderOpen, CircleDot, ArrowRightLeft, GitBranch, Eye, Layers, Star, ExternalLink, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { type WorkspaceResponse } from '@/services/workspaceService'
+import { usePermission } from '@/store/auth'
 import { WorkspaceHealthBadge } from './workspace/WorkspaceHealthBadge'
 import { getProviderLogo } from './ProviderLogos'
 
@@ -81,6 +82,12 @@ export function WorkspaceCard({
     const [showSources, setShowSources] = useState(false)
     const gradient = GRADIENT_ACCENTS[index % GRADIENT_ACCENTS.length]
     const { uniqueEntityTypes, uniqueRelationshipTypes, ontologyNames, providerGroups, viewCount } = schemaSummary
+    // Workspace deletion + set-default both gate on system:admin
+    // (matches WorkspaceListRow). Workspace admins manage their own
+    // workspace from inside the detail page; the platform-wide list
+    // mutations stay platform-admin-only so the card row doesn't
+    // surface buttons that 403 on click.
+    const canMutateWorkspace = usePermission('system:admin')
 
     const AGG_META: Record<string, { dot: string; label: string }> = {
         ready:   { dot: 'bg-emerald-400', label: 'Ready' },
@@ -264,14 +271,16 @@ export function WorkspaceCard({
                             <Users className="w-3 h-3" /> Members
                         </button>
                     )}
-                    {!ws.isDefault && (
+                    {!ws.isDefault && canMutateWorkspace && (
                         <button onClick={(e) => { e.stopPropagation(); onSetDefault() }} className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors">
                             <Shield className="w-3 h-3" /> Default
                         </button>
                     )}
-                    <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-lg text-red-500/70 hover:text-red-500 hover:bg-red-500/10 transition-colors">
-                        <Trash2 className="w-3 h-3" />
-                    </button>
+                    {canMutateWorkspace && (
+                        <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium rounded-lg text-red-500/70 hover:text-red-500 hover:bg-red-500/10 transition-colors">
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    )}
                 </div>
             </div>
         </div>

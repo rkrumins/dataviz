@@ -21,6 +21,10 @@ from backend.app.db.models import (
     OutboxEventORM,
     RoleBindingORM,
 )
+from backend.common.roles import (
+    DEFAULT_PLATFORM_TIER,
+    GLOBAL_ASSIGNABLE_ROLES,
+)
 
 
 def _now() -> str:
@@ -283,22 +287,18 @@ async def update_user_status(session: AsyncSession, user_id: str, status: str) -
 # orthogonal to workspace-template roles (which are bound per workspace
 # via the workspace-members endpoint).
 #
+# ``GLOBAL_ASSIGNABLE_ROLES`` and ``DEFAULT_PLATFORM_TIER`` are
+# re-exported from ``backend.common.roles`` (imported above) — kept
+# at module scope so existing call sites that reference
+# ``user_repo.GLOBAL_ASSIGNABLE_ROLES`` continue to work. The
+# canonical definitions live alongside the FE mirror in
+# ``backend/common/roles.py`` so a rename is one edit, not twelve.
+#
 # * ``user`` is the default tier — every user starts here. Setting this
 #   role clears the user's global binding entirely; the user keeps any
 #   workspace bindings they hold but has no platform-wide privileges.
 # * ``org_auditor`` / ``org_admin`` / ``super_admin`` are the elevated
 #   tiers and write a real ``role_bindings`` row at global scope.
-GLOBAL_ASSIGNABLE_ROLES: frozenset[str] = frozenset({
-    "user",
-    "org_auditor",
-    "org_admin",
-    "super_admin",
-})
-
-# The default tier — assigning this means "no platform privileges,
-# clear any elevated binding". Treated specially in ``set_global_role``
-# (delete-only; no new role_bindings row).
-DEFAULT_PLATFORM_TIER: str = "user"
 
 
 async def assign_role(session: AsyncSession, user_id: str, role_name: str) -> UserRoleORM:

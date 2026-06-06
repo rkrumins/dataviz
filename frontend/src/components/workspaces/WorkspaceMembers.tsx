@@ -38,6 +38,7 @@ import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
+import { ROLE_NAMES } from '@/lib/roleNames'
 
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -68,7 +69,7 @@ const KPI_CARDS = [
         iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
     },
     {
-        key: 'workspace_admin',
+        key: ROLE_NAMES.WORKSPACE_ADMIN,
         label: 'Admins',
         icon: Shield,
         gradient: 'from-amber-500/20 to-amber-500/0',
@@ -76,7 +77,7 @@ const KPI_CARDS = [
         iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
     },
     {
-        key: 'workspace_member',
+        key: ROLE_NAMES.WORKSPACE_MEMBER,
         label: 'Members',
         icon: UserCog,
         gradient: 'from-sky-500/20 to-sky-500/0',
@@ -84,7 +85,7 @@ const KPI_CARDS = [
         iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
     },
     {
-        key: 'workspace_viewer',
+        key: ROLE_NAMES.WORKSPACE_VIEWER,
         label: 'Viewers',
         icon: Eye,
         gradient: 'from-slate-500/20 to-slate-500/0',
@@ -259,9 +260,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
     const kpis = useMemo(() => ({
         total: members.length,
-        workspace_admin: members.filter(m => m.role === 'workspace_admin').length,
-        workspace_member: members.filter(m => m.role === 'workspace_member').length,
-        workspace_viewer: members.filter(m => m.role === 'workspace_viewer').length,
+        [ROLE_NAMES.WORKSPACE_ADMIN]: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_ADMIN).length,
+        [ROLE_NAMES.WORKSPACE_MEMBER]: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_MEMBER).length,
+        [ROLE_NAMES.WORKSPACE_VIEWER]: members.filter(m => m.role === ROLE_NAMES.WORKSPACE_VIEWER).length,
     }), [members])
 
     const processedMembers = useMemo(() => {
