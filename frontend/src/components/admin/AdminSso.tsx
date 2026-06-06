@@ -21,6 +21,9 @@ import {
     type IdpProvider,
     type UserSummary,
 } from '@/services/ssoAdminService'
+import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
+import { roleVisualFor } from '@/lib/roleVisual'
+import { cn } from '@/lib/utils'
 
 type Tab = 'providers' | 'mappings' | 'settings' | 'lookup'
 
@@ -276,6 +279,13 @@ function CreateProviderForm({
 function MappingsTab() {
     const [rows, setRows] = useState<IdpGroupMapping[]>([])
     const [providers, setProviders] = useState<IdpProvider[]>([])
+    // Available roles come from the live ``/admin/roles`` catalogue so
+    // the picker always reflects the current taxonomy (organization
+    // access + workspace access + custom roles). The old free-text
+    // input forced
+    // admins to know exact role names by heart and produced a 400 on
+    // typos — a dropdown of validated choices is correct UX.
+    const [availableRoles, setAvailableRoles] = useState<RoleDefinitionResponse[]>([])
     const [error, setError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
     const [target, setTarget] = useState<'role_binding' | 'group_membership'>('role_binding')
@@ -292,12 +302,18 @@ function MappingsTab() {
 
     const refresh = useCallback(async () => {
         try {
-            const [m, p] = await Promise.all([
+            const [m, p, r] = await Promise.all([
                 ssoAdminService.listGroupMappings(),
                 ssoAdminService.listProviders(),
+                permissionsService.listRoles(),
             ])
             setRows(m)
             setProviders(p)
+            // Drop ``system:admin``-equivalent roles that the BE refuses
+            // to auto-grant via SSO (per ``FORBIDDEN_AUTO_ROLE`` in
+            // ``idp_group_mapping_repo``). super_admin is the only one
+            // currently on the list.
+            setAvailableRoles(r.filter(role => role.name !== 'super_admin'))
             setError(null)
         } catch (err) {
             setError((err as Error).message)
@@ -305,6 +321,30 @@ function MappingsTab() {
     }, [])
 
     useEffect(() => { void refresh() }, [refresh])
+
+    // Auto-flip the scope picker to match the selected role. Workspace-
+    // template roles only make sense at workspace scope; platform
+    // tiers only at global scope. The free-text version let admins
+    // pair them wrong and 400 at the BE.
+    const selectedRoleObj = availableRoles.find(r => r.name === roleName)
+    const roleIsWorkspaceScoped = selectedRoleObj
+        ? selectedRoleObj.scopeType === 'workspace'
+            || selectedRoleObj.permissions.some(p => p.startsWith('workspace:'))
+        : false
+    useEffect(() => {
+        if (!selectedRoleObj) return
+        // Only force-flip when the user hasn't deliberately picked the
+        // other scope; otherwise we'd fight their choice on every key
+        // press. The "hint" is presence of ``workspace:*`` perms on the
+        // role — if it's a custom role with mixed perms, we leave the
+        // scope alone.
+        if (roleIsWorkspaceScoped && scopeType === 'global') {
+            setScopeType('workspace')
+        } else if (!roleIsWorkspaceScoped && scopeType === 'workspace') {
+            setScopeType('global')
+            setScopeId('')
+        }
+    }, [selectedRoleObj, roleIsWorkspaceScoped, scopeType])
 
     async function create(e: React.FormEvent) {
         e.preventDefault()
@@ -396,21 +436,66 @@ function MappingsTab() {
                     {target === 'role_binding' ? (
                         <>
                             <label className="text-xs">
-                                Role name
-                                <input
-                                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 font-mono text-xs"
+                                Role
+                                <select
+                                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
                                     value={roleName}
                                     onChange={(e) => setRoleName(e.target.value)}
-                                    placeholder="user"
                                     required
-                                />
+                                >
+                                    <option value="">Select a role…</option>
+                                    <optgroup label="Organization-wide access">
+                                        {availableRoles
+                                            .filter(r => r.isSystem
+                                                && !r.permissions.some(p => p.startsWith('workspace:')))
+                                            .map(r => (
+                                                <option key={r.name} value={r.name}>
+                                                    {roleVisualFor(r.name).label}
+                                                </option>
+                                            ))}
+                                    </optgroup>
+                                    <optgroup label="Workspace-specific access">
+                                        {availableRoles
+                                            .filter(r => r.isSystem
+                                                && r.permissions.some(p => p.startsWith('workspace:')))
+                                            .map(r => (
+                                                <option key={r.name} value={r.name}>
+                                                    {roleVisualFor(r.name).label}
+                                                </option>
+                                            ))}
+                                    </optgroup>
+                                    {availableRoles.some(r => !r.isSystem) && (
+                                        <optgroup label="Custom roles">
+                                            {availableRoles
+                                                .filter(r => !r.isSystem)
+                                                .map(r => (
+                                                    <option key={r.name} value={r.name}>
+                                                        {r.name}
+                                                    </option>
+                                                ))}
+                                        </optgroup>
+                                    )}
+                                </select>
+                                {selectedRoleObj?.description && (
+                                    <p className="mt-1 text-[10px] text-ink-muted/80">
+                                        {selectedRoleObj.description}
+                                    </p>
+                                )}
                             </label>
                             <label className="text-xs">
                                 Scope
                                 <select
-                                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs"
+                                    className="mt-1 w-full px-2 py-1.5 rounded bg-canvas border border-white/10 text-xs disabled:opacity-60"
                                     value={scopeType}
                                     onChange={(e) => setScopeType(e.target.value as 'global' | 'workspace')}
+                                    // Scope is implied by the role selection — workspace-
+                                    // template roles must bind at workspace scope, platform
+                                    // tiers at global. The picker auto-flips above; we
+                                    // disable manual override so they can't drift apart.
+                                    disabled={selectedRoleObj?.isSystem}
+                                    title={selectedRoleObj?.isSystem
+                                        ? 'Scope is fixed by the selected built-in role.'
+                                        : undefined}
                                 >
                                     <option value="global">Global</option>
                                     <option value="workspace">Workspace</option>
@@ -470,9 +555,21 @@ function MappingsTab() {
                             </td>
                             <td className="font-mono text-xs">{m.idpGroup}</td>
                             <td className="text-xs">
-                                {m.targetType === 'role_binding'
-                                    ? `role ${m.roleName} @ ${m.scopeType}${m.scopeId ? `/${m.scopeId}` : ''}`
-                                    : `group ${m.targetGroupId}`}
+                                {m.targetType === 'role_binding' ? (
+                                    <span className="flex items-center gap-1.5">
+                                        <span className={cn(
+                                            'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold border',
+                                            roleVisualFor(m.roleName ?? '').badge,
+                                        )}>
+                                            {roleVisualFor(m.roleName ?? '').label}
+                                        </span>
+                                        <span className="text-ink-muted">
+                                            @ {m.scopeType}{m.scopeId ? `/${m.scopeId}` : ''}
+                                        </span>
+                                    </span>
+                                ) : (
+                                    `group ${m.targetGroupId}`
+                                )}
                             </td>
                             <td className="text-right">
                                 <button
@@ -861,7 +958,7 @@ export function AdminSso() {
                     SSO
                 </h1>
                 <p className="mt-1 text-sm text-ink-muted">
-                    Configure Identity Providers, map IdP groups to internal roles or groups, manage the platform-wide posture, and look up users by email or claim identifier.
+                    Configure Identity Providers, map IdP groups to internal roles or groups, manage organization-wide sign-in settings, and look up users by email or claim identifier.
                 </p>
             </header>
             <nav className="flex gap-2 border-b border-white/10">

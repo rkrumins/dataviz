@@ -88,7 +88,7 @@ const CATEGORY_VISUAL: Record<string, {
         accent: 'text-violet-600 dark:text-violet-400',
         border: 'border-violet-500/20',
         pill: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-        description: 'Global, platform-wide capabilities',
+        description: 'Organization-wide capabilities',
     },
     workspace: {
         label: 'Workspace',

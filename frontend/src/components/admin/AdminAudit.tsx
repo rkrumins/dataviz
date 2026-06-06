@@ -171,8 +171,8 @@ export function AdminAudit() {
                     <div>
                         <p className="text-sm font-semibold text-ink">Audit log requires Super Admin</p>
                         <p className="text-xs text-ink-muted mt-1">
-                            The audit history contains sensitive role / permission provenance
-                            and is restricted to platform owners (<code className="font-mono">system:admin</code>).
+                            The audit history contains sensitive role and permission changes
+                            and is restricted to Super Admins (<code className="font-mono">system:admin</code>).
                         </p>
                     </div>
                 </div>

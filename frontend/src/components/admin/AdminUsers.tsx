@@ -88,16 +88,17 @@ const STATUS_CONFIG: Record<string, { badge: string; dot: string; label: string 
 // canonical helper (which itself falls back to "Custom" for unknown
 // roles).
 
-// Platform tiers — what kind of system account a user is. Orthogonal
-// to workspace bindings (managed inside each workspace's Members tab).
-// Every user has exactly one tier; ``user`` is the default and means
-// "no platform privileges, but they may still hold workspace bindings".
+// Organization-wide access — what kind of account a person has across
+// the whole org. Orthogonal to workspace access (managed inside each
+// workspace's Members tab). Every user has exactly one organization
+// role; ``user`` is the default and means "no organization-wide
+// privileges, but they can still be invited into specific workspaces".
 // See backend/app/db/repositories/user_repo.py:GLOBAL_ASSIGNABLE_ROLES.
 const AVAILABLE_ROLES = [
-    { value: 'user', label: 'User', description: 'Standard account. No platform privileges; may still hold workspace roles.', icon: UserCog },
-    { value: 'org_auditor', label: 'Org Auditor', description: 'Read-only access across every workspace + audit log + bindings.', icon: ScrollText },
-    { value: 'org_admin', label: 'Org Admin', description: 'Manage every workspace; create new ones. No user / SSO admin.', icon: Shield },
-    { value: 'super_admin', label: 'Super Admin', description: 'Platform owner; every permission, every scope.', icon: Shield },
+    { value: 'user', label: 'User', description: 'A standard team member. No organization-wide privileges; can be invited to specific workspaces.', icon: UserCog },
+    { value: 'org_auditor', label: 'Org Auditor', description: 'Can see every workspace and the activity log, but can\'t make changes anywhere.', icon: ScrollText },
+    { value: 'org_admin', label: 'Org Admin', description: 'Manages every workspace and creates new ones. Doesn\'t manage user accounts or sign-in settings.', icon: Shield },
+    { value: 'super_admin', label: 'Super Admin', description: 'Full administrator with unrestricted access across the whole organization.', icon: Shield },
 ]
 
 const KPI_CARDS = [
@@ -817,9 +818,9 @@ export function AdminUsers() {
                                                             <Pencil className="w-4 h-4" />
                                                         </button>
 
-                                                        {/* Change platform tier */}
+                                                        {/* Change organization access */}
                                                         <button onClick={() => openRoleModal(user)} disabled={isActing}
-                                                            title="Change platform tier"
+                                                            title="Change organization access"
                                                             className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50">
                                                             <UserCog className="w-4 h-4" />
                                                         </button>
@@ -934,16 +935,16 @@ export function AdminUsers() {
                             )}
 
                             {/* ── Role change modal ──
-                                Renamed "Platform tier" to make explicit that this
-                                is orthogonal to per-workspace bindings. The modal
-                                shows all 4 tiers (User / Org Auditor / Org Admin
-                                / Super Admin) so admins can demote as well as
+                                Organization-wide access. Separate axis from
+                                each workspace's own members list. Shows all
+                                4 roles (User / Org Auditor / Org Admin /
+                                Super Admin) so admins can demote as well as
                                 promote. */}
                             {modal.kind === 'role' && (
                                 <>
                                     <ModalHeader icon={UserCog} iconBg="bg-indigo-500/10 border-indigo-500/20" iconColor="text-indigo-500"
-                                        title="Change Platform Tier"
-                                        subtitle={`Current: ${roleVisualFor(modal.currentRole).label}. Workspace roles are managed inside each workspace's Members tab.`}
+                                        title="Change Organization Access"
+                                        subtitle={`Current: ${roleVisualFor(modal.currentRole).label}. Workspace-specific access is managed inside each workspace.`}
                                         onClose={closeModal} />
                                     <UserPill name={modal.name} />
                                     <div className="space-y-2 mb-5">
@@ -1218,10 +1219,10 @@ export function AdminUsers() {
                                 <button
                                     onClick={() => openRoleModal(accessUser)}
                                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors shrink-0"
-                                    title="Change platform tier"
+                                    title="Change organization access"
                                 >
                                     <UserCog className="w-3.5 h-3.5" />
-                                    Platform tier
+                                    Org access
                                 </button>
                                 <button
                                     onClick={closeAccessDrawer}
@@ -1377,13 +1378,13 @@ const _BUILTIN_ORDER = [
 ]
 
 const _ROLE_FALLBACK_DESC: Record<string, string> = {
-    super_admin: 'Platform owner — every permission, every workspace.',
-    org_admin: 'Manage every workspace, create new ones. No user / SSO admin.',
-    org_auditor: 'Read-only across every workspace + audit log + bindings.',
-    workspace_admin: 'Full powers inside the bound workspace.',
-    workspace_data_engineer: 'Owns data products in the workspace; no members or settings.',
-    workspace_member: 'Edit views and data sources in the bound workspace.',
-    workspace_viewer: 'Read-only access to the bound workspace.',
+    super_admin: 'Full administrator. Unrestricted access across the whole organization.',
+    org_admin: 'Manages every workspace and creates new ones. Doesn\'t manage user accounts or sign-in.',
+    org_auditor: 'Read-only access to every workspace and the activity log.',
+    workspace_admin: 'Full control inside the workspace — members, settings, and content.',
+    workspace_data_engineer: 'Owns data sources, semantic layers, and views inside the workspace.',
+    workspace_member: 'Day-to-day contributor. Creates and edits views and data sources.',
+    workspace_viewer: 'Read-only access to the workspace.',
 }
 
 
@@ -1531,7 +1532,22 @@ function InviteForm({
     // in Standard Roles, not Custom. The smart-visual helper picks an
     // icon/colour from role characteristics for any role without a
     // curated entry.
-    const { standardRoles, customRoles, noRole } = useMemo(() => {
+    // The invite flow is about getting someone INTO the organization.
+    // Workspace-specific access is something each workspace's admin
+    // grants from their own Members tab after the user signs up — so
+    // we only surface two buckets in this picker:
+    //   * Organization access — built-in tiers that apply across the
+    //     whole org (super_admin / org_admin / org_auditor). ``user``
+    //     is the implicit default and lives in the "Standard user"
+    //     card up top.
+    //   * Custom roles — admin-defined. Workspace-scoped custom roles
+    //     are kept here in case an admin built one for a specific
+    //     onboarding flow; their workspace pick still works via the
+    //     right rail when one is selected.
+    // Built-in workspace tiers (workspace_admin/member/viewer/
+    // data_engineer) are intentionally NOT shown here — workspace
+    // admins assign those from inside the workspace.
+    const { platformTiers, customRoles, noRole } = useMemo(() => {
         const opt = (r: RoleDefinitionResponse): RoleOption => {
             const v = inviteRoleVisual(r.name)
             return {
@@ -1548,28 +1564,36 @@ function InviteForm({
             }
         }
         const all = (roles ?? []).map(opt)
-        const standardRoles: RoleOption[] = []
+        const platformTiers: RoleOption[] = []
         const customRoles: RoleOption[] = []
-        for (const o of all) (o.isBuiltin ? standardRoles : customRoles).push(o)
-        // Standard roles sort canonical first, then alpha for anything
-        // outside the canonical set (catches legacy admin/user/viewer).
-        standardRoles.sort((a, b) => {
+        for (const o of all) {
+            if (!o.isBuiltin) {
+                customRoles.push(o)
+                continue
+            }
+            // Drop built-in workspace tiers. They belong in each
+            // workspace's own Members tab, not the org-level invite.
+            if (o.scoped) continue
+            platformTiers.push(o)
+        }
+        const byCanonicalOrder = (a: RoleOption, b: RoleOption) => {
             const ia = _BUILTIN_ORDER.indexOf(a.value)
             const ib = _BUILTIN_ORDER.indexOf(b.value)
             if (ia >= 0 && ib >= 0) return ia - ib
             if (ia >= 0) return -1
             if (ib >= 0) return 1
             return a.label.localeCompare(b.label)
-        })
+        }
+        platformTiers.sort(byCanonicalOrder)
         customRoles.sort((a, b) => a.label.localeCompare(b.label))
         const noRole: RoleOption = {
             value: '',
-            label: 'No role',
-            sublabel: 'Plain activated account — no workspace access until granted.',
+            label: 'Standard user',
+            sublabel: 'A regular team account with no organization-wide privileges. A workspace admin will invite them into specific workspaces with the right role from inside that workspace.',
             privileged: false, scoped: false, fixedWorkspaceId: null,
             visual: _ROLE_VISUAL_NONE, isBuiltin: false,
         }
-        return { standardRoles, customRoles, noRole }
+        return { platformTiers, customRoles, noRole }
     }, [roles])
 
     const fixedWorkspace = fixedWorkspaceId
@@ -1601,8 +1625,9 @@ function InviteForm({
             className="flex-1 flex flex-col min-h-0 -mx-6"
         >
             <p className="text-sm text-ink-secondary mb-4 px-6">
-                Generate a link that lets a new user sign up. Pick any role —
-                workspace tiers and custom roles work too.
+                Generate a link that lets a new user sign up as a standard team member.
+                Optionally elevate them to an organization-wide role, or add them to groups.
+                Workspace-specific access is granted by each workspace's admin after signup.
             </p>
 
             {roles === null ? (
@@ -1612,11 +1637,18 @@ function InviteForm({
                     {/* Scrollable body — wraps the role pickers + the
                         two-column config grid + the live summary. The
                         footer below sits outside this scroll region.
-                        ``min-w-0`` on the inner grid columns prevents
-                        long workspace / group / recipient strings from
-                        pushing the right rail past the modal edge. */}
+                        Grid:
+                          * Left column has a 0 minimum so long role
+                            descriptions truncate inside the column
+                            instead of stealing width from the right
+                            rail.
+                          * Right column has an explicit 260px minimum
+                            so it can never collapse to a sliver (last
+                            bug: ``minmax(0,1fr)`` let it shrink to a
+                            1-character-wide vertical strip when role
+                            descriptions ate the available space). */}
                     <div className="flex-1 overflow-y-auto px-6 min-w-0">
-                        <div className="grid grid-cols-1 md:grid-cols-[1.1fr_minmax(0,1fr)] gap-x-6 gap-y-0 min-w-0">
+                        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.1fr)_minmax(260px,1fr)] gap-x-6 gap-y-0 min-w-0">
                             {/* ── LEFT column — Role catalogue ─────────── */}
                             <div>
                                 <SectionLabel>Choose a role</SectionLabel>
@@ -1626,17 +1658,19 @@ function InviteForm({
                                     onSelect={() => setSelectedRole('')}
                                 />
                                 <div className="space-y-3 mt-3 max-h-[360px] overflow-y-auto pr-1">
-                                    {standardRoles.length > 0 && (
+                                    {platformTiers.length > 0 && (
                                         <RoleGroup
-                                            title="Standard Roles"
-                                            options={standardRoles}
+                                            title="Elevate to a privileged role"
+                                            subtitle="Optional. Grants access across the whole organization."
+                                            options={platformTiers}
                                             selected={selectedRole}
                                             onSelect={setSelectedRole}
                                         />
                                     )}
                                     {customRoles.length > 0 && (
                                         <RoleGroup
-                                            title="Custom Roles"
+                                            title="Custom roles"
+                                            subtitle="Created by your team. How they work depends on the role."
                                             options={customRoles}
                                             selected={selectedRole}
                                             onSelect={setSelectedRole}
@@ -1987,18 +2021,24 @@ function RoleListSkeleton() {
 
 
 function RoleGroup({
-    title, options, selected, onSelect,
+    title, subtitle, options, selected, onSelect,
 }: {
     title: string
+    subtitle?: string
     options: RoleOption[]
     selected: string
     onSelect: (v: string) => void
 }) {
     return (
         <div>
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-1.5 px-1">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-0.5 px-1">
                 {title}
             </p>
+            {subtitle && (
+                <p className="text-[10px] text-ink-muted/70 mb-1.5 px-1 italic">
+                    {subtitle}
+                </p>
+            )}
             <div className="space-y-1.5">
                 {options.map(opt => {
                     const isSelected = selected === opt.value
