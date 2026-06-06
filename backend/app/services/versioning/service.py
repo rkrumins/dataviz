@@ -1399,6 +1399,79 @@ class GraphVersioningService:
         out.sort(key=lambda r: r["id"])
         return out[offset: offset + limit]
 
+    async def get_children_with_edges_from_state(
+        self, *, graph_id: str, parent_urn: str, containment_edge_types: Sequence[str],
+        lineage_edge_types: Optional[Sequence[str]] = None, branch_id: Optional[str] = None,
+        as_of_seq: Optional[int] = None, include_lineage_edges: bool = True,
+        limit: int = 100, offset: int = 0,
+    ) -> Dict[str, object]:
+        """Branch/as-of-aware children-with-edges — the draft/as-of counterpart of the
+        provider's ``get_children_with_edges``. One bounded round trip: the parent's OUT
+        containment edges give the children (in = ancestors), then the page children's
+        cross-edges give the lineage edges within {parent} ∪ children. Bounded by the
+        parent's and the page's degree (ix_ev_source/target); mirrors ChildrenWithEdgesResult.
+        Edge-type classification is the graph's ontology sets, matched case-insensitively."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
+        empty = {"children": [], "containmentEdges": [], "lineageEdges": [],
+                 "totalChildren": 0, "hasMore": False, "nextCursor": None}
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            parent = await self._eid_for_urn(s, graph_id, branch_id, parent_urn, as_of_seq)
+            if parent is None:
+                return empty
+            # parent's live incident edges → OUT containment edges name the children
+            inc = await self._incident_live_edges(s, graph_id, branch_id, {parent}, as_of_seq)
+            cont_edge: Dict[str, Tuple[str, dict]] = {}   # child_eid -> (edge_id, payload)
+            for eid, p in inc.items():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)
+                if a == parent and b != parent:
+                    cont_edge[b] = (eid, p)
+            child_vals = await self._current_values(s, graph_id, branch_id, list(cont_edge), as_of_seq)
+            live = [(eid, p) for eid, p in child_vals.items()
+                    if p is not None and not _is_edge_payload(p)]
+            live.sort(key=lambda kv: ((kv[1].get("displayName") or ""), kv[0]))
+            total = len(live)
+            page = live[offset: offset + limit]
+            page_ids = {eid for eid, _ in page}
+
+            lineage: List[Tuple[str, dict]] = []
+            if include_lineage_edges and page_ids:
+                scope = page_ids | {parent}
+                for eid, p in (await self._incident_live_edges(s, graph_id, branch_id, page_ids, as_of_seq)).items():
+                    et = (p.get("edgeType") or "").upper()
+                    if et in cset or (lset is not None and et not in lset):
+                        continue
+                    a, b = _edge_src_tgt(p)
+                    if a in scope and b in scope:
+                        lineage.append((eid, p))
+
+            need = page_ids | {parent}
+            for _, p in lineage:
+                a, b = _edge_src_tgt(p)
+                need.update((a, b))
+            node_vals = await self._current_values(s, graph_id, branch_id, need, as_of_seq)
+
+        urn_of = {
+            eid: ((p.get("urn") if (p is not None and not _is_edge_payload(p)) else None) or f"gv:{eid}")
+            for eid, p in node_vals.items()
+        }
+        children_out = [_graphnode_dict(eid, urn_of.get(eid, f"gv:{eid}"), p) for eid, p in page]
+        cont_out = [_graphedge_dict(cont_edge[eid][0], cont_edge[eid][1], urn_of) for eid, _ in page]
+        lin_out = [_graphedge_dict(eid, p, urn_of) for eid, p in lineage]
+        has_more = offset + len(page) < total
+        return {
+            "children": children_out,
+            "containmentEdges": cont_out,
+            "lineageEdges": lin_out,
+            "totalChildren": total,
+            "hasMore": has_more,
+            "nextCursor": (children_out[-1]["displayName"] if (children_out and has_more) else None),
+        }
+
     async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
         """Full revision timeline of one entity (plan §7 tier 1)."""
         async with self._session() as s:
