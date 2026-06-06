@@ -493,16 +493,17 @@ async def compute_user_access(
     # canonical effective permission map.
     claims = await resolve_claims(session, user_orm.id)
 
-    # Group member counts (for the FE chip "X members").
-    group_payload: list[UserAccessGroup] = []
-    for gid in group_ids:
-        g = group_meta.get(gid)
-        if g is None:
-            continue
-        count = await group_repo.count_members(session, gid)
-        group_payload.append(
-            UserAccessGroup(id=g.id, name=g.name, member_count=count)
-        )
+    # Group member counts (for the FE chip "X members"). One batched
+    # query for all groups — the old per-group ``count_members`` loop
+    # was the dominant cost of this endpoint when a user belonged to
+    # more than a couple of groups.
+    counts = await group_repo.count_members_batch(session, group_ids)
+    group_payload: list[UserAccessGroup] = [
+        UserAccessGroup(id=g.id, name=g.name, member_count=counts.get(gid, 0))
+        for gid in group_ids
+        for g in (group_meta.get(gid),)
+        if g is not None
+    ]
 
     return UserAccessResponse(
         user=UserAccessSubject(

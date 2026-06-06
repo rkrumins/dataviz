@@ -54,14 +54,18 @@ const EMPTY_CLAIMS: PermissionClaims = { sid: '', global: [], ws: {} }
 export type SystemRole =
     | 'super_admin'
     | 'org_admin'
+    | 'org_auditor'
     | 'workspace_admin'
+    | 'workspace_data_engineer'
     | 'workspace_member'
     | 'workspace_viewer'
 
 export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
     super_admin: 'Super Admin',
     org_admin: 'Org Admin',
+    org_auditor: 'Org Auditor',
     workspace_admin: 'Workspace Admin',
+    workspace_data_engineer: 'Data Engineer',
     workspace_member: 'Member',
     workspace_viewer: 'Viewer',
 }

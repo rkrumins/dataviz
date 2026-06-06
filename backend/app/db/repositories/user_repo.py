@@ -279,15 +279,26 @@ async def update_user_status(session: AsyncSession, user_id: str, status: str) -
 # super_admin in the UI but every endpoint 403s her" footgun the audit
 # called out (issue #1).
 
-# Roles that are global-only and meaningful when assigned via the
-# ``/admin/users/{id}/role`` flow. The workspace-template roles
-# (workspace_admin / workspace_member / workspace_viewer) describe
-# powers inside a workspace and are bound via the workspace-members
-# endpoint instead.
+# Platform tiers assignable via ``/admin/users/{id}/role``. These are
+# orthogonal to workspace-template roles (which are bound per workspace
+# via the workspace-members endpoint).
+#
+# * ``user`` is the default tier — every user starts here. Setting this
+#   role clears the user's global binding entirely; the user keeps any
+#   workspace bindings they hold but has no platform-wide privileges.
+# * ``org_auditor`` / ``org_admin`` / ``super_admin`` are the elevated
+#   tiers and write a real ``role_bindings`` row at global scope.
 GLOBAL_ASSIGNABLE_ROLES: frozenset[str] = frozenset({
-    "super_admin",
+    "user",
+    "org_auditor",
     "org_admin",
+    "super_admin",
 })
+
+# The default tier — assigning this means "no platform privileges,
+# clear any elevated binding". Treated specially in ``set_global_role``
+# (delete-only; no new role_bindings row).
+DEFAULT_PLATFORM_TIER: str = "user"
 
 
 async def assign_role(session: AsyncSession, user_id: str, role_name: str) -> UserRoleORM:
@@ -331,6 +342,13 @@ async def set_global_role(
             f"role_name must be one of {sorted(GLOBAL_ASSIGNABLE_ROLES)}, "
             f"got {role_name!r}"
         )
+
+    # Special case: the default ``user`` tier is "no elevated platform
+    # binding". We clear both stores and don't insert anything.
+    # Workspace-scope bindings stay untouched.
+    if role_name == DEFAULT_PLATFORM_TIER:
+        await clear_global_role(session, user_id)
+        return
 
     # 1. Legacy ``user_roles`` table — replace.
     await session.execute(
@@ -380,6 +398,35 @@ async def clear_global_role(session: AsyncSession, user_id: str) -> None:
             RoleBindingORM.subject_id == user_id,
             RoleBindingORM.scope_type == "global",
         )
+    )
+    await session.flush()
+
+
+async def update_identity(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+) -> None:
+    """Update an admin-editable identity field on a user.
+
+    Only first / last name are accepted here. Email is the SSO identity
+    key and changes via a separate re-link flow. ``updated_at`` is
+    refreshed so audit lookups can find the change.
+    """
+    updates: dict[str, str] = {}
+    if first_name is not None:
+        updates["first_name"] = first_name
+    if last_name is not None:
+        updates["last_name"] = last_name
+    if not updates:
+        return
+    updates["updated_at"] = _now()
+    await session.execute(
+        UserORM.__table__.update()
+        .where(UserORM.id == user_id)
+        .values(**updates)
     )
     await session.flush()
 

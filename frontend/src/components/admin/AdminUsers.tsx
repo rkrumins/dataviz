@@ -14,16 +14,18 @@ import {
     Users, CheckCircle2, XCircle, Clock, Shield, AlertCircle,
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
-    KeyRound, Eye, UserCog,
+    KeyRound, UserCog,
     RotateCcw, Lock, Copy, Check, Link2,
-    Crown, ShieldCheck, Building2, Globe, Sparkles, AtSign, Users2,
+    Building2, Globe, Sparkles, AtSign, Users2, ScrollText, Pencil,
 } from 'lucide-react'
 import { adminUserService, type AdminUserResponse, type InviteResponse } from '@/services/adminUserService'
-import { permissionsService, type RoleDefinitionResponse } from '@/services/permissionsService'
+import { permissionsService, type RoleDefinitionResponse, type UserAccessResponse } from '@/services/permissionsService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
+import { roleVisualFor } from '@/lib/roleVisual'
+import { AccessSummary } from '@/components/access/AccessSummary'
 
 
 // Phase 11: classify a role for invite purposes from its catalogue
@@ -52,6 +54,7 @@ type ModalType =
     | { kind: 'suspend'; userId: string; name: string }
     | { kind: 'resetPassword'; userId: string; name: string }
     | { kind: 'invite' }
+    | { kind: 'editProfile'; userId: string; firstName: string; lastName: string; email: string }
     | null
 
 const STATUS_TABS: { value: StatusFilter; label: string; icon: typeof Clock }[] = [
@@ -79,33 +82,22 @@ const STATUS_CONFIG: Record<string, { badge: string; dot: string; label: string 
     },
 }
 
-const ROLE_CONFIG: Record<string, { icon: typeof Shield; color: string; iconBg: string }> = {
-    admin: {
-        icon: Shield,
-        color: 'text-accent-lineage font-semibold',
-        iconBg: 'text-accent-lineage',
-    },
-    user: {
-        icon: UserCog,
-        color: 'text-sky-600 dark:text-sky-400',
-        iconBg: 'text-sky-500',
-    },
-    viewer: {
-        icon: Eye,
-        color: 'text-ink-secondary',
-        iconBg: 'text-ink-muted',
-    },
-}
+// Legacy table row visual map — replaced at the row-render call site
+// by ``roleVisualFor(user.role)`` from ``@/lib/roleVisual``. Kept as
+// an empty object so any stale lookup gracefully falls back to the
+// canonical helper (which itself falls back to "Custom" for unknown
+// roles).
 
-// Globally-assignable roles. The three workspace tiers
-// (workspace_admin / workspace_member / workspace_viewer) describe
-// powers inside a workspace and are bound via WorkspaceMembers, not
-// here — assigning them globally would have no workspace context and
-// the resolver's category × scope filter would drop them anyway.
+// Platform tiers — what kind of system account a user is. Orthogonal
+// to workspace bindings (managed inside each workspace's Members tab).
+// Every user has exactly one tier; ``user`` is the default and means
+// "no platform privileges, but they may still hold workspace bindings".
 // See backend/app/db/repositories/user_repo.py:GLOBAL_ASSIGNABLE_ROLES.
 const AVAILABLE_ROLES = [
-    { value: 'super_admin', label: 'Super Admin', description: 'Platform owner; every permission, every scope', icon: Shield },
-    { value: 'org_admin', label: 'Org Admin', description: 'Manage every workspace; no user / SSO admin', icon: Shield },
+    { value: 'user', label: 'User', description: 'Standard account. No platform privileges; may still hold workspace roles.', icon: UserCog },
+    { value: 'org_auditor', label: 'Org Auditor', description: 'Read-only access across every workspace + audit log + bindings.', icon: ScrollText },
+    { value: 'org_admin', label: 'Org Admin', description: 'Manage every workspace; create new ones. No user / SSO admin.', icon: Shield },
+    { value: 'super_admin', label: 'Super Admin', description: 'Platform owner; every permission, every scope.', icon: Shield },
 ]
 
 const KPI_CARDS = [
@@ -217,6 +209,36 @@ export function AdminUsers() {
     const [inviteResult, setInviteResult] = useState<InviteResponse | null>(null)
     const [inviteCopied, setInviteCopied] = useState(false)
     const [inviteLoading, setInviteLoading] = useState(false)
+
+    // Per-user access drawer — opens on row click. Shows direct +
+    // inherited bindings, group memberships, workspace + global
+    // permission maps via the shared ``AccessSummary`` component
+    // (same render the ``/admin/permissions`` "By user" tab uses).
+    const [accessUser, setAccessUser] = useState<AdminUserResponse | null>(null)
+    const [accessData, setAccessData] = useState<UserAccessResponse | null>(null)
+    const [accessLoading, setAccessLoading] = useState(false)
+    const [accessError, setAccessError] = useState<string | null>(null)
+
+    const openAccessDrawer = useCallback(async (user: AdminUserResponse) => {
+        setAccessUser(user)
+        setAccessData(null)
+        setAccessError(null)
+        setAccessLoading(true)
+        try {
+            const data = await permissionsService.getUserAccess(user.id)
+            setAccessData(data)
+        } catch (err) {
+            setAccessError(err instanceof Error ? err.message : 'Failed to load access')
+        } finally {
+            setAccessLoading(false)
+        }
+    }, [])
+
+    const closeAccessDrawer = useCallback(() => {
+        setAccessUser(null)
+        setAccessData(null)
+        setAccessError(null)
+    }, [])
 
     // ── Data fetching ────────────────────────────────────────────────
 
@@ -416,6 +438,42 @@ export function AdminUsers() {
     const openRoleModal = (user: AdminUserResponse) => {
         setSelectedRole(user.role)
         setModal({ kind: 'role', userId: user.id, name: user.displayName, currentRole: user.role })
+    }
+
+    const openEditProfileModal = (user: AdminUserResponse) => {
+        setModal({
+            kind: 'editProfile',
+            userId: user.id,
+            firstName: user.firstName ?? '',
+            lastName: user.lastName ?? '',
+            email: user.email,
+        })
+    }
+
+    const [profileFirstName, setProfileFirstName] = useState('')
+    const [profileLastName, setProfileLastName] = useState('')
+
+    useEffect(() => {
+        if (modal?.kind === 'editProfile') {
+            setProfileFirstName(modal.firstName)
+            setProfileLastName(modal.lastName)
+        }
+    }, [modal])
+
+    const handleUpdateProfile = async () => {
+        if (modal?.kind !== 'editProfile') return
+        const first = profileFirstName.trim()
+        const last = profileLastName.trim()
+        if (!first || !last) {
+            setError('First and last name are required')
+            return
+        }
+        await withAction(
+            modal.userId,
+            () => adminUserService.updateUser(modal.userId, { firstName: first, lastName: last }),
+            'Profile updated',
+        )
+        closeModal()
     }
 
     // ── Tab counts ───────────────────────────────────────────────────
@@ -652,13 +710,14 @@ export function AdminUsers() {
                         <tbody>
                             {processedUsers.map((user, i) => {
                                 const sc = STATUS_CONFIG[user.status]
-                                const rc = ROLE_CONFIG[user.role] || ROLE_CONFIG.user
+                                const rc = roleVisualFor(user.role)
                                 const RoleIcon = rc.icon
                                 const isActing = actionLoading === user.id
                                 return (
                                     <motion.tr key={user.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
                                         transition={{ duration: 0.15, delay: i * 0.02 }}
-                                        className="border-b last:border-b-0 border-glass-border transition-colors group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]">
+                                        onClick={() => openAccessDrawer(user)}
+                                        className="border-b last:border-b-0 border-glass-border transition-colors group hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer">
 
                                         {/* User avatar + name + email + reset badge */}
                                         <td className="px-5 py-4">
@@ -706,12 +765,15 @@ export function AdminUsers() {
                                             )}
                                         </td>
 
-                                        {/* Role with icon */}
+                                        {/* Role with icon — shared visual map. */}
                                         <td className="px-5 py-4">
-                                            <div className="flex items-center gap-1.5">
-                                                <RoleIcon className={cn("w-3.5 h-3.5", rc.iconBg)} />
-                                                <span className={cn("text-sm capitalize", rc.color)}>{user.role}</span>
-                                            </div>
+                                            <span className={cn(
+                                                'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border',
+                                                rc.badge,
+                                            )}>
+                                                <RoleIcon className="w-3 h-3" />
+                                                {rc.label}
+                                            </span>
                                         </td>
 
                                         {/* Joined */}
@@ -720,8 +782,8 @@ export function AdminUsers() {
                                             <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(user.createdAt)}</p>
                                         </td>
 
-                                        {/* Actions */}
-                                        <td className="px-5 py-4 text-right">
+                                        {/* Actions — clicks must not bubble to the row's drawer-open handler. */}
+                                        <td className="px-5 py-4 text-right" onClick={(e) => e.stopPropagation()}>
                                             <div className="flex items-center gap-1.5 justify-end">
                                                 {/* Pending: approve + reject */}
                                                 {user.status === 'pending' && (
@@ -748,9 +810,16 @@ export function AdminUsers() {
                                                 {/* Active / Suspended: action buttons */}
                                                 {user.status !== 'pending' && (
                                                     <>
-                                                        {/* Change role (not for self — backend guards this too) */}
+                                                        {/* Edit profile (name fields) */}
+                                                        <button onClick={() => openEditProfileModal(user)} disabled={isActing}
+                                                            title="Edit profile"
+                                                            className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50">
+                                                            <Pencil className="w-4 h-4" />
+                                                        </button>
+
+                                                        {/* Change platform tier */}
                                                         <button onClick={() => openRoleModal(user)} disabled={isActing}
-                                                            title="Change role"
+                                                            title="Change platform tier"
                                                             className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50">
                                                             <UserCog className="w-4 h-4" />
                                                         </button>
@@ -864,11 +933,18 @@ export function AdminUsers() {
                                 </>
                             )}
 
-                            {/* ── Role change modal ── */}
+                            {/* ── Role change modal ──
+                                Renamed "Platform tier" to make explicit that this
+                                is orthogonal to per-workspace bindings. The modal
+                                shows all 4 tiers (User / Org Auditor / Org Admin
+                                / Super Admin) so admins can demote as well as
+                                promote. */}
                             {modal.kind === 'role' && (
                                 <>
                                     <ModalHeader icon={UserCog} iconBg="bg-indigo-500/10 border-indigo-500/20" iconColor="text-indigo-500"
-                                        title="Change Role" subtitle={`Current: ${modal.currentRole}`} onClose={closeModal} />
+                                        title="Change Platform Tier"
+                                        subtitle={`Current: ${roleVisualFor(modal.currentRole).label}. Workspace roles are managed inside each workspace's Members tab.`}
+                                        onClose={closeModal} />
                                     <UserPill name={modal.name} />
                                     <div className="space-y-2 mb-5">
                                         {assignableRoles.map(r => {
@@ -903,6 +979,65 @@ export function AdminUsers() {
                                         confirmLabel="Update Role" confirmIcon={CheckCircle2}
                                         confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
                                         loading={!!actionLoading} disabled={selectedRole === modal.currentRole} />
+                                </>
+                            )}
+
+                            {/* ── Edit profile modal ──
+                                First / last name edit. Email is intentionally
+                                read-only (SSO identity key). Display name is
+                                derived server-side from first+last. */}
+                            {modal.kind === 'editProfile' && (
+                                <>
+                                    <ModalHeader icon={Pencil} iconBg="bg-indigo-500/10 border-indigo-500/20" iconColor="text-indigo-500"
+                                        title="Edit Profile"
+                                        subtitle="Update the user's name. Email is fixed (SSO identity key)."
+                                        onClose={closeModal} />
+                                    <div className="space-y-4 mb-5">
+                                        <div>
+                                            <label className="text-[11px] uppercase tracking-wider font-bold text-ink-muted block mb-1.5">Email (read-only)</label>
+                                            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink-muted">
+                                                <AtSign className="w-3.5 h-3.5 shrink-0" />
+                                                <span className="truncate">{modal.email}</span>
+                                                <Lock className="w-3 h-3 ml-auto shrink-0" />
+                                            </div>
+                                        </div>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-[11px] uppercase tracking-wider font-bold text-ink-muted block mb-1.5">First name</label>
+                                                <input
+                                                    type="text"
+                                                    value={profileFirstName}
+                                                    onChange={(e) => setProfileFirstName(e.target.value)}
+                                                    placeholder="First name"
+                                                    maxLength={120}
+                                                    className="w-full px-3 py-2 rounded-xl border border-glass-border bg-canvas-elevated text-sm text-ink focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage outline-none transition-colors"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-[11px] uppercase tracking-wider font-bold text-ink-muted block mb-1.5">Last name</label>
+                                                <input
+                                                    type="text"
+                                                    value={profileLastName}
+                                                    onChange={(e) => setProfileLastName(e.target.value)}
+                                                    placeholder="Last name"
+                                                    maxLength={120}
+                                                    className="w-full px-3 py-2 rounded-xl border border-glass-border bg-canvas-elevated text-sm text-ink focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage outline-none transition-colors"
+                                                />
+                                            </div>
+                                        </div>
+                                        <p className="text-[11px] text-ink-muted">
+                                            Display name is updated automatically from first + last.
+                                        </p>
+                                    </div>
+                                    <ModalFooter onCancel={closeModal} onConfirm={handleUpdateProfile}
+                                        confirmLabel="Save Profile" confirmIcon={Check}
+                                        confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
+                                        loading={!!actionLoading}
+                                        disabled={
+                                            !profileFirstName.trim() ||
+                                            !profileLastName.trim() ||
+                                            (profileFirstName.trim() === modal.firstName && profileLastName.trim() === modal.lastName)
+                                        } />
                                 </>
                             )}
 
@@ -1033,9 +1168,130 @@ export function AdminUsers() {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Per-user access drawer — opens on row click. Reuses
+                AccessSummary so this page and `/admin/permissions` →
+                "By user" can't drift visually or factually. */}
+            <AnimatePresence>
+                {accessUser && (
+                    <>
+                        {/* Overlay: ``backdrop-blur-sm`` was a perf killer —
+                            blur is GPU-expensive and the browser had to
+                            recompute it every frame while the drawer slid
+                            in, stalling the panel transform. Plain opacity
+                            dim achieves the same visual focus at zero cost.
+                            shadow-2xl on the drawer was the second
+                            offender (large shadow + moving transform =
+                            recomposite per frame); shadow-xl looks the
+                            same at 480px wide and animates clean. */}
+                        <motion.div
+                            key="access-overlay"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: 0.15 }}
+                            onClick={closeAccessDrawer}
+                            className="fixed inset-0 bg-black/40 z-40"
+                        />
+                        <motion.aside
+                            key="access-drawer"
+                            initial={{ x: '100%' }}
+                            animate={{ x: 0 }}
+                            exit={{ x: '100%' }}
+                            transition={{ duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
+                            style={{ willChange: 'transform' }}
+                            className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-lg bg-canvas-elevated border-l border-glass-border shadow-xl flex flex-col"
+                        >
+                            <div className="flex items-center gap-2 px-5 py-4 border-b border-glass-border shrink-0">
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted">User access</p>
+                                    <h2 className="text-base font-bold text-ink truncate">{accessUser.displayName}</h2>
+                                    <p className="text-[11px] text-ink-muted truncate">{accessUser.email}</p>
+                                </div>
+                                <button
+                                    onClick={() => openEditProfileModal(accessUser)}
+                                    className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0"
+                                    title="Edit profile"
+                                >
+                                    <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                    onClick={() => openRoleModal(accessUser)}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors shrink-0"
+                                    title="Change platform tier"
+                                >
+                                    <UserCog className="w-3.5 h-3.5" />
+                                    Platform tier
+                                </button>
+                                <button
+                                    onClick={closeAccessDrawer}
+                                    className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors shrink-0"
+                                    title="Close"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+                            {/* Body: show skeleton placeholders while the
+                                /users/{id}/access call is in flight, so the
+                                drawer feels responsive even on a slow BE.
+                                Replaced by AccessSummary the moment data
+                                lands. */}
+                            <div className="flex-1 min-h-0 overflow-y-auto">
+                                {accessLoading ? (
+                                    <AccessSkeleton />
+                                ) : accessError ? (
+                                    <div className="p-6">
+                                        <div className="flex items-start gap-2.5 p-3 rounded-xl bg-red-500/5 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+                                            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                                            <span>{accessError}</span>
+                                        </div>
+                                    </div>
+                                ) : accessData ? (
+                                    <AccessSummary access={accessData} mode="admin" hideHeader />
+                                ) : null}
+                            </div>
+                        </motion.aside>
+                    </>
+                )}
+            </AnimatePresence>
         </div>
     )
 }
+
+// ── Skeleton placeholder for the user-access drawer ─────────────────
+// Keeps the drawer feeling responsive while the BE compute_user_access
+// call (groups + bindings + claim resolver) is in flight. Layout
+// roughly matches AccessSummary so the eventual render isn't a jarring
+// re-layout. Pure DIVs with `animate-pulse`; no expensive renders.
+function AccessSkeleton() {
+    return (
+        <div className="p-6 space-y-6 animate-pulse">
+            <div className="grid grid-cols-3 gap-3">
+                {[0, 1, 2].map((i) => (
+                    <div key={i} className="rounded-xl border border-glass-border bg-glass-base/30 px-3 py-2.5 h-[58px]" />
+                ))}
+            </div>
+            <div className="space-y-3">
+                <div className="h-5 w-32 rounded bg-black/5 dark:bg-white/5" />
+                <div className="h-20 rounded-xl border border-glass-border bg-glass-base/30" />
+                <div className="h-20 rounded-xl border border-glass-border bg-glass-base/30" />
+            </div>
+            <div className="space-y-3">
+                <div className="h-5 w-40 rounded bg-black/5 dark:bg-white/5" />
+                <div className="h-14 rounded-xl border border-glass-border bg-glass-base/30" />
+                <div className="h-14 rounded-xl border border-glass-border bg-glass-base/30" />
+            </div>
+            <div className="space-y-3">
+                <div className="h-5 w-36 rounded bg-black/5 dark:bg-white/5" />
+                <div className="grid grid-cols-2 gap-2">
+                    <div className="h-12 rounded-lg border border-glass-border bg-glass-base/30" />
+                    <div className="h-12 rounded-lg border border-glass-border bg-glass-base/30" />
+                </div>
+            </div>
+        </div>
+    )
+}
+
 
 // ── Shared modal sub-components ──────────────────────────────────────
 
@@ -1103,45 +1359,11 @@ function ModalFooter({ onCancel, onConfirm, confirmLabel, confirmIcon: Icon, con
 // (Quick start / Built-in / Custom), animated workspace + privilege
 // reveals, chip-style workspace + expiry pickers, glass callouts.
 
-// Per-tier visual config — icon + colour family applied to the role
-// button's icon container. Mirrors the change-role modal pattern
-// (icon container + brand-coloured accent on select).
-const _ROLE_VISUAL: Record<string, {
-    icon: typeof Shield
-    bg: string         // icon container bg + text
-    accent: string     // text-color when selected
-}> = {
-    super_admin: {
-        icon: Crown,
-        bg: 'bg-amber-500/10 text-amber-600 border-amber-500/20',
-        accent: 'text-amber-600 dark:text-amber-400',
-    },
-    org_admin: {
-        icon: Shield,
-        bg: 'bg-violet-500/10 text-violet-600 border-violet-500/20',
-        accent: 'text-violet-600 dark:text-violet-400',
-    },
-    workspace_admin: {
-        icon: ShieldCheck,
-        bg: 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20',
-        accent: 'text-indigo-600 dark:text-indigo-400',
-    },
-    workspace_member: {
-        icon: UserCog,
-        bg: 'bg-sky-500/10 text-sky-600 border-sky-500/20',
-        accent: 'text-sky-600 dark:text-sky-400',
-    },
-    workspace_viewer: {
-        icon: Eye,
-        bg: 'bg-slate-500/10 text-slate-600 border-slate-500/20',
-        accent: 'text-slate-600 dark:text-slate-400',
-    },
-}
-const _ROLE_VISUAL_CUSTOM = {
-    icon: Sparkles,
-    bg: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20',
-    accent: 'text-emerald-600 dark:text-emerald-400',
-} as const
+// Invite-form role visuals are derived from the canonical shared map
+// (``@/lib/roleVisual``) so a role rename or addition only needs to
+// happen in one place. The shape returned here ({icon, bg, accent})
+// matches the InviteForm's button styling; the canonical source has
+// more fields (badge, gradient, iconBg) that this UI doesn't use.
 const _ROLE_VISUAL_NONE = {
     icon: Globe,
     bg: 'bg-slate-500/10 text-slate-600 border-slate-500/20',
@@ -1149,72 +1371,36 @@ const _ROLE_VISUAL_NONE = {
 } as const
 
 const _BUILTIN_ORDER = [
-    'super_admin', 'org_admin',
-    'workspace_admin', 'workspace_member', 'workspace_viewer',
+    'super_admin', 'org_admin', 'org_auditor',
+    'workspace_admin', 'workspace_data_engineer',
+    'workspace_member', 'workspace_viewer',
 ]
-
-const _ROLE_LABEL: Record<string, string> = {
-    super_admin: 'Super Admin',
-    org_admin: 'Org Admin',
-    workspace_admin: 'Workspace Admin',
-    workspace_member: 'Member',
-    workspace_viewer: 'Viewer',
-}
 
 const _ROLE_FALLBACK_DESC: Record<string, string> = {
     super_admin: 'Platform owner — every permission, every workspace.',
     org_admin: 'Manage every workspace, create new ones. No user / SSO admin.',
+    org_auditor: 'Read-only across every workspace + audit log + bindings.',
     workspace_admin: 'Full powers inside the bound workspace.',
+    workspace_data_engineer: 'Owns data products in the workspace; no members or settings.',
     workspace_member: 'Edit views and data sources in the bound workspace.',
     workspace_viewer: 'Read-only access to the bound workspace.',
 }
 
 
-/** Phase 13: pick a visual for any role — curated entry if we have
- *  one for the exact name, else derive from the role's characteristics
- *  so legacy / custom roles don't all render as a generic Sparkles
- *  bubble. Priority: curated → privileged → workspace-scoped → global
- *  → custom default. */
-function getRoleVisual(role: RoleDefinitionResponse): {
+/** Adapter from the canonical ``RoleVisual`` to the {icon, bg, accent}
+ *  shape this file's InviteForm + change-role modal use. */
+function inviteRoleVisual(roleName: string): {
     icon: typeof Shield; bg: string; accent: string
 } {
-    if (_ROLE_VISUAL[role.name]) return _ROLE_VISUAL[role.name]
-    if (roleIsPrivileged(role.permissions)) {
-        return {
-            icon: Shield,
-            bg: 'bg-amber-500/10 text-amber-600 border-amber-500/20',
-            accent: 'text-amber-600 dark:text-amber-400',
-        }
+    const v = roleVisualFor(roleName)
+    return {
+        icon: v.icon,
+        bg: v.iconBg,
+        accent: `text-${v.accent}-600 dark:text-${v.accent}-400`,
     }
-    if (roleNeedsWorkspace(role)) {
-        return {
-            icon: UserCog,
-            bg: 'bg-sky-500/10 text-sky-600 border-sky-500/20',
-            accent: 'text-sky-600 dark:text-sky-400',
-        }
-    }
-    if (role.isSystem) {
-        return {
-            icon: Globe,
-            bg: 'bg-slate-500/10 text-slate-600 border-slate-500/20',
-            accent: 'text-slate-600 dark:text-slate-400',
-        }
-    }
-    return _ROLE_VISUAL_CUSTOM
 }
 
 
-/** Phase 12: pretty-format a custom role name. Splits on
- *  ``_`` / ``-`` / whitespace and Title-Cases each word. Built-in
- *  tiers have hand-curated labels in ``_ROLE_LABEL`` and skip this. */
-function toTitleCase(s: string): string {
-    return s
-        .replace(/[_-]+/g, ' ')
-        .split(/\s+/)
-        .filter(Boolean)
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-        .join(' ')
-}
 
 interface RoleOption {
     value: string                 // '' = No role
@@ -1347,10 +1533,10 @@ function InviteForm({
     // curated entry.
     const { standardRoles, customRoles, noRole } = useMemo(() => {
         const opt = (r: RoleDefinitionResponse): RoleOption => {
-            const v = getRoleVisual(r)
+            const v = inviteRoleVisual(r.name)
             return {
                 value: r.name,
-                label: _ROLE_LABEL[r.name] ?? toTitleCase(r.name),
+                label: roleVisualFor(r.name).label,
                 sublabel: r.description?.trim()
                     || _ROLE_FALLBACK_DESC[r.name]
                     || (roleNeedsWorkspace(r) ? 'Workspace-scoped role.' : 'Global role.'),
@@ -1401,7 +1587,7 @@ function InviteForm({
         ? (workspaces?.find(w => w.id === effectiveWorkspaceId)?.name ?? effectiveWorkspaceId)
         : null
     const summaryRoleLabel = selectedRole
-        ? (_ROLE_LABEL[selectedRole] ?? toTitleCase(selectedRole))
+        ? roleVisualFor(selectedRole).label
         : null
 
     return (
@@ -1425,9 +1611,12 @@ function InviteForm({
                 <>
                     {/* Scrollable body — wraps the role pickers + the
                         two-column config grid + the live summary. The
-                        footer below sits outside this scroll region. */}
-                    <div className="flex-1 overflow-y-auto px-6">
-                        <div className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr] gap-x-6 gap-y-0">
+                        footer below sits outside this scroll region.
+                        ``min-w-0`` on the inner grid columns prevents
+                        long workspace / group / recipient strings from
+                        pushing the right rail past the modal edge. */}
+                    <div className="flex-1 overflow-y-auto px-6 min-w-0">
+                        <div className="grid grid-cols-1 md:grid-cols-[1.1fr_minmax(0,1fr)] gap-x-6 gap-y-0 min-w-0">
                             {/* ── LEFT column — Role catalogue ─────────── */}
                             <div>
                                 <SectionLabel>Choose a role</SectionLabel>
@@ -1456,8 +1645,12 @@ function InviteForm({
                                 </div>
                             </div>
 
-                            {/* ── RIGHT column — Workspace + Groups + Email ── */}
-                            <div className="space-y-0 md:border-l md:border-glass-border md:pl-6 mt-5 md:mt-0">
+                            {/* ── RIGHT column — Workspace + Groups + Email ──
+                                ``min-w-0`` lets the column shrink below its
+                                natural content width so long workspace / group /
+                                recipient strings truncate inside the column
+                                instead of pushing the modal to overflow. */}
+                            <div className="min-w-0 space-y-0 md:border-l md:border-glass-border md:pl-6 mt-5 md:mt-0">
 
                     {/* ── Section 2 — Workspace (animated) ───────────── */}
                     <AnimatePresence initial={false}>
@@ -2255,7 +2448,7 @@ function InviteResultCard({
     onClose: () => void
 }) {
     const roleLabel = result.role
-        ? (_ROLE_LABEL[result.role] ?? toTitleCase(result.role))
+        ? roleVisualFor(result.role).label
         : 'No role (plain account)'
     const expiresWhen = (() => {
         const d = new Date(result.expiresAt)

@@ -37,6 +37,7 @@ import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
+import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
 
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -47,7 +48,8 @@ type SortDir = 'asc' | 'desc'
  * Phase 3: ``RoleName`` is no longer a closed enum. Bindings can
  * reference any role defined in the canonical ``roles`` table —
  * built-ins (admin / user / viewer) and admin-defined custom roles.
- * The visual ``ROLE_CONFIG`` keeps fallbacks for unknown names.
+ * Role visuals come from ``@/lib/roleVisual`` (single source of
+ * truth across the FE).
  */
 type RoleName = string
 type SubjectType = 'user' | 'group'
@@ -55,63 +57,6 @@ type SubjectType = 'user' | 'group'
 type ModalType =
     | { kind: 'add' }
     | null
-
-interface RoleVisual {
-    label: string
-    description: string
-    icon: typeof Shield
-    badge: string
-    iconColor: string
-    iconBg: string
-    accent: string
-}
-
-const ROLE_CONFIG: Record<string, RoleVisual> = {
-    admin: {
-        label: 'Admin',
-        description: 'Full control of this workspace, including members, settings, and data sources.',
-        icon: Shield,
-        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-        iconColor: 'text-amber-500',
-        iconBg: 'bg-amber-500/10 border-amber-500/20',
-        accent: 'text-amber-600 dark:text-amber-400',
-    },
-    user: {
-        label: 'User',
-        description: 'Create, edit, and delete views; connect data sources; full read access.',
-        icon: UserCog,
-        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-        iconColor: 'text-sky-500',
-        iconBg: 'bg-sky-500/10 border-sky-500/20',
-        accent: 'text-sky-600 dark:text-sky-400',
-    },
-    viewer: {
-        label: 'Viewer',
-        description: 'Read-only — list views and data sources, no edits.',
-        icon: Eye,
-        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
-        iconColor: 'text-slate-500',
-        iconBg: 'bg-slate-500/10 border-slate-500/20',
-        accent: 'text-slate-600 dark:text-slate-400',
-    },
-}
-
-/** Visual fallback for any custom (non-built-in) role. */
-const CUSTOM_ROLE_VISUAL: RoleVisual = {
-    label: 'Custom',
-    description: 'Custom role — see the Permissions page for its bundle.',
-    icon: Shield,  // overridden at the call-site to Sparkles
-    badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-    iconColor: 'text-violet-500',
-    iconBg: 'bg-violet-500/10 border-violet-500/20',
-    accent: 'text-violet-600 dark:text-violet-400',
-}
-
-/** Resolve the visual treatment for a role by name, falling back to
- *  the custom-role styling for anything not in the built-in set. */
-function resolveRoleVisual(name: string): RoleVisual {
-    return ROLE_CONFIG[name] ?? CUSTOM_ROLE_VISUAL
-}
 
 const KPI_CARDS = [
     {
@@ -357,7 +302,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             })
             await fetchMembers()
             const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
-            showToast('success', `Granted ${resolveRoleVisual(role).label} to ${label}${suffix}`)
+            showToast('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
             setModal(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to add member'
@@ -558,7 +503,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                         </thead>
                         <tbody>
                             {processedMembers.map((m, i) => {
-                                const role = resolveRoleVisual(m.role)
+                                const role = roleVisualFor(m.role)
                                 const RoleIcon = role.icon
                                 const isActing = actionLoading === `revoke-${m.bindingId}`
                                 const name = m.subject.displayName ?? m.subject.id
@@ -744,9 +689,27 @@ function AddMemberModal({
     useEffect(() => {
         ;(async () => {
             try {
-                setAvailableRoles(
-                    await permissionsService.listRoles({ workspaceId }),
-                )
+                const all = await permissionsService.listRoles({ workspaceId })
+                // Filter out roles that wouldn't grant anything when
+                // bound at workspace scope. The resolver's category x
+                // scope filter silently drops mismatched bindings, so
+                // binding e.g. ``super_admin`` (system-category perms
+                // only) at workspace scope is a no-op — showing it
+                // here would mislead admins. Keep:
+                //   * workspace-scoped roles (workspace_admin / member
+                //     / viewer / data_engineer + workspace-scoped
+                //     custom roles), and
+                //   * global roles whose grant includes any
+                //     ``workspace:*`` perm.
+                // Drop:
+                //   * global roles whose grant is entirely
+                //     ``system:*`` (super_admin / org_admin /
+                //     org_auditor) — these belong on /admin/users.
+                const bindable = all.filter((r) => {
+                    if (r.scopeType === 'workspace') return true
+                    return r.permissions.some((p) => p.startsWith('workspace:'))
+                })
+                setAvailableRoles(bindable)
             } catch (err) {
                 showToast('error', err instanceof Error ? err.message : 'Failed to load roles')
             }
@@ -924,13 +887,15 @@ function AddMemberModal({
                             </div>
                         ) : (
                             availableRoles.map(r => {
-                                const cfg = resolveRoleVisual(r.name)
+                                const cfg = roleVisualFor(r.name)
                                 const isCustom = !r.isSystem
                                 const Icon = isCustom ? Users2 : cfg.icon
                                 const isSelected = role === r.name
                                 const isWsScoped = r.scopeType === 'workspace'
                                 const description = r.description
-                                    ?? (r.isSystem ? cfg.description : 'Custom role — see Permissions for its bundle.')
+                                    ?? (isCustom
+                                        ? 'Custom role — see Permissions for its bundle.'
+                                        : 'Built-in role — see Permissions for the bundle.')
                                 return (
                                     <button
                                         key={r.name}
@@ -943,12 +908,15 @@ function AddMemberModal({
                                         )}
                                     >
                                         <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', cfg.iconBg)}>
-                                            <Icon className={cn('w-4 h-4', cfg.iconColor)} />
+                                            <Icon className="w-4 h-4" />
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-1.5 flex-wrap">
-                                                <p className={cn('text-sm font-semibold truncate', isSelected ? cfg.accent : 'text-ink')}>
-                                                    {r.isSystem ? cfg.label : r.name}
+                                                <p className={cn(
+                                                    'text-sm font-semibold truncate',
+                                                    isSelected ? `text-${cfg.accent}-600 dark:text-${cfg.accent}-400` : 'text-ink',
+                                                )}>
+                                                    {isBuiltinRole(r.name) ? cfg.label : r.name}
                                                 </p>
                                                 {isWsScoped && (
                                                     <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full text-[9px] font-bold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
@@ -1016,7 +984,7 @@ function AddMemberModal({
                         className="mt-4 flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs"
                     >
                         <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        This subject already holds the {resolveRoleVisual(role).label} role here. Pick a different role or subject.
+                        This subject already holds the {roleVisualFor(role).label} role here. Pick a different role or subject.
                     </motion.div>
                 )}
             </AnimatePresence>
@@ -1155,7 +1123,7 @@ function PendingRequestsPanel({
                 {list.map(req => {
                     const isActing = acting === req.id
                     const denying = denyingId === req.id
-                    const v = resolveRoleVisual(req.requestedRole)
+                    const v = roleVisualFor(req.requestedRole)
                     return (
                         <div key={req.id} className="px-5 py-3.5 flex items-start gap-3">
                             <div className={cn(

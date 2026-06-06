@@ -52,16 +52,30 @@ class ChangeRoleRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: str) -> str:
-        # Phase 6: only globally-assignable roles. The three workspace
-        # tiers (workspace_admin/member/viewer) are bound via the
-        # workspace-members endpoint and don't make sense as a primary
-        # user role (they have no workspace context here). See
-        # ``user_repo.GLOBAL_ASSIGNABLE_ROLES`` for the source of truth
-        # and ``docs/RBAC.md`` for operator guidance.
-        allowed = {"super_admin", "org_admin"}
+        # Platform tiers — what kind of system account this user is.
+        # Orthogonal to workspace bindings (managed inside each
+        # workspace's Members tab). Every user has exactly one tier:
+        #   * ``user``         — default, no global perms.
+        #   * ``org_auditor``  — read-only across every workspace.
+        #   * ``org_admin``    — cross-workspace operator.
+        #   * ``super_admin``  — platform owner.
+        # Workspace-template roles (workspace_admin/member/viewer/
+        # data_engineer) are deliberately rejected here; they're bound
+        # per-workspace via the workspace-members endpoint.
+        allowed = {"user", "org_auditor", "org_admin", "super_admin"}
         if v not in allowed:
             raise ValueError(f"Role must be one of: {', '.join(sorted(allowed))}")
         return v
+
+
+class UpdateUserRequest(BaseModel):
+    """Admin-side identity edit. All fields optional; ``None`` leaves
+    the field unchanged. Email is intentionally NOT mutable here — it
+    changes the SSO identity key and needs its own re-link flow."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    first_name: Optional[str] = Field(default=None, alias="firstName", min_length=1, max_length=120)
+    last_name: Optional[str] = Field(default=None, alias="lastName", min_length=1, max_length=120)
 
 
 class AdminResetPasswordRequest(BaseModel):

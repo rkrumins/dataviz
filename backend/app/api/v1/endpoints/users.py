@@ -33,6 +33,7 @@ from backend.common.models.auth import (
     CreateInviteRequest,
     InviteTokenResponse,
     ResetTokenResponse,
+    UpdateUserRequest,
     UserPublicResponse,
 )
 
@@ -170,6 +171,53 @@ async def reject_user(
 
     logger.info("User %s rejected by %s", user_id, admin.id)
     return {"detail": "User rejected"}
+
+
+# ── Identity edit ─────────────────────────────────────────────────────
+
+@admin_router.patch("/{user_id}", response_model=AdminUserResponse)
+async def update_user_identity(
+    user_id: str,
+    body: UpdateUserRequest,
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Update an admin-editable identity field on a user.
+
+    Only first / last name are mutable; email change is a separate
+    re-link flow because it's the SSO identity key. Display name is
+    derived from first + last on the server (single source of truth).
+    """
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    updates: dict[str, str] = {}
+    if body.first_name is not None and body.first_name.strip():
+        updates["first_name"] = body.first_name.strip()
+    if body.last_name is not None and body.last_name.strip():
+        updates["last_name"] = body.last_name.strip()
+    if not updates:
+        # Nothing to do — return the current state so the client can
+        # refresh without a separate GET.
+        return await _admin_response(session, user)
+
+    await user_repo.update_identity(session, user_id, **updates)
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.identity_updated",
+        payload={
+            "user_id": user_id,
+            "updated_fields": list(updates.keys()),
+            "updated_by": admin.id,
+        },
+    )
+
+    logger.info("User %s identity updated by %s: %s", user_id, admin.id, list(updates.keys()))
+
+    refreshed = await user_repo.get_user_by_id(session, user_id)
+    return await _admin_response(session, refreshed)
 
 
 # ── Role change ───────────────────────────────────────────────────────

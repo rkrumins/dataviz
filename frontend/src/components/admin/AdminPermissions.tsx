@@ -21,11 +21,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase, ScrollText,
+    KeyRound, Shield, UserCog, Eye, Users2, Users, Briefcase, Database,
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
     ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
     Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink, Navigation,
 } from 'lucide-react'
+import { ROLE_VISUAL, customRoleVisual } from '@/lib/roleVisual'
 import {
     permissionsService,
     type PermissionResponse,
@@ -72,122 +73,6 @@ const TABS: TabDef[] = [
 
 
 // ── Visual config — roles + categories ──────────────────────────────
-
-const ROLE_VISUAL: Record<string, {
-    label: string
-    icon: typeof Shield
-    accent: string
-    badge: string
-    gradient: string
-    iconBg: string
-}> = {
-    // Phase 5 post-uplift built-ins (super/org/workspace tiers). The
-    // backend migration ``20260603_1100_rbac_uplift`` renamed
-    // ``admin/user/viewer`` to these. Keep the legacy entries below for
-    // backwards-compat with any data that still references the old
-    // names (custom roles, audit log entries, etc.).
-    super_admin: {
-        label: 'Super admin',
-        icon: Shield,
-        accent: 'amber',
-        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-        gradient: 'from-amber-500/20 to-amber-500/0',
-        iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-    },
-    org_admin: {
-        label: 'Org admin',
-        icon: Shield,
-        accent: 'rose',
-        badge: 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20',
-        gradient: 'from-rose-500/20 to-rose-500/0',
-        iconBg: 'bg-rose-500/10 text-rose-500 border-rose-500/20',
-    },
-    workspace_admin: {
-        label: 'Workspace admin',
-        icon: Shield,
-        accent: 'indigo',
-        badge: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
-        gradient: 'from-indigo-500/20 to-indigo-500/0',
-        iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
-    },
-    workspace_member: {
-        label: 'Workspace member',
-        icon: UserCog,
-        accent: 'sky',
-        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-        gradient: 'from-sky-500/20 to-sky-500/0',
-        iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
-    },
-    workspace_viewer: {
-        label: 'Workspace viewer',
-        icon: Eye,
-        accent: 'slate',
-        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
-        gradient: 'from-slate-500/20 to-slate-500/0',
-        iconBg: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
-    },
-    // Phase 6 additions: workspace_data_engineer + org_auditor.
-    workspace_data_engineer: {
-        label: 'Data engineer',
-        icon: Database,
-        accent: 'emerald',
-        badge: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
-        gradient: 'from-emerald-500/20 to-emerald-500/0',
-        iconBg: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
-    },
-    org_auditor: {
-        label: 'Org auditor',
-        icon: ScrollText,
-        accent: 'violet',
-        badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-        gradient: 'from-violet-500/20 to-violet-500/0',
-        iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
-    },
-    // Pre-uplift legacy names — kept so any rogue reference doesn't
-    // fall through to the "Custom" badge with the wrong colour.
-    admin: {
-        label: 'Admin',
-        icon: Shield,
-        accent: 'amber',
-        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-        gradient: 'from-amber-500/20 to-amber-500/0',
-        iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-    },
-    user: {
-        label: 'User',
-        icon: UserCog,
-        accent: 'sky',
-        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-        gradient: 'from-sky-500/20 to-sky-500/0',
-        iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
-    },
-    viewer: {
-        label: 'Viewer',
-        icon: Eye,
-        accent: 'slate',
-        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
-        gradient: 'from-slate-500/20 to-slate-500/0',
-        iconBg: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
-    },
-}
-
-// Base visual for any non-built-in role. The Sparkles icon marks it
-// visually distinct from system roles. Use ``customRoleVisual(name)``
-// below at call sites — that copy preserves the chip styling but
-// shows the role's actual name instead of the static "Custom" label,
-// which is what users want to see in the matrix / catalog / member
-// lists.
-const CUSTOM_ROLE_VISUAL_BASE = {
-    icon: Sparkles,
-    accent: 'violet',
-    badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-    gradient: 'from-violet-500/20 to-violet-500/0',
-    iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
-} as const
-
-function customRoleVisual(roleName: string) {
-    return { ...CUSTOM_ROLE_VISUAL_BASE, label: roleName }
-}
 
 const CATEGORY_VISUAL: Record<string, {
     label: string

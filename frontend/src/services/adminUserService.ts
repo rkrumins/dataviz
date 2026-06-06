@@ -76,6 +76,19 @@ export const adminUserService = {
         })
     },
 
+    /** Admin-side identity edit. Both fields optional; backend
+     *  ignores undefined and trims whitespace. Email is intentionally
+     *  not editable here — it's the SSO identity key. */
+    updateUser(
+        userId: string,
+        body: { firstName?: string; lastName?: string },
+    ): Promise<AdminUserResponse> {
+        return authFetch<AdminUserResponse>(`${ADMIN_USERS_API}/${userId}`, {
+            method: 'PATCH',
+            body: JSON.stringify(body),
+        })
+    },
+
     suspendUser(userId: string): Promise<{ detail: string }> {
         return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/suspend`, {
             method: 'POST',
