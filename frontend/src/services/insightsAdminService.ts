@@ -6,6 +6,7 @@
  * config cache so the change takes effect within a few jobs.
  */
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { humanizeErrorMessage } from '@/lib/permissionError'
 
 const BASE = '/api/v1/admin/insights/admission'
 const CONFIG_BASE = '/api/v1/admin/insights/config'
@@ -70,8 +71,13 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
         headers: { 'Content-Type': 'application/json', ...init?.headers },
     })
     if (!res.ok) {
+        // Extract the human-friendly message from the structured detail
+        // envelope. Without this the raw JSON used to land in
+        // ``Error.message`` and get rendered verbatim by callers — the
+        // ``{"error":"missing_permission",...}`` strings users were
+        // seeing on the Providers / Data Sources tabs.
         const text = await res.text()
-        throw new Error(text || `HTTP ${res.status}`)
+        throw new Error(humanizeErrorMessage(text) || `HTTP ${res.status}`)
     }
     return res.json()
 }

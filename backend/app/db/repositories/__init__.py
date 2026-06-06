@@ -13,6 +13,11 @@ from . import (
     grant_repo,
     role_repo,
     access_request_repo,
+    idp_group_mapping_repo,
+    idp_provider_repo,
+    user_identity_repo,
+    user_attribute_repo,
+    app_auth_config_repo,
 )
 
 __all__ = [
@@ -30,4 +35,9 @@ __all__ = [
     "grant_repo",
     "role_repo",
     "access_request_repo",
+    "idp_group_mapping_repo",
+    "idp_provider_repo",
+    "user_identity_repo",
+    "user_attribute_repo",
+    "app_auth_config_repo",
 ]

@@ -21,11 +21,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    KeyRound, Shield, UserCog, Eye, Users2, Users, Database, Briefcase,
+    KeyRound, Shield, UserCog, Eye, Users2, Users, Briefcase, Database,
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
     ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
-    Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink,
+    Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink, Navigation,
 } from 'lucide-react'
+import { ROLE_VISUAL, customRoleVisual } from '@/lib/roleVisual'
 import {
     permissionsService,
     type PermissionResponse,
@@ -47,11 +48,13 @@ import { ImpactPreviewModal } from './ImpactPreviewModal'
 import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { Link, useNavigate } from 'react-router-dom'
+import { useNavCatalogueStore } from '@/store/navCatalogue'
+import { roleSatisfiesSpec, type NavPermissionSpec } from '@/lib/navPermissions'
 
 
 // ── Shared types ─────────────────────────────────────────────────────
 
-type TabKey = 'roles' | 'catalog' | 'byUser' | 'byWorkspace'
+type TabKey = 'roles' | 'catalog' | 'byUser' | 'byWorkspace' | 'features'
 
 interface TabDef {
     key: TabKey
@@ -63,58 +66,13 @@ interface TabDef {
 const TABS: TabDef[] = [
     { key: 'roles', label: 'Role matrix', icon: GitBranch, hint: 'What does each role bundle?' },
     { key: 'catalog', label: 'Permissions', icon: BookOpen, hint: 'Browse the permission catalogue' },
+    { key: 'features', label: 'Feature access', icon: Navigation, hint: 'Which roles can reach each app section' },
     { key: 'byUser', label: 'By user', icon: UserCog, hint: 'See everything one user has access to' },
     { key: 'byWorkspace', label: 'By workspace', icon: Layers, hint: 'See who has access to a workspace' },
 ]
 
 
 // ── Visual config — roles + categories ──────────────────────────────
-
-const ROLE_VISUAL: Record<string, {
-    label: string
-    icon: typeof Shield
-    accent: string
-    badge: string
-    gradient: string
-    iconBg: string
-}> = {
-    admin: {
-        label: 'Admin',
-        icon: Shield,
-        accent: 'amber',
-        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-        gradient: 'from-amber-500/20 to-amber-500/0',
-        iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-    },
-    user: {
-        label: 'User',
-        icon: UserCog,
-        accent: 'sky',
-        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-        gradient: 'from-sky-500/20 to-sky-500/0',
-        iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
-    },
-    viewer: {
-        label: 'Viewer',
-        icon: Eye,
-        accent: 'slate',
-        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
-        gradient: 'from-slate-500/20 to-slate-500/0',
-        iconBg: 'bg-slate-500/10 text-slate-500 border-slate-500/20',
-    },
-}
-
-// Used for any custom (non-system) role. The icon is overridden to
-// ``Sparkles`` at the call-site to mark it visually distinct from
-// built-ins.
-const CUSTOM_ROLE_VISUAL = {
-    label: 'Custom',
-    icon: Sparkles,
-    accent: 'violet',
-    badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-    gradient: 'from-violet-500/20 to-violet-500/0',
-    iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20',
-} as const
 
 const CATEGORY_VISUAL: Record<string, {
     label: string
@@ -130,7 +88,7 @@ const CATEGORY_VISUAL: Record<string, {
         accent: 'text-violet-600 dark:text-violet-400',
         border: 'border-violet-500/20',
         pill: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-        description: 'Global, platform-wide capabilities',
+        description: 'Organization-wide capabilities',
     },
     workspace: {
         label: 'Workspace',
@@ -345,6 +303,9 @@ export function AdminPermissions() {
                             highlightedPermissionId={highlightedPermissionId}
                         />
                     )}
+                    {permissions && roles && tab === 'features' && (
+                        <FeatureAccessTab roles={roles} permissions={permissions} onEditRole={setEditingRole} />
+                    )}
                     {permissions && tab === 'byUser' && (
                         <ByUserTab
                             permissions={permissions}
@@ -382,6 +343,152 @@ export function AdminPermissions() {
                     />
                 )}
             </AnimatePresence>
+        </div>
+    )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Tab — Feature access (read-only section→permission→roles map)
+// ─────────────────────────────────────────────────────────────────────
+
+function humanizeKey(key: string): string {
+    return key.charAt(0).toUpperCase() + key.slice(1).replace(/[-_]/g, ' ')
+}
+
+/** Render the permission requirement of a spec as inline code chips. */
+function SpecRequirement({ spec }: { spec: NavPermissionSpec }) {
+    if (spec.kind === 'always') {
+        return (
+            <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <Globe className="w-3 h-3" /> Every authenticated user
+            </span>
+        )
+    }
+    const perms = spec.kind === 'perm' || spec.kind === 'workspaceAny' ? [spec.perm] : spec.perms
+    return (
+        <span className="inline-flex flex-wrap items-center gap-1">
+            {perms.map((p, i) => (
+                <span key={p} className="inline-flex items-center">
+                    {i > 0 && <span className="text-[10px] text-ink-muted mx-1">or</span>}
+                    <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-glass-base/50 border border-glass-border text-ink-secondary">
+                        {p}
+                    </code>
+                </span>
+            ))}
+            {spec.kind === 'workspaceAny' && (
+                <span className="text-[10px] text-ink-muted ml-1">in any workspace</span>
+            )}
+        </span>
+    )
+}
+
+function FeatureAccessRow({
+    label,
+    spec,
+    roles,
+    permissions,
+    onEditRole,
+}: {
+    label: string
+    spec: NavPermissionSpec
+    roles: RoleDefinitionResponse[]
+    permissions: PermissionResponse[]
+    onEditRole: (r: RoleDefinitionResponse) => void
+}) {
+    const satisfying = roles.filter((r) => roleSatisfiesSpec(r.permissions, spec, permissions))
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-3 md:gap-6 py-3.5 border-b border-glass-border last:border-b-0">
+            <div className="min-w-0">
+                <p className="text-sm font-semibold text-ink truncate">{label}</p>
+                <div className="mt-1"><SpecRequirement spec={spec} /></div>
+            </div>
+            <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-wider font-bold text-ink-muted mb-1.5">
+                    {satisfying.length} {satisfying.length === 1 ? 'role' : 'roles'} can reach this
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                    {satisfying.length === 0 ? (
+                        <span className="text-xs text-ink-muted italic">No role grants this yet</span>
+                    ) : (
+                        satisfying.map((r) => {
+                            const visual = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
+                            return (
+                                <button
+                                    key={r.name}
+                                    onClick={() => onEditRole(r)}
+                                    title={r.isSystem ? 'System role (immutable)' : 'Edit role'}
+                                    className={cn(
+                                        'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border transition-colors hover:brightness-110',
+                                        visual.badge,
+                                    )}
+                                >
+                                    {r.name}
+                                </button>
+                            )
+                        })
+                    )}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+function FeatureAccessTab({
+    roles,
+    permissions,
+    onEditRole,
+}: {
+    roles: RoleDefinitionResponse[]
+    permissions: PermissionResponse[]
+    onEditRole: (r: RoleDefinitionResponse) => void
+}) {
+    const sidebar = useNavCatalogueStore((s) => s.sidebar)
+    const adminSections = useNavCatalogueStore((s) => s.adminSections)
+    const sidebarLabels = useNavCatalogueStore((s) => s.sidebarLabels)
+    const adminLabels = useNavCatalogueStore((s) => s.adminLabels)
+
+    const sections: { title: string; entries: [string, NavPermissionSpec][]; labels: Record<string, string> }[] = [
+        { title: 'Navigation', entries: Object.entries(sidebar), labels: sidebarLabels },
+        { title: 'Administration', entries: Object.entries(adminSections), labels: adminLabels },
+    ]
+
+    return (
+        <div className="space-y-6">
+            {/* Explainer — clarifies this is the centralised, role-driven map */}
+            <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-indigo-500/[0.06] border border-indigo-500/15">
+                <Info className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+                <div className="text-xs text-ink-secondary leading-relaxed">
+                    <p className="font-semibold text-ink">Sections are unlocked by the permissions their features need.</p>
+                    <p className="mt-0.5">
+                        This map is served from the central catalogue
+                        (<code className="font-mono text-[11px]">GET /me/nav</code>) and mirrors the backend
+                        enforcement. It's read-only — to change who can reach a section, grant or remove the
+                        relevant permission on a role in the <span className="font-medium">Role matrix</span>.
+                        Any role (including custom ones) that holds the permission gets access automatically.
+                    </p>
+                </div>
+            </div>
+
+            {sections.map((group) => (
+                <div key={group.title} className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                    <div className="px-5 py-3 border-b border-glass-border bg-glass-base/30">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-ink-secondary">{group.title}</h3>
+                    </div>
+                    <div className="px-5">
+                        {group.entries.map(([key, spec]) => (
+                            <FeatureAccessRow
+                                key={key}
+                                label={group.labels[key] ?? humanizeKey(key)}
+                                spec={spec}
+                                roles={roles}
+                                permissions={permissions}
+                                onEditRole={onEditRole}
+                            />
+                        ))}
+                    </div>
+                </div>
+            ))}
         </div>
     )
 }
@@ -461,7 +568,7 @@ function RoleMatrixTab({
                                     </span>
                                 </th>
                                 {roles.map(r => {
-                                    const v = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                                    const v = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                                     const RoleIcon = r.isSystem ? v.icon : Sparkles
                                     const labelText = r.isSystem
                                         ? v.label
@@ -578,7 +685,7 @@ function RoleMatrixTab({
                                                     {/* Role cells */}
                                                     {roles.map(r => {
                                                         const has = rolePerms[r.name]?.has(p.id) ?? false
-                                                        const v = ROLE_VISUAL[r.name] ?? CUSTOM_ROLE_VISUAL
+                                                        const v = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                                                         return (
                                                             <td key={r.name} className="px-3 py-2.5 text-center">
                                                                 {has ? (
@@ -843,7 +950,7 @@ function PermissionDetailDrawer({
                         ) : (
                             <div className="flex flex-wrap gap-2">
                                 {grantedTo.map(r => {
-                                    const v = ROLE_VISUAL[r.name] ?? ROLE_VISUAL.user
+                                    const v = ROLE_VISUAL[r.name] ?? customRoleVisual(r.name)
                                     const RoleIcon = v.icon
                                     return (
                                         <span
@@ -1052,7 +1159,7 @@ function PermissionCatalogTab({
                                                         <span className="text-[11px] italic text-ink-muted">No role</span>
                                                     ) : (
                                                         inRoles.map(rname => {
-                                                            const v = ROLE_VISUAL[rname] ?? ROLE_VISUAL.user
+                                                            const v = ROLE_VISUAL[rname] ?? customRoleVisual(rname)
                                                             const RoleIcon = v.icon
                                                             return (
                                                                 <span
@@ -1353,9 +1460,13 @@ function ByWorkspaceTab({
         if (!members) return { total: 0, admin: 0, user: 0, viewer: 0, groups: 0, users: 0 }
         return {
             total: members.length,
-            admin: members.filter(m => m.role === 'admin').length,
-            user: members.filter(m => m.role === 'user').length,
-            viewer: members.filter(m => m.role === 'viewer').length,
+            // Phase 5: relabel internally to the new role names; the
+            // UI keys these as 'admin'/'user'/'viewer' for short
+            // KPI labels but the underlying data uses the canonical
+            // workspace_* names.
+            admin: members.filter(m => m.role === 'workspace_admin').length,
+            user: members.filter(m => m.role === 'workspace_member').length,
+            viewer: members.filter(m => m.role === 'workspace_viewer').length,
             groups: members.filter(m => m.subject.type === 'group').length,
             users: members.filter(m => m.subject.type === 'user').length,
         }
@@ -1504,7 +1615,7 @@ function WorkspaceMembersDetail({
                 ) : (
                     <div className="rounded-xl border border-glass-border bg-glass-base/20 divide-y divide-glass-border">
                         {members.map(m => {
-                            const v = ROLE_VISUAL[m.role] ?? ROLE_VISUAL.user
+                            const v = ROLE_VISUAL[m.role] ?? customRoleVisual(m.role)
                             const RoleIcon = v.icon
                             const name = m.subject.displayName ?? m.subject.id
                             const isUser = m.subject.type === 'user'
@@ -1665,7 +1776,7 @@ function RoleEditorDrawer({
         }
     }
 
-    const v = ROLE_VISUAL[role.name] ?? CUSTOM_ROLE_VISUAL
+    const v = ROLE_VISUAL[role.name] ?? customRoleVisual(role.name)
     const RoleIcon = isSystem ? v.icon : Sparkles
     const labelText = isSystem ? v.label : role.name
 
@@ -1921,7 +2032,41 @@ function CreateRoleModal({
     const [error, setError] = useState<string | null>(null)
     const { showToast } = useToast()
 
-    const grouped = useMemo(() => groupByCategory(permissions), [permissions])
+    // Phase 7: the resolver's category × scope filter silently drops
+    // perms whose category doesn't match the binding's scope. So a
+    // workspace-scoped role bundling ``system:*`` perms grants
+    // nothing of those perms — confusing for operators. Filter the
+    // picker by the role's scope so they only see what will actually
+    // work: ``workspace`` perms for ws-scoped roles, ``system`` perms
+    // for global roles. ``resource`` perms (per-view grants) are
+    // visible from both — they sit at a different layer.
+    const visiblePermissions = useMemo(() => {
+        if (scopeType === 'workspace') {
+            return permissions.filter(
+                p => p.category === 'workspace' || p.category === 'resource',
+            )
+        }
+        return permissions.filter(
+            p => p.category === 'system' || p.category === 'resource',
+        )
+    }, [permissions, scopeType])
+
+    // Clear selections that the scope flip rendered invalid so the
+    // silently-dropped perms don't sneak through on submit.
+    useEffect(() => {
+        const visibleIds = new Set(visiblePermissions.map(p => p.id))
+        setSelectedPerms(prev => {
+            let changed = false
+            const next = new Set<string>()
+            for (const id of prev) {
+                if (visibleIds.has(id)) next.add(id)
+                else changed = true
+            }
+            return changed ? next : prev
+        })
+    }, [visiblePermissions])
+
+    const grouped = useMemo(() => groupByCategory(visiblePermissions), [visiblePermissions])
 
     // Lazy-load workspaces only when the user picks workspace scope.
     useEffect(() => {

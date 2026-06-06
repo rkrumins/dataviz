@@ -16,45 +16,13 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import {
-    KeyRound, Shield, UserCog, Eye, Users2, Users, Briefcase,
+    KeyRound, Shield, UserCog, Users2, Users, Briefcase,
     Sparkles, GitBranch, Lock, Mail, ExternalLink,
 } from 'lucide-react'
 import type { UserAccessResponse, AccessBinding } from '@/services/permissionsService'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
-
-
-// Role-chip palette. Kept local on purpose — the source-of-truth in
-// AdminPermissions has more knobs (gradient, iconBg) for the matrix
-// hero. This stripped-down map only needs ``label`` + ``icon`` +
-// ``badge`` for the BindingList chip.
-const ROLE_VISUAL: Record<string, {
-    label: string
-    icon: typeof Shield
-    badge: string
-}> = {
-    admin: {
-        label: 'Admin',
-        icon: Shield,
-        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-    },
-    user: {
-        label: 'User',
-        icon: UserCog,
-        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-    },
-    viewer: {
-        label: 'Viewer',
-        icon: Eye,
-        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
-    },
-}
-
-const CUSTOM_ROLE_VISUAL = {
-    label: 'Custom',
-    icon: Sparkles,
-    badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-} as const
+import { ROLE_VISUAL, roleVisualFor } from '@/lib/roleVisual'
 
 
 export type AccessSummaryMode = 'admin' | 'self'
@@ -443,7 +411,7 @@ function BindingList({
     return (
         <div className="rounded-xl border border-glass-border bg-glass-base/30 divide-y divide-glass-border">
             {bindings.map(b => {
-                const v = ROLE_VISUAL[b.role] ?? CUSTOM_ROLE_VISUAL
+                const v = roleVisualFor(b.role)
                 const RoleIcon = v.icon
                 return (
                     <div key={b.bindingId} className="flex items-center gap-3 px-3 py-2.5">

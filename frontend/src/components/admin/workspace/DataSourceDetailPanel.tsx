@@ -18,6 +18,7 @@ import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
+import { usePermission } from '@/store/auth'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
 // ─────────────────────────────────────────────────────────────────────
@@ -322,14 +323,14 @@ export function DataSourceDetailPanel({
                                 >
                                     <Compass className="w-3 h-3" /> Explorer
                                 </Link>
-                                <button onClick={onEdit} className="p-2 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Edit">
-                                    <Edit2 className="w-3.5 h-3.5" />
-                                </button>
-                                {onDelete && (
-                                    <button onClick={onDelete} className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors" title="Remove">
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
-                                )}
+                                <DataSourceActions
+                                    wsId={wsId}
+                                    onEdit={onEdit}
+                                    onDelete={onDelete}
+                                />
+                                {/* DataSourceActions handles permission gating per
+                                    workspace; falls back to hidden buttons if the
+                                    viewer can't manage data sources here. */}
                             </div>
                         </div>
 
@@ -624,4 +625,33 @@ export function DataSourceDetailPanel({
     )
 
     return createPortal(content, document.body)
+}
+
+
+// Permission-gated edit/delete buttons. Workspace data-source
+// mutations need ``workspace:datasource:manage`` on the specific
+// workspace; without it the buttons are hidden so a viewer doesn't
+// click into a 403 toast.
+function DataSourceActions({
+    wsId, onEdit, onDelete,
+}: {
+    wsId: string
+    onEdit: () => void
+    onDelete?: () => void
+}) {
+    const isPlatformAdmin = usePermission('system:admin')
+    const canManage = isPlatformAdmin || usePermission('workspace:datasource:manage', wsId)
+    if (!canManage) return null
+    return (
+        <>
+            <button onClick={onEdit} className="p-2 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Edit">
+                <Edit2 className="w-3.5 h-3.5" />
+            </button>
+            {onDelete && (
+                <button onClick={onDelete} className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors" title="Remove">
+                    <Trash2 className="w-3.5 h-3.5" />
+                </button>
+            )}
+        </>
+    )
 }

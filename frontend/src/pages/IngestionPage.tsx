@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { Server, Layers, Activity, DatabaseZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
+import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
@@ -12,8 +13,15 @@ import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 
 type IngestionTab = 'providers' | 'assets' | 'jobs'
 
-const TABS: { id: IngestionTab; label: string; icon: typeof Server; desc: string }[] = [
-    { id: 'providers', label: 'Providers', icon: Server, desc: 'Manage provider credentials and health' },
+interface TabDef {
+    id: IngestionTab
+    label: string
+    icon: typeof Server
+    desc: string
+}
+
+const ALL_TABS: TabDef[] = [
+    { id: 'providers', label: 'Providers', icon: Server, desc: 'View provider credentials and health' },
     { id: 'assets', label: 'Data Sources', icon: Layers, desc: 'Register and configure data sources' },
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
 ]
@@ -21,8 +29,30 @@ const TABS: { id: IngestionTab; label: string; icon: typeof Server; desc: string
 export function IngestionPage() {
     const navigate = useNavigate()
     const [searchParams, setSearchParams] = useSearchParams()
+    const isPlatformAdmin = usePermission('system:admin')
+    // Phase 18: readers (workspace:provider:read) can now see the
+    // Providers tab read-only. Edit/create/delete buttons in
+    // RegistryConnections stay gated by system:admin.
+    //
+    // Rules of Hooks: always call the workspace probes (don't
+    // short-circuit with ``||``) — the hook count must be stable
+    // across renders even when ``isPlatformAdmin`` flips.
+    const hasProviderRead = useAnyWorkspacePermission('workspace:provider:read')
+    const hasCatalogRead = useAnyWorkspacePermission('workspace:catalog:read')
+    const canReadProviders = isPlatformAdmin || hasProviderRead
+    const canReadCatalog = isPlatformAdmin || hasCatalogRead
+
+    // Visible tabs reflect what the current claim set can actually use.
+    // Non-readers (no workspace bindings) skip Providers entirely.
+    const visibleTabs = useMemo(
+        () => ALL_TABS.filter(t => t.id !== 'providers' || canReadProviders),
+        [canReadProviders],
+    )
+
     const rawTab = searchParams.get('tab')
-    const activeTab: IngestionTab = TABS.some(t => t.id === rawTab) ? (rawTab as IngestionTab) : 'providers'
+    const activeTab: IngestionTab = visibleTabs.some(t => t.id === rawTab)
+        ? (rawTab as IngestionTab)
+        : (visibleTabs[0]?.id ?? 'assets')
 
     const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
     const [loadError, setLoadError] = useState<string | null>(null)
@@ -31,53 +61,81 @@ export function IngestionPage() {
         document.title = 'Ingestion · Synodic'
     }, [])
 
+    // Phase 18: providers + catalog reads are workspace-scoped. The
+    // backend filters to what the caller's workspaces touch; the FE
+    // skips the call when the user holds neither read perm so the
+    // onboarding card stays accurate. Lifted into a stable callback
+    // so the ``permissions:changed`` listener can call it without
+    // re-creating the listener every render.
+    const loadCounts = useCallback(async () => {
+        setLoadError(null)
+        const fetches: [Promise<unknown>, Promise<unknown>, Promise<unknown>] = [
+            canReadProviders ? providerService.list() : Promise.resolve(null),
+            canReadCatalog ? catalogService.list() : Promise.resolve([]),
+            workspaceService.list(),
+        ]
+        const [providersResult, catalogsResult, workspacesResult] = await Promise.allSettled(fetches)
+        const providers = providersResult.status === 'fulfilled'
+            ? (providersResult.value as { length: number } | null)
+            : null
+        const catalogs = catalogsResult.status === 'fulfilled'
+            ? (catalogsResult.value as { length: number })
+            : { length: 0 }
+        const workspaces = workspacesResult.status === 'fulfilled'
+            ? (workspacesResult.value as Array<{ dataSources?: Array<{ ontologyId?: string | null }> }>)
+            : []
+
+        const errors: string[] = []
+        if (canReadProviders && providersResult.status === 'rejected') errors.push('providers')
+        if (canReadCatalog && catalogsResult.status === 'rejected') errors.push('catalog items')
+        if (workspacesResult.status === 'rejected') errors.push('workspaces')
+
+        const hasOntology = workspaces.some(ws =>
+            ws.dataSources?.some(ds => !!ds.ontologyId)
+        )
+        setCounts({
+            providers: providers ? providers.length : 0,
+            catalogs: catalogs.length,
+            workspaces: workspaces.length,
+            hasOntology,
+        })
+        setLoadError(
+            errors.length > 0
+                ? `Could not load ${errors.join(', ')}. Showing partial data.`
+                : null,
+        )
+    }, [canReadProviders, canReadCatalog])
+
     useEffect(() => {
         let cancelled = false
-        setLoadError(null)
-        Promise.allSettled([
-            providerService.list(),
-            catalogService.list(),
-            workspaceService.list(),
-        ]).then(([providersResult, catalogsResult, workspacesResult]) => {
+        void loadCounts().then(() => {
             if (cancelled) return
-            const providers = providersResult.status === 'fulfilled' ? providersResult.value : null
-            const catalogs = catalogsResult.status === 'fulfilled' ? catalogsResult.value : []
-            const workspaces = workspacesResult.status === 'fulfilled' ? workspacesResult.value : []
-
-            const errors: string[] = []
-            if (providersResult.status === 'rejected') errors.push('providers')
-            if (catalogsResult.status === 'rejected') errors.push('catalog items')
-            if (workspacesResult.status === 'rejected') errors.push('workspaces')
-
-            const hasOntology = workspaces.some(ws =>
-                ws.dataSources?.some(ds => !!ds.ontologyId)
-            )
-            setCounts({
-                providers: providers ? providers.length : 0,
-                catalogs: catalogs.length,
-                workspaces: workspaces.length,
-                hasOntology,
-            })
-            setLoadError(
-                errors.length > 0
-                    ? `Could not load ${errors.join(', ')}. Showing partial data.`
-                    : null,
-            )
         })
         return () => { cancelled = true }
-    }, [activeTab])
+    }, [activeTab, loadCounts])
+
+    // Refresh when a permissions change is announced (silent refresh,
+    // 60s poller, or cross-tab BroadcastChannel). Without this, the
+    // page keeps showing the pre-revocation counts while open.
+    useEffect(() => {
+        const onChange = () => { void loadCounts() }
+        window.addEventListener('permissions:changed', onChange)
+        return () => window.removeEventListener('permissions:changed', onChange)
+    }, [loadCounts])
 
     const handleStageClick = (tab: string) => {
         if (tab === 'workspaces') {
             navigate('/workspaces')
             return
         }
-        if (tab === 'providers' || tab === 'assets') {
+        if ((tab === 'providers' && canReadProviders) || tab === 'assets') {
             setSearchParams({ tab })
         }
     }
 
-    if (counts.providers === -1 && !loadError) return null
+    // Wait for the providers fetch to settle before painting (the
+    // sentinel is -1 only when we attempted the fetch).
+    if (canReadProviders && counts.providers === -1 && !loadError) return null
 
     const setTab = (id: IngestionTab) => setSearchParams({ tab: id })
 
@@ -103,14 +161,30 @@ export function IngestionPage() {
                         </div>
                     )}
 
-                    {/* Onboarding Progress */}
-                    <OnboardingProgress
-                        providerCount={Math.max(counts.providers, 0)}
-                        catalogItemCount={counts.catalogs}
-                        workspaceCount={counts.workspaces}
-                        hasOntology={counts.hasOntology}
-                        onStageClick={handleStageClick}
-                    />
+                    {/* Onboarding Progress — admin-only because the first
+                        two stages (providers, catalog) are admin-tier
+                        concerns. Non-admins arrive at Ingestion to manage
+                        data sources inside their workspaces; the
+                        onboarding ladder doesn't apply to them. */}
+                    {isPlatformAdmin && (
+                        <OnboardingProgress
+                            providerCount={Math.max(counts.providers, 0)}
+                            catalogItemCount={counts.catalogs}
+                            workspaceCount={counts.workspaces}
+                            hasOntology={counts.hasOntology}
+                            onStageClick={handleStageClick}
+                        />
+                    )}
+
+                    {/* Phase 18: Provider write paths stay system:admin.
+                        Readers see the rows but get a banner explaining
+                        edit lives with admins. */}
+                    {!isPlatformAdmin && canReadProviders && activeTab === 'providers' && (
+                        <div className="mb-4 rounded-xl border border-glass-border bg-glass-base/30 px-4 py-2.5 text-xs text-ink-secondary">
+                            You're viewing the providers your workspaces use. To register,
+                            edit, or delete a provider, ask a platform administrator.
+                        </div>
+                    )}
 
                     {/* Tabs */}
                     <div
@@ -118,7 +192,7 @@ export function IngestionPage() {
                         aria-label="Ingestion sections"
                         className="flex items-center gap-1 border-b border-glass-border"
                     >
-                        {TABS.map(tab => {
+                        {visibleTabs.map(tab => {
                             const Icon = tab.icon
                             const isActive = activeTab === tab.id
                             return (
@@ -161,7 +235,7 @@ export function IngestionPage() {
                     <RegistryJobHistory />
                 ) : (
                     <div className="px-8 py-6 max-w-7xl mx-auto">
-                        {activeTab === 'providers' && <RegistryConnections />}
+                        {activeTab === 'providers' && canReadProviders && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
                     </div>
                 )}

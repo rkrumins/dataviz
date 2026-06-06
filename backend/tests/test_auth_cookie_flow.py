@@ -34,7 +34,7 @@ async def _seed(db_session: AsyncSession, email: str = "cookie@example.com") -> 
         last_name="Tester",
         status="active",
     )
-    await user_repo.assign_role(db_session, user.id, "admin")
+    await user_repo.assign_role(db_session, user.id, "super_admin")
     await db_session.commit()
     return user.id
 

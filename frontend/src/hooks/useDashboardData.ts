@@ -5,6 +5,7 @@ import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
+import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import type { ViewConfiguration } from '@/types/schema'
 
 const EMPTY_VIEWS: ViewConfiguration[] = []
@@ -140,12 +141,38 @@ export function useDashboardData() {
         fetchAllStats()
     }, [workspaces])
 
-    // Fetch Templates
+    // Phase 17: Templates + Ontologies live behind system:admin gates.
+    // Skip the fetch entirely for non-admins — the dashboard tiles and
+    // the global-search Template/Semantic-Layer categories already
+    // handle empty arrays, so the UI stays consistent (just no admin
+    // probe + no 403 in the console). Re-fires when the claim flips
+    // (login, silent-refresh after promotion). ``silent403`` is kept
+    // as belt-and-suspenders in the rare case admin demotion races a
+    // refresh while the effect is mid-flight.
+    const isPlatformAdmin = usePermission('system:admin')
+    // Phase 18: ontologies are now workspace-scoped reads (backend
+    // filters to the user's visible set). Allow the fetch for anyone
+    // holding workspace:ontology:read in any workspace. Templates stay
+    // platform-admin (no workspace-scoped read path on the backend).
+    //
+    // NOTE: hooks must be called unconditionally (Rules of Hooks) — do
+    // NOT short-circuit with `||`. Always call the workspace probe and
+    // OR the boolean result.
+    const hasOntologyRead = useAnyWorkspacePermission('workspace:ontology:read')
+    const canReadOntologies = isPlatformAdmin || hasOntologyRead
+
     useEffect(() => {
+        if (!isPlatformAdmin) {
+            setTemplates([])
+            setIsLoadingTemplates(false)
+            return
+        }
         const fetchTemplates = async () => {
             setIsLoadingTemplates(true)
             try {
-                const res = await fetchWithTimeout('/api/v1/admin/context-model-templates')
+                const res = await fetchWithTimeout('/api/v1/admin/context-model-templates', {
+                    silent403: true,
+                })
                 if (res.ok) {
                     const data = await res.json()
                     setTemplates(data || [])
@@ -157,14 +184,20 @@ export function useDashboardData() {
             }
         }
         fetchTemplates()
-    }, [])
+    }, [isPlatformAdmin])
 
-    // Fetch Ontologies
     useEffect(() => {
+        if (!canReadOntologies) {
+            setOntologies([])
+            setIsLoadingOntologies(false)
+            return
+        }
         const fetchOntologies = async () => {
             setIsLoadingOntologies(true)
             try {
-                const res = await fetchWithTimeout('/api/v1/admin/ontologies')
+                const res = await fetchWithTimeout('/api/v1/admin/ontologies', {
+                    silent403: true,
+                })
                 if (res.ok) {
                     const data = await res.json()
                     setOntologies(data || [])
@@ -176,7 +209,7 @@ export function useDashboardData() {
             }
         }
         fetchOntologies()
-    }, [])
+    }, [canReadOntologies])
 
     // Derive recent and popular views — memoized so downstream effects get stable refs
     const recentViews = useMemo(

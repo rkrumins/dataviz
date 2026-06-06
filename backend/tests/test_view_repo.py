@@ -229,7 +229,6 @@ async def _seed_views(session: AsyncSession, ws: WorkspaceORM, n: int, creator_i
             first_name="Test",
             last_name="Creator",
             status="active",
-            auth_provider="local",
         ))
         await session.flush()
     for i in range(n):

@@ -96,7 +96,94 @@ async function tryRefresh(): Promise<boolean> {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       })
-      return res.ok
+      if (res.ok) {
+        // Phase 10: the new JWT carries re-resolved claims (the
+        // backend refresh path calls ``permission_service.resolve``
+        // — see auth_service/service.py:365). Re-hydrate the FE
+        // store so route guards (RequirePermission, TopBar admin
+        // cog) react to role / binding mutations made
+        // mid-session. Fire-and-forget — a failed re-hydrate
+        // logs and the next page transition picks up fresh state.
+        // Dynamic import avoids a circular dep through the auth
+        // store.
+        //
+        // After the store rehydrates, blanket-invalidate React Query
+        // so the sidebar's workspaces list, member tables, etc.
+        // repaint with fresh data instead of serving the cached
+        // response that pre-dates the permission mutation. The cost
+        // is one refetch wave per silent refresh — acceptable, and
+        // exactly the behaviour users expect after their access
+        // shifts mid-session.
+        void (async () => {
+          try {
+            const mod = await import('@/store/auth')
+            await mod.useAuthStore.getState().refreshPermissions()
+            try {
+              const mainMod = await import('@/main')
+              const qc = mainMod.getQueryClient()
+              if (qc) await qc.invalidateQueries()
+            } catch {
+              // best-effort — the next user-triggered render still
+              // resolves fresh data within React Query's staleTime.
+            }
+            // Reload Zustand stores + emit ``permissions:changed``
+            // for page-level caches. Without this, the sidebar /
+            // CommandPalette / open page would keep their pre-
+            // revocation cache because they don't live in React
+            // Query. See store/permissionChangeBus.ts.
+            try {
+              const busMod = await import('@/store/permissionChangeBus')
+              await busMod.notifyPermissionsChanged()
+            } catch {
+              // best-effort
+            }
+          } catch {
+            // best-effort
+          }
+        })()
+        return true
+      }
+
+      // SSO daily ceiling: the backend signals "session expired at the
+      // IdP, follow login_url to re-authenticate" via a structured 401
+      // body. Navigate transparently — the user shouldn't have to click
+      // anything; they just see one extra IdP redirect that completes
+      // automatically when the IdP session is still warm.
+      if (res.status === 401) {
+        try {
+          const body = (await res.clone().json()) as {
+            detail?: { error?: string; login_url?: string }
+          }
+          const detail = body?.detail
+          if (
+            detail?.error === 'sso_reauth_required'
+            && typeof detail.login_url === 'string'
+            && detail.login_url.startsWith('/')
+          ) {
+            // Wipe the cached user DTO before the bounce. The IdP
+            // re-auth may resolve to a different account, and we
+            // don't want a stale cache seeding the next /auth/me.
+            // Dynamic import avoids a top-level circular dep through
+            // the auth store.
+            try {
+              const mod = await import('@/store/userCache')
+              mod.clearUserCache()
+            } catch {
+              // ignore — bounce still happens
+            }
+            if (typeof window !== 'undefined') {
+              window.location.href = detail.login_url
+            }
+            // Tell callers refresh "succeeded" in the sense that we're
+            // about to navigate; suppresses the session-lost event so
+            // we don't flash the /login screen during the bounce.
+            return true
+          }
+        } catch {
+          // Body wasn't the structured envelope; fall through to false.
+        }
+      }
+      return false
     } catch {
       return false
     } finally {
@@ -156,14 +243,37 @@ function parseRetryAfterMs(header: string | null): number | null {
 async function notifyAccessDenied(res: Response, requestPath: string): Promise<void> {
   if (typeof window === 'undefined') return
   let detail: string | null = null
-  // Clone before reading so the caller can still consume the body.
+  let permission: string | null = null
+  let scope: { type: 'global' | 'workspace'; id: string | null } | null = null
   try {
     const clone = res.clone()
     const text = await clone.text()
     if (text) {
       try {
-        const body = JSON.parse(text) as { detail?: string }
-        detail = body.detail ?? null
+        // Phase 5: the backend ``requires()`` 403 body is structured:
+        //   { detail: { error, permission, scope, message } }
+        // We tolerate both the old (string detail) and new (dict detail)
+        // shapes so a deploy mid-upgrade doesn't render '[object Object]'.
+        const body = JSON.parse(text) as {
+          detail?: string | {
+            error?: string
+            permission?: string
+            scope?: { type?: 'global' | 'workspace'; id?: string | null }
+            message?: string
+          }
+        }
+        if (typeof body.detail === 'string') {
+          detail = body.detail
+        } else if (body.detail) {
+          detail = body.detail.message ?? body.detail.error ?? null
+          permission = body.detail.permission ?? null
+          scope = body.detail.scope
+            ? {
+                type: body.detail.scope.type ?? 'global',
+                id: body.detail.scope.id ?? null,
+              }
+            : null
+        }
       } catch {
         detail = text
       }
@@ -173,7 +283,7 @@ async function notifyAccessDenied(res: Response, requestPath: string): Promise<v
   }
   window.dispatchEvent(
     new CustomEvent(ACCESS_DENIED_EVENT, {
-      detail: { detail, path: requestPath, status: res.status },
+      detail: { detail, permission, scope, path: requestPath, status: res.status },
     }),
   )
 }
@@ -241,9 +351,9 @@ async function runOnce(
 
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init?: RequestInit & { timeoutMs?: number },
+  init?: RequestInit & { timeoutMs?: number; silent403?: boolean },
 ): Promise<Response> {
-  const { timeoutMs = TIMEOUTS.DEFAULT_MS, ...fetchInit } = init ?? {}
+  const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, ...fetchInit } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
 
   let res: Response
@@ -299,7 +409,13 @@ export async function fetchWithTimeout(
   // Response and can shape its own error handling — we just announce
   // the denial centrally so the user sees a clear "you don't have X"
   // message instead of a generic toast.
-  if (res.status === 403) {
+  //
+  // Callers can opt out with ``silent403: true`` when the 403 is an
+  // expected outcome for a user tier (a background probe firing an
+  // admin-only endpoint to render counts, for example). The Response
+  // still flows through so the service can degrade gracefully — only
+  // the global modal is suppressed.
+  if (res.status === 403 && !silent403) {
     void notifyAccessDenied(res, urlPath(input))
   }
 

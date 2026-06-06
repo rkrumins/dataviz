@@ -23,7 +23,10 @@ import { useAuthStore } from '@/store/auth'
 
 
 interface RequirePermissionProps {
-    perm: string
+    /** Single permission required. Mutually exclusive with ``anyOf``. */
+    perm?: string
+    /** Any-of permission set — user passes when they hold at least one. */
+    anyOf?: string[]
     /** Optional element rendered when the user lacks the permission.
      *  Default: a centered access-denied empty-state panel matching
      *  the rest of the admin shell. */
@@ -32,10 +35,15 @@ interface RequirePermissionProps {
 }
 
 
-export function RequirePermission({ perm, fallback, children }: RequirePermissionProps) {
-    const allowed = useAuthStore((s) => s.can(perm))
+export function RequirePermission({ perm, anyOf, fallback, children }: RequirePermissionProps) {
+    const allowed = useAuthStore((s) => {
+        if (anyOf && anyOf.length > 0) return s.canAny(anyOf)
+        if (perm) return s.can(perm)
+        return false
+    })
     if (allowed) return <>{children}</>
-    return <>{fallback ?? <DeniedPanel permission={perm} />}</>
+    const displayPerm = perm ?? (anyOf && anyOf.length > 0 ? anyOf.join(' or ') : 'unknown')
+    return <>{fallback ?? <DeniedPanel permission={displayPerm} />}</>
 }
 
 

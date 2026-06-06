@@ -12,6 +12,7 @@ from backend.app.api.v1.endpoints.graph import (
     _cache_scope,
     _provider_health_header,
     get_context_engine,
+    require_ws_manage,
 )
 from backend.app.models.assignment import LayerAssignmentRequest, LayerAssignmentResult
 from backend.app.services.assignment_engine import assignment_engine
@@ -26,6 +27,7 @@ async def compute_assignments(
     response: Response,
     request: LayerAssignmentRequest = Body(..., embed=False),
     engine: ContextEngine = Depends(get_context_engine),
+    _: object = Depends(require_ws_manage),
 ):
     """Compute layer assignments using the workspace-scoped ContextEngine.
 

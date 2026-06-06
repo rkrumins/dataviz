@@ -6,9 +6,16 @@ import { router } from './routes'
 import './styles/globals.css'
 import { GraphProvider } from '@/providers/GraphProviderContext'
 import { BackendHealthBanner } from '@/components/layout/BackendHealthBanner'
-import { useAuthStore } from '@/store/auth'
-import { enableProviderStatusPolling } from '@/store/providerStatus'
+import { useAuthStore, usePermission, useAnyWorkspacePermission } from '@/store/auth'
+import {
+  enableProviderStatusPolling,
+  disableProviderStatusPolling,
+} from '@/store/providerStatus'
 import { enableProviderHealthPolling } from '@/store/providerHealth'
+import {
+  enablePermissionPolling,
+  disablePermissionPolling,
+} from '@/store/permissionPoller'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -42,6 +49,18 @@ export function getQueryClient(): QueryClient | null {
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const status = useAuthStore((s) => s.status)
+  // Phase 17/18: provider-status polling hits ``/admin/providers/status``
+  // which is now ``workspace:provider:read``-gated (Phase 18) — readers
+  // get their workspaces' providers' status, admins get all. Subscribe
+  // to the claims so the poller starts once they hydrate AND tears down
+  // on demotion. Bootstrap flips ``status → 'authenticated'`` BEFORE
+  // awaiting hydratePermissions, so an inline ``can()`` check at
+  // status-flip time would be empty — the effect re-runs when claims
+  // land. Both hooks are called unconditionally (Rules of Hooks).
+  const isPlatformAdmin = usePermission('system:admin')
+  const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
+  const canPollProviders = isPlatformAdmin || canReadProviders
+
   useEffect(() => {
     void bootstrap()
     const onSessionLost = () => useAuthStore.getState().handleSessionLost()
@@ -49,14 +68,27 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('auth:session-lost', onSessionLost)
   }, [bootstrap])
 
+  useEffect(() => {
+    if (status !== 'authenticated') {
+      // Logout / session-lost: stop the permission poller so it
+      // doesn't keep firing /me/permissions against an empty cookie.
+      disablePermissionPolling()
+      return
+    }
+    // Public endpoint — every authenticated user.
+    enableProviderHealthPolling()
+    // Workspace-scoped read endpoint. Toggle in both directions so a
+    // mid-session demotion that drops provider:read stops the timer.
+    if (canPollProviders) enableProviderStatusPolling()
+    else disableProviderStatusPolling()
+    // Catch idle-user permission updates and cross-tab changes. The
+    // poller compares against its own last snapshot, so a stable
+    // claims response is a silent no-op.
+    enablePermissionPolling()
+  }, [status, canPollProviders])
+
   // Block rendering until auth resolves — prevents premature API calls
   if (status === 'idle' || status === 'loading') return null
-
-  // Start background pollers only once auth confirms user is logged in
-  if (status === 'authenticated') {
-    enableProviderStatusPolling()
-    enableProviderHealthPolling()
-  }
 
   return <>{children}</>
 }

@@ -27,6 +27,10 @@ from .config import (
 
 _REFRESH_AUDIENCE = f"{JWT_AUDIENCE}:refresh"
 _INVITE_AUDIENCE = f"{JWT_AUDIENCE}:invite"
+_OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
+_SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
+_MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
+_LINK_INTENT_AUDIENCE = f"{JWT_AUDIENCE}:link_intent"
 
 
 # ── Access tokens ────────────────────────────────────────────────────
@@ -72,22 +76,35 @@ def decode_token(token: str) -> dict:
 
 @dataclass(frozen=True)
 class RefreshClaims:
-    sub: str          # user id
-    jti: str          # unique token id (for revocation tracking)
-    family_id: str    # rotation chain id (for reuse detection)
-    exp: int          # unix epoch
+    sub: str                 # user id
+    jti: str                 # unique token id (for revocation tracking)
+    family_id: str           # rotation chain id (for reuse detection)
+    exp: int                 # unix epoch
+    # IdP-issued authentication instant for SSO sessions (epoch
+    # seconds). Propagated through rotation so the 24h SSO re-auth
+    # check on /refresh can read it directly from the token. NULL for
+    # local password sessions (which keep their 7-day refresh TTL and
+    # are not subject to the SSO ceiling).
+    auth_time: int | None = None
 
 
 def create_refresh_token(
     user_id: str,
     family_id: str | None = None,
     extra: dict | None = None,
+    *,
+    auth_time: int | None = None,
 ) -> tuple[str, RefreshClaims]:
     """Create a signed refresh JWT.
 
     Returns (token, claims). When *family_id* is None a new family is started
     (this is what /login does). Pass an existing family_id when rotating from
     /refresh so the chain can be tracked for reuse-detection.
+
+    ``auth_time`` (epoch seconds) anchors the SSO re-auth ceiling. It is
+    propagated forward unchanged on every rotation so the check on
+    ``/refresh`` measures elapsed wall-clock time since the user actually
+    authenticated at the IdP, not since the last token rotation.
     """
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=JWT_REFRESH_EXPIRY_DAYS)
@@ -102,6 +119,8 @@ def create_refresh_token(
         "iat": now,
         "exp": expires_at,
     }
+    if auth_time is not None:
+        payload["auth_time"] = int(auth_time)
     if extra:
         payload.update(extra)
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
@@ -110,6 +129,7 @@ def create_refresh_token(
         jti=jti,
         family_id=fam,
         exp=int(expires_at.timestamp()),
+        auth_time=int(auth_time) if auth_time is not None else None,
     )
     return token, claims
 
@@ -132,7 +152,18 @@ def decode_refresh_token(token: str) -> RefreshClaims:
     exp = payload.get("exp")
     if not (sub and jti and fam and exp):
         raise jwt.InvalidTokenError("Refresh token missing required claims")
-    return RefreshClaims(sub=sub, jti=jti, family_id=fam, exp=int(exp))
+    auth_time_raw = payload.get("auth_time")
+    auth_time: int | None
+    if auth_time_raw is None:
+        auth_time = None
+    else:
+        try:
+            auth_time = int(auth_time_raw)
+        except (TypeError, ValueError):
+            raise jwt.InvalidTokenError("Refresh token auth_time is malformed")
+    return RefreshClaims(
+        sub=sub, jti=jti, family_id=fam, exp=int(exp), auth_time=auth_time,
+    )
 
 
 # ── Invite tokens ────────────────────────────────────────────────────
@@ -141,8 +172,24 @@ def create_invite_token(
     role: str,
     created_by: str,
     expires_in_hours: int = 72,
+    *,
+    workspace_id: str | None = None,
+    email: str | None = None,
+    group_ids: list[str] | None = None,
 ) -> tuple[str, str]:
-    """Create a signed invite JWT. Returns (token, expires_at_iso)."""
+    """Create a signed invite JWT. Returns (token, expires_at_iso).
+
+    Phase 11: the token can now carry an optional ``workspace_id``
+    (for workspace-scoped role invites) and an optional ``email``
+    (for email-bound invites — privileged roles pin a target address
+    so a forwarded link can't escalate an unintended identity). Both
+    are omitted from the payload when ``None`` so existing global,
+    shareable invites are unchanged on the wire.
+
+    Phase 13: also optional ``group_ids`` — a list of internal Group
+    ids the new user should be added to on signup. Omitted from the
+    payload when ``None`` / empty.
+    """
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=expires_in_hours)
     payload = {
@@ -154,6 +201,12 @@ def create_invite_token(
         "iat": now,
         "exp": expires_at,
     }
+    if workspace_id is not None:
+        payload["workspace_id"] = workspace_id
+    if email is not None:
+        payload["email"] = email
+    if group_ids:
+        payload["group_ids"] = list(group_ids)
     token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
     return token, expires_at.isoformat()
 
@@ -172,4 +225,172 @@ def decode_invite_token(token: str) -> dict:
     )
     if payload.get("purpose") != "invite":
         raise jwt.InvalidTokenError("Not an invite token")
+    return payload
+
+
+# ── OIDC flow-state tokens ───────────────────────────────────────────
+#
+# The Authorization-Code + PKCE dance needs ``state``, ``nonce`` and the
+# PKCE ``code_verifier`` to survive the round-trip to the IdP. Rather
+# than a server-side session store we sign them into a short-lived,
+# HttpOnly cookie. The signature makes the cookie tamper-proof; the
+# short expiry bounds the window for a stolen-cookie replay.
+
+def create_oidc_state_token(
+    *,
+    state: str,
+    nonce: str,
+    code_verifier: str,
+    next_path: str,
+    expires_in_minutes: int = 10,
+) -> str:
+    """Sign the in-flight OIDC handshake parameters into a JWT."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "purpose": "oidc_state",
+        "state": state,
+        "nonce": nonce,
+        "cv": code_verifier,
+        "next": next_path,
+        "iss": JWT_ISSUER,
+        "aud": _OIDC_STATE_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_oidc_state_token(token: str) -> dict:
+    """Decode an OIDC flow-state JWT. Returns the payload dict.
+
+    Raises jwt.ExpiredSignatureError or jwt.InvalidTokenError on failure.
+    """
+    payload = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_OIDC_STATE_AUDIENCE,
+    )
+    if payload.get("purpose") != "oidc_state":
+        raise jwt.InvalidTokenError("Not an OIDC state token")
+    return payload
+
+
+# ── SAML flow-state tokens ───────────────────────────────────────────
+#
+# The SAML AuthnRequest/Response round-trip uses ``RelayState`` to bind
+# the post-login bounce target. We sign the next_path + a random
+# anti-CSRF nonce into a short-lived HttpOnly cookie that the ACS
+# handler compares against the relay-state echoed back by the IdP.
+
+def create_saml_state_token(
+    *,
+    relay_state: str,
+    next_path: str,
+    expires_in_minutes: int = 10,
+) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "purpose": "saml_state",
+        "rs": relay_state,
+        "next": next_path,
+        "iss": JWT_ISSUER,
+        "aud": _SAML_STATE_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_saml_state_token(token: str) -> dict:
+    payload = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_SAML_STATE_AUDIENCE,
+    )
+    if payload.get("purpose") != "saml_state":
+        raise jwt.InvalidTokenError("Not a SAML state token")
+    return payload
+
+
+# ── Custom-IdP mock identity tokens (dev/demo only) ──────────────────
+#
+# Signed envelope carrying an AD-style identity payload (external_id,
+# email, names, claims, groups, auth_time). The payload is OPAQUE to
+# this module — fields are validated by the custom provider. Signing
+# with the platform secret stops a casual tampering of the cookie /
+# header value; the route layer additionally refuses to operate unless
+# AUTH_CUSTOM_PROVIDER_ENABLED is true and ENV is non-prod (enforced
+# at startup in core/config.py).
+
+def create_mock_identity_token(
+    payload: dict, *, expires_in_minutes: int = 10,
+) -> str:
+    now = datetime.now(timezone.utc)
+    envelope = {
+        "purpose": "mock_identity",
+        "payload": payload,
+        "iss": JWT_ISSUER,
+        "aud": _MOCK_IDENTITY_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(envelope, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_mock_identity_token(token: str) -> dict:
+    envelope = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_MOCK_IDENTITY_AUDIENCE,
+    )
+    if envelope.get("purpose") != "mock_identity":
+        raise jwt.InvalidTokenError("Not a mock-identity token")
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise jwt.InvalidTokenError("Mock identity payload missing")
+    return payload
+
+
+# ── Link-intent tokens (self-service "link this IdP to me") ──────────
+#
+# A logged-in user can ask to attach a new SSO identity to their
+# current account. We need to remember "who initiated this flow" and
+# "which provider they're linking to" across the IdP round-trip. The
+# signed cookie ``nx_link_intent`` carries those two ids; the SSO
+# callback checks it before deciding whether to provision a new user
+# or attach the verified identity to ``user_id``.
+
+
+def create_link_intent_token(
+    *, user_id: str, provider_id: str, expires_in_minutes: int = 10,
+) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "purpose": "link_intent",
+        "user_id": user_id,
+        "provider_id": provider_id,
+        "iss": JWT_ISSUER,
+        "aud": _LINK_INTENT_AUDIENCE,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_in_minutes),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def decode_link_intent_token(token: str) -> dict:
+    payload = jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        issuer=JWT_ISSUER,
+        audience=_LINK_INTENT_AUDIENCE,
+    )
+    if payload.get("purpose") != "link_intent":
+        raise jwt.InvalidTokenError("Not a link-intent token")
     return payload

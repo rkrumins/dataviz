@@ -91,7 +91,7 @@ async def _client(app: FastAPI, *, cookies=None) -> AsyncClient:
 
 @pytest.mark.asyncio
 async def test_requires_returns_401_when_no_cookie():
-    app = _build_app("workspaces:create")
+    app = _build_app("system:workspaces:create")
     async with await _client(app) as c:
         r = await c.get("/widget")
         assert r.status_code == 401
@@ -99,7 +99,7 @@ async def test_requires_returns_401_when_no_cookie():
 
 @pytest.mark.asyncio
 async def test_requires_returns_401_on_invalid_cookie():
-    app = _build_app("workspaces:create")
+    app = _build_app("system:workspaces:create")
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: "not-a-real-jwt"}) as c:
         r = await c.get("/widget")
         assert r.status_code == 401
@@ -111,11 +111,18 @@ async def test_requires_returns_401_on_invalid_cookie():
 async def test_requires_403_when_global_permission_missing():
     claims = PermissionClaims(sid="sess_a", global_perms=("workspace:view:read",))
     token = _make_token(claims)
-    app = _build_app("workspaces:create")
+    app = _build_app("system:workspaces:create")
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget")
         assert r.status_code == 403
-        assert "workspaces:create" in r.json()["detail"]
+        # Phase 5 structured 403 body. ``detail.permission`` carries the
+        # canonical id, ``detail.scope.type`` the scope, ``detail.message``
+        # the human-readable copy. The frontend keys off ``permission``.
+        body = r.json()["detail"]
+        assert body["error"] == "missing_permission"
+        assert body["permission"] == "system:workspaces:create"
+        assert body["scope"] == {"type": "global", "id": None}
+        assert "system:workspaces:create" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -136,9 +143,9 @@ async def test_requires_403_when_workspace_permission_missing():
 
 @pytest.mark.asyncio
 async def test_requires_200_with_global_permission():
-    claims = PermissionClaims(sid="sess_a", global_perms=("workspaces:create",))
+    claims = PermissionClaims(sid="sess_a", global_perms=("system:workspaces:create",))
     token = _make_token(claims)
-    app = _build_app("workspaces:create")
+    app = _build_app("system:workspaces:create")
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget")
         assert r.status_code == 200
@@ -175,10 +182,10 @@ async def test_requires_401_when_session_in_revocation_set():
     backend = InMemoryBackend()
     await backend.set_with_ttl("rbac:revoked:sess_a", 60)
 
-    claims = PermissionClaims(sid="sess_a", global_perms=("workspaces:create",))
+    claims = PermissionClaims(sid="sess_a", global_perms=("system:workspaces:create",))
     token = _make_token(claims)
 
-    app = _build_app("workspaces:create", backend=backend)
+    app = _build_app("system:workspaces:create", backend=backend)
     async with await _client(app, cookies={ACCESS_COOKIE_NAME: token}) as c:
         r = await c.get("/widget")
         assert r.status_code == 401

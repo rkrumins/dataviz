@@ -268,7 +268,15 @@ async def lifespan(_app: FastAPI):
                         last_name="Admin",
                         status="active",
                     )
-                    await user_repo.assign_role(session, user.id, "admin")
+                    # Phase 6: ``set_global_role`` writes both
+                    # ``user_roles`` (legacy display) and
+                    # ``role_bindings`` (canonical claims) so the
+                    # bootstrap admin actually has system:admin in
+                    # their JWT, not just on the User DTO.
+                    await user_repo.set_global_role(
+                        session, user.id, "super_admin",
+                        granted_by="system",
+                    )
                     await user_repo.create_approval(
                         session, user.id, status="approved", approved_by="system",
                     )
@@ -300,6 +308,167 @@ async def lifespan(_app: FastAPI):
     #    client implementing the same protocol.
     register_provider("local", LocalIdentityProvider())
 
+    # Phase 3: DB-backed provider registry. The auth service no longer
+    # holds singleton OIDC/SAML/Custom instances — it materialises one
+    # per ``idp_providers`` row on demand. Env-only Phase 2 deployments
+    # get a "default-{kind}" row seeded automatically on first boot so
+    # the old config keeps working until the operator edits it via the
+    # admin UI.
+    from backend.auth_service.providers import (
+        PROVIDER_BUILDERS,
+        ProviderConfigSnapshot,
+        ProviderRegistry,
+        configure_registry,
+        SAML_AVAILABLE,
+    )
+    from backend.app.db.repositories import idp_provider_repo
+
+    class _DbProviderConfigLoader:
+        """Implements ``ProviderConfigLoader`` against the DB.
+
+        Lives here in main.py so the auth_service stays free of
+        ``backend.app.*`` imports (enforced by the isolation test).
+        """
+
+        async def get_by_id(self, provider_id: str):
+            async with get_async_session() as session:
+                row = await idp_provider_repo.get_provider(session, provider_id)
+                return self._to_snapshot(row) if row is not None else None
+
+        async def get_by_slug(self, slug: str):
+            async with get_async_session() as session:
+                row = await idp_provider_repo.get_provider_by_slug(session, slug)
+                return self._to_snapshot(row) if row is not None else None
+
+        async def list_enabled(self):
+            async with get_async_session() as session:
+                rows = await idp_provider_repo.list_providers(
+                    session, only_enabled=True,
+                )
+                return [self._to_snapshot(r) for r in rows]
+
+        @staticmethod
+        def _to_snapshot(row) -> ProviderConfigSnapshot:
+            return ProviderConfigSnapshot(
+                id=row.id,
+                slug=row.slug,
+                display_name=row.display_name,
+                kind=row.kind,
+                enabled=bool(row.enabled),
+                priority=int(row.priority or 100),
+                settings=idp_provider_repo.decrypt_settings(row.settings),
+                claim_mapping=idp_provider_repo.parse_claim_mapping(row),
+                linking_policy=row.linking_policy,
+                button_label=row.button_label,
+                button_icon=row.button_icon,
+            )
+
+    _registry = ProviderRegistry(
+        loader=_DbProviderConfigLoader(),
+        builders=PROVIDER_BUILDERS,
+    )
+    configure_registry(_registry)
+    logger.info(
+        "Provider registry configured (builders=%s)",
+        sorted(PROVIDER_BUILDERS.keys()),
+    )
+
+    # Boot-seed: write a default OIDC / SAML / custom row from env
+    # vars (if set) so existing deployments keep working without an
+    # admin action on first start. Idempotent — re-runs detect the
+    # existing row and skip.
+    async def _seed_provider_from_env() -> None:
+        from backend.auth_service.providers import (
+            load_env_oidc_settings,
+            load_env_saml_settings,
+        )
+
+        async with get_async_session() as session:
+            # OIDC
+            env_oidc = load_env_oidc_settings()
+            if env_oidc is not None:
+                existing = await idp_provider_repo.get_provider_by_slug(
+                    session, "default-oidc",
+                )
+                if existing is None:
+                    await idp_provider_repo.create_provider(
+                        session,
+                        slug="default-oidc",
+                        display_name="Default OIDC (from env)",
+                        kind="oidc",
+                        settings={
+                            "issuer": env_oidc.issuer,
+                            "client_id": env_oidc.client_id,
+                            "client_secret": env_oidc.client_secret,
+                            "redirect_uri": env_oidc.redirect_uri,
+                            "scopes": env_oidc.scopes,
+                            "default_next": env_oidc.default_next,
+                        },
+                        claim_mapping={},
+                        linking_policy="strict",
+                        button_label="Sign in with OIDC",
+                    )
+                    await session.commit()
+                    logger.info("Seeded default-oidc provider from env.")
+            # SAML
+            if SAML_AVAILABLE and load_env_saml_settings is not None:
+                env_saml = load_env_saml_settings()
+                if env_saml is not None:
+                    existing = await idp_provider_repo.get_provider_by_slug(
+                        session, "default-saml2",
+                    )
+                    if existing is None:
+                        await idp_provider_repo.create_provider(
+                            session,
+                            slug="default-saml2",
+                            display_name="Default SAML (from env)",
+                            kind="saml2",
+                            settings={
+                                "sp_entity_id": env_saml.sp_entity_id,
+                                "sp_acs_url": env_saml.sp_acs_url,
+                                "sp_slo_url": env_saml.sp_slo_url,
+                                "idp_entity_id": env_saml.idp_entity_id,
+                                "idp_sso_url": env_saml.idp_sso_url,
+                                "idp_slo_url": env_saml.idp_slo_url,
+                                "idp_x509_cert": env_saml.idp_x509_cert,
+                                "sp_x509_cert": env_saml.sp_x509_cert,
+                                "sp_private_key": env_saml.sp_private_key,
+                                "name_id_format": env_saml.name_id_format,
+                                "default_next": env_saml.default_next,
+                            },
+                            claim_mapping={},
+                            linking_policy="strict",
+                            button_label="Sign in with SAML",
+                        )
+                        await session.commit()
+                        logger.info("Seeded default-saml2 provider from env.")
+            # Custom (dev only)
+            from backend.auth_service.core.config import (
+                AUTH_CUSTOM_PROVIDER_ENABLED, ENV,
+            )
+            if AUTH_CUSTOM_PROVIDER_ENABLED:
+                existing = await idp_provider_repo.get_provider_by_slug(
+                    session, "default-custom",
+                )
+                if existing is None:
+                    await idp_provider_repo.create_provider(
+                        session,
+                        slug="default-custom",
+                        display_name=f"Dev Login (mock) [{ENV}]",
+                        kind="custom",
+                        settings={},
+                        claim_mapping={},
+                        linking_policy="strict",
+                        button_label="Dev Login",
+                    )
+                    await session.commit()
+                    logger.info("Seeded default-custom provider (dev).")
+
+    try:
+        await _seed_provider_from_env()
+    except Exception as exc:  # noqa: BLE001 — seeding must not block boot
+        logger.warning("Provider seeding failed (continuing): %s", exc)
+
     async def _emit_user_event(session, event_type: str, payload: dict) -> None:
         await user_repo.create_outbox_event(session, event_type=event_type, payload=payload)
 
@@ -307,17 +476,77 @@ async def lifespan(_app: FastAPI):
     # them in the access JWT. The auth service forwards the dict
     # opaquely; the FastAPI ``requires(...)`` dependency reads it back.
     from backend.app.services import permission_service
+    from backend.app.services.revocation_service import get_revocation_service
 
     async def _resolve_claims(session, user_id: str) -> dict:
         claims = await permission_service.resolve(session, user_id)
+        # Record the freshly-minted sid in the user→sids reverse index
+        # so revoke_all_user_sessions can kill every live session on
+        # suspend / deprovision / role change. Best-effort: a Redis
+        # outage must not block login (requires() applies its own
+        # fail policy on the read side).
+        try:
+            await get_revocation_service().record_session(user_id, claims.sid)
+        except Exception as exc:  # noqa: BLE001 — recording is best-effort
+            logger.warning(
+                "Session-index record failed (user=%s): %s", user_id, exc
+            )
         return claims.to_jwt_dict()
+
+    # Phase 3: inject the group->target reconciler (now handles both
+    # role_binding and group_membership target types). New signature
+    # accepts provider_id so per-IdP mapping scoping works.
+    async def _reconcile_sso_targets(
+        session, *, user_id: str, idp_groups: list[str],
+        provider_id=None,
+    ) -> dict:
+        return await permission_service.reconcile_sso_targets(
+            session, user_id=user_id, idp_groups=idp_groups,
+            provider_id=provider_id,
+        )
+
+    # Phase 2.E: inject the session-killer (RevocationService). Called
+    # by the auth service when the SSO daily ceiling forces re-auth so
+    # every live access token across all tabs bounces to the IdP.
+    async def _kill_user_sessions(user_id: str) -> None:
+        await get_revocation_service().revoke_all_user_sessions(user_id)
+
+    # Phase 4: inject the platform SSO posture provider. The
+    # ``auth_service`` stays free of ``backend.app.*`` imports —
+    # the loader closure does the DB hit; the service only sees a
+    # cached snapshot.
+    from backend.app.db.repositories import (
+        app_auth_config_repo as _app_auth_config_repo,
+        user_identity_repo as _user_identity_repo,
+    )
+    from backend.auth_service.app_auth_config import (
+        AuthConfigSnapshot,
+        CachedAuthConfigProvider,
+    )
+
+    async def _load_auth_config() -> AuthConfigSnapshot:
+        async with get_async_session() as session:
+            snap = await _app_auth_config_repo.get_snapshot(session)
+        return AuthConfigSnapshot(
+            sso_enabled=snap.sso_enabled,
+            allow_local_login=snap.allow_local_login,
+            allow_jit_provisioning=snap.allow_jit_provisioning,
+            version=snap.version,
+            updated_at=snap.updated_at,
+        )
+
+    _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
 
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
+        user_identity_repo=_user_identity_repo,
         refresh_store_factory=make_refresh_store,
         outbox_emit=_emit_user_event,
         claims_resolver=_resolve_claims,
+        sso_role_reconciler=_reconcile_sso_targets,
+        session_killer=_kill_user_sessions,
+        auth_config_provider=_auth_config_provider,
     )
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 
@@ -633,6 +862,21 @@ async def lifespan(_app: FastAPI):
         name="event-loop-monitor",
     )
 
+    # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
+    # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
+    # so multiple WEB replicas don't all drain the same outbox.
+    _app.state._outbox_relay_shutdown = asyncio.Event()
+    _app.state._outbox_relay_task = None
+    if runs_scheduler():
+        from .services.outbox_relay import run_relay as _run_outbox_relay
+        _app.state._outbox_relay_task = asyncio.create_task(
+            _run_outbox_relay(
+                get_jobs_session,
+                _app.state._outbox_relay_shutdown,
+            ),
+            name="outbox-relay",
+        )
+
     # P1.10 — flip the readiness gate. From this point on, the
     # TimeoutMiddleware accepts non-liveness requests; before this, it
     # returns 503 + Retry-After: 5. Setting this AFTER all sync init
@@ -680,6 +924,21 @@ async def lifespan(_app: FastAPI):
             await asyncio.wait_for(_event_loop_task, timeout=1.0)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
+
+    # Phase 0 — stop the outbox relay before DB pool teardown.
+    _outbox_relay_shutdown = getattr(_app.state, "_outbox_relay_shutdown", None)
+    _outbox_relay_task = getattr(_app.state, "_outbox_relay_task", None)
+    if _outbox_relay_shutdown is not None:
+        _outbox_relay_shutdown.set()
+    if _outbox_relay_task is not None and not _outbox_relay_task.done():
+        try:
+            await asyncio.wait_for(_outbox_relay_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _outbox_relay_task.cancel()
+            try:
+                await _outbox_relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     # Stop the stuck-job reconciler so it doesn't try to commit during
     # DB pool teardown. Setting the shutdown event lets it exit at the

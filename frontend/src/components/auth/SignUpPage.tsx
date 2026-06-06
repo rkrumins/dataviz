@@ -45,6 +45,11 @@ export function SignUpPage() {
     const inviteToken = searchParams.get('invite')
     const [inviteRole, setInviteRole] = useState<string | null>(null)
     const [inviteValid, setInviteValid] = useState<boolean | null>(null)
+    // Phase 11: workspace context + email pin from the invite token.
+    const [inviteWorkspaceName, setInviteWorkspaceName] = useState<string | null>(null)
+    const [inviteEmail, setInviteEmail] = useState<string | null>(null)
+    // Phase 13: groups the user will be added to on signup.
+    const [inviteGroupNames, setInviteGroupNames] = useState<string[] | null>(null)
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
@@ -62,6 +67,14 @@ export function SignUpPage() {
         authService.verifyInvite(inviteToken).then((res) => {
             setInviteValid(res.valid)
             setInviteRole(res.role)
+            setInviteWorkspaceName(res.workspaceName ?? null)
+            setInviteGroupNames(res.groupNames ?? null)
+            // Email-bound invite: prefill + lock the email field so the
+            // user signs up with the address the link is pinned to.
+            if (res.email) {
+                setInviteEmail(res.email)
+                setEmail(res.email)
+            }
         }).catch(() => {
             setInviteValid(false)
         })
@@ -157,11 +170,29 @@ export function SignUpPage() {
                     </div>
 
                     {/* Invite banner */}
-                    {inviteToken && inviteValid && (
+    {inviteToken && inviteValid && (
                         <div className="flex items-center gap-2.5 p-3 mb-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
                             <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
                             <p className="text-xs text-emerald-700 dark:text-emerald-300">
-                                Your account will be activated immediately as <span className="font-semibold capitalize">{inviteRole}</span>.
+                                Your account will be activated immediately
+                                {inviteRole ? (
+                                    <> as <span className="font-semibold">{inviteRole}</span></>
+                                ) : null}
+                                {inviteWorkspaceName ? (
+                                    <> in <span className="font-semibold">{inviteWorkspaceName}</span></>
+                                ) : null}.
+                                {inviteGroupNames && inviteGroupNames.length > 0 ? (
+                                    <>
+                                        {' '}You'll join the{' '}
+                                        <span className="font-semibold">
+                                            {inviteGroupNames.join(' and ')}
+                                        </span>
+                                        {' '}{inviteGroupNames.length > 1 ? 'groups' : 'group'}.
+                                    </>
+                                ) : null}
+                                {inviteEmail ? (
+                                    <> This invite is for <span className="font-semibold">{inviteEmail}</span>.</>
+                                ) : null}
                             </p>
                         </div>
                     )}
@@ -252,7 +283,12 @@ export function SignUpPage() {
                                             placeholder="jane@company.com"
                                             value={email}
                                             onChange={(e) => setEmail(e.target.value)}
-                                            className="input pl-10 h-11 bg-white/50 dark:bg-black/20 border-white/40 dark:border-white/10"
+                                            readOnly={!!inviteEmail}
+                                            title={inviteEmail ? 'This invite is bound to a specific email address.' : undefined}
+                                            className={cn(
+                                                "input pl-10 h-11 bg-white/50 dark:bg-black/20 border-white/40 dark:border-white/10",
+                                                inviteEmail && "opacity-70 cursor-not-allowed",
+                                            )}
                                             required
                                         />
                                     </div>

@@ -32,34 +32,17 @@ async def _seed_user(db_session, *, user_id="usr_alice", email="alice@example.co
         first_name="Alice",
         last_name="Anderson",
         status="active",
-        auth_provider="local",
     ))
     await db_session.flush()
     return user_id
 
 
 async def _seed_permissions(db_session) -> None:
-    """Insert a minimal catalogue and role bundle so resolver tests work."""
-    perms = [
-        PermissionORM(id="system:admin", description="all", category="system"),
-        PermissionORM(id="workspace:view:read", description="read view", category="workspace"),
-        PermissionORM(id="workspace:view:edit", description="edit view", category="workspace"),
-    ]
-    for p in perms:
-        db_session.add(p)
-
-    # admin gets everything; user gets view perms; viewer gets read only.
-    bundles = [
-        ("admin", "system:admin"),
-        ("admin", "workspace:view:read"),
-        ("admin", "workspace:view:edit"),
-        ("user", "workspace:view:read"),
-        ("user", "workspace:view:edit"),
-        ("viewer", "workspace:view:read"),
-    ]
-    for role, perm in bundles:
-        db_session.add(RolePermissionORM(role_name=role, permission_id=perm))
-    await db_session.flush()
+    """No-op: ``conftest.db_session`` already seeds the Phase-5
+    catalogue (roles, permissions, role_permissions). Kept as a hook
+    so individual tests can extend the catalogue if they need to.
+    """
+    return None
 
 
 # ── permission_repo ──────────────────────────────────────────────────
@@ -68,25 +51,37 @@ async def _seed_permissions(db_session) -> None:
 async def test_permission_repo_lists_seeded_permissions(db_session):
     await _seed_permissions(db_session)
     perms = await permission_repo.list_permissions(db_session)
-    assert {p.id for p in perms} == {"system:admin", "workspace:view:read", "workspace:view:edit"}
+    # The Phase-5 catalogue is seeded by conftest; spot-check a few
+    # well-known ids rather than asserting the whole set (the catalogue
+    # is documented in ``docs/RBAC.md``).
+    ids = {p.id for p in perms}
+    assert {"system:admin", "system:org-admin", "workspace:admin",
+            "workspace:view:read"} <= ids
 
 
 @pytest.mark.asyncio
 async def test_permission_repo_role_permissions_for_role(db_session):
     await _seed_permissions(db_session)
-    user_perms = await permission_repo.get_role_permissions(db_session, "user")
-    assert set(user_perms) == {"workspace:view:read", "workspace:view:edit"}
+    member_perms = await permission_repo.get_role_permissions(
+        db_session, "workspace_member"
+    )
+    assert "workspace:view:read" in member_perms
+    assert "workspace:view:edit" in member_perms
+    # No system:* perms in a workspace role bundle.
+    assert not any(p.startswith("system:") for p in member_perms)
 
 
 @pytest.mark.asyncio
 async def test_permission_repo_bulk_role_permissions(db_session):
     await _seed_permissions(db_session)
     bulk = await permission_repo.get_role_permissions_for_roles(
-        db_session, ["admin", "viewer"]
+        db_session, ["super_admin", "workspace_viewer"]
     )
-    assert "admin" in bulk and "viewer" in bulk
-    assert "system:admin" in bulk["admin"]
-    assert bulk["viewer"] == ["workspace:view:read"]
+    assert "super_admin" in bulk and "workspace_viewer" in bulk
+    assert "system:admin" in bulk["super_admin"]
+    assert set(bulk["workspace_viewer"]) == {
+        "workspace:datasource:read", "workspace:view:read",
+    }
 
 
 @pytest.mark.asyncio
@@ -158,7 +153,7 @@ async def test_binding_repo_create_global(db_session):
         db_session,
         subject_type="user",
         subject_id=user_id,
-        role_name="admin",
+        role_name="super_admin",
         scope_type="global",
         scope_id=None,
         granted_by="usr_admin",
@@ -174,7 +169,7 @@ async def test_binding_repo_create_workspace(db_session):
         db_session,
         subject_type="user",
         subject_id=user_id,
-        role_name="user",
+        role_name="workspace_member",
         scope_type="workspace",
         scope_id="ws_finance",
     )
@@ -189,14 +184,14 @@ async def test_binding_repo_validates_scope_consistency(db_session):
         await binding_repo.create_binding(
             db_session,
             subject_type="user", subject_id=user_id,
-            role_name="user", scope_type="global", scope_id="ws_x",
+            role_name="workspace_member", scope_type="global", scope_id="ws_x",
         )
     # workspace without scope_id
     with pytest.raises(ValueError):
         await binding_repo.create_binding(
             db_session,
             subject_type="user", subject_id=user_id,
-            role_name="user", scope_type="workspace", scope_id=None,
+            role_name="workspace_member", scope_type="workspace", scope_id=None,
         )
 
 
@@ -227,20 +222,20 @@ async def test_binding_repo_for_user_with_groups_unions(db_session):
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="user", scope_type="workspace", scope_id="ws_a",
+        role_name="workspace_member", scope_type="workspace", scope_id="ws_a",
     )
     # Group binding the user inherits.
     await binding_repo.create_binding(
         db_session,
         subject_type="group", subject_id=g.id,
-        role_name="viewer", scope_type="workspace", scope_id="ws_b",
+        role_name="workspace_viewer", scope_type="workspace", scope_id="ws_b",
     )
 
     bindings = await binding_repo.list_for_user_with_groups(
         db_session, user_id=user_id, group_ids=[g.id]
     )
     scopes = {(b.scope_id, b.role_name) for b in bindings}
-    assert scopes == {("ws_a", "user"), ("ws_b", "viewer")}
+    assert scopes == {("ws_a", "workspace_member"), ("ws_b", "workspace_viewer")}
 
 
 @pytest.mark.asyncio
@@ -249,12 +244,12 @@ async def test_binding_repo_delete_subject_bindings(db_session):
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="user", scope_type="workspace", scope_id="ws_x",
+        role_name="workspace_member", scope_type="workspace", scope_id="ws_x",
     )
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="admin", scope_type="global",
+        role_name="super_admin", scope_type="global",
     )
     deleted = await binding_repo.delete_subject_bindings(
         db_session, subject_type="user", subject_id=user_id

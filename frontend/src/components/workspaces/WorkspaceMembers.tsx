@@ -37,6 +37,7 @@ import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
+import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
 
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -47,7 +48,8 @@ type SortDir = 'asc' | 'desc'
  * Phase 3: ``RoleName`` is no longer a closed enum. Bindings can
  * reference any role defined in the canonical ``roles`` table —
  * built-ins (admin / user / viewer) and admin-defined custom roles.
- * The visual ``ROLE_CONFIG`` keeps fallbacks for unknown names.
+ * Role visuals come from ``@/lib/roleVisual`` (single source of
+ * truth across the FE).
  */
 type RoleName = string
 type SubjectType = 'user' | 'group'
@@ -55,63 +57,6 @@ type SubjectType = 'user' | 'group'
 type ModalType =
     | { kind: 'add' }
     | null
-
-interface RoleVisual {
-    label: string
-    description: string
-    icon: typeof Shield
-    badge: string
-    iconColor: string
-    iconBg: string
-    accent: string
-}
-
-const ROLE_CONFIG: Record<string, RoleVisual> = {
-    admin: {
-        label: 'Admin',
-        description: 'Full control of this workspace, including members, settings, and data sources.',
-        icon: Shield,
-        badge: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
-        iconColor: 'text-amber-500',
-        iconBg: 'bg-amber-500/10 border-amber-500/20',
-        accent: 'text-amber-600 dark:text-amber-400',
-    },
-    user: {
-        label: 'User',
-        description: 'Create, edit, and delete views; connect data sources; full read access.',
-        icon: UserCog,
-        badge: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
-        iconColor: 'text-sky-500',
-        iconBg: 'bg-sky-500/10 border-sky-500/20',
-        accent: 'text-sky-600 dark:text-sky-400',
-    },
-    viewer: {
-        label: 'Viewer',
-        description: 'Read-only — list views and data sources, no edits.',
-        icon: Eye,
-        badge: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
-        iconColor: 'text-slate-500',
-        iconBg: 'bg-slate-500/10 border-slate-500/20',
-        accent: 'text-slate-600 dark:text-slate-400',
-    },
-}
-
-/** Visual fallback for any custom (non-built-in) role. */
-const CUSTOM_ROLE_VISUAL: RoleVisual = {
-    label: 'Custom',
-    description: 'Custom role — see the Permissions page for its bundle.',
-    icon: Shield,  // overridden at the call-site to Sparkles
-    badge: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
-    iconColor: 'text-violet-500',
-    iconBg: 'bg-violet-500/10 border-violet-500/20',
-    accent: 'text-violet-600 dark:text-violet-400',
-}
-
-/** Resolve the visual treatment for a role by name, falling back to
- *  the custom-role styling for anything not in the built-in set. */
-function resolveRoleVisual(name: string): RoleVisual {
-    return ROLE_CONFIG[name] ?? CUSTOM_ROLE_VISUAL
-}
 
 const KPI_CARDS = [
     {
@@ -123,7 +68,7 @@ const KPI_CARDS = [
         iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20',
     },
     {
-        key: 'admin',
+        key: 'workspace_admin',
         label: 'Admins',
         icon: Shield,
         gradient: 'from-amber-500/20 to-amber-500/0',
@@ -131,15 +76,15 @@ const KPI_CARDS = [
         iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
     },
     {
-        key: 'user',
-        label: 'Users',
+        key: 'workspace_member',
+        label: 'Members',
         icon: UserCog,
         gradient: 'from-sky-500/20 to-sky-500/0',
         accent: 'text-sky-600 dark:text-sky-400',
         iconBg: 'bg-sky-500/10 text-sky-500 border-sky-500/20',
     },
     {
-        key: 'viewer',
+        key: 'workspace_viewer',
         label: 'Viewers',
         icon: Eye,
         gradient: 'from-slate-500/20 to-slate-500/0',
@@ -167,6 +112,40 @@ function timeAgo(iso: string): string {
     const days = Math.floor(hrs / 24)
     if (days < 30) return `${days}d ago`
     return formatDate(iso)
+}
+
+
+/** Phase 7 — small inline badge next to time-bound binding rows.
+ *  Red if expired, amber if within 24h, slate otherwise. */
+function ExpiryBadge({ expiresAt }: { expiresAt: string }) {
+    const remaining = new Date(expiresAt).getTime() - Date.now()
+    const expired = remaining <= 0
+    const soon = remaining > 0 && remaining < 24 * 3600_000
+
+    const label = expired
+        ? 'Expired'
+        : (soon
+            ? `Expires in ${Math.max(1, Math.floor(remaining / 3600_000))}h`
+            : `Expires in ${Math.max(1, Math.floor(remaining / 86_400_000))}d`)
+
+    const tone = expired
+        ? 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20'
+        : (soon
+            ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
+            : 'bg-slate-500/10 text-ink-muted border-slate-500/20')
+
+    return (
+        <span
+            className={cn(
+                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold mt-1 border',
+                tone,
+            )}
+            title={`Auto-revokes at ${new Date(expiresAt).toLocaleString()}`}
+        >
+            <Clock className="w-2.5 h-2.5" />
+            {label}
+        </span>
+    )
 }
 
 
@@ -265,14 +244,24 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
     useEffect(() => { void fetchMembers() }, [fetchMembers])
 
+    // Refresh on a permissions change (silent refresh, 60s poller, or
+    // cross-tab BroadcastChannel) so a binding mutation made elsewhere
+    // (admin removed a member in another tab, group binding revoked,
+    // etc.) refreshes this page in place.
+    useEffect(() => {
+        const onChange = () => { void fetchMembers() }
+        window.addEventListener('permissions:changed', onChange)
+        return () => window.removeEventListener('permissions:changed', onChange)
+    }, [fetchMembers])
+
 
     // ── KPIs + filtering + sort ─────────────────────────────────────
 
     const kpis = useMemo(() => ({
         total: members.length,
-        admin: members.filter(m => m.role === 'admin').length,
-        user: members.filter(m => m.role === 'user').length,
-        viewer: members.filter(m => m.role === 'viewer').length,
+        workspace_admin: members.filter(m => m.role === 'workspace_admin').length,
+        workspace_member: members.filter(m => m.role === 'workspace_member').length,
+        workspace_viewer: members.filter(m => m.role === 'workspace_viewer').length,
     }), [members])
 
     const processedMembers = useMemo(() => {
@@ -307,13 +296,23 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
 
     // ── Actions ──────────────────────────────────────────────────────
 
-    const handleAdd = async (subjectType: SubjectType, subjectId: string, role: RoleName, label: string) => {
+    const handleAdd = async (
+        subjectType: SubjectType,
+        subjectId: string,
+        role: RoleName,
+        label: string,
+        expiresIn?: string | null,
+    ) => {
         setActionLoading('add')
         setError(null)
         try {
-            await workspaceMembersService.create(workspaceId, { subjectType, subjectId, role })
+            await workspaceMembersService.create(workspaceId, {
+                subjectType, subjectId, role,
+                expiresIn: expiresIn ?? null,
+            })
             await fetchMembers()
-            showToast('success', `Granted ${resolveRoleVisual(role).label} to ${label}`)
+            const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
+            showToast('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
             setModal(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to add member'
@@ -514,7 +513,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                         </thead>
                         <tbody>
                             {processedMembers.map((m, i) => {
-                                const role = resolveRoleVisual(m.role)
+                                const role = roleVisualFor(m.role)
                                 const RoleIcon = role.icon
                                 const isActing = actionLoading === `revoke-${m.bindingId}`
                                 const name = m.subject.displayName ?? m.subject.id
@@ -564,6 +563,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                         <td className="px-5 py-4">
                                             <p className="text-sm text-ink-secondary">{formatDate(m.grantedAt)}</p>
                                             <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(m.grantedAt)}</p>
+                                            {m.expiresAt && (
+                                                <ExpiryBadge expiresAt={m.expiresAt} />
+                                            )}
                                         </td>
 
                                         {/* Actions */}
@@ -617,7 +619,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                             transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
                             className={cn(
-                                'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6',
+                                'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6 max-h-[90vh] overflow-y-auto',
                                 modal.kind === 'add' ? 'max-w-2xl' : 'max-w-md',
                             )}
                         >
@@ -674,6 +676,7 @@ function AddMemberModal({
         subjectId: string,
         role: RoleName,
         label: string,
+        expiresIn?: string | null,
     ) => Promise<void>
     submitting: boolean
 }) {
@@ -683,7 +686,11 @@ function AddMemberModal({
     const [availableRoles, setAvailableRoles] = useState<RoleDefinitionResponse[] | null>(null)
     const [search, setSearch] = useState('')
     const [selected, setSelected] = useState<{ id: string; label: string } | null>(null)
-    const [role, setRole] = useState<RoleName>('user')
+    const [role, setRole] = useState<RoleName>('workspace_member')
+    // Phase 7: time-bound bindings. ``''`` means permanent; otherwise
+    // we send the duration shortcut to the backend which normalises
+    // it to an ISO ``expires_at`` on the server side.
+    const [expiresIn, setExpiresIn] = useState<string>('')
     const { showToast } = useToast()
 
     // Phase 3: pull the bindable roles for *this* workspace — global
@@ -692,9 +699,27 @@ function AddMemberModal({
     useEffect(() => {
         ;(async () => {
             try {
-                setAvailableRoles(
-                    await permissionsService.listRoles({ workspaceId }),
-                )
+                const all = await permissionsService.listRoles({ workspaceId })
+                // Filter out roles that wouldn't grant anything when
+                // bound at workspace scope. The resolver's category x
+                // scope filter silently drops mismatched bindings, so
+                // binding e.g. ``super_admin`` (system-category perms
+                // only) at workspace scope is a no-op — showing it
+                // here would mislead admins. Keep:
+                //   * workspace-scoped roles (workspace_admin / member
+                //     / viewer / data_engineer + workspace-scoped
+                //     custom roles), and
+                //   * global roles whose grant includes any
+                //     ``workspace:*`` perm.
+                // Drop:
+                //   * global roles whose grant is entirely
+                //     ``system:*`` (super_admin / org_admin /
+                //     org_auditor) — these belong on /admin/users.
+                const bindable = all.filter((r) => {
+                    if (r.scopeType === 'workspace') return true
+                    return r.permissions.some((p) => p.startsWith('workspace:'))
+                })
+                setAvailableRoles(bindable)
             } catch (err) {
                 showToast('error', err instanceof Error ? err.message : 'Failed to load roles')
             }
@@ -872,13 +897,15 @@ function AddMemberModal({
                             </div>
                         ) : (
                             availableRoles.map(r => {
-                                const cfg = resolveRoleVisual(r.name)
+                                const cfg = roleVisualFor(r.name)
                                 const isCustom = !r.isSystem
                                 const Icon = isCustom ? Users2 : cfg.icon
                                 const isSelected = role === r.name
                                 const isWsScoped = r.scopeType === 'workspace'
                                 const description = r.description
-                                    ?? (r.isSystem ? cfg.description : 'Custom role — see Permissions for its bundle.')
+                                    ?? (isCustom
+                                        ? 'Custom role — see Permissions for its bundle.'
+                                        : 'Built-in role — see Permissions for the bundle.')
                                 return (
                                     <button
                                         key={r.name}
@@ -891,12 +918,15 @@ function AddMemberModal({
                                         )}
                                     >
                                         <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', cfg.iconBg)}>
-                                            <Icon className={cn('w-4 h-4', cfg.iconColor)} />
+                                            <Icon className="w-4 h-4" />
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-1.5 flex-wrap">
-                                                <p className={cn('text-sm font-semibold truncate', isSelected ? cfg.accent : 'text-ink')}>
-                                                    {r.isSystem ? cfg.label : r.name}
+                                                <p className={cn(
+                                                    'text-sm font-semibold truncate',
+                                                    isSelected ? `text-${cfg.accent}-600 dark:text-${cfg.accent}-400` : 'text-ink',
+                                                )}>
+                                                    {isBuiltinRole(r.name) ? cfg.label : r.name}
                                                 </p>
                                                 {isWsScoped && (
                                                     <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full text-[9px] font-bold bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20">
@@ -921,6 +951,39 @@ function AddMemberModal({
                 </div>
             </div>
 
+            {/* Phase 7 — access duration */}
+            <div className="mt-5 pt-5 border-t border-glass-border">
+                <p className="text-xs font-semibold text-ink mb-2">
+                    Access duration
+                </p>
+                <div className="flex flex-wrap gap-2">
+                    {(['', '24h', '7d', '30d', '90d'] as const).map(opt => {
+                        const isSelected = expiresIn === opt
+                        const label = opt === '' ? 'Permanent' : opt
+                        return (
+                            <button
+                                key={opt || 'permanent'}
+                                type="button"
+                                onClick={() => setExpiresIn(opt)}
+                                className={cn(
+                                    'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                    isSelected
+                                        ? 'border-accent-lineage bg-accent-lineage/10 text-accent-lineage'
+                                        : 'border-glass-border text-ink-secondary hover:border-accent-lineage/30 hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                )}
+                            >
+                                {label}
+                            </button>
+                        )
+                    })}
+                </div>
+                <p className="text-[11px] text-ink-muted mt-2">
+                    {expiresIn
+                        ? `Access auto-revokes after ${expiresIn}. Useful for contractors and temporary cover.`
+                        : 'Binding stays active until manually revoked.'}
+                </p>
+            </div>
+
             {/* Conflict notice */}
             <AnimatePresence>
                 {conflict && (
@@ -931,7 +994,7 @@ function AddMemberModal({
                         className="mt-4 flex items-center gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs"
                     >
                         <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                        This subject already holds the {resolveRoleVisual(role).label} role here. Pick a different role or subject.
+                        This subject already holds the {roleVisualFor(role).label} role here. Pick a different role or subject.
                     </motion.div>
                 )}
             </AnimatePresence>
@@ -948,7 +1011,10 @@ function AddMemberModal({
                 <button
                     onClick={() => {
                         if (!selected) return
-                        void onSubmit(subjectType, selected.id, role, selected.label)
+                        void onSubmit(
+                            subjectType, selected.id, role, selected.label,
+                            expiresIn || null,
+                        )
                     }}
                     disabled={!valid || conflict || submitting}
                     className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-accent-lineage hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-accent-lineage/20"
@@ -1067,7 +1133,7 @@ function PendingRequestsPanel({
                 {list.map(req => {
                     const isActing = acting === req.id
                     const denying = denyingId === req.id
-                    const v = resolveRoleVisual(req.requestedRole)
+                    const v = roleVisualFor(req.requestedRole)
                     return (
                         <div key={req.id} className="px-5 py-3.5 flex items-start gap-3">
                             <div className={cn(

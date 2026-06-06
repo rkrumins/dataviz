@@ -40,6 +40,17 @@ export const POLLING_INTERVALS = {
    * scales linearly with how many users are watching.
    */
   aggregationHistoryActive: 5_000,
+  /**
+   * Caller's own permissions (``GET /me/permissions``). Catches the
+   * idle-user case where an admin mutates bindings while the user is
+   * staring at a page without making any API calls — the silent
+   * refresh-on-401 dance only fires when the user actively requests
+   * something, so without this poll, idle users would still be on
+   * stale claims until natural JWT expiry. The endpoint is a no-DB
+   * JWT decode (``backend/app/api/v1/endpoints/me.py:39``) so a 60s
+   * poll is essentially free.
+   */
+  permissions: 60_000,
 } as const
 
 /**

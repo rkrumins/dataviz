@@ -44,7 +44,10 @@ export interface CatalogItemBindingResponse {
     boundWorkspaceName?: string | null
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+    url: string,
+    init?: RequestInit & { silent403?: boolean },
+): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
@@ -57,16 +60,22 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     return res.json()
 }
 
+// Catalog is router-gated by system:admin. Non-admin pages probe the
+// list endpoints to render the onboarding progress + unallocated-source
+// pickers; suppress the global 403 modal on reads so a workspace viewer
+// never sees an admin-tier denial. Writes stay loud (user-initiated).
+const SILENT_READ = { silent403: true } as const
+
 export const catalogService = {
     async list(providerId?: string): Promise<CatalogItemResponse[]> {
         const url = providerId ? `${ADMIN_API}?providerId=${providerId}` : ADMIN_API
-        const res = await fetchWithTimeout(url)
+        const res = await fetchWithTimeout(url, SILENT_READ)
         if (!res.ok) throw new Error('Failed to load catalog items')
         return res.json()
     },
 
     get(id: string): Promise<CatalogItemResponse> {
-        return request<CatalogItemResponse>(`${ADMIN_API}/${id}`)
+        return request<CatalogItemResponse>(`${ADMIN_API}/${id}`, SILENT_READ)
     },
 
     async create(req: CatalogItemCreateRequest): Promise<CatalogItemResponse> {
@@ -98,7 +107,7 @@ export const catalogService = {
         const url = providerId
             ? `${ADMIN_API}/bindings?providerId=${providerId}`
             : `${ADMIN_API}/bindings`
-        const res = await fetchWithTimeout(url)
+        const res = await fetchWithTimeout(url, SILENT_READ)
         if (!res.ok) throw new Error('Failed to load catalog bindings')
         return res.json()
     },

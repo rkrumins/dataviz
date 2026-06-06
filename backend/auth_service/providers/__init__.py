@@ -1,22 +1,113 @@
-"""Identity provider registry — pluggable per-protocol implementations."""
+"""Identity provider registry — Phase 3 (DB-backed, multi-IdP).
+
+The Phase-2 dict ``_REGISTRY`` lived here; Phase 3 promotes it into a
+process singleton :class:`ProviderRegistry` that materialises a fresh
+provider object per ``idp_providers`` row with TTL caching. The
+``register_provider`` / ``get_provider`` helpers from Phase 2 are kept
+as thin compatibility shims so the local-only login path
+(``LocalIdentityProvider``) and any third-party callers don't have to
+move in lockstep.
+"""
 from .base import IdentityProvider, ProviderCredentials, ProviderIdentity
 from .local import LocalIdentityProvider
+from .registry import (
+    ProviderConfigLoader,
+    ProviderConfigSnapshot,
+    ProviderDisabled,
+    ProviderNotFound,
+    ProviderRegistry,
+    configure_registry,
+    get_registry,
+)
+from .oidc import (
+    OidcError,
+    OidcProvider,
+    OidcSettings,
+    build_oidc_provider,
+    load_env_oidc_settings,
+    load_oidc_settings,
+)
+from .claim_mapper import (
+    ClaimMappingError,
+    DEFAULT_CUSTOM,
+    DEFAULT_OIDC,
+    DEFAULT_SAML,
+    apply_claim_mapping,
+    merge_mapping,
+)
 
-_REGISTRY: dict[str, IdentityProvider] = {}
+# SAML import is best-effort: a non-viz Dockerfile may not install the
+# ``python3-saml`` / ``libxmlsec1`` system deps, in which case the
+# import fails and we never expose the provider class. The viz-service
+# is the only image that mounts the SAML routes, so missing-install
+# elsewhere is a silent no-op.
+try:
+    from .saml2 import (  # noqa: F401
+        SamlError,
+        SamlProvider,
+        SamlSettings,
+        build_saml_provider,
+        load_env_saml_settings,
+        load_saml_settings,
+    )
+    SAML_AVAILABLE: bool = True
+except ImportError:  # pragma: no cover - missing system dep / library
+    SamlProvider = None  # type: ignore[assignment]
+    SamlSettings = None  # type: ignore[assignment]
+    SamlError = None  # type: ignore[assignment]
+    build_saml_provider = None  # type: ignore[assignment]
+    load_saml_settings = None  # type: ignore[assignment]
+    load_env_saml_settings = None  # type: ignore[assignment]
+    SAML_AVAILABLE = False
+
+from .custom import (
+    CustomIdentityError,
+    CustomIdentityProvider,
+    CustomSettings,
+    build_custom_provider,
+)
+
+
+# ── Phase 2 compatibility shims ───────────────────────────────────────
+# The local provider has no DB row (there's no "local IdP" in
+# ``idp_providers``); it lives in this dict the same way Phase 2 had
+# it. SSO providers go through the registry above.
+_LOCAL_PROVIDERS: dict[str, IdentityProvider] = {}
 
 
 def register_provider(name: str, provider: IdentityProvider) -> None:
-    """Register a provider under its ``auth_provider`` value (e.g. 'local', 'oidc')."""
-    _REGISTRY[name] = provider
+    """Register a non-SSO provider (currently only ``local``).
+
+    SSO providers are no longer registered through this function;
+    they are materialised per row by the
+    :class:`~.registry.ProviderRegistry`. This shim stays so the
+    ``main.py`` startup keeps working unchanged for the local case.
+    """
+    _LOCAL_PROVIDERS[name] = provider
 
 
 def get_provider(name: str) -> IdentityProvider:
-    """Look up a provider by name. Raises ``KeyError`` if not registered."""
-    return _REGISTRY[name]
+    """Phase 2-compatible lookup for the LOCAL provider only.
+
+    SSO callers must go through :func:`get_registry` to look up a
+    provider by row id or slug; calling this with an SSO kind name
+    (``oidc``, ``saml2``, ``custom``) raises ``KeyError`` so misuse is
+    caught at the boundary.
+    """
+    return _LOCAL_PROVIDERS[name]
 
 
 def known_providers() -> list[str]:
-    return sorted(_REGISTRY.keys())
+    return sorted(_LOCAL_PROVIDERS.keys())
+
+
+# Per-kind builder map consumed by :class:`ProviderRegistry`.
+PROVIDER_BUILDERS = {
+    "oidc":   build_oidc_provider,
+    "custom": build_custom_provider,
+}
+if SAML_AVAILABLE and build_saml_provider is not None:
+    PROVIDER_BUILDERS["saml2"] = build_saml_provider
 
 
 __all__ = [
@@ -24,7 +115,38 @@ __all__ = [
     "ProviderCredentials",
     "ProviderIdentity",
     "LocalIdentityProvider",
+    "OidcProvider",
+    "OidcSettings",
+    "OidcError",
+    "load_oidc_settings",
+    "load_env_oidc_settings",
+    "build_oidc_provider",
+    "SamlProvider",
+    "SamlSettings",
+    "SamlError",
+    "load_saml_settings",
+    "load_env_saml_settings",
+    "build_saml_provider",
+    "SAML_AVAILABLE",
+    "CustomIdentityProvider",
+    "CustomIdentityError",
+    "CustomSettings",
+    "build_custom_provider",
+    "ProviderRegistry",
+    "ProviderConfigSnapshot",
+    "ProviderConfigLoader",
+    "ProviderNotFound",
+    "ProviderDisabled",
+    "configure_registry",
+    "get_registry",
+    "PROVIDER_BUILDERS",
     "register_provider",
     "get_provider",
     "known_providers",
+    "apply_claim_mapping",
+    "merge_mapping",
+    "ClaimMappingError",
+    "DEFAULT_OIDC",
+    "DEFAULT_SAML",
+    "DEFAULT_CUSTOM",
 ]

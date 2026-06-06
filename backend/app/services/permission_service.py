@@ -30,16 +30,31 @@ actual three-layer view evaluator lives in
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.models import (
+    GroupMemberORM,
+    GroupORM,
+    RoleBindingORM,
+)
 from backend.app.db.repositories import (
     binding_repo,
+    idp_group_mapping_repo,
     permission_repo,
     user_repo,
 )
+from backend.app.db.repositories.idp_group_mapping_repo import (
+    FORBIDDEN_AUTO_ROLE,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # Permission ids that the wildcard collapser knows about. Any permission
@@ -102,6 +117,26 @@ async def resolve(
 
     Then folds those into a (global, ws_id → permissions) map, with
     wildcard collapsing for compactness.
+
+    Phase 5 invariants:
+
+      * **Category × scope filter** — only ``system``-category perms
+        land in ``global_perms``; only ``workspace``-category perms
+        land in ``ws_perms``. A global ``super_admin`` binding (whose
+        role bundles every permission across categories) therefore
+        does NOT leak ``workspace:*`` perms into ``global_perms``,
+        and a workspace ``admin`` binding does NOT leak ``system:*``
+        perms into ``ws_perms``. Without this filter the JWT bloats
+        and a malformed cross-scope binding could silently grant the
+        wrong tier.
+      * **``workspace:admin`` auto-implication** — once we've folded
+        bindings, any workspace bucket that contains
+        ``workspace:admin`` is unioned with every other known
+        ``workspace:*`` leaf in the catalogue. Matches operator
+        intuition: "I'm admin in this workspace, so I can read its
+        data sources / edit its views / etc." Lets custom roles
+        bundle just ``workspace:admin`` rather than enumerating every
+        workspace permission.
     """
     sid = sid or new_session_id()
 
@@ -117,6 +152,9 @@ async def resolve(
     role_perms = await permission_repo.get_role_permissions_for_roles(
         session, role_names
     )
+    # Phase 5: pull the {permission_id: category} map once so the
+    # category × scope filter has no per-permission DB cost.
+    perm_categories = await permission_repo.get_permission_categories(session)
 
     # Aggregate into per-scope permission sets.
     global_set: set[str] = set()
@@ -124,21 +162,24 @@ async def resolve(
 
     for b in bindings:
         perms_for_role = role_perms.get(b.role_name, [])
-        if b.scope_type == "global":
-            global_set.update(perms_for_role)
-        else:
-            ws_id = b.scope_id or ""
-            if not ws_id:
-                continue
-            ws_sets.setdefault(ws_id, set()).update(perms_for_role)
+        for perm in perms_for_role:
+            cat = perm_categories.get(perm, "system")
+            if b.scope_type == "global" and cat == "system":
+                global_set.add(perm)
+            elif b.scope_type == "workspace" and cat == "workspace":
+                ws_id = b.scope_id or ""
+                if ws_id:
+                    ws_sets.setdefault(ws_id, set()).add(perm)
+            # Other category × scope combinations are silently dropped.
+            # See Phase 5 invariants in the docstring above.
 
-    # Admin shortcut: a global admin binding implies every workspace
-    # permission in every workspace, but the workspace bindings already
-    # carry that for the membership-backfilled rows. We DO NOT
-    # synthesize implicit ws scopes here — the JWT must list workspaces
-    # explicitly so the FE knows which workspaces to display. The
-    # admin's actual access in a given workspace falls back to the
-    # global "system:admin" implicit-allow check inside ``requires()``.
+    # Phase 5: ``workspace:admin`` auto-implies every other workspace
+    # permission in the same bucket. Computed against the seed leaves
+    # so a future operator can add a new workspace:* permission to
+    # the catalogue and have it pick up automatically.
+    for ws_id, perms in ws_sets.items():
+        if "workspace:admin" in perms:
+            perms.update(_WORKSPACE_CATEGORY_LEAVES)
 
     return PermissionClaims(
         sid=sid,
@@ -184,11 +225,83 @@ _SEED_LEAVES: dict[str, frozenset[str]] = {
         "workspace:datasource:manage",
         "workspace:datasource:read",
     }),
+    # Phase 18: read+manage split for ontology / catalog; provider
+    # stays read-only here (manage is platform-admin-only because
+    # provider rows carry credentials).
+    "workspace:ontology": frozenset({
+        "workspace:ontology:read",
+        "workspace:ontology:manage",
+    }),
+    "workspace:catalog": frozenset({
+        "workspace:catalog:read",
+        "workspace:catalog:manage",
+    }),
+    "workspace:provider": frozenset({
+        "workspace:provider:read",
+    }),
 }
+
+# Phase 5 — every ``workspace:*`` leaf known to the seed catalogue.
+# Used by ``resolve()`` to auto-imply the full workspace permission
+# set whenever a binding grants ``workspace:admin`` in some workspace.
+# ``workspace:admin`` itself is the "I can manage settings, members,
+# and deletion" perm; bundling it auto-implies "and everything else
+# you can do in this workspace as a side effect" — matches operator
+# intuition (Phase 5 user decision).
+#
+# Phase 18 additions: workspace_admin implies workspace:ontology:* and
+# workspace:catalog:* (read + manage). Provider manage is deliberately
+# omitted — provider credentials remain platform-admin-only — but
+# workspace:provider:read is included so a workspace_admin can see the
+# providers their workspace touches.
+_WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
+    "workspace:admin",
+    "workspace:datasource:manage",
+    "workspace:datasource:read",
+    "workspace:view:create",
+    "workspace:view:edit",
+    "workspace:view:delete",
+    "workspace:view:read",
+    "workspace:ontology:read",
+    "workspace:ontology:manage",
+    "workspace:catalog:read",
+    "workspace:catalog:manage",
+    "workspace:provider:read",
+})
 
 
 def _known_leaves_for_prefix(prefix: str) -> frozenset[str]:
     return _SEED_LEAVES.get(prefix, frozenset())
+
+
+def compute_implied_by(perm_id: str, category: str) -> list[str]:
+    """Return the roles/perms whose grant auto-implies ``perm_id``
+    in the same scope. Pure projection of ``has_permission``'s
+    shortcuts — used by ``GET /admin/permissions`` so the FE's
+    Feature Access tab can compute role satisfaction without a
+    duplicate ``WORKSPACE_LEAVES`` constant of its own.
+
+    Order is documentation-stable (most-privileged first) so the FE
+    can render chips in a predictable order.
+    """
+    out: list[str] = []
+    if perm_id != "system:admin":
+        out.append("system:admin")          # implies every perm, every scope.
+    if category == "workspace":
+        if perm_id != "system:org-admin":
+            out.append("system:org-admin")  # implies every workspace:* in any workspace.
+        # Phase 6: system:org-viewer is the read-only sibling of
+        # system:org-admin. It short-circuits workspace:*:read but
+        # NOT manage/write — exactly what the org_auditor role needs
+        # to inspect every workspace without being able to mutate.
+        if perm_id.endswith(":read"):
+            out.append("system:org-viewer")
+        if (
+            perm_id != "workspace:admin"
+            and perm_id in _WORKSPACE_CATEGORY_LEAVES
+        ):
+            out.append("workspace:admin")   # implies every leaf in the same workspace.
+    return out
 
 
 # ── Claim-side helpers (used by ``requires(...)``) ────────────────────
@@ -206,11 +319,39 @@ def has_permission(
     Wildcard expansion: a claim of ``workspace:view:*`` matches any
     ``workspace:view:<leaf>`` lookup.
 
-    Global-admin shortcut: a global ``system:admin`` claim implies
-    every other permission, in every workspace, full stop.
+    Two short-circuits at the top:
+
+      * ``system:admin`` (carried by the ``super_admin`` role) implies
+        every permission, every scope. The platform owner.
+      * ``system:org-admin`` (Phase 5; carried by ``super_admin`` and
+        ``org_admin``) implies every **workspace-scoped** permission
+        in any workspace. The cross-workspace operator. Does NOT
+        imply system-category permissions (users:manage etc.) — those
+        stay tied to ``super_admin``.
     """
-    # System admin shortcut: implies all.
+    # 1. System admin shortcut: implies all permissions, every scope.
     if "system:admin" in claims.global_perms:
+        return True
+
+    # 2. Phase 5: org-admin shortcut for workspace-scoped checks. An
+    #    org_admin has every workspace power in every workspace
+    #    without per-ws bindings; ``MyAccessPage`` surfaces this as
+    #    "Organisation admin" and the FE topbar shows the same tier
+    #    in every workspace they visit.
+    if (
+        workspace_id is not None
+        and "system:org-admin" in claims.global_perms
+    ):
+        return True
+
+    # 3. Phase 6: org-viewer — the read-only cousin of org-admin.
+    #    Short-circuits every workspace:*:read across every workspace
+    #    but NOT manage/write. Drives the ``org_auditor`` role.
+    if (
+        workspace_id is not None
+        and permission.endswith(":read")
+        and "system:org-viewer" in claims.global_perms
+    ):
         return True
 
     if workspace_id is None:
@@ -226,6 +367,44 @@ def has_permission(
             prefix = granted[:-2]
             if permission.startswith(prefix + ":"):
                 return True
+    return False
+
+
+def has_permission_any_workspace(
+    claims: PermissionClaims,
+    permission: str,
+) -> bool:
+    """True if ``claims`` grants ``permission`` in **any** workspace.
+
+    Phase 18 introduced workspace-scoped reads on otherwise-global
+    resources (ontologies, providers, catalog items). The list/get
+    endpoints don't have a workspace id on the URL — the user just
+    needs the perm *somewhere* to read the catalogue (handler then
+    filters results to their visible workspaces). This helper drives
+    the ``workspace_any=True`` mode of ``requires(...)``.
+
+    Honours the standard short-circuits:
+      * ``system:admin`` implies every permission.
+      * ``system:org-admin`` implies every workspace-scoped permission
+        in every workspace.
+    """
+    if "system:admin" in claims.global_perms:
+        return True
+    if "system:org-admin" in claims.global_perms:
+        return True
+    # Phase 6: org-viewer covers the workspace_any flow for any
+    # ``*:read`` permission so the auditor sees every workspace's
+    # provider / ontology / catalog listings without needing a
+    # per-workspace binding. Mirrors the same-named shortcut in
+    # ``has_permission``.
+    if (
+        permission.endswith(":read")
+        and "system:org-viewer" in claims.global_perms
+    ):
+        return True
+    for ws_id in claims.ws_perms.keys():
+        if has_permission(claims, permission, workspace_id=ws_id):
+            return True
     return False
 
 
@@ -288,10 +467,235 @@ async def simulate_for_user(
     return global_set, ws_sets
 
 
+# ── SSO group -> target reconciliation (Phase 3 — both targets) ──────
+
+
+async def reconcile_sso_targets(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    idp_groups: list[str],
+    provider_id: Optional[str] = None,
+) -> dict:
+    """Reconcile the user's ``source='sso'`` RoleBindings AND Group
+    memberships to match what the IdP currently asserts.
+
+    Each mapping row's ``target_type`` determines the branch:
+
+      * ``role_binding`` (Phase-2 default): a ``RoleBindingORM`` row
+        with ``source='sso'`` in the configured ``(scope_type,
+        scope_id, role_name)``.
+      * ``group_membership`` (Phase 3 new): a ``GroupMemberORM`` row
+        with ``source='sso'`` in the configured internal Group.
+
+    Algorithm (idempotent; called on every SSO login AND on every
+    /refresh):
+
+      1. Pull mappings whose ``idp_group`` is in ``idp_groups`` AND
+         whose ``provider_id`` matches the user's logging-in IdP OR
+         is NULL (the Phase 2 wildcard semantics).
+      2. Bucket the target set into two key spaces:
+            - role_keys: ``(scope_type, scope_id, role_name)``
+            - group_ids: ``{group_id, …}``
+      3. For each branch:
+            - missing in target -> soft-revoke (``expires_at=now()``
+              for bindings; delete row for memberships).
+            - present in target -> reactivate (clear ``expires_at``;
+              no-op for memberships).
+            - target without an existing row -> insert.
+
+    Hard guardrails (mirroring the write-time validation):
+      * Mappings pointing at ``system:admin`` are skipped + warned.
+      * Mappings whose target_group is ``is_protected=true`` are
+        skipped + warned. (Operator can't normally create these; the
+        check defends against out-of-band inserts.)
+
+    Returns a small dict of counts for observability / audit.
+    """
+    from sqlalchemy import update, delete as sa_delete, select as sa_select
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    mappings = await idp_group_mapping_repo.list_active_for_groups(
+        session, provider_id=provider_id, idp_groups=idp_groups,
+    )
+
+    role_target_keys: set[tuple[str, str | None, str]] = set()
+    group_target_ids: set[str] = set()
+    for m in mappings:
+        if m.target_type == "group_membership":
+            if not m.target_group_id:
+                continue
+            target_group = (await session.execute(
+                sa_select(GroupORM).where(GroupORM.id == m.target_group_id)
+            )).scalar_one_or_none()
+            if target_group is None or target_group.deleted_at is not None:
+                continue
+            if getattr(target_group, "is_protected", False):
+                logger.warning(
+                    "Refusing to auto-add %s to protected group %s (mapping=%s)",
+                    user_id, m.target_group_id, m.id,
+                )
+                continue
+            group_target_ids.add(m.target_group_id)
+        else:
+            if m.role_name == FORBIDDEN_AUTO_ROLE:
+                logger.warning(
+                    "Refusing to auto-grant %s from IdP group %s (mapping id=%s)",
+                    FORBIDDEN_AUTO_ROLE, m.idp_group, m.id,
+                )
+                continue
+            if not m.role_name or not m.scope_type:
+                continue
+            role_target_keys.add((m.scope_type, m.scope_id, m.role_name))
+
+    # ── role_binding branch ───────────────────────────────────────────
+    existing = await binding_repo.list_for_subject(
+        session, subject_type="user", subject_id=user_id,
+    )
+    # Snapshot keys of existing sso-sourced bindings.
+    existing_sso = {
+        (b.scope_type, b.scope_id, b.role_name): b
+        for b in existing if getattr(b, "source", "local") == "sso"
+    }
+
+    revoked = 0
+    reactivated = 0
+    created = 0
+
+    # 3a. Soft-revoke bindings the IdP no longer asserts.
+    to_expire = [
+        b for k, b in existing_sso.items()
+        if k not in role_target_keys and b.expires_at is None
+    ]
+    if to_expire:
+        ids = [b.id for b in to_expire]
+        await session.execute(
+            update(RoleBindingORM)
+            .where(RoleBindingORM.id.in_(ids))
+            .values(expires_at=now_iso)
+        )
+        revoked = len(to_expire)
+
+    # 3b. Reactivate bindings the IdP asserts again.
+    to_reactivate = [
+        b for k, b in existing_sso.items()
+        if k in role_target_keys and b.expires_at is not None
+    ]
+    if to_reactivate:
+        ids = [b.id for b in to_reactivate]
+        await session.execute(
+            update(RoleBindingORM)
+            .where(RoleBindingORM.id.in_(ids))
+            .values(expires_at=None)
+        )
+        reactivated = len(to_reactivate)
+
+    # 4. Create missing target bindings.
+    for scope_type, scope_id, role_name in role_target_keys:
+        if (scope_type, scope_id, role_name) in existing_sso:
+            continue
+        # Skip when an admin-granted (source='local') binding already
+        # exists for the same (scope, role) — no need for a duplicate,
+        # and the unique constraint would reject it anyway.
+        already = any(
+            b.scope_type == scope_type
+            and b.scope_id == scope_id
+            and b.role_name == role_name
+            for b in existing
+        )
+        if already:
+            continue
+        new_binding = RoleBindingORM(
+            subject_type="user",
+            subject_id=user_id,
+            role_name=role_name,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            granted_by=None,
+            source="sso",
+        )
+        session.add(new_binding)
+        created += 1
+
+    # ── group_membership branch ───────────────────────────────────────
+    # Query the user's existing sso-sourced memberships once. The repo
+    # would do this for us but we read it directly here to keep this
+    # service self-contained (Phase 2 pattern).
+    members_q = await session.execute(
+        sa_select(GroupMemberORM).where(GroupMemberORM.user_id == user_id)
+    )
+    members = list(members_q.scalars().all())
+    existing_sso_groups = {
+        m.group_id for m in members
+        if getattr(m, "source", "local") == "sso"
+    }
+    existing_any_groups = {m.group_id for m in members}
+
+    memberships_removed = 0
+    memberships_added = 0
+
+    # 5a. Remove sso memberships that are no longer asserted.
+    to_remove = existing_sso_groups - group_target_ids
+    if to_remove:
+        await session.execute(
+            sa_delete(GroupMemberORM).where(
+                GroupMemberORM.user_id == user_id,
+                GroupMemberORM.group_id.in_(list(to_remove)),
+                GroupMemberORM.source == "sso",
+            )
+        )
+        memberships_removed = len(to_remove)
+
+    # 5b. Add memberships the IdP asserts. Skip groups the user is
+    # already a member of via a local route (we never overwrite admin-
+    # set memberships).
+    to_add = group_target_ids - existing_any_groups
+    for group_id in to_add:
+        session.add(GroupMemberORM(
+            group_id=group_id,
+            user_id=user_id,
+            added_by=None,
+            source="sso",
+        ))
+        memberships_added += 1
+
+    if created or revoked or reactivated or memberships_added or memberships_removed:
+        await session.flush()
+
+    return {
+        "user_id": user_id,
+        "groups": list(idp_groups),
+        "mappings_matched": len(mappings),
+        "created": created,
+        "revoked": revoked,
+        "reactivated": reactivated,
+        "memberships_added": memberships_added,
+        "memberships_removed": memberships_removed,
+    }
+
+
+# Backwards-compatible alias for Phase 2 callers that still import the
+# old name. Routes the call to the Phase 3 reconciler with the new
+# kwargs. New code should import ``reconcile_sso_targets``.
+async def reconcile_sso_role_bindings(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    idp_groups: list[str],
+    provider_id: Optional[str] = None,
+) -> dict:
+    return await reconcile_sso_targets(
+        session, user_id=user_id, idp_groups=idp_groups, provider_id=provider_id,
+    )
+
+
 __all__ = [
     "PermissionClaims",
     "resolve",
     "new_session_id",
     "has_permission",
     "simulate_for_user",
+    "reconcile_sso_role_bindings",
+    "reconcile_sso_targets",
 ]

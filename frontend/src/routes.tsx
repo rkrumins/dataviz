@@ -3,7 +3,7 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
-import { RequirePermission } from '@/components/auth/RequirePermission'
+import { RequireNav } from '@/components/auth/RequireNav'
 
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
@@ -19,11 +19,14 @@ const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => 
 const AdminGroups = lazy(() => import('@/components/admin/AdminGroups').then(m => ({ default: m.AdminGroups })))
 const AdminPermissions = lazy(() => import('@/components/admin/AdminPermissions').then(m => ({ default: m.AdminPermissions })))
 const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnouncements/index').then(m => ({ default: m.AdminAnnouncements })))
+const AdminSso = lazy(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
+const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
+const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
 
 // Auth pages (unauthenticated)
 const LoginPage = lazy(() => import('@/components/auth/LoginPage').then(m => ({ default: m.LoginPage })))
@@ -35,6 +38,9 @@ const DocsContent = lazy(() => import('@/components/docs/DocsContent').then(m =>
 const DocsFAQ = lazy(() => import('@/components/docs/DocsFAQ').then(m => ({ default: m.DocsFAQ })))
 const ForgotPasswordPage = lazy(() => import('@/components/auth/ForgotPasswordPage').then(m => ({ default: m.ForgotPasswordPage })))
 const ResetPasswordPage = lazy(() => import('@/components/auth/ResetPasswordPage').then(m => ({ default: m.ResetPasswordPage })))
+// Dev-only mock IdP login page. Gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED
+// inside the component (renders a "disabled" banner otherwise).
+const DevLogin = lazy(() => import('@/pages/DevLogin').then(m => ({ default: m.DevLogin })))
 
 // Thin suspense wrapper used for each lazy route — shows a centred spinner.
 function PageLoader() {
@@ -65,6 +71,8 @@ export const router = createBrowserRouter([
   },
   { path: '/forgot-password', element: <Lazy><ForgotPasswordPage /></Lazy> },
   { path: '/reset-password', element: <Lazy><ResetPasswordPage /></Lazy> },
+  // Dev/demo mock IdP — gated by VITE_AUTH_CUSTOM_PROVIDER_ENABLED.
+  { path: '/dev-login', element: <Lazy><DevLogin /></Lazy> },
 
   // Authenticated routes (guarded by AppLayout)
   {
@@ -75,7 +83,14 @@ export const router = createBrowserRouter([
       { path: 'dashboard', element: <Lazy><Dashboard /></Lazy> },
 
       // Top-level Ingestion (pipeline control plane: providers, assets, jobs)
-      { path: 'ingestion', element: <Lazy><IngestionPage /></Lazy> },
+      {
+        path: 'ingestion',
+        element: (
+          <RequireNav group="sidebar" sectionKey="ingestion">
+            <Lazy><IngestionPage /></Lazy>
+          </RequireNav>
+        ),
+      },
 
       // Top-level Workspaces (listing + detail/management). Workspace visuals
       // are view-driven — see /views and /explorer; there is no standalone canvas.
@@ -84,12 +99,28 @@ export const router = createBrowserRouter([
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
+      // SSO identity management — link/unlink IdP connections.
+      { path: 'me/identities', element: <Lazy><MyIdentitiesPage /></Lazy> },
 
       // Schema/Semantic Layer pages — independent of workspace context.
       // They manage global ontology resources and read data source context
       // from URL search params (?workspaceId=X&dataSourceId=Y).
-      { path: 'schema', element: <Lazy><OntologySchemaPage /></Lazy> },
-      { path: 'schema/:ontologyId', element: <Lazy><OntologySchemaPage /></Lazy> },
+      {
+        path: 'schema',
+        element: (
+          <RequireNav group="sidebar" sectionKey="schema">
+            <Lazy><OntologySchemaPage /></Lazy>
+          </RequireNav>
+        ),
+      },
+      {
+        path: 'schema/:ontologyId',
+        element: (
+          <RequireNav group="sidebar" sectionKey="schema">
+            <Lazy><OntologySchemaPage /></Lazy>
+          </RequireNav>
+        ),
+      },
       // CanvasLayout gates these routes behind a schema fetch so the heavy
       // ontology data only loads when the user navigates to a canvas section.
       {
@@ -103,19 +134,82 @@ export const router = createBrowserRouter([
       },
       {
         path: 'admin',
+        // Parent guard: any user holding ONE of the admin sub-page
+        // permissions can enter. Each sub-route below has its own
+        // guard so a delegated admin (e.g. groups-only) lands on the
+        // page they have access to and gets an explicit denied panel
+        // on routes they don't.
         element: (
-          <RequirePermission perm="system:admin">
+          <RequireNav group="sidebar" sectionKey="admin">
             <Lazy><AdminPage /></Lazy>
-          </RequirePermission>
+          </RequireNav>
         ),
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
-          { path: 'overview', element: <Lazy><AdminOverview /></Lazy> },
-          { path: 'features', element: <Lazy><AdminFeatures /></Lazy> },
-          { path: 'users', element: <Lazy><AdminUsers /></Lazy> },
-          { path: 'groups', element: <Lazy><AdminGroups /></Lazy> },
-          { path: 'permissions', element: <Lazy><AdminPermissions /></Lazy> },
-          { path: 'announcements', element: <Lazy><AdminAnnouncements /></Lazy> },
+          {
+            path: 'overview',
+            element: (
+              <RequireNav group="admin" sectionKey="overview">
+                <Lazy><AdminOverview /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'features',
+            element: (
+              <RequireNav group="admin" sectionKey="features">
+                <Lazy><AdminFeatures /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'users',
+            element: (
+              <RequireNav group="admin" sectionKey="users">
+                <Lazy><AdminUsers /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'groups',
+            element: (
+              <RequireNav group="admin" sectionKey="groups">
+                <Lazy><AdminGroups /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'permissions',
+            element: (
+              <RequireNav group="admin" sectionKey="permissions">
+                <Lazy><AdminPermissions /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'announcements',
+            element: (
+              <RequireNav group="admin" sectionKey="announcements">
+                <Lazy><AdminAnnouncements /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'sso',
+            element: (
+              <RequireNav group="admin" sectionKey="sso">
+                <Lazy><AdminSso /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'audit',
+            element: (
+              <RequireNav group="admin" sectionKey="audit">
+                <Lazy><AdminAudit /></Lazy>
+              </RequireNav>
+            ),
+          },
         ],
       },
       { path: '*', element: <NotFoundPage /> },

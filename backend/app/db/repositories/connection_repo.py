@@ -25,6 +25,31 @@ logger = logging.getLogger(__name__)
 # Credential encryption (Fernet symmetric)                             #
 # ------------------------------------------------------------------ #
 
+_PROD_ENV_VALUES = {"prod", "production"}
+
+
+class CredentialEncryptionError(RuntimeError):
+    """Raised when secrets would be persisted as plaintext in production."""
+
+
+def require_encryption_or_plaintext_ok() -> None:
+    """Fail closed in production.
+
+    Both credential stores (``graph_connections`` and ``idp_providers``)
+    fall back to plaintext JSON when ``CREDENTIAL_ENCRYPTION_KEY`` is unset.
+    That fallback is acceptable for dev/test but must never run in
+    production, where it would silently write secrets in the clear. Call
+    this on the write path before persisting plaintext.
+    """
+    if os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES:
+        raise CredentialEncryptionError(
+            "CREDENTIAL_ENCRYPTION_KEY is unset but ENV is production — "
+            "refusing to store credentials as plaintext. Configure a "
+            "Fernet key (CREDENTIAL_ENCRYPTION_KEY) before persisting "
+            "secrets."
+        )
+
+
 def _get_fernet():
     """Return a Fernet instance or None if key not configured."""
     key = os.getenv("CREDENTIAL_ENCRYPTION_KEY")
@@ -43,6 +68,7 @@ def _encrypt(data: dict) -> str:
     raw = json.dumps(data)
     if fernet:
         return fernet.encrypt(raw.encode()).decode()
+    require_encryption_or_plaintext_ok()  # fail closed in prod
     return raw  # plaintext fallback (dev only)
 
 

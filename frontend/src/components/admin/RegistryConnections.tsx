@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
+import { usePermission } from '@/store/auth'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
@@ -73,7 +74,7 @@ function syntheticMetaFromSweep(
     }
 }
 
-function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
+function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; canManage: boolean; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
     const config = getProviderConfig(provider.providerType)
     const [expanded, setExpanded] = useState(false)
     const statusDot = { checking: 'bg-amber-400 animate-pulse', healthy: 'bg-emerald-400', unhealthy: 'bg-red-400', unknown: 'bg-gray-400' }[health.status]
@@ -95,10 +96,15 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                         <StatusChip meta={syntheticMetaFromSweep(health, provider.id)} compact />
                     </div>
                 </div>
-                <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
-                    {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
-                    {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
-                </div>
+                {/* Connection endpoint (host:port + TLS) is a connection
+                    detail — only managers see it. Readers see name, type,
+                    and status only. */}
+                {canManage && (
+                    <div className="flex items-center gap-4 text-xs text-ink-muted mb-4">
+                        {provider.host && <div className="flex items-center gap-1.5"><Globe className="w-3 h-3" /><span className="font-mono">{provider.host}:{provider.port || '—'}</span></div>}
+                        {provider.tlsEnabled && <div className="flex items-center gap-1 text-emerald-500"><Shield className="w-3 h-3" /><span>TLS</span></div>}
+                    </div>
+                )}
                 {health.status === 'unhealthy' && health.error && (
                     <div className="mb-4 p-3 rounded-xl bg-red-500/5 border border-red-500/15 text-sm text-red-600 dark:text-red-400 leading-relaxed">
                         <div className="flex items-start gap-2">
@@ -108,19 +114,27 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
                     </div>
                 )}
                 <div className="flex items-center gap-2">
-                    <button onClick={onTest} disabled={health.status === 'checking'} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors disabled:opacity-50">
-                        {health.status === 'checking' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />} Test
-                    </button>
-                    <button onClick={onScan} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 transition-colors"><RefreshCw className="w-3 h-3" /> Discover Sources</button>
-                    <button onClick={onEdit} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors"><Edit2 className="w-3 h-3" /> Edit</button>
-                    <button
-                        onClick={onDelete}
-                        aria-label={`Delete provider ${provider.name}`}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors ml-auto"
-                    >
-                        <Trash2 className="w-3 h-3" />
-                    </button>
-                    <button onClick={() => setExpanded(!expanded)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
+                    {canManage && (
+                        <button onClick={onTest} disabled={health.status === 'checking'} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors disabled:opacity-50">
+                            {health.status === 'checking' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />} Test
+                        </button>
+                    )}
+                    {canManage && (
+                        <button onClick={onScan} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 transition-colors"><RefreshCw className="w-3 h-3" /> Discover Sources</button>
+                    )}
+                    {canManage && (
+                        <button onClick={onEdit} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 text-ink-secondary hover:text-ink transition-colors"><Edit2 className="w-3 h-3" /> Edit</button>
+                    )}
+                    {canManage && (
+                        <button
+                            onClick={onDelete}
+                            aria-label={`Delete provider ${provider.name}`}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg text-red-500 hover:bg-red-500/10 transition-colors ml-auto"
+                        >
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    )}
+                    <button onClick={() => setExpanded(!expanded)} className={cn("p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors", !canManage && "ml-auto")}>
                         {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                     </button>
                 </div>
@@ -128,13 +142,17 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
             {expanded && (
                 <div className="px-5 pb-5 pt-3 border-t border-glass-border animate-in slide-in-from-top-2 fade-in duration-200 space-y-4">
                     <dl className="grid grid-cols-2 gap-3 text-xs">
-                        <div><dt className="text-ink-muted font-medium">Provider ID</dt><dd className="font-mono text-ink mt-0.5 truncate">{provider.id}</dd></div>
+                        {/* Provider ID is an internal connection detail. */}
+                        {canManage && <div><dt className="text-ink-muted font-medium">Provider ID</dt><dd className="font-mono text-ink mt-0.5 truncate">{provider.id}</dd></div>}
                         <div><dt className="text-ink-muted font-medium">Status</dt><dd className={cn("mt-0.5 font-semibold", provider.isActive ? "text-emerald-500" : "text-red-500")}>{provider.isActive ? 'Active' : 'Inactive'}</dd></div>
                         <div><dt className="text-ink-muted font-medium">Created</dt><dd className="text-ink mt-0.5">{new Date(provider.createdAt).toLocaleDateString()}</dd></div>
                         <div><dt className="text-ink-muted font-medium">Last Updated</dt><dd className="text-ink mt-0.5">{new Date(provider.updatedAt).toLocaleDateString()}</dd></div>
                         {health.error && <div className="col-span-2"><dt className="text-red-500 font-medium">Error</dt><dd className="text-red-400 mt-0.5 font-mono text-[11px] break-all">{health.error}</dd></div>}
                     </dl>
-                    <ProviderAdmissionEditor providerId={provider.id} />
+                    {/* Admission control hits a system:admin-only endpoint —
+                        only render it for managers (also avoids a 403 per
+                        expanded card for readers). */}
+                    {canManage && <ProviderAdmissionEditor providerId={provider.id} />}
                 </div>
             )}
         </div>
@@ -143,6 +161,10 @@ function ConnectionCard({ provider, health, onTest, onEdit, onDelete, onScan }: 
 
 export function RegistryConnections() {
     const navigate = useNavigate()
+    // Phase 18: providers are visible to anyone with workspace:provider:read,
+    // but write paths (register / edit / delete / test / discover) stay
+    // platform-admin-only because the rows carry credentials.
+    const canManage = usePermission('system:admin')
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     // Backend-published per-provider status — populated by the global
@@ -232,9 +254,11 @@ export function RegistryConnections() {
                     <h2 className="text-xl font-bold text-ink">Providers</h2>
                     <p className="text-sm text-ink-muted mt-1">Manage database providers and catalog availability.</p>
                 </div>
-                <button onClick={() => { setEditingProvider(null); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
-                    <Plus className="w-4 h-4" /> Register Provider
-                </button>
+                {canManage && (
+                    <button onClick={() => { setEditingProvider(null); setShowWizard(true) }} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-semibold transition-colors">
+                        <Plus className="w-4 h-4" /> Register Provider
+                    </button>
+                )}
             </div>
 
             {/* Health Summary */}
@@ -248,9 +272,11 @@ export function RegistryConnections() {
                             <WifiOff className="w-3 h-3" /> {unhealthyCount} Disconnected
                         </div>
                     )}
-                    <button onClick={() => { void refreshHealth() }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-ink-muted hover:text-ink transition-colors ml-auto">
-                        <RefreshCw className="w-3 h-3" /> Re-test All
-                    </button>
+                    {canManage && (
+                        <button onClick={() => { void refreshHealth() }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-ink-muted hover:text-ink transition-colors ml-auto">
+                            <RefreshCw className="w-3 h-3" /> Re-test All
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -349,6 +375,7 @@ export function RegistryConnections() {
                                 key={p.id}
                                 provider={p}
                                 health={resolved}
+                                canManage={canManage}
                                 onTest={() => { void testOne(p.id) }}
                                 onEdit={() => handleEditProvider(p)}
                                 onDelete={() => handleDeleteClick(p)}

@@ -3,6 +3,7 @@ import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
 import type { WsDataSourceProviderInfo } from '../WorkspaceCard'
+import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -88,22 +89,53 @@ export function WorkspaceListRow({ ws, index: _index, stats, healthStatus, dsPro
 
             <span className="text-[11px] text-ink-muted">{new Date(ws.updatedAt).toLocaleDateString()}</span>
 
-            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                {onManageMembers && (
-                    <button onClick={(e) => { e.stopPropagation(); onManageMembers() }} className="p-1 rounded-lg text-ink-muted hover:text-emerald-500 hover:bg-emerald-500/10 transition-colors" title="Manage members">
-                        <Users className="w-3 h-3" />
-                    </button>
-                )}
-                {!ws.isDefault && (
-                    <button onClick={(e) => { e.stopPropagation(); onSetDefault() }} className="p-1 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Set Default">
-                        <Shield className="w-3 h-3" />
-                    </button>
-                )}
+            <WorkspaceRowActions
+                ws={ws}
+                onManageMembers={onManageMembers}
+                onSetDefault={onSetDefault}
+                onDelete={onDelete}
+            />
+        </div>
+    )
+}
+
+// Row-level action buttons are split out so the permission hooks
+// run per row WITHOUT cluttering the main component. Hidden when the
+// user lacks the relevant permission so the row stays focused on
+// what the viewer can actually do.
+function WorkspaceRowActions({
+    ws, onManageMembers, onSetDefault, onDelete,
+}: {
+    ws: WorkspaceResponse
+    onManageMembers?: () => void
+    onSetDefault: () => void
+    onDelete: () => void
+}) {
+    // Workspace mutations require system:admin (delete + set default
+    // are platform-level). Membership management is workspace:admin
+    // on the specific workspace.
+    const isPlatformAdmin = usePermission('system:admin')
+    const wsAdminAnywhere = useAnyWorkspacePermission('workspace:admin')
+    const canManageMembers = isPlatformAdmin || wsAdminAnywhere
+    const canMutateWorkspace = isPlatformAdmin
+    return (
+        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            {onManageMembers && canManageMembers && (
+                <button onClick={(e) => { e.stopPropagation(); onManageMembers() }} className="p-1 rounded-lg text-ink-muted hover:text-emerald-500 hover:bg-emerald-500/10 transition-colors" title="Manage members">
+                    <Users className="w-3 h-3" />
+                </button>
+            )}
+            {!ws.isDefault && canMutateWorkspace && (
+                <button onClick={(e) => { e.stopPropagation(); onSetDefault() }} className="p-1 rounded-lg text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors" title="Set Default">
+                    <Shield className="w-3 h-3" />
+                </button>
+            )}
+            {canMutateWorkspace && (
                 <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="p-1 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors" title="Delete">
                     <Trash2 className="w-3 h-3" />
                 </button>
-                <ChevronRight className="w-3.5 h-3.5 text-ink-muted" />
-            </div>
+            )}
+            <ChevronRight className="w-3.5 h-3.5 text-ink-muted" />
         </div>
     )
 }

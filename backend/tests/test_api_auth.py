@@ -27,7 +27,7 @@ async def _seed_active_user(
         last_name="Tester",
         status="active",
     )
-    await user_repo.assign_role(session, user.id, "user")
+    await user_repo.assign_role(session, user.id, "workspace_member")
     await session.commit()
     return user.id
 

@@ -40,8 +40,11 @@ from backend.app.db.repositories.role_repo import (
     RoleScopeError,
     UnknownPermissionError,
 )
-from backend.app.services.permission_service import resolve as resolve_claims
-from backend.app.services.permission_service import simulate_for_user
+from backend.app.services.permission_service import (
+    compute_implied_by,
+    resolve as resolve_claims,
+    simulate_for_user,
+)
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ImpactPreviewResponse,
@@ -85,6 +88,7 @@ def _permission_to_response(p) -> PermissionResponse:
         category=p.category,
         long_description=getattr(p, "long_description", None),
         examples=examples,
+        implied_by=compute_implied_by(p.id, p.category),
     )
 
 
@@ -94,7 +98,7 @@ def _permission_to_response(p) -> PermissionResponse:
     response_model_by_alias=True,
 )
 async def list_permissions(
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:bindings:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return the full permission catalogue.
@@ -194,7 +198,7 @@ async def list_roles(
     scope_type: Optional[str] = Query(default=None, alias="scopeType"),
     scope_id: Optional[str] = Query(default=None, alias="scopeId"),
     include_system: bool = Query(default=True, alias="includeSystem"),
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:bindings:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Return each role and the permissions it bundles.
@@ -294,11 +298,36 @@ async def update_role(
     except UnknownPermissionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Phase 7: a role-bundle change fans out to every subject bound
+    # to the role. Kill their live sessions so the new permission
+    # set takes effect immediately. Best-effort; emits the count
+    # into the audit event so the blast radius is visible.
+    # Phase 9: pass ``reason`` for the per-user audit event.
+    from backend.app.services.revocation_service import revoke_role_sessions
+    cascade_revoked = await revoke_role_sessions(
+        name, session=session, reason="role_permissions_updated",
+    )
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.role.updated",
-        payload={"name": name, "actor_id": admin.id},
+        payload={
+            "name": name,
+            "actor_id": admin.id,
+            "cascade_sessions_revoked": cascade_revoked,
+        },
     )
+    if cascade_revoked:
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.role.cascade_revoked",
+            payload={
+                "role_name": name,
+                "actor_id": admin.id,
+                "users_revoked": cascade_revoked,
+                "reason": "role_permissions_updated",
+            },
+        )
     bundles = await role_repo.role_names_with_permissions(session, [name])
     counts = await _binding_counts(session, [name])
     return _role_to_response(
@@ -464,16 +493,17 @@ async def compute_user_access(
     # canonical effective permission map.
     claims = await resolve_claims(session, user_orm.id)
 
-    # Group member counts (for the FE chip "X members").
-    group_payload: list[UserAccessGroup] = []
-    for gid in group_ids:
-        g = group_meta.get(gid)
-        if g is None:
-            continue
-        count = await group_repo.count_members(session, gid)
-        group_payload.append(
-            UserAccessGroup(id=g.id, name=g.name, member_count=count)
-        )
+    # Group member counts (for the FE chip "X members"). One batched
+    # query for all groups — the old per-group ``count_members`` loop
+    # was the dominant cost of this endpoint when a user belonged to
+    # more than a couple of groups.
+    counts = await group_repo.count_members_batch(session, group_ids)
+    group_payload: list[UserAccessGroup] = [
+        UserAccessGroup(id=g.id, name=g.name, member_count=counts.get(gid, 0))
+        for gid in group_ids
+        for g in (group_meta.get(gid),)
+        if g is not None
+    ]
 
     return UserAccessResponse(
         user=UserAccessSubject(
@@ -499,7 +529,7 @@ async def compute_user_access(
 )
 async def get_user_access(
     user_id: str = Path(...),
-    _admin: User = Depends(requires("system:admin")),
+    _admin: User = Depends(requires("system:bindings:read")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Compute every binding the user holds (direct or via group) and

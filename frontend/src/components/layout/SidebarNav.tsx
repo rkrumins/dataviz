@@ -21,6 +21,8 @@ import { useCanvasStore } from '@/store/canvas'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
+import { useNavPermission } from '@/store/auth'
+import { useSidebarSpec } from '@/store/navCatalogue'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -346,15 +348,42 @@ export function SidebarNav() {
       case 'workspaces': navigate('/workspaces'); break
       case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
-      case 'admin': navigate('/admin/overview'); break
+      // Navigate to /admin (no sub-route). AdminPage's ``isRoot``
+      // branch redirects to the first sub-page the current user can
+      // see — so a delegated groups-admin lands on /admin/groups,
+      // not on /admin/overview's access-denied panel.
+      case 'admin': navigate('/admin'); break
     }
   }
 
-  // Populate nav item badges
-  const mainNavItems: NavItemConfig[] = NAV_ITEMS_CONFIG.map((item) => ({
-    ...item,
-    badge: item.id === 'explore' ? viewCount : undefined,
-  }))
+  // Permission gate per nav item, driven by the centralised nav
+  // catalogue served from the backend (seeded by bundled defaults).
+  // Hooks are called in static order matching ``NAV_ITEMS_CONFIG``
+  // (module-scope constant), so hook-rules stay satisfied across
+  // renders. ``useSidebarSpec`` resolves the live spec from the store.
+  const dashboardVisible  = useNavPermission(useSidebarSpec('dashboard'))
+  const exploreVisible    = useNavPermission(useSidebarSpec('explore'))
+  const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
+  const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
+  const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
+  const adminVisible      = useNavPermission(useSidebarSpec('admin'))
+
+  const visibility: Record<NavigationTab, boolean> = {
+    dashboard:  dashboardVisible,
+    explore:    exploreVisible,
+    workspaces: workspacesVisible,
+    ingestion:  ingestionVisible,
+    schema:     schemaVisible,
+    admin:      adminVisible,
+  }
+
+  // Populate nav item badges and filter to permission-allowed items.
+  const mainNavItems: NavItemConfig[] = NAV_ITEMS_CONFIG
+    .filter((item) => visibility[item.id])
+    .map((item) => ({
+      ...item,
+      badge: item.id === 'explore' ? viewCount : undefined,
+    }))
 
   const hoveredNavItem = hoveredNavId ? mainNavItems.find(i => i.id === hoveredNavId) : null
 

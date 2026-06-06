@@ -1,16 +1,150 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck } from 'lucide-react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink } from 'lucide-react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import { authService, type SsoProviderSummary } from '@/services/authService'
 import { cn } from '@/lib/utils'
+
+
+// SSO is initiated by a top-level GET so the IdP redirect flow works
+// (a fetch would lose the cookie + redirect chain). The catalog comes
+// from /api/v1/auth/providers — only enabled providers are returned,
+// no client-side fan-out.
+function SsoButtons() {
+    const [providers, setProviders] = useState<SsoProviderSummary[] | null>(null)
+    const [failed, setFailed] = useState(false)
+
+    useEffect(() => {
+        let cancelled = false
+        authService.listProviders()
+            .then((rows) => {
+                if (!cancelled) setProviders(rows)
+            })
+            .catch(() => {
+                if (!cancelled) setFailed(true)
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [])
+
+    const next = encodeURIComponent('/dashboard')
+    const customEnabled =
+        (import.meta.env.VITE_AUTH_CUSTOM_PROVIDER_ENABLED ?? '')
+            .toString()
+            .toLowerCase() === 'true'
+
+    if (providers === null && !failed) {
+        // While the catalog is loading, render nothing — the password
+        // form is the dependable fallback.
+        return null
+    }
+
+    const hasProviders = providers !== null && providers.length > 0
+    if (!hasProviders && !customEnabled) {
+        return null
+    }
+
+    return (
+        <div className="mt-6 pt-6 border-t border-white/10 space-y-3">
+            <p className="text-[11px] text-center uppercase tracking-widest text-ink-muted">
+                Or sign in with
+            </p>
+            {(providers ?? []).map((p) => (
+                <a
+                    key={p.id}
+                    href={`/api/v1/auth/${encodeURIComponent(p.slug)}/login?next=${next}`}
+                    className={cn(
+                        "flex items-center justify-center gap-2 w-full text-center py-2.5",
+                        "rounded-xl border text-sm font-medium transition-colors",
+                        p.kind === 'custom'
+                            ? "border-yellow-500/40 text-yellow-300 hover:bg-yellow-500/5"
+                            : "border-white/20 text-ink hover:bg-white/5",
+                    )}
+                >
+                    {p.buttonLabel || p.displayName}
+                    <ExternalLink className="w-3.5 h-3.5 opacity-50" />
+                </a>
+            ))}
+            {/* Dev-login button is always offered when the env flag is
+                set, even if no ``custom`` provider exists yet — clicking
+                it lands on /dev-login which guides the operator. */}
+            {customEnabled && !providers?.some((p) => p.kind === 'custom') && (
+                <a
+                    href={`/dev-login?next=${next}`}
+                    className="block w-full text-center py-2.5 rounded-xl border border-yellow-500/40 text-sm font-medium text-yellow-300 hover:bg-yellow-500/5 transition-colors"
+                >
+                    Dev Login (mock IdP) — non-production
+                </a>
+            )}
+        </div>
+    )
+}
+
+
+/** Collision modal — rendered when the SSO callback redirects with
+ *  ``?error_code=unsafe_auto_link&email=...``. Guides the user through
+ *  the link-by-password recovery path instead of the cryptic
+ *  ``sso_error=1`` page. */
+function CollisionModal({ email, onClose }: { email: string; onClose: () => void }) {
+    return (
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+            onClick={onClose}
+        >
+            <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                onClick={(e) => e.stopPropagation()}
+                className="max-w-md w-full p-6 rounded-2xl bg-canvas border border-white/15 shadow-xl"
+            >
+                <div className="flex items-start gap-3">
+                    <AlertCircle className="w-5 h-5 mt-0.5 text-yellow-400 shrink-0" />
+                    <div>
+                        <h2 className="text-base font-semibold text-ink">
+                            An account for <span className="font-mono">{email}</span> already exists
+                        </h2>
+                        <p className="mt-2 text-sm text-ink-secondary">
+                            We won't auto-link your SSO identity to it because your
+                            IdP hasn't verified the email address. Sign in with your
+                            password below, then go to <span className="font-mono">Account → Identities</span>
+                            {' '}to link your SSO provider securely.
+                        </p>
+                        <button
+                            onClick={onClose}
+                            className="mt-4 px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:brightness-110"
+                        >
+                            Sign in with password
+                        </button>
+                    </div>
+                </div>
+            </motion.div>
+        </div>
+    )
+}
 
 export function LoginPage() {
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
     const navigate = useNavigate()
+    const [params] = useSearchParams()
 
     const { login, error, clearError, isLoading, isAuthenticated, status } = useAuthStore()
+
+    // Read ``?error_code=...&email=...`` from the SSO failure redirect
+    // path. The collision modal is the most user-actionable case; other
+    // codes fall through to a generic inline error.
+    const errorCode = params.get('error_code')
+    const collisionEmail = params.get('email')
+    const [showCollision, setShowCollision] = useState(
+        errorCode === 'unsafe_auto_link' && Boolean(collisionEmail),
+    )
+    useEffect(() => {
+        if (errorCode === 'unsafe_auto_link' && collisionEmail) {
+            setEmail(collisionEmail)
+        }
+    }, [errorCode, collisionEmail])
 
     // If already authenticated, redirect to dashboard
     useEffect(() => {
@@ -40,6 +174,12 @@ export function LoginPage() {
 
     return (
         <div className="relative min-h-screen w-full flex items-center justify-center overflow-hidden bg-canvas font-sans">
+            {showCollision && collisionEmail && (
+                <CollisionModal
+                    email={collisionEmail}
+                    onClose={() => setShowCollision(false)}
+                />
+            )}
             {/* Animated Background Elements */}
             <div className="absolute inset-0 pointer-events-none overflow-hidden">
                 <motion.div
@@ -167,6 +307,14 @@ export function LoginPage() {
                             )}
                         </button>
                     </form>
+
+                    {/* ── SSO ──────────────────────────────────────────── */}
+                    {/* Each link is a top-level GET so the IdP redirect
+                        flow works. The backend returns 404 for any
+                        provider that isn't configured, and we render
+                        the buttons unconditionally because the user has
+                        the most context about which their org uses. */}
+                    <SsoButtons />
 
                     {/* Footer Info */}
                     <div className="mt-8 text-center space-y-3">
