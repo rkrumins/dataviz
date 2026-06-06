@@ -609,7 +609,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                             transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
                             className={cn(
-                                'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6',
+                                'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6 max-h-[90vh] overflow-y-auto',
                                 modal.kind === 'add' ? 'max-w-2xl' : 'max-w-md',
                             )}
                         >

@@ -106,10 +106,26 @@ async function tryRefresh(): Promise<boolean> {
         // logs and the next page transition picks up fresh state.
         // Dynamic import avoids a circular dep through the auth
         // store.
+        //
+        // After the store rehydrates, blanket-invalidate React Query
+        // so the sidebar's workspaces list, member tables, etc.
+        // repaint with fresh data instead of serving the cached
+        // response that pre-dates the permission mutation. The cost
+        // is one refetch wave per silent refresh — acceptable, and
+        // exactly the behaviour users expect after their access
+        // shifts mid-session.
         void (async () => {
           try {
             const mod = await import('@/store/auth')
             await mod.useAuthStore.getState().refreshPermissions()
+            try {
+              const mainMod = await import('@/main')
+              const qc = mainMod.getQueryClient()
+              if (qc) await qc.invalidateQueries()
+            } catch {
+              // best-effort — the next user-triggered render still
+              // resolves fresh data within React Query's staleTime.
+            }
           } catch {
             // best-effort
           }

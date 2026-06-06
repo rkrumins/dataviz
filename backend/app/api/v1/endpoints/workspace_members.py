@@ -196,6 +196,17 @@ async def create_member_binding(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # The subject's existing JWT pre-dates this binding, so its
+    # ``ws_perms`` doesn't include the workspace yet — ``GET /workspaces``
+    # would silently exclude it from their sidebar. Revoke sessions to
+    # force a fresh claim resolve on next request. For ``subject_type
+    # == 'group'`` the helper fans out across every group member, so
+    # every user who inherits this binding loses their stale token.
+    revoked = await revoke_subject_sessions(
+        body.subject_type, body.subject_id, session=session,
+        reason="workspace_binding_added",
+    )
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.workspace.member_bound",
@@ -207,6 +218,7 @@ async def create_member_binding(
             "role": body.role,
             "actor_id": admin.id,
             "expires_at": body.expires_at,
+            "sessions_revoked": revoked,
         },
     )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)

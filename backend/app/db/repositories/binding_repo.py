@@ -190,8 +190,16 @@ async def list_for_scope(
     *,
     scope_type: str,
     scope_id: Optional[str] = None,
+    include_expired: bool = False,
 ) -> list[RoleBindingORM]:
-    """Reverse lookup: who has access to this workspace?"""
+    """Reverse lookup: who has access to this workspace?
+
+    By default, expired time-bound bindings are filtered out so the
+    Members tab UI doesn't show stale rows AND its "already holds this
+    role" duplicate check doesn't false-positive on a lapsed binding.
+    Pass ``include_expired=True`` only when the caller actually needs
+    the historical rows (audit / compliance tooling).
+    """
     if scope_type == "global":
         stmt = select(RoleBindingORM).where(
             RoleBindingORM.scope_type == "global",
@@ -203,7 +211,11 @@ async def list_for_scope(
             RoleBindingORM.scope_id == scope_id,
         )
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())
+    if include_expired:
+        return rows
+    now = datetime.now(timezone.utc)
+    return [b for b in rows if not _is_expired(b.expires_at, now=now)]
 
 
 async def find_binding(

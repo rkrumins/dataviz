@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import get_current_user, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import binding_repo, group_repo, grant_repo, user_repo
+from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     GroupCreateRequest,
@@ -126,6 +127,11 @@ async def delete_group(
     admin: User = Depends(requires("system:groups:manage")),
     session: AsyncSession = Depends(get_db_session),
 ):
+    # Snapshot the membership BEFORE the soft-delete so we can fan
+    # out session revocation to every user who was inheriting bindings
+    # through this group.
+    members_before = await group_repo.list_group_members(session, group_id)
+
     deleted = await group_repo.soft_delete_group(session, group_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -138,6 +144,16 @@ async def delete_group(
     n_grants = await grant_repo.delete_subject_grants(
         session, subject_type="group", subject_id=group_id,
     )
+
+    # Revoke each ex-member's sessions so they lose inherited access
+    # immediately rather than after JWT expiry.
+    revoked = 0
+    for m in members_before:
+        revoked += await revoke_subject_sessions(
+            "user", m.user_id, session=session,
+            reason="group_deleted",
+        )
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.group.deleted",
@@ -146,11 +162,12 @@ async def delete_group(
             "actor_id": admin.id,
             "bindings_revoked": n_bindings,
             "grants_revoked": n_grants,
+            "sessions_revoked": revoked,
         },
     )
     logger.info(
-        "Group %s soft-deleted by %s (revoked %d bindings, %d grants)",
-        group_id, admin.id, n_bindings, n_grants,
+        "Group %s soft-deleted by %s (revoked %d bindings, %d grants, %d sessions)",
+        group_id, admin.id, n_bindings, n_grants, revoked,
     )
 
 
@@ -200,6 +217,18 @@ async def add_member(
     member = await group_repo.add_member(
         session, group_id, body.user_id, added_by=admin.id,
     )
+
+    # The user just inherited every binding this group holds. Their
+    # current JWT was issued BEFORE the membership existed, so its
+    # ``ws_perms`` doesn't include the group-bound workspaces yet —
+    # ``GET /workspaces`` would silently exclude those from their
+    # sidebar until the access token expires. Revoke their sessions
+    # so the next request forces a fresh login + claim re-resolve.
+    revoked = await revoke_subject_sessions(
+        "user", body.user_id, session=session,
+        reason="group_membership_added",
+    )
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.group.member_added",
@@ -207,10 +236,12 @@ async def add_member(
             "group_id": group_id,
             "user_id": body.user_id,
             "actor_id": admin.id,
+            "sessions_revoked": revoked,
         },
     )
     logger.info(
-        "User %s added to group %s by %s", body.user_id, group_id, admin.id,
+        "User %s added to group %s by %s (sessions killed: %d)",
+        body.user_id, group_id, admin.id, revoked,
     )
     return GroupMemberResponse(
         user_id=member.user_id,
@@ -236,6 +267,16 @@ async def remove_member(
             status_code=404,
             detail="Membership not found",
         )
+
+    # The user just lost every binding inherited from this group.
+    # Revoke their sessions so the next request re-resolves from DB
+    # and the stale ``ws_perms`` doesn't grant access until the JWT
+    # expires.
+    revoked = await revoke_subject_sessions(
+        "user", user_id, session=session,
+        reason="group_membership_removed",
+    )
+
     await user_repo.create_outbox_event(
         session,
         event_type="rbac.group.member_removed",
@@ -243,8 +284,10 @@ async def remove_member(
             "group_id": group_id,
             "user_id": user_id,
             "actor_id": admin.id,
+            "sessions_revoked": revoked,
         },
     )
     logger.info(
-        "User %s removed from group %s by %s", user_id, group_id, admin.id,
+        "User %s removed from group %s by %s (sessions killed: %d)",
+        user_id, group_id, admin.id, revoked,
     )

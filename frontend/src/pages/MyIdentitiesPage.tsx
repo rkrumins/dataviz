@@ -90,6 +90,7 @@ export function MyIdentitiesPage() {
     }
 
     return (
+        <div className="absolute inset-0 overflow-y-auto bg-canvas">
         <div className="max-w-2xl mx-auto p-8 space-y-8">
             <header>
                 <h1 className="text-2xl font-semibold text-ink">Connected identities</h1>
@@ -192,6 +193,7 @@ export function MyIdentitiesPage() {
                     </ul>
                 </section>
             )}
+        </div>
         </div>
     )
 }

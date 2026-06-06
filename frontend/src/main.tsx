@@ -12,6 +12,10 @@ import {
   disableProviderStatusPolling,
 } from '@/store/providerStatus'
 import { enableProviderHealthPolling } from '@/store/providerHealth'
+import {
+  enablePermissionPolling,
+  disablePermissionPolling,
+} from '@/store/permissionPoller'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -65,13 +69,22 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   }, [bootstrap])
 
   useEffect(() => {
-    if (status !== 'authenticated') return
+    if (status !== 'authenticated') {
+      // Logout / session-lost: stop the permission poller so it
+      // doesn't keep firing /me/permissions against an empty cookie.
+      disablePermissionPolling()
+      return
+    }
     // Public endpoint — every authenticated user.
     enableProviderHealthPolling()
     // Workspace-scoped read endpoint. Toggle in both directions so a
     // mid-session demotion that drops provider:read stops the timer.
     if (canPollProviders) enableProviderStatusPolling()
     else disableProviderStatusPolling()
+    // Catch idle-user permission updates and cross-tab changes. The
+    // poller compares against its own last snapshot, so a stable
+    // claims response is a silent no-op.
+    enablePermissionPolling()
   }, [status, canPollProviders])
 
   // Block rendering until auth resolves — prevents premature API calls
