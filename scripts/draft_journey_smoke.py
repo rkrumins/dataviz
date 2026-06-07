@@ -81,17 +81,37 @@ def run(base: str, email: str, password: str, fhost: str, fport: int) -> int:
         s = Client(base, raw)
         print(f"{DIM}→ viz-service {base}{RESET}")
 
-        # 1. infrastructure: a provider + a workspace with one data source
+        # 1. infrastructure: a provider, an ontology, and a workspace whose
+        # data source is ONBOARDED with that ontology. The ontology is
+        # required for the main-path /graph read (step 6): the resolution
+        # gate refuses un-onboarded data sources — there is no system-default
+        # fallback — so without it the live provider's get_nodes() raises
+        # ProviderConfigurationError. Resolved containment is derived from the
+        # relationship defs' isContainment flag (not the flat list field), and
+        # "assigned" resolution requires entity/relationship definitions.
         sfx = uuid.uuid4().hex[:8]
         prov = _json(s.post("/api/v1/admin/providers", {
             "name": f"smoke-falkor-{sfx}", "providerType": "falkordb",
             "host": fhost, "port": fport}))
         s.ok(f"created provider {prov['id']}")
+        ont = _json(s.post("/api/v1/admin/ontologies", {
+            "name": f"smoke-ont-{sfx}", "scope": "workspace",
+            "entityTypeDefinitions": {
+                "Domain": {"name": "Domain", "hierarchy": {"level": 0, "canContain": ["Table"]}},
+                "Table": {"name": "Table", "hierarchy": {"level": 1, "canBeContainedBy": ["Domain"]}},
+            },
+            "relationshipTypeDefinitions": {
+                "CONTAINS": {"name": "Contains", "isContainment": True, "isLineage": False,
+                             "sourceTypes": ["Domain"], "targetTypes": ["Table"]},
+                "LINEAGE": {"name": "Lineage", "isContainment": False, "isLineage": True},
+            }}))
+        s.ok(f"created ontology {ont['id']}")
         ws = _json(s.post("/api/v1/admin/workspaces", {
             "name": f"smoke-ws-{sfx}",
-            "dataSources": [{"providerId": prov["id"], "graphName": f"smoke_{sfx}"}]}))
+            "dataSources": [{"providerId": prov["id"], "graphName": f"smoke_{sfx}",
+                             "ontologyId": ont["id"]}]}))
         ws_id, ds = ws["id"], ws["dataSources"][0]["id"]
-        s.ok(f"created workspace {ws_id} + data source {ds}")
+        s.ok(f"created workspace {ws_id} + data source {ds} (ontology assigned)")
 
         V, GP = f"/api/v1/{ws_id}/versioning", f"/api/v1/{ws_id}/graph"
 
