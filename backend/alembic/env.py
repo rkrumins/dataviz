@@ -90,16 +90,18 @@ def run_migrations_offline() -> None:
 def _widen_alembic_version_column(connection) -> None:
     """Ensure ``alembic_version.version_num`` can hold long revision ids.
 
-    Alembic creates this column as ``VARCHAR(32)`` by default. Revision
-    ids longer than 32 chars (e.g. ``20260605_1200_phase18_workspace_reads``
-    at 37 chars) cause a ``StringDataRightTruncation`` on the post-
-    migration ``UPDATE alembic_version``, silently rolling back the
+    Alembic creates this column as ``VARCHAR(32)`` by default. A revision
+    id longer than 32 chars causes a ``StringDataRightTruncation`` on the
+    post-migration ``UPDATE alembic_version``, silently rolling back the
     migration that just ran. This is exactly the trap the
     ``20260527_1200_sso_phase4`` docstring describes.
 
-    Widen to 128 unconditionally. The check + alter is microsecond-fast
-    on a one-row table, and it's a no-op when the column is already
-    wide enough.
+    The primary defence is the ≤32-char contract enforced by
+    ``tests/test_alembic_revision_lengths.py`` (over-length ids are
+    renamed to fit). This widen stays as a safety net for legacy
+    databases: widen to 128 unconditionally. The check + alter is
+    microsecond-fast on a one-row table, and it's a no-op when the
+    column is already wide enough.
     """
     from sqlalchemy import inspect as sa_inspect, text
 

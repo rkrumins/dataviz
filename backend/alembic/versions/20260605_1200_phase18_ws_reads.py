@@ -1,6 +1,6 @@
 """RBAC Phase 18 — workspace-scoped reads for ontology / provider / catalog.
 
-Revision ID: 20260605_1200_phase18_workspace_reads
+Revision ID: 20260605_1200_phase18_ws_reads
 Revises: 20260603_1100_rbac_uplift
 Create Date: 2026-06-05 12:00
 
@@ -43,7 +43,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260605_1200_phase18_workspace_reads"
+revision: str = "20260605_1200_phase18_ws_reads"
 down_revision: Union[str, None] = "20260603_1100_rbac_uplift"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

@@ -1,7 +1,7 @@
 """Phase 6 — role taxonomy expansion: workspace_data_engineer + org_auditor.
 
 Revision ID: 20260606_0100_role_expansion
-Revises: 20260605_1200_phase18_workspace_reads
+Revises: 20260605_1200_phase18_ws_reads
 Create Date: 2026-06-06 01:00
 
 Adds two new built-in roles and three new system-category permissions
@@ -45,7 +45,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20260606_0100_role_expansion"
-down_revision: Union[str, None] = "20260605_1200_phase18_workspace_reads"
+down_revision: Union[str, None] = "20260605_1200_phase18_ws_reads"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
