@@ -19,14 +19,25 @@ import { type FC, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useDraftPredicate } from '@/store/searchStore'
+import type { Predicate } from '@/types/search'
 
 import { formatPredicateAsSentence } from './predicateSentence'
 import { rootGroupOp, topLevelConditions } from './predicateComposition'
 
 
-export const WhatThisMeansDisclosure: FC = () => {
+/**
+ * ``predicate`` is optional: when supplied (e.g. the store-decoupled
+ * VisualQueryBuilder driving local state), the disclosure renders that
+ * predicate. When omitted, it falls back to the singleton
+ * ``draftPredicate`` so the live Advanced-Search panel keeps working
+ * with zero-arg call sites untouched.
+ */
+export const WhatThisMeansDisclosure: FC<{ predicate?: Predicate | null }> = ({
+    predicate,
+}) => {
     const [open, setOpen] = useState(false)
-    const draft = useDraftPredicate()
+    const storeDraft = useDraftPredicate()
+    const draft = predicate !== undefined ? predicate : storeDraft
 
     const oneLiner = collapsedSummary(draft)
 

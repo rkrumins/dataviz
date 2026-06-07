@@ -24,6 +24,34 @@ from .interface import SessionTokens
 ACCESS_COOKIE_NAME = "nx_access"
 REFRESH_COOKIE_NAME = "nx_refresh"
 CSRF_COOKIE_NAME = "nx_csrf"
+# Short-lived signed cookie holding the in-flight OIDC handshake
+# (state / nonce / PKCE verifier). Scoped to the auth subtree so it is
+# only ever sent to the callback. SameSite=Lax is required: the IdP
+# redirects back via a top-level GET navigation.
+OIDC_COOKIE_NAME = "nx_oidc"
+OIDC_COOKIE_PATH = "/api/v1/auth/"
+_OIDC_COOKIE_MAX_AGE = 600
+
+# Short-lived signed cookie holding the in-flight SAML handshake
+# (RelayState + next_path). Same scoping rationale as ``nx_oidc``.
+SAML_COOKIE_NAME = "nx_saml"
+SAML_COOKIE_PATH = "/api/v1/auth/"
+_SAML_COOKIE_MAX_AGE = 600
+
+# Dev/demo Custom-IdP signed identity envelope cookie. The browser
+# obtains it from /api/v1/auth/custom/mock (also dev-only); the
+# /custom/login route reads it to find-or-provision the user. Refused
+# in production via the AUTH_CUSTOM_PROVIDER_ENABLED env gate.
+MOCK_IDENTITY_COOKIE_NAME = "nx_mock_identity"
+MOCK_IDENTITY_COOKIE_PATH = "/api/v1/auth/"
+_MOCK_IDENTITY_COOKIE_MAX_AGE = 600
+
+# Self-service link cookie. Set by ``POST /me/identities/link/{slug}/start``,
+# read by the SSO callback to bind the verified identity to the
+# already-authenticated user instead of provisioning a new account.
+LINK_INTENT_COOKIE_NAME = "nx_link_intent"
+LINK_INTENT_COOKIE_PATH = "/api/v1/auth/"
+_LINK_INTENT_COOKIE_MAX_AGE = 600
 
 # Refresh cookie is scoped to the /auth subtree so it's sent to /refresh
 # AND /logout (logout needs to read it to revoke the rotation family)
@@ -95,3 +123,100 @@ def read_refresh_cookie(request: Request) -> str | None:
 
 def read_csrf_cookie(request: Request) -> str | None:
     return request.cookies.get(CSRF_COOKIE_NAME)
+
+
+def set_oidc_cookie(response: Response, state_token: str) -> None:
+    response.set_cookie(
+        key=OIDC_COOKIE_NAME,
+        value=state_token,
+        max_age=_OIDC_COOKIE_MAX_AGE,
+        httponly=True,
+        path=OIDC_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_oidc_cookie(response: Response) -> None:
+    response.delete_cookie(
+        OIDC_COOKIE_NAME, path=OIDC_COOKIE_PATH, **_common_kwargs()
+    )
+
+
+def read_oidc_cookie(request: Request) -> str | None:
+    return request.cookies.get(OIDC_COOKIE_NAME)
+
+
+# ── SAML state cookie ────────────────────────────────────────────────
+
+
+def set_saml_cookie(response: Response, state_token: str) -> None:
+    response.set_cookie(
+        key=SAML_COOKIE_NAME,
+        value=state_token,
+        max_age=_SAML_COOKIE_MAX_AGE,
+        httponly=True,
+        path=SAML_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_saml_cookie(response: Response) -> None:
+    response.delete_cookie(
+        SAML_COOKIE_NAME, path=SAML_COOKIE_PATH, **_common_kwargs()
+    )
+
+
+def read_saml_cookie(request: Request) -> str | None:
+    return request.cookies.get(SAML_COOKIE_NAME)
+
+
+# ── Custom-IdP mock-identity cookie (dev/demo only) ──────────────────
+
+
+def set_mock_identity_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=MOCK_IDENTITY_COOKIE_NAME,
+        value=token,
+        max_age=_MOCK_IDENTITY_COOKIE_MAX_AGE,
+        httponly=True,
+        path=MOCK_IDENTITY_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_mock_identity_cookie(response: Response) -> None:
+    response.delete_cookie(
+        MOCK_IDENTITY_COOKIE_NAME,
+        path=MOCK_IDENTITY_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def read_mock_identity_cookie(request: Request) -> str | None:
+    return request.cookies.get(MOCK_IDENTITY_COOKIE_NAME)
+
+
+# ── Link intent cookie ──────────────────────────────────────────────
+
+
+def set_link_intent_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=LINK_INTENT_COOKIE_NAME,
+        value=token,
+        max_age=_LINK_INTENT_COOKIE_MAX_AGE,
+        httponly=True,
+        path=LINK_INTENT_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def clear_link_intent_cookie(response: Response) -> None:
+    response.delete_cookie(
+        LINK_INTENT_COOKIE_NAME,
+        path=LINK_INTENT_COOKIE_PATH,
+        **_common_kwargs(),
+    )
+
+
+def read_link_intent_cookie(request: Request) -> str | None:
+    return request.cookies.get(LINK_INTENT_COOKIE_NAME)

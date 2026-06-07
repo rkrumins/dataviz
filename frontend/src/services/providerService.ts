@@ -186,7 +186,10 @@ export function friendlyError(raw: string): string {
     return detail
 }
 
-async function request<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+async function request<T>(
+    url: string,
+    init?: RequestInit & { timeoutMs?: number; silent403?: boolean },
+): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
@@ -199,17 +202,25 @@ async function request<T>(url: string, init?: RequestInit & { timeoutMs?: number
     return res.json()
 }
 
+// Reads are tier-gated (system:admin) at the router. Non-admin pages
+// (Ingestion, Workspaces) probe these endpoints to render counts and
+// pipeline nudges — surface failures to the caller but suppress the
+// global access-denied modal so a viewer never sees an admin-tier
+// error. Writes deliberately stay loud — those are user-initiated
+// and the user needs feedback when they're blocked.
+const SILENT_READ = { silent403: true } as const
+
 export const providerService = {
     list(): Promise<ProviderResponse[]> {
-        return request<ProviderResponse[]>(ADMIN_API)
+        return request<ProviderResponse[]>(ADMIN_API, SILENT_READ)
     },
 
     listStatus(): Promise<ProviderStatusResponse[]> {
-        return request<ProviderStatusResponse[]>(`${ADMIN_API}/status`)
+        return request<ProviderStatusResponse[]>(`${ADMIN_API}/status`, SILENT_READ)
     },
 
     get(id: string): Promise<ProviderResponse> {
-        return request<ProviderResponse>(`${ADMIN_API}/${id}`)
+        return request<ProviderResponse>(`${ADMIN_API}/${id}`, SILENT_READ)
     },
 
     create(req: ProviderCreateRequest): Promise<ProviderResponse> {

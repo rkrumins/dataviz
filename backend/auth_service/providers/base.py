@@ -10,7 +10,7 @@ external IdP), confirm the identity and return enough information for the
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
 
@@ -19,8 +19,9 @@ class ProviderCredentials:
     """Credentials handed to a provider's ``authenticate`` call.
 
     For ``local``: email + password are populated.
-    For ``oidc`` / ``saml2``: ``external_token`` carries the ID token /
-    SAML response; ``email`` / ``password`` are unused.
+    For ``oidc`` / ``saml2`` / ``custom``: ``external_token`` carries
+    the ID token / SAML response / signed envelope; ``email`` /
+    ``password`` are unused.
     """
     email: Optional[str] = None
     password: Optional[str] = None
@@ -32,15 +33,34 @@ class ProviderIdentity:
     """The minimal identity payload a provider returns on success.
 
     ``IdentityService`` uses this to find or provision the matching
-    ``UserORM`` row (matched on ``provider`` + ``external_id`` for SSO,
-    or on ``email`` for local).
+    ``UserORM`` row (matched on ``(provider_id, external_id)`` in
+    ``user_identities`` for SSO, or on ``email`` for local).
+
+    ``groups`` is the list of IdP-asserted group memberships at this
+    login (mapped via :mod:`claim_mapper`). The auth service persists
+    it on the user row and feeds it to the group->target reconciler
+    so RoleBindings + Group memberships track what the IdP currently
+    says. Empty when the provider can't or won't supply groups.
+
+    ``auth_time`` (epoch seconds) is the provider-attested moment the
+    user actually authenticated. Used to enforce the 24h SSO re-auth
+    ceiling on every /refresh. ``None`` for local password sessions.
+
+    ``attributes`` holds any operator-defined extras from the
+    provider's ``claim_mapping.extras`` config (department, employee_id,
+    cost_center, etc.). The auth service stores it in
+    ``users.metadata_.attributes`` so admins + ``/me`` can surface
+    them — they are NEVER used for access decisions.
     """
-    provider: str          # 'local' | 'oidc' | 'saml2' | ...
-    external_id: str       # for SSO: the IdP-assigned subject; for local: the user_id
+    provider: str          # 'oidc' | 'saml2' | 'custom' (always the kind, not slug)
+    external_id: str       # IdP-assigned subject (sub / NameID / external_id)
     email: str
     first_name: str
     last_name: str
     raw_claims: dict       # full IdP claims for audit / metadata storage
+    groups: tuple[str, ...] = field(default_factory=tuple)
+    auth_time: Optional[int] = None
+    attributes: dict = field(default_factory=dict)
 
 
 @runtime_checkable

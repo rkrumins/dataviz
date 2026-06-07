@@ -10,6 +10,7 @@
  */
 import type {
     ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, ScopeEdgeConfig,
+    DisplayRuleConfig,
 } from '@/types/schema'
 import { fetchWithTimeout } from './fetchWithTimeout'
 
@@ -29,6 +30,7 @@ export interface ContextModel {
     scopeFilter?: ScopeFilterConfig
     instanceAssignments: Record<string, EntityAssignmentConfig>
     scopeEdgeConfig?: ScopeEdgeConfig
+    displayRulesConfig?: DisplayRuleConfig[]
     isActive: boolean
     createdAt: string
     updatedAt: string
@@ -43,6 +45,7 @@ export interface ContextModelCreateRequest {
     scopeFilter?: ScopeFilterConfig | null
     instanceAssignments?: Record<string, EntityAssignmentConfig>
     scopeEdgeConfig?: ScopeEdgeConfig | null
+    displayRulesConfig?: DisplayRuleConfig[] | null
 }
 
 export interface ContextModelUpdateRequest {
@@ -52,6 +55,7 @@ export interface ContextModelUpdateRequest {
     scopeFilter?: ScopeFilterConfig | null
     instanceAssignments?: Record<string, EntityAssignmentConfig>
     scopeEdgeConfig?: ScopeEdgeConfig | null
+    displayRulesConfig?: DisplayRuleConfig[] | null
 }
 
 // ============================================
@@ -165,6 +169,7 @@ export async function createOrUpdate(
             scopeFilter: data.scopeFilter,
             instanceAssignments: data.instanceAssignments,
             scopeEdgeConfig: data.scopeEdgeConfig,
+            displayRulesConfig: data.displayRulesConfig,
         })
     }
     return createContextModel(wsId, data)

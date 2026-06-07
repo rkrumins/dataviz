@@ -110,7 +110,10 @@ export interface OntologyImportResponse {
     } | null
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+    url: string,
+    init?: RequestInit & { silent403?: boolean },
+): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
         headers: { 'Content-Type': 'application/json', ...init?.headers },
@@ -123,21 +126,27 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     return res.json()
 }
 
+// Ontologies router is system:admin-gated. Non-admin pages (dashboard,
+// workspaces) probe ``list`` to render counts and pipeline state;
+// suppress the global 403 modal on reads so non-admins never see an
+// admin-tier denial for a background probe.
+const SILENT_READ = { silent403: true } as const
+
 export const ontologyDefinitionService = {
     list(allVersions = false, includeDeleted = false): Promise<OntologyDefinitionResponse[]> {
         const params = new URLSearchParams()
         if (allVersions) params.set('all_versions', 'true')
         if (includeDeleted) params.set('include_deleted', 'true')
         const qs = params.toString()
-        return request<OntologyDefinitionResponse[]>(qs ? `${ADMIN_API}?${qs}` : ADMIN_API)
+        return request<OntologyDefinitionResponse[]>(qs ? `${ADMIN_API}?${qs}` : ADMIN_API, SILENT_READ)
     },
 
     get(id: string): Promise<OntologyDefinitionResponse> {
-        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`)
+        return request<OntologyDefinitionResponse>(`${ADMIN_API}/${id}`, SILENT_READ)
     },
 
     listVersions(id: string): Promise<OntologyDefinitionResponse[]> {
-        return request<OntologyDefinitionResponse[]>(`${ADMIN_API}/${id}/versions`)
+        return request<OntologyDefinitionResponse[]>(`${ADMIN_API}/${id}/versions`, SILENT_READ)
     },
 
     create(req: OntologyCreateRequest): Promise<OntologyDefinitionResponse> {

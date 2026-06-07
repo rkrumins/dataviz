@@ -27,35 +27,11 @@ from backend.app.services.permission_service import (
 # ── helpers ──────────────────────────────────────────────────────────
 
 async def _seed_full_catalogue(db_session) -> None:
-    """Insert the same permission catalogue the migration would produce."""
-    catalogue = [
-        ("system:admin", "system"),
-        ("users:manage", "system"),
-        ("groups:manage", "system"),
-        ("workspaces:create", "system"),
-        ("workspace:admin", "workspace"),
-        ("workspace:datasource:manage", "workspace"),
-        ("workspace:datasource:read", "workspace"),
-        ("workspace:view:create", "workspace"),
-        ("workspace:view:edit", "workspace"),
-        ("workspace:view:delete", "workspace"),
-        ("workspace:view:read", "workspace"),
-    ]
-    for pid, cat in catalogue:
-        db_session.add(PermissionORM(id=pid, description=pid, category=cat))
-
-    admin_perms = [c[0] for c in catalogue]
-    user_perms = [
-        "workspace:datasource:manage", "workspace:datasource:read",
-        "workspace:view:create", "workspace:view:edit",
-        "workspace:view:delete", "workspace:view:read",
-    ]
-    viewer_perms = ["workspace:datasource:read", "workspace:view:read"]
-
-    for r, perms in (("admin", admin_perms), ("user", user_perms), ("viewer", viewer_perms)):
-        for p in perms:
-            db_session.add(RolePermissionORM(role_name=r, permission_id=p))
-    await db_session.flush()
+    """No-op: ``conftest.db_session`` already seeds the Phase-5
+    catalogue (roles, permissions, role_permissions). Kept as a
+    function so existing call sites don't have to be rewritten.
+    """
+    return None
 
 
 async def _seed_user(db_session, user_id="usr_alice") -> str:
@@ -66,7 +42,6 @@ async def _seed_user(db_session, user_id="usr_alice") -> str:
         first_name="A",
         last_name="L",
         status="active",
-        auth_provider="local",
     ))
     await db_session.flush()
     return user_id
@@ -104,13 +79,13 @@ def test_collapse_wildcards_mixed_domain():
 def test_has_permission_global_and_workspace():
     claims = PermissionClaims(
         sid="sess_x",
-        global_perms=("workspaces:create",),
+        global_perms=("system:workspaces:create",),
         ws_perms={"ws_a": ("workspace:view:read",)},
     )
-    assert has_permission(claims, "workspaces:create")
+    assert has_permission(claims, "system:workspaces:create")
     assert has_permission(claims, "workspace:view:read", workspace_id="ws_a")
     assert not has_permission(claims, "workspace:view:read", workspace_id="ws_b")
-    assert not has_permission(claims, "users:manage")
+    assert not has_permission(claims, "system:users:manage")
 
 
 def test_has_permission_wildcard_expansion():
@@ -127,13 +102,13 @@ def test_has_permission_wildcard_expansion():
 def test_has_permission_global_admin_is_implicit_allow():
     claims = PermissionClaims(sid="sess_a", global_perms=("system:admin",))
     assert has_permission(claims, "workspace:view:delete", workspace_id="ws_anywhere")
-    assert has_permission(claims, "users:manage")
+    assert has_permission(claims, "system:users:manage")
 
 
 def test_jwt_round_trip_preserves_shape():
     claims = PermissionClaims(
         sid="sess_z",
-        global_perms=("workspaces:create",),
+        global_perms=("system:workspaces:create",),
         ws_perms={"ws_x": ("workspace:view:read",)},
     )
     restored = PermissionClaims.from_jwt_dict(claims.to_jwt_dict())
@@ -167,12 +142,14 @@ async def test_resolve_user_with_global_admin(db_session):
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="admin", scope_type="global",
+        role_name="super_admin", scope_type="global",
     )
     claims = await resolve(db_session, user_id)
     assert "system:admin" in claims.global_perms
-    assert "users:manage" in claims.global_perms
-    # No workspace bindings → no ws claims (admin is implied at check time)
+    assert "system:users:manage" in claims.global_perms
+    # Phase 5 category × scope filter: super_admin bundled
+    # workspace:* perms are dropped at global scope (no leak into
+    # ws_perms either, since binding is global).
     assert claims.ws_perms == {}
 
 
@@ -183,13 +160,14 @@ async def test_resolve_user_with_workspace_user_role(db_session):
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="user", scope_type="workspace", scope_id="ws_a",
+        role_name="workspace_member", scope_type="workspace", scope_id="ws_a",
     )
 
     claims = await resolve(db_session, user_id)
     assert "ws_a" in claims.ws_perms
     perms = set(claims.ws_perms["ws_a"])
-    # 'user' role gets the full view + datasource sets → wildcards collapse
+    # 'workspace_member' role gets the full view + datasource sets
+    # → wildcards collapse.
     assert "workspace:view:*" in perms
     assert "workspace:datasource:*" in perms
 
@@ -206,20 +184,20 @@ async def test_resolve_unions_direct_and_group_bindings(db_session):
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="viewer", scope_type="workspace", scope_id="ws_a",
+        role_name="workspace_viewer", scope_type="workspace", scope_id="ws_a",
     )
-    # Indirect via group: user in ws_b.
+    # Indirect via group: member in ws_b.
     await binding_repo.create_binding(
         db_session,
         subject_type="group", subject_id=g.id,
-        role_name="user", scope_type="workspace", scope_id="ws_b",
+        role_name="workspace_member", scope_type="workspace", scope_id="ws_b",
     )
 
     claims = await resolve(db_session, user_id)
     assert "ws_a" in claims.ws_perms
     assert "ws_b" in claims.ws_perms
     assert "workspace:view:read" in claims.ws_perms["ws_a"]
-    # ws_b 'user' bundle collapses to wildcard
+    # ws_b 'workspace_member' bundle collapses to wildcard
     assert "workspace:view:*" in claims.ws_perms["ws_b"]
 
 
@@ -236,18 +214,102 @@ async def test_resolve_overlapping_roles_in_same_workspace_take_union(db_session
     await binding_repo.create_binding(
         db_session,
         subject_type="user", subject_id=user_id,
-        role_name="viewer", scope_type="workspace", scope_id="ws_x",
+        role_name="workspace_viewer", scope_type="workspace", scope_id="ws_x",
     )
     await binding_repo.create_binding(
         db_session,
         subject_type="group", subject_id=g.id,
-        role_name="user", scope_type="workspace", scope_id="ws_x",
+        role_name="workspace_member", scope_type="workspace", scope_id="ws_x",
     )
 
     claims = await resolve(db_session, user_id)
     perms = set(claims.ws_perms["ws_x"])
-    # Wildcards from the 'user' role should be present (union folded in)
+    # Wildcards from the 'workspace_member' role should be present
+    # (union folded in).
     assert "workspace:view:*" in perms or {
         "workspace:view:create", "workspace:view:edit",
         "workspace:view:delete", "workspace:view:read",
     } <= perms
+
+
+# ── time-bound bindings (expires_at enforcement) ─────────────────────
+
+
+def _iso(dt) -> str:
+    return dt.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_resolve_excludes_expired_binding(db_session):
+    """A binding whose ``expires_at`` is in the past must not grant
+    any permissions through ``resolve``."""
+    from datetime import datetime, timedelta, timezone
+
+    await _seed_full_catalogue(db_session)
+    user_id = await _seed_user(db_session)
+    past = _iso(datetime.now(timezone.utc) - timedelta(hours=1))
+    await binding_repo.create_binding(
+        db_session,
+        subject_type="user", subject_id=user_id,
+        role_name="workspace_member", scope_type="workspace", scope_id="ws_a",
+        expires_at=past,
+    )
+
+    claims = await resolve(db_session, user_id)
+    assert claims.ws_perms == {}
+    assert not has_permission(
+        claims, "workspace:view:read", workspace_id="ws_a"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_includes_unexpired_and_null_expiry_bindings(db_session):
+    """A future ``expires_at`` and a NULL ``expires_at`` both still
+    grant permissions."""
+    from datetime import datetime, timedelta, timezone
+
+    await _seed_full_catalogue(db_session)
+    user_id = await _seed_user(db_session)
+    future = _iso(datetime.now(timezone.utc) + timedelta(days=1))
+
+    await binding_repo.create_binding(
+        db_session,
+        subject_type="user", subject_id=user_id,
+        role_name="workspace_viewer", scope_type="workspace", scope_id="ws_future",
+        expires_at=future,
+    )
+    await binding_repo.create_binding(
+        db_session,
+        subject_type="user", subject_id=user_id,
+        role_name="workspace_viewer", scope_type="workspace", scope_id="ws_forever",
+        expires_at=None,
+    )
+
+    claims = await resolve(db_session, user_id)
+    assert has_permission(
+        claims, "workspace:view:read", workspace_id="ws_future"
+    )
+    assert has_permission(
+        claims, "workspace:view:read", workspace_id="ws_forever"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_expired_global_admin_loses_implicit_allow(db_session):
+    """Regression: an expired global-admin binding must not keep
+    granting the system:admin implicit-allow."""
+    from datetime import datetime, timedelta, timezone
+
+    await _seed_full_catalogue(db_session)
+    user_id = await _seed_user(db_session)
+    past = _iso(datetime.now(timezone.utc) - timedelta(seconds=1))
+    await binding_repo.create_binding(
+        db_session,
+        subject_type="user", subject_id=user_id,
+        role_name="super_admin", scope_type="global",
+        expires_at=past,
+    )
+
+    claims = await resolve(db_session, user_id)
+    assert "system:admin" not in claims.global_perms
+    assert not has_permission(claims, "system:users:manage")

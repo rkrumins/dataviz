@@ -24,9 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.endpoints.permissions_admin import compute_user_access
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
 from backend.app.db.engine import get_db_session
+from backend.app.services.nav_catalogue import get_catalogue
 from backend.app.services.permission_service import PermissionClaims
 from backend.auth_service.interface import User
-from backend.common.models.rbac import UserAccessResponse
+from backend.common.models.rbac import NavCatalogueResponse, UserAccessResponse
 
 
 router = APIRouter()
@@ -53,15 +54,28 @@ class PermissionsResponse(BaseModel):
     response_model_by_alias=True,
 )
 async def get_my_permissions(
+    # ``get_current_user`` runs FIRST in the dependency chain and is
+    # the only place that checks the Redis revocation set. Without it
+    # here, a revoked session (binding removed, user dropped from a
+    # group) would still get a 200 here because the JWT itself is
+    # syntactically valid and ``get_permission_claims`` just decodes
+    # it — no revocation check. This endpoint is polled every 60s by
+    # the FE permission poller (``store/permissionPoller.ts``) to
+    # catch idle-user permission updates, so it has to honour the
+    # revocation set: a revoked sid here triggers a 401, which the
+    # FE's silent refresh path catches, rotates the JWT with fresh DB
+    # claims, and the next poll returns the new state.
+    _user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> PermissionsResponse:
     """Return the caller's effective permissions across all scopes.
 
-    Read directly from the access JWT — no DB hit. The frontend uses
-    this to gate UI controls (hide the admin link, show the Share
-    button only when the user can change visibility, etc.). Backend
-    enforcement still happens in ``requires(...)``; the frontend
-    treats this response as advisory.
+    Read directly from the access JWT — no DB hit beyond the
+    revocation lookup that ``get_current_user`` does for us. The
+    frontend uses this to gate UI controls (hide the admin link,
+    show the Share button only when the user can change visibility,
+    etc.). Backend enforcement still happens in ``requires(...)``;
+    the frontend treats this response as advisory.
     """
     return PermissionsResponse(
         sid=claims.sid,
@@ -95,3 +109,23 @@ async def get_my_access(
         # mid-request; treat as 404 rather than 500.
         raise HTTPException(status_code=404, detail="User not found")
     return response
+
+
+@router.get(
+    "/nav",
+    response_model=NavCatalogueResponse,
+    response_model_by_alias=True,
+)
+async def get_nav_catalogue(
+    _user: User = Depends(get_current_user),
+) -> NavCatalogueResponse:
+    """Return the navigation visibility catalogue (Phase 16).
+
+    The section→permission map the frontend uses to gate sidebar and
+    admin nav items. Static (not personalised) — every authenticated
+    user gets the same catalogue and evaluates each spec against their
+    own claims client-side. Centralising it here means the FE no
+    longer hardcodes these gates and can't drift from the backend
+    ``requires(...)`` enforcement (see ``test_nav_catalogue.py``).
+    """
+    return get_catalogue()

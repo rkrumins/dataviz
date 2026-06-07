@@ -10,6 +10,7 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
+import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -370,6 +371,13 @@ export const GenericNode = memo(function GenericNode({
               ))}
             </div>
           </div>
+        )}
+
+        {/* Display-rule tags — shared premium chip cluster, keyed on the
+            same URN used for search highlight. Identical rendering to the
+            other canvases. */}
+        {visual.size !== 'xs' && (
+          <DisplayRuleTagChips urn={searchUrn} size="sm" className="mt-2" />
         )}
 
         {/* Child Count for collapsed nodes */}

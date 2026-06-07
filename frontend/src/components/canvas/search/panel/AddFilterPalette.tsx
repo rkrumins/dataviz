@@ -60,6 +60,7 @@ import {
 } from 'lucide-react'
 import {
     type FC,
+    memo,
     useCallback,
     useEffect,
     useLayoutEffect,
@@ -157,13 +158,16 @@ export interface AddFilterPaletteProps {
     onAdd: (predicate: Predicate) => void
     /** Emit a list of predicates to add at once (from DSL paste). */
     onAddMany: (predicates: Predicate[]) => void
-    /** Open Advanced for group / path authoring. */
-    onOpenAdvanced: () => void
+    /** Open Advanced for group / path authoring. Omit (e.g. the Property
+     *  Manager rule editor, which has no Advanced drawer) to drop any
+     *  ``action:'advanced'`` entries from the palette. */
+    onOpenAdvanced?: () => void
     /** Open the Code (JSON) editor with a stub of the named predicate
      *  kind appended to the current draft. Used by the "Code-only"
      *  Advanced entries (path, withinHops) — visual editors for these
-     *  shapes don't exist; the user authors them in JSON instead. */
-    onOpenCode: (kind: 'path' | 'withinHops') => void
+     *  shapes don't exist; the user authors them in JSON instead. Omit
+     *  to drop those entries (no Code mode in the rule editor). */
+    onOpenCode?: (kind: 'path' | 'withinHops') => void
     disabled?: boolean
 }
 
@@ -195,7 +199,7 @@ interface PaletteEntry {
 }
 
 
-export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
+const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     counts, samples, onAdd, onAddMany, onOpenAdvanced, onOpenCode, disabled,
 }) => {
     const [open, setOpen] = useState(false)
@@ -526,10 +530,29 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
         },
     ], [counts])
 
+    // Drop entries whose handoff isn't wired in this context: ``code``
+    // entries (path / withinHops) need ``onOpenCode``; ``advanced``
+    // entries need ``onOpenAdvanced``. In the Property Manager rule
+    // editor neither is supplied, so those entries are hidden and
+    // now-empty categories collapse — group authoring still works via
+    // the ``emit`` AND/OR/NOT-group entries.
+    const availableCategories = useMemo(() => {
+        return categories
+            .map((cat) => ({
+                ...cat,
+                entries: cat.entries.filter((e) => {
+                    if (e.action === 'code') return !!onOpenCode
+                    if (e.action === 'advanced') return !!onOpenAdvanced
+                    return true
+                }),
+            }))
+            .filter((cat) => cat.entries.length > 0)
+    }, [categories, onOpenCode, onOpenAdvanced])
+
     const filteredCategories = useMemo(() => {
         const q = query.trim().toLowerCase()
-        if (!q) return categories
-        return categories
+        if (!q) return availableCategories
+        return availableCategories
             .map((cat) => ({
                 ...cat,
                 entries: cat.entries.filter((e) =>
@@ -538,7 +561,7 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
                 ),
             }))
             .filter((cat) => cat.entries.length > 0)
-    }, [categories, query])
+    }, [availableCategories, query])
 
     // Close on outside click + Escape. Includes the portal-rendered
     // popover in the "inside" check so clicks within it don't dismiss.
@@ -568,9 +591,9 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
 
     const handleEntry = useCallback((entry: PaletteEntry) => {
         if (entry.action === 'advanced') {
-            onOpenAdvanced()
+            onOpenAdvanced?.()
         } else if (entry.action === 'code' && entry.codeKind) {
-            onOpenCode(entry.codeKind)
+            onOpenCode?.(entry.codeKind)
         } else if (entry.build) {
             onAdd(entry.build())
         }
@@ -786,6 +809,14 @@ export const AddFilterPalette: FC<AddFilterPaletteProps> = ({
         </div>
     )
 }
+
+
+/**
+ * Memoised so the palette (which rebuilds its category catalogue + a
+ * portal) doesn't re-render on every keystroke in a sibling filter row.
+ * VisualQueryBuilder passes referentially stable counts/samples/callbacks.
+ */
+export const AddFilterPalette = memo(AddFilterPaletteImpl)
 
 
 /**

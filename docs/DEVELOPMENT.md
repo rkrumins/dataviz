@@ -4,6 +4,12 @@ Local-dev reference for contributors iterating on Synodic source code.
 
 For self-hosting on a VM, see [DEPLOYMENT.md](DEPLOYMENT.md) instead.
 
+> **Working on the auth / SSO surface?** Read
+> [`SSO_INTEGRATION.md`](SSO_INTEGRATION.md) for the developer
+> Day-1 walkthrough, architecture + sequence diagrams, backend and
+> frontend cookbooks, runbooks, and reference tables. The operator
+> view is in [`SSO.md`](SSO.md).
+
 ## Mental model — two workflows, never both
 
 ```

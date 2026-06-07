@@ -15,8 +15,11 @@ from backend.app.db.engine import (
     get_provider_probe_session,
     with_short_session,
 )
+from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.repositories import provider_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.workspace_visibility import compute_visible_provider_ids
 from backend.common.models.management import (
     ProviderCreateRequest,
     ProviderUpdateRequest,
@@ -26,6 +29,14 @@ from backend.common.models.management import (
 )
 
 router = APIRouter()
+
+
+# Phase 18 — per-endpoint gates. Reads accept any workspace-bound user
+# holding ``workspace:provider:read`` (results are filtered to their
+# visible providers); writes stay ``system:admin`` because provider
+# rows carry credentials and credential rotation is a platform concern.
+_REQUIRES_PROVIDER_READ = requires("workspace:provider:read", workspace_any=True)
+_REQUIRES_SYSTEM_ADMIN = requires("system:admin")
 
 # ── Provider test cache + in-flight dedup ──────────────────────────
 # Reason: multiple hook instances may mount simultaneously and each kick
@@ -159,6 +170,8 @@ async def _run_connectivity_probe(
 @router.get("/status")
 async def list_provider_statuses(
     session: AsyncSession = Depends(get_provider_probe_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_PROVIDER_READ),
 ):
     """Return provider readiness — STRICT structural decoupling from
     provider state.
@@ -192,6 +205,14 @@ async def list_provider_statuses(
     providers = await provider_repo.list_providers(session)
     if not providers:
         return []
+
+    # Phase 18: filter to the providers this caller can see. Platform
+    # admins (system:admin / org-admin) get the unfiltered list.
+    visible_ids = await compute_visible_provider_ids(session, claims)
+    if visible_ids is not None:
+        providers = [p for p in providers if p.id in visible_ids]
+        if not providers:
+            return []
 
     # Read in-memory state — both calls are O(1).
     try:
@@ -276,14 +297,28 @@ def _iso_timestamp(epoch_seconds: float | None) -> str | None:
 @router.get("", response_model=List[ProviderResponse])
 async def list_providers(
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_PROVIDER_READ),
 ):
-    """List all registered providers."""
-    return await provider_repo.list_providers(session)
+    """List providers visible to the caller.
+
+    Platform admins see every registered provider. Workspace-bound
+    users see only providers referenced by a data source in one of
+    their workspaces OR explicitly bound via ``permitted_workspaces``.
+    Provider credentials are NEVER returned (the response DTO strips
+    them).
+    """
+    providers = await provider_repo.list_providers(session)
+    visible_ids = await compute_visible_provider_ids(session, claims)
+    if visible_ids is None:
+        return providers
+    return [p for p in providers if p.id in visible_ids]
 
 
 @router.post("/test-connection", response_model=ConnectionTestResult)
 async def test_unsaved_provider_connection(
     req: ProviderCreateRequest = Body(...),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     # Spanner is a managed gRPC service keyed on project / instance /
     # database (in extra_config). It does NOT use host/port. Reject
@@ -314,6 +349,7 @@ async def test_unsaved_provider_connection(
 async def create_provider(
     req: ProviderCreateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Register a new provider (database server)."""
     return await provider_repo.create_provider(session, req)
@@ -323,10 +359,17 @@ async def create_provider(
 async def get_provider(
     provider_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_PROVIDER_READ),
 ):
-    """Get a single provider."""
+    """Get a single provider, 404 if not visible to the caller."""
     prov = await provider_repo.get_provider(session, provider_id)
     if not prov:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    # Phase 18: hide providers the caller's workspaces don't touch
+    # behind a 404 (don't leak existence).
+    visible_ids = await compute_visible_provider_ids(session, claims)
+    if visible_ids is not None and provider_id not in visible_ids:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     return prov
 
@@ -336,6 +379,7 @@ async def update_provider(
     provider_id: str = Path(...),
     req: ProviderUpdateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Update a provider. Evicts any cached provider instances."""
     prov = await provider_repo.update_provider(session, provider_id, req)
@@ -349,6 +393,7 @@ async def update_provider(
 async def delete_provider(
     provider_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Delete a provider. Rejects if workspaces still reference it."""
     if await provider_repo.has_workspaces(session, provider_id):
@@ -366,8 +411,13 @@ async def delete_provider(
 async def get_provider_impact(
     provider_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_PROVIDER_READ),
 ):
     """Calculate the blast radius of deleting a provider."""
+    visible_ids = await compute_visible_provider_ids(session, claims)
+    if visible_ids is not None and provider_id not in visible_ids:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
     # Ensure provider exists first
     prov_row = await provider_repo.get_provider_orm(session, provider_id)
     if not prov_row:
@@ -379,6 +429,7 @@ async def get_provider_impact(
 @router.post("/{provider_id}/test", response_model=ConnectionTestResult)
 async def test_provider(
     provider_id: str = Path(...),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
     fresh: bool = Query(
         False,
         description=(
@@ -501,6 +552,7 @@ async def _load_provider_for_outbound(provider_id: str, asset_name: str | None):
 async def discover_schema(
     provider_id: str = Path(...),
     asset_name: str = Body(None, embed=True),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Introspect an asset's schema. Short-session pattern."""
     instance = await _load_provider_for_outbound(provider_id, asset_name)

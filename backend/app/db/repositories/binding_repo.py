@@ -12,12 +12,37 @@ handlers in those tables, plus the consistency check constraint on
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import RoleBindingORM
+
+
+def _is_expired(expires_at: Optional[str], *, now: datetime) -> bool:
+    """True if a time-bound binding has lapsed.
+
+    ``expires_at`` is a nullable ISO-8601 string (NULL = never expires).
+    Parsed defensively: a value we can't parse is treated as
+    non-expiring so a malformed timestamp can never silently revoke a
+    legitimate grant — the alternative (fail-closed on parse error)
+    would lock users out on a bad write, which is worse than the
+    status quo where expiry wasn't enforced at all.
+    """
+    if not expires_at:
+        return False
+    raw = expires_at.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= now
 
 
 VALID_SUBJECT_TYPES = {"user", "group"}
@@ -78,6 +103,26 @@ async def create_binding(
     return binding
 
 
+async def update_binding_expiry(
+    session: AsyncSession,
+    binding_id: str,
+    *,
+    expires_at: Optional[str],
+) -> Optional[RoleBindingORM]:
+    """Phase 7: extend, change, or clear a binding's ``expires_at``.
+
+    Passing ``None`` clears the expiry (the binding becomes
+    permanent). Passing an ISO timestamp sets / replaces it. Returns
+    the updated binding or ``None`` if no binding has that id.
+    """
+    binding = await get_binding(session, binding_id)
+    if binding is None:
+        return None
+    binding.expires_at = expires_at
+    await session.flush()
+    return binding
+
+
 async def delete_binding(session: AsyncSession, binding_id: str) -> bool:
     result = await session.execute(
         delete(RoleBindingORM).where(RoleBindingORM.id == binding_id)
@@ -133,7 +178,11 @@ async def list_for_user_with_groups(
     else:
         where = direct
     result = await session.execute(select(RoleBindingORM).where(where))
-    return list(result.scalars().all())
+    now = datetime.now(timezone.utc)
+    return [
+        b for b in result.scalars().all()
+        if not _is_expired(b.expires_at, now=now)
+    ]
 
 
 async def list_for_scope(
@@ -141,8 +190,16 @@ async def list_for_scope(
     *,
     scope_type: str,
     scope_id: Optional[str] = None,
+    include_expired: bool = False,
 ) -> list[RoleBindingORM]:
-    """Reverse lookup: who has access to this workspace?"""
+    """Reverse lookup: who has access to this workspace?
+
+    By default, expired time-bound bindings are filtered out so the
+    Members tab UI doesn't show stale rows AND its "already holds this
+    role" duplicate check doesn't false-positive on a lapsed binding.
+    Pass ``include_expired=True`` only when the caller actually needs
+    the historical rows (audit / compliance tooling).
+    """
     if scope_type == "global":
         stmt = select(RoleBindingORM).where(
             RoleBindingORM.scope_type == "global",
@@ -154,7 +211,11 @@ async def list_for_scope(
             RoleBindingORM.scope_id == scope_id,
         )
     result = await session.execute(stmt)
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())
+    if include_expired:
+        return rows
+    now = datetime.now(timezone.utc)
+    return [b for b in rows if not _is_expired(b.expires_at, now=now)]
 
 
 async def find_binding(

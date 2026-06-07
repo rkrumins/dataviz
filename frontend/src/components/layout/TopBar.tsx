@@ -7,7 +7,14 @@ import { NotificationBell } from '@/components/layout/NotificationBell'
 import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
-import { useAuthStore, usePermission } from '@/store/auth'
+import {
+  useAuthStore,
+  usePermission,
+  usePermissionClaims,
+  effectiveRoleFor,
+  SYSTEM_ROLE_LABELS,
+  type SystemRole,
+} from '@/store/auth'
 import { useSchemaStore } from '@/store/schema'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
@@ -35,10 +42,40 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const persona = usePersonaStore((s) => s.mode)
   const { user, logout } = useAuthStore()
   const isSystemAdmin = usePermission('system:admin')
+  const isOrgAdmin = usePermission('system:org-admin')
+  const claims = usePermissionClaims()
+  const location = useLocation()
   const searchPlaceholder = useSearchPlaceholder()
   const navigate = useNavigate()
   const avatar = useAvatarContent()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
+
+  // Phase 5: derive a workspace-aware role badge. When the route is
+  // ``/workspaces/:wsId/...`` (or the admin equivalent), look up the
+  // user's effective tier inside that workspace; otherwise show the
+  // global tier. A user who's admin in finance and viewer in marketing
+  // sees the badge flip as they navigate between the two — preventing
+  // the "why am I still seeing 'admin' but getting 403s" confusion.
+  const activeWorkspaceId = (() => {
+    const m = location.pathname.match(
+      /^\/(?:admin\/)?workspaces\/([^/]+)/,
+    )
+    return m?.[1] ?? null
+  })()
+  const effectiveRole: SystemRole | null = effectiveRoleFor(
+    claims, activeWorkspaceId,
+  )
+  const roleBadgeLabel = effectiveRole
+    ? SYSTEM_ROLE_LABELS[effectiveRole]
+    : (user?.role ?? 'Member')
+  const roleBadgeIsAdmin = effectiveRole === 'super_admin'
+    || effectiveRole === 'org_admin'
+    || effectiveRole === 'workspace_admin'
+
+  // The admin nav cog shows for super_admin OR org_admin — both tiers
+  // see at least part of /admin (org_admin gets workspaces/SSO but not
+  // users/groups; the section guards inside /admin enforce that).
+  const showAdminCog = isSystemAdmin || isOrgAdmin
 
   const initials = user
     ? `${(user.firstName?.[0] ?? '').toUpperCase()}${(user.lastName?.[0] ?? '').toUpperCase()}`
@@ -151,7 +188,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           {/* Group 3: System / Account */}
           <ThemeSwitcher theme={theme} onChange={setTheme} />
 
-          {isSystemAdmin && (
+          {showAdminCog && (
             <button
               className="btn btn-ghost p-2 rounded-lg"
               onClick={() => navigate('/admin')}
@@ -205,13 +242,20 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
                     <p className="text-xs text-ink-muted truncate">
                       {user?.email}
                     </p>
-                    <span className={cn(
-                      "inline-block mt-0.5 px-1.5 py-px rounded text-[10px] font-medium capitalize",
-                      user?.role === 'admin'
-                        ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
-                        : 'bg-accent-lineage/10 text-accent-lineage'
-                    )}>
-                      {user?.role || 'user'}
+                    <span
+                      className={cn(
+                        'inline-block mt-0.5 px-1.5 py-px rounded text-[10px] font-medium',
+                        roleBadgeIsAdmin
+                          ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                          : 'bg-accent-lineage/10 text-accent-lineage',
+                      )}
+                      title={
+                        activeWorkspaceId
+                          ? `Effective role in this workspace`
+                          : 'Global tier'
+                      }
+                    >
+                      {roleBadgeLabel}
                     </span>
                   </div>
                 </div>

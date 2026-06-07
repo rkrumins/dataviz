@@ -41,10 +41,15 @@ REVOCATION_TTL_SECONDS: int = int(
 )
 
 _KEY_PREFIX = "rbac:revoked:"
+_USER_SIDS_PREFIX = "rbac:user_sids:"
 
 
 def _key(sid: str) -> str:
     return f"{_KEY_PREFIX}{sid}"
+
+
+def _user_sids_key(user_id: str) -> str:
+    return f"{_USER_SIDS_PREFIX}{user_id}"
 
 
 # ── Backend protocol (so tests can swap in a fake) ───────────────────
@@ -53,6 +58,9 @@ class RevocationBackend(Protocol):
     async def exists(self, key: str) -> bool: ...
     async def set_with_ttl(self, key: str, ttl_seconds: int) -> None: ...
     async def delete(self, key: str) -> None: ...
+    # user → sids reverse index (a set keyed by user, whole-key TTL).
+    async def add_to_set(self, key: str, member: str, ttl_seconds: int) -> None: ...
+    async def set_members(self, key: str) -> set[str]: ...
     async def health(self) -> bool: ...
 
 
@@ -91,6 +99,21 @@ class RedisBackend:
         except Exception as exc:
             raise RevocationBackendError(str(exc)) from exc
 
+    async def add_to_set(self, key: str, member: str, ttl_seconds: int) -> None:
+        try:
+            await self._client.sadd(key, member)
+            # Refresh the whole-key TTL on every add so an active user's
+            # index outlives their most recent session by the buffer.
+            await self._client.expire(key, ttl_seconds)
+        except Exception as exc:
+            raise RevocationBackendError(str(exc)) from exc
+
+    async def set_members(self, key: str) -> set[str]:
+        try:
+            return set(await self._client.smembers(key))
+        except Exception as exc:
+            raise RevocationBackendError(str(exc)) from exc
+
     async def health(self) -> bool:
         try:
             return bool(await self._client.ping())
@@ -106,6 +129,7 @@ class InMemoryBackend:
     """
     def __init__(self) -> None:
         self._set: set[str] = set()
+        self._sets: dict[str, set[str]] = {}
 
     async def exists(self, key: str) -> bool:
         return key in self._set
@@ -117,6 +141,14 @@ class InMemoryBackend:
 
     async def delete(self, key: str) -> None:
         self._set.discard(key)
+        self._sets.pop(key, None)
+
+    async def add_to_set(self, key: str, member: str, ttl_seconds: int) -> None:
+        # TTL ignored in the fake (see set_with_ttl).
+        self._sets.setdefault(key, set()).add(member)
+
+    async def set_members(self, key: str) -> set[str]:
+        return set(self._sets.get(key, ()))
 
     async def health(self) -> bool:
         return True
@@ -163,28 +195,212 @@ class RevocationService:
         for sid in sids:
             await self.revoke_session(sid)
 
-    # Coarse revocation: caller knows the user but not their sids.
-    # Phase 1: there is no sid index by user yet — we mint a new
-    # session per login and that's the only place it is recorded.
-    # Phase 2 may add a Redis-side ``rbac:user_sids:<user>`` reverse
-    # index so this becomes O(1); for now we provide the placeholder
-    # so call sites can be written today.
-    async def revoke_all_user_sessions(self, user_id: str) -> None:
-        """Phase 1 stub — see docstring.
+    # Session tracking: every login/refresh mints a fresh sid; record
+    # it under the user's reverse index so a later coarse revocation
+    # can find every live session for that user. The set carries a
+    # whole-key TTL (refreshed on each add) equal to the revocation
+    # window, so stale sids self-expire — a revoked sid whose access
+    # token has already lapsed is a harmless no-op anyway.
+    async def record_session(self, user_id: str, sid: str) -> None:
+        if not user_id or not sid:
+            return
+        await self._backend.add_to_set(
+            _user_sids_key(user_id), sid, self._ttl
+        )
 
-        In Phase 1 the helper is a no-op because we don't yet keep a
-        user → sids index. This is intentional: Phase 1 ships the
-        revocation set without yet using it, so the only "revocation"
-        path that actually matters is at session creation/logout (the
-        existing refresh-token rotation handles that). The helper is
-        published now so Phase 2 can fill in the body without any call-
-        site change."""
-        logger.debug(
-            "revoke_all_user_sessions: user=%s — Phase 1 no-op", user_id,
+    # Coarse revocation: caller knows the user but not their sids.
+    # Reads the reverse index, revokes every sid in it, then drops the
+    # index so a re-login starts a clean set.
+    async def revoke_all_user_sessions(self, user_id: str) -> None:
+        if not user_id:
+            return
+        key = _user_sids_key(user_id)
+        sids = await self._backend.set_members(key)
+        for sid in sids:
+            await self.revoke_session(sid)
+        await self._backend.delete(key)
+        logger.info(
+            "revoke_all_user_sessions: user=%s revoked %d session(s)",
+            user_id, len(sids),
         )
 
     async def health(self) -> bool:
         return await self._backend.health()
+
+
+# ── Binding-mutation fan-out helpers ────────────────────────────────
+#
+# Phase 7: when an admin demotes a user or revokes a binding, the
+# resolver's read path catches the change at next login. Until then,
+# the user's existing JWT carries the old claims for up to
+# ``JWT_EXPIRY_MINUTES``. For enterprise security postures this is
+# too slow — a fired employee retains workspace access for 5 minutes
+# after their offboarding ticket completes.
+#
+# The helpers below convert a binding-shape change into the right
+# ``revoke_*_user_sessions`` calls. Wrapped in try/except so a Redis
+# outage never blocks the API mutation (the JWT expiry is still the
+# safety net).
+
+
+async def _emit_session_revoked(
+    session, *, user_id: str, reason: str, sessions_killed: int = 1,
+) -> None:
+    """Phase 9: emit one ``user.session_revoked`` outbox event per
+    user whose sessions we killed. Best-effort — a failure here must
+    never block the binding mutation that triggered the revocation.
+    The caller passes ``reason`` so the audit log shows WHY (the
+    Phase-7 revoke helpers fan out from multiple call sites).
+    """
+    if session is None:
+        return
+    try:
+        from backend.app.db.repositories import user_repo
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.session_revoked",
+            payload={
+                "user_id": user_id,
+                "reason": reason,
+                "sessions_killed": sessions_killed,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "_emit_session_revoked(user=%s reason=%s) failed: %s",
+            user_id, reason, exc,
+        )
+
+
+async def revoke_subject_sessions(
+    subject_type: str,
+    subject_id: str,
+    *,
+    expand_groups: bool = True,
+    session=None,
+    reason: str = "unspecified",
+) -> int:
+    """Revoke every live session belonging to a binding subject.
+
+    For ``subject_type='user'`` the call is direct. For
+    ``subject_type='group'`` we expand to every group member (so a
+    group-binding revoke fans out across the membership).
+
+    Returns the number of users whose sessions were revoked.
+    Best-effort: a Redis failure or an empty session index returns 0
+    silently — the JWT TTL is still the floor on staleness.
+
+    Phase 9: ``reason`` is propagated to a ``user.session_revoked``
+    outbox event per affected user so the audit log explains WHY
+    each kill happened (binding revoked, role changed, etc.).
+    """
+    svc = get_revocation_service()
+    if subject_type == "user":
+        try:
+            await svc.revoke_all_user_sessions(subject_id)
+            await _emit_session_revoked(
+                session, user_id=subject_id, reason=reason,
+            )
+            return 1
+        except Exception as exc:  # noqa: BLE001 — best-effort by design
+            logger.warning(
+                "revoke_subject_sessions(user=%s) failed: %s", subject_id, exc,
+            )
+            return 0
+
+    if subject_type == "group" and expand_groups:
+        if session is None:
+            logger.warning(
+                "revoke_subject_sessions(group=%s): no DB session "
+                "passed; skipping membership expansion. JWT TTL is "
+                "the only floor on staleness.",
+                subject_id,
+            )
+            return 0
+        from backend.app.db.repositories import group_repo
+        try:
+            members = await group_repo.list_group_members(session, subject_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "revoke_subject_sessions(group=%s) membership lookup "
+                "failed: %s", subject_id, exc,
+            )
+            return 0
+        count = 0
+        for m in members:
+            try:
+                await svc.revoke_all_user_sessions(m.user_id)
+                await _emit_session_revoked(
+                    session, user_id=m.user_id, reason=reason,
+                )
+                count += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "revoke_subject_sessions(group=%s, member=%s) failed: %s",
+                    subject_id, m.user_id, exc,
+                )
+        return count
+
+    return 0
+
+
+async def revoke_role_sessions(
+    role_name: str, *, session, reason: str = "role_changed",
+) -> int:
+    """Revoke sessions for every user touched by a role-shape change.
+
+    Used by ``PUT /admin/roles/{name}`` (the role's permission bundle
+    changed) and ``DELETE`` (cascading after individual bindings are
+    removed). Walks every binding that references the role, expands
+    group bindings to their members, and dedupes per user.
+
+    Best-effort throughout. Returns the count of distinct users
+    revoked so the caller can audit-log the blast radius.
+
+    Phase 9: emits one ``user.session_revoked`` event per affected
+    user (with ``reason``) so the audit log captures the cascade.
+    """
+    from sqlalchemy import select
+    from backend.app.db.models import RoleBindingORM
+    from backend.app.db.repositories import group_repo
+
+    try:
+        rows = (await session.execute(
+            select(RoleBindingORM).where(RoleBindingORM.role_name == role_name)
+        )).scalars().all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "revoke_role_sessions(%s) lookup failed: %s", role_name, exc,
+        )
+        return 0
+
+    user_ids: set[str] = set()
+    for b in rows:
+        if b.subject_type == "user":
+            user_ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            try:
+                members = await group_repo.list_group_members(
+                    session, b.subject_id,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            for m in members:
+                user_ids.add(m.user_id)
+
+    svc = get_revocation_service()
+    count = 0
+    for uid in user_ids:
+        try:
+            await svc.revoke_all_user_sessions(uid)
+            await _emit_session_revoked(session, user_id=uid, reason=reason)
+            count += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "revoke_role_sessions(%s, user=%s) failed: %s",
+                role_name, uid, exc,
+            )
+    return count
 
 
 # ── Singleton wiring ──────────────────────────────────────────────────

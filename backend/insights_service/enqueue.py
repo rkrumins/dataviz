@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from backend.app.config import resilience
 
@@ -57,6 +57,12 @@ _DEFAULT_DEDUP_TTL_SECS = int(os.getenv(
 _REDIS_BENIGN_ERRORS: tuple = (
     ConnectionError, asyncio.TimeoutError, TimeoutError, OSError,
 )
+
+
+# Why no message was enqueued. ``dedup`` (a job for this scope is already
+# in flight) is the normal steady-state outcome and must be readable
+# distinctly from ``redis_down`` (Redis unreachable — degraded path).
+EnqueueOutcome = Literal["enqueued", "dedup", "redis_down", "error"]
 
 
 # ── Core: kind-generic enqueue ───────────────────────────────────────
@@ -100,6 +106,36 @@ async def enqueue_job(
         return None
 
 
+async def enqueue_job_safe_ex(
+    envelope: JobEnvelope,
+    *,
+    dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+) -> tuple[Optional[str], EnqueueOutcome]:
+    """Redis-tolerant enqueue that also reports *why* no message landed.
+
+    Same behavior as :func:`enqueue_job_safe`, but returns
+    ``(msg_id, outcome)`` so callers can log ``dedup`` (a poll is already
+    in flight — normal) separately from ``redis_down`` (Redis
+    unreachable — degraded). A falsy ``msg_id`` from :func:`enqueue_job`
+    means the dedup claim was already held.
+    """
+    try:
+        msg_id = await enqueue_job(envelope, dedup_ttl_secs=dedup_ttl_secs)
+    except _REDIS_BENIGN_ERRORS as exc:
+        logger.warning(
+            "Redis unavailable for %s enqueue scope=%s: %s — handler will return cache-only without refresh",
+            envelope.kind, envelope.scope_key, exc,
+        )
+        return None, "redis_down"
+    except Exception as exc:  # pragma: no cover - last-resort safety net
+        logger.exception(
+            "Unexpected failure in enqueue_job_safe (kind=%s scope=%s): %s",
+            envelope.kind, envelope.scope_key, exc,
+        )
+        return None, "error"
+    return (msg_id, "enqueued") if msg_id else (None, "dedup")
+
+
 async def enqueue_job_safe(
     envelope: JobEnvelope,
     *,
@@ -112,20 +148,8 @@ async def enqueue_job_safe(
     is unreachable, otherwise a Redis outage cascades into 5xx errors
     on the web tier.
     """
-    try:
-        return await enqueue_job(envelope, dedup_ttl_secs=dedup_ttl_secs)
-    except _REDIS_BENIGN_ERRORS as exc:
-        logger.warning(
-            "Redis unavailable for %s enqueue scope=%s: %s — handler will return cache-only without refresh",
-            envelope.kind, envelope.scope_key, exc,
-        )
-        return None
-    except Exception as exc:  # pragma: no cover - last-resort safety net
-        logger.exception(
-            "Unexpected failure in enqueue_job_safe (kind=%s scope=%s): %s",
-            envelope.kind, envelope.scope_key, exc,
-        )
-        return None
+    msg_id, _ = await enqueue_job_safe_ex(envelope, dedup_ttl_secs=dedup_ttl_secs)
+    return msg_id
 
 
 # ── Stats: existing call-site API (graph.py, workspaces.py, scheduler) ─
@@ -154,6 +178,26 @@ async def enqueue_stats_job(
     return await enqueue_job(envelope, dedup_ttl_secs=dedup_ttl_secs)
 
 
+async def enqueue_stats_job_safe_ex(
+    data_source_id: str,
+    workspace_id: str,
+    *,
+    dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+) -> tuple[Optional[str], EnqueueOutcome]:
+    """Like :func:`enqueue_stats_job_safe` but reports the enqueue outcome
+    (``enqueued`` / ``dedup`` / ``redis_down`` / ``error``) so the caller
+    can log a steady-state dedup distinctly from a Redis outage.
+    """
+    if not data_source_id or not workspace_id:
+        return None, "error"
+    envelope = StatsJobEnvelope(
+        data_source_id=data_source_id,
+        workspace_id=workspace_id,
+        enqueued_at=datetime.now(timezone.utc),
+    )
+    return await enqueue_job_safe_ex(envelope, dedup_ttl_secs=dedup_ttl_secs)
+
+
 async def enqueue_stats_job_safe(
     data_source_id: str,
     workspace_id: str,
@@ -166,14 +210,10 @@ async def enqueue_stats_job_safe(
     into 5xx errors. ``None`` covers both "Redis unreachable" and "claim
     already held"; callers treat them identically.
     """
-    if not data_source_id or not workspace_id:
-        return None
-    envelope = StatsJobEnvelope(
-        data_source_id=data_source_id,
-        workspace_id=workspace_id,
-        enqueued_at=datetime.now(timezone.utc),
+    msg_id, _ = await enqueue_stats_job_safe_ex(
+        data_source_id, workspace_id, dedup_ttl_secs=dedup_ttl_secs
     )
-    return await enqueue_job_safe(envelope, dedup_ttl_secs=dedup_ttl_secs)
+    return msg_id
 
 
 # ── Discovery: pre-registration asset cache miss ─────────────────────

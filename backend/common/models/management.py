@@ -604,6 +604,7 @@ class ContextModelCreateRequest(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
+    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
 
     class Config:
         populate_by_name = True
@@ -616,6 +617,7 @@ class ContextModelUpdateRequest(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Optional[Dict[str, Any]] = Field(None, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
+    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
 
     class Config:
         populate_by_name = True
@@ -633,6 +635,7 @@ class ContextModelResponse(BaseModel):
     scope_filter: Optional[Dict[str, Any]] = Field(None, alias="scopeFilter")
     instance_assignments: Dict[str, Any] = Field(default_factory=dict, alias="instanceAssignments")
     scope_edge_config: Optional[Dict[str, Any]] = Field(None, alias="scopeEdgeConfig")
+    display_rules_config: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRulesConfig")
     is_active: bool = Field(alias="isActive")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")

@@ -106,3 +106,20 @@ async def get_role_permissions_for_roles(
     for role_name, permission_id in result.all():
         out.setdefault(role_name, []).append(permission_id)
     return out
+
+
+async def get_permission_categories(session: AsyncSession) -> dict[str, str]:
+    """Return ``{permission_id: category}`` for every permission in
+    the catalogue. Used by ``permission_service.resolve()`` to filter
+    emitted permissions by category × binding scope (Phase 5).
+
+    Returns an empty dict if the table is missing (defensive — should
+    never happen post-migration, but keeps the resolver from crashing
+    on a partial upgrade). The fallback in resolve() treats unknown
+    permissions as ``system`` category, which is the safer default
+    for global-scoped bindings.
+    """
+    result = await session.execute(
+        select(PermissionORM.id, PermissionORM.category)
+    )
+    return {row[0]: row[1] for row in result.all()}

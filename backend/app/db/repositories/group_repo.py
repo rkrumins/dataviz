@@ -165,3 +165,21 @@ async def count_members(session: AsyncSession, group_id: str) -> int:
         .where(GroupMemberORM.group_id == group_id)
     )
     return result.scalar_one()
+
+
+async def count_members_batch(
+    session: AsyncSession, group_ids: list[str] | set[str],
+) -> dict[str, int]:
+    """One query for N group counts (replacement for an N+1 loop).
+
+    Returns ``{group_id: member_count}`` with zero entries for groups
+    that have no members at all (callers should ``.get(gid, 0)``).
+    """
+    if not group_ids:
+        return {}
+    rows = await session.execute(
+        select(GroupMemberORM.group_id, func.count())
+        .where(GroupMemberORM.group_id.in_(list(group_ids)))
+        .group_by(GroupMemberORM.group_id)
+    )
+    return {gid: cnt for gid, cnt in rows.all()}

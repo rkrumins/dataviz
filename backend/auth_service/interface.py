@@ -24,6 +24,13 @@ class User(BaseModel):
 
     This is the cross-service contract: when auth becomes its own
     microservice, this is what /auth/me returns over HTTP.
+
+    Phase 3 adds ``attributes``: the operator-mapped IdP extras
+    (department, employee_id, manager, cost_center, …) persisted on
+    the user row by ``set_user_idp_metadata``. The full list of
+    linked SSO identities lives on a separate ``/me/identities``
+    endpoint, not on this DTO, so the wire shape of /me / /login /
+    /refresh stays tight.
     """
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
@@ -36,6 +43,8 @@ class User(BaseModel):
     auth_provider: str = Field("local", alias="authProvider")
     created_at: str = Field("", alias="createdAt")
     updated_at: str = Field("", alias="updatedAt")
+    # IdP-mapped attributes. Empty dict for local-only users.
+    attributes: dict = Field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
@@ -100,6 +109,15 @@ class IdentityService(Protocol):
         """Look up a user by id. Returns ``None`` if not found or deleted."""
         ...
 
+    async def complete_sso_login(self, identity) -> tuple[User, SessionTokens]:
+        """Find-or-provision a user from a verified SSO ``ProviderIdentity``
+        and issue a fresh session.
+
+        Applies the identity-linking guardrails. Raises ``SSOAuthError``
+        when linking is unsafe (the caller surfaces a generic failure).
+        """
+        ...
+
 
 # ── Errors ───────────────────────────────────────────────────────────
 
@@ -115,6 +133,40 @@ class InvalidRefreshToken(AuthError):
     """Refresh token is missing, malformed, expired, or reused."""
 
 
+class SSOAuthError(AuthError):
+    """SSO login could not be completed — e.g. the IdP subject's email
+    collides with an existing account and auto-linking is unsafe. The
+    route maps this to a generic failure; the reason is audited, not
+    shown to the browser."""
+
+
+class SsoReauthRequired(AuthError):
+    """The SSO session has exceeded ``SSO_SESSION_MAX_AGE_HOURS`` since
+    the user actually authenticated at the IdP. The refresh family is
+    revoked and the caller must redirect the user to ``login_url`` (an
+    IdP-bound /auth/{oidc,saml,custom}/login URL with ``force=1``) to
+    re-authenticate.
+
+    The router translates this into a 401 with a structured body so the
+    frontend can follow the redirect transparently."""
+
+    def __init__(self, login_url: str, *, provider: str):
+        super().__init__("sso_reauth_required")
+        self.login_url = login_url
+        self.provider = provider
+
+
+class LocalLoginDisabled(AuthError):
+    """Phase 4: the platform is in SSO-only mode
+    (``app_auth_config.allow_local_login = false``). The router
+    surfaces this as a 403 with a structured body so the FE can
+    redirect to the dynamic providers picker instead of showing the
+    generic "invalid credentials" message."""
+
+    def __init__(self) -> None:
+        super().__init__("local_login_disabled")
+
+
 __all__ = [
     "User",
     "SessionTokens",
@@ -122,4 +174,7 @@ __all__ = [
     "AuthError",
     "InvalidCredentials",
     "InvalidRefreshToken",
+    "SSOAuthError",
+    "SsoReauthRequired",
+    "LocalLoginDisabled",
 ]

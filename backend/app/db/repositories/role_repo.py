@@ -30,8 +30,22 @@ from backend.app.db.models import (
 )
 
 
-SYSTEM_ROLE_NAMES = ("admin", "user", "viewer")
-"""Roles seeded by the migration; never editable or deletable."""
+SYSTEM_ROLE_NAMES = (
+    "super_admin",
+    "org_admin",
+    "workspace_admin",
+    "workspace_member",
+    "workspace_viewer",
+)
+"""Roles seeded by the migration; never editable or deletable.
+
+Phase 5 taxonomy:
+  * ``super_admin``     — platform owner (global)
+  * ``org_admin``       — cross-workspace operator (global)
+  * ``workspace_admin`` — workspace administrator (workspace)
+  * ``workspace_member``— standard member (workspace)
+  * ``workspace_viewer``— read-only (workspace)
+"""
 
 VALID_SCOPE_TYPES = ("global", "workspace")
 """Mirrors ``RoleORM`` CHECK constraint."""
@@ -275,6 +289,42 @@ async def _validate_permissions_exist(
         )
 
 
+async def delete_workspace_scoped_roles(
+    session: AsyncSession,
+    workspace_id: str,
+) -> list[str]:
+    """Phase 7: delete every custom role scoped to a workspace.
+
+    Used on workspace deletion to prevent orphaned ``RoleORM`` rows
+    that can't be bound anywhere (their workspace is gone). System
+    roles are stored at ``scope_type='global'`` (workspace templates)
+    so they're never matched here. Returns the deleted role names so
+    the caller can audit the cascade.
+
+    Callers must have removed binding rows for those roles first —
+    the FK from ``role_permissions`` to a deleted role would orphan
+    too, so we clear that bundle as part of the same call.
+    """
+    rows = (await session.execute(
+        select(RoleORM).where(
+            RoleORM.scope_type == "workspace",
+            RoleORM.scope_id == workspace_id,
+        )
+    )).scalars().all()
+    deleted: list[str] = []
+    for role in rows:
+        await session.execute(
+            delete(RolePermissionORM).where(RolePermissionORM.role_name == role.name)
+        )
+        await session.execute(
+            delete(RoleORM).where(RoleORM.name == role.name)
+        )
+        deleted.append(role.name)
+    if deleted:
+        await session.flush()
+    return deleted
+
+
 async def role_is_bindable_in_scope(
     session: AsyncSession,
     *,
@@ -295,9 +345,18 @@ async def role_is_bindable_in_scope(
     if role is None:
         return False
     if role.scope_type == "global":
+        # Phase 5: system workspace-template roles (workspace_admin,
+        # workspace_member, workspace_viewer) are stored as
+        # scope_type='global' (the ``ck_roles_scope_consistency``
+        # CHECK requires workspace-scoped roles to have a concrete
+        # scope_id, which we don't have for templates that bind to
+        # any workspace). The resolver's category × scope filter still
+        # does the right thing semantically: a binding at workspace
+        # scope only emits workspace:* perms, even if the role bundles
+        # system:* perms too. So "global role binds anywhere" is safe.
         return True
-    # Workspace-scoped role: binding must be a workspace binding for
-    # the same workspace.
+    # Workspace-scoped CUSTOM role: binding must be a workspace binding
+    # for the same workspace.
     return (
         binding_scope_type == "workspace"
         and binding_scope_id == role.scope_id

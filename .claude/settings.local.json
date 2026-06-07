@@ -1,10 +1,19 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)"
-    ]
-  },
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(docker volume *)",
+      "Bash(docker stop *)",
+      "Bash(docker run *)",
+      "Bash(docker start *)"
+    ]
+  },
+  "sandbox": {
+    "enabled": false,
+    "autoAllowBashIfSandboxed": false,
+    "allowUnsandboxedCommands": true
   }
 }

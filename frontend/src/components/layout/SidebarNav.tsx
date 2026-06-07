@@ -13,6 +13,7 @@ import {
   Clock,
   ArrowRight,
   BookOpen,
+  Sparkles,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useNavigationStore, type NavigationTab } from '@/store/navigation'
@@ -21,6 +22,8 @@ import { useCanvasStore } from '@/store/canvas'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
+import { useNavPermission } from '@/store/auth'
+import { useSidebarSpec } from '@/store/navCatalogue'
 
 // ── Sidebar sizing constants ────────────────────────────────────────
 const MIN_WIDTH = 220
@@ -346,15 +349,42 @@ export function SidebarNav() {
       case 'workspaces': navigate('/workspaces'); break
       case 'ingestion': navigate('/ingestion'); break
       case 'schema': navigate('/schema'); break
-      case 'admin': navigate('/admin/overview'); break
+      // Navigate to /admin (no sub-route). AdminPage's ``isRoot``
+      // branch redirects to the first sub-page the current user can
+      // see — so a delegated groups-admin lands on /admin/groups,
+      // not on /admin/overview's access-denied panel.
+      case 'admin': navigate('/admin'); break
     }
   }
 
-  // Populate nav item badges
-  const mainNavItems: NavItemConfig[] = NAV_ITEMS_CONFIG.map((item) => ({
-    ...item,
-    badge: item.id === 'explore' ? viewCount : undefined,
-  }))
+  // Permission gate per nav item, driven by the centralised nav
+  // catalogue served from the backend (seeded by bundled defaults).
+  // Hooks are called in static order matching ``NAV_ITEMS_CONFIG``
+  // (module-scope constant), so hook-rules stay satisfied across
+  // renders. ``useSidebarSpec`` resolves the live spec from the store.
+  const dashboardVisible  = useNavPermission(useSidebarSpec('dashboard'))
+  const exploreVisible    = useNavPermission(useSidebarSpec('explore'))
+  const workspacesVisible = useNavPermission(useSidebarSpec('workspaces'))
+  const ingestionVisible  = useNavPermission(useSidebarSpec('ingestion'))
+  const schemaVisible     = useNavPermission(useSidebarSpec('schema'))
+  const adminVisible      = useNavPermission(useSidebarSpec('admin'))
+
+  const visibility: Record<NavigationTab, boolean> = {
+    dashboard:  dashboardVisible,
+    explore:    exploreVisible,
+    workspaces: workspacesVisible,
+    ingestion:  ingestionVisible,
+    schema:     schemaVisible,
+    admin:      adminVisible,
+  }
+
+  // Populate nav item badges and filter to permission-allowed items.
+  const mainNavItems: NavItemConfig[] = NAV_ITEMS_CONFIG
+    .filter((item) => visibility[item.id])
+    .map((item) => ({
+      ...item,
+      badge: item.id === 'explore' ? viewCount : undefined,
+    }))
 
   const hoveredNavItem = hoveredNavId ? mainNavItems.find(i => i.id === hoveredNavId) : null
 
@@ -417,8 +447,28 @@ export function SidebarNav() {
         </div>
       )}
 
+      {/* User Guide link */}
+      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 pt-2" : "px-2.5 pt-2")}>
+        <a
+          href="/guide"
+          className={cn(
+            "flex items-center rounded-lg transition-all duration-150 text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]",
+            sidebarCollapsed ? "justify-center p-2" : "gap-3 px-2.5 py-2"
+          )}
+          title="User Guide"
+        >
+          <div className={cn(
+            "flex items-center justify-center rounded-lg shrink-0 bg-gradient-to-br from-indigo-500 to-violet-600 text-white",
+            sidebarCollapsed ? "w-8 h-8" : "w-7 h-7"
+          )}>
+            <Sparkles className={cn(sidebarCollapsed ? "w-4 h-4" : "w-3.5 h-3.5")} />
+          </div>
+          {!sidebarCollapsed && <span className="text-xs font-medium">User Guide</span>}
+        </a>
+      </div>
+
       {/* Documentation link */}
-      <div className={cn("border-t border-glass-border", sidebarCollapsed ? "px-1.5 py-2" : "px-2.5 py-2")}>
+      <div className={cn(sidebarCollapsed ? "px-1.5 pb-2" : "px-2.5 pb-2")}>
         <a
           href="/docs"
           target="_blank"

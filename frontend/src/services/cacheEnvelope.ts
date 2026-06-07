@@ -144,6 +144,13 @@ export interface FetchEnvelopedOptions {
      * (e.g. an "is the cache populated yet?" poll).
      */
     useCircuitBreaker?: boolean
+    /**
+     * Suppress the global access-denied modal on 403. Forwarded to
+     * ``fetchWithTimeout``. Use when the envelope endpoint is admin-only
+     * and the caller is a background probe — non-admins will 403 by
+     * design, and the toast confuses them.
+     */
+    silent403?: boolean
 }
 
 
@@ -186,6 +193,7 @@ async function _runEnvelopeFetch(
         res = await fetchWithTimeout(url, {
             ...(options?.init ?? {}),
             timeoutMs: options?.timeoutMs,
+            silent403: options?.silent403,
         })
     } catch (err) {
         // `fetchWithTimeout` throws TypeError on timeout AND on network

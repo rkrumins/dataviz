@@ -9,9 +9,11 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound,
+    UserCog, Users2, KeyRound, Network, History,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useNavPermission } from '@/store/auth'
+import { useAdminSectionSpec } from '@/store/navCatalogue'
 
 // Administration sidebar is split into two sections — "System" for
 // platform-wide configuration and "Identity & Access" for the people
@@ -43,6 +45,8 @@ const adminGroups = [
             { path: 'users', label: 'User Management', icon: Users, description: 'Accounts & approvals' },
             { path: 'groups', label: 'Groups', icon: Users2, description: 'Bundle members for bulk role grants' },
             { path: 'permissions', label: 'Permissions', icon: KeyRound, description: 'Roles, permissions, and who has access where' },
+            { path: 'sso', label: 'SSO', icon: Network, description: 'IdP providers + IdP group mappings' },
+            { path: 'audit', label: 'Audit Log', icon: History, description: 'RBAC + user lifecycle history' },
         ]
     }
 ]
@@ -51,8 +55,52 @@ export function AdminPage() {
     const location = useLocation()
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
+    // Permission gate per admin sub-item, driven by the centralised nav
+    // catalogue served from the backend (seeded by bundled defaults).
+    // Hooks called in fixed order; entries the user lacks perms for
+    // drop out of the group. ``useAdminSectionSpec`` resolves the live
+    // spec from the store.
+    const overviewVisible      = useNavPermission(useAdminSectionSpec('overview'))
+    const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
+    const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
+    const usersVisible         = useNavPermission(useAdminSectionSpec('users'))
+    const groupsVisible        = useNavPermission(useAdminSectionSpec('groups'))
+    const permissionsVisible   = useNavPermission(useAdminSectionSpec('permissions'))
+    const ssoVisible           = useNavPermission(useAdminSectionSpec('sso'))
+    const auditVisible         = useNavPermission(useAdminSectionSpec('audit'))
+
+    const itemVisibility: Record<string, boolean> = {
+        overview:      overviewVisible,
+        features:      featuresVisible,
+        announcements: announcementsVisible,
+        users:         usersVisible,
+        groups:        groupsVisible,
+        permissions:   permissionsVisible,
+        sso:           ssoVisible,
+        audit:         auditVisible,
+    }
+
+    // Filter items out of each group; drop groups that end up empty.
+    const visibleGroups = adminGroups
+        .map((g) => ({ ...g, items: g.items.filter((i) => itemVisibility[i.path]) }))
+        .filter((g) => g.items.length > 0)
+
+    // Per-group open/close state — pulled OUT of the .map (was a
+    // useState inside .map, hooks-order smell). One entry per group
+    // id, default open.
+    const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(
+        () => Object.fromEntries(adminGroups.map((g) => [g.id, true]))
+    )
+    const toggleGroup = (id: string) =>
+        setOpenGroups((prev) => ({ ...prev, [id]: !prev[id] }))
+
+    // ── Root-route redirect: send to the first sub-page the user can
+    // actually see. A delegated groups admin (no system:admin) lands
+    // on /admin/groups instead of bouncing off /admin/overview's
+    // access-denied panel.
     if (isRoot) {
-        return <Navigate to="/admin/overview" replace />
+        const firstVisible = visibleGroups[0]?.items[0]?.path ?? 'overview'
+        return <Navigate to={`/admin/${firstVisible}`} replace />
     }
 
     return (
@@ -74,13 +122,12 @@ export function AdminPage() {
 
                 {/* Navigation */}
                 <nav className="flex-1 px-3 space-y-4 pt-2">
-                    {adminGroups.map((group) => {
+                    {visibleGroups.map((group) => {
                         const GroupIcon = group.icon
                         // Check if any child is active to keep the group open and highlighted
                         const isGroupActive = group.items.some(item => location.pathname.includes(`/admin/${item.path}`))
 
-                        // Default to open if active, otherwise open
-                        const [isOpen, setIsOpen] = useState(true)
+                        const isOpen = openGroups[group.id] ?? true
 
                         return (
                             <div key={group.id} className="space-y-1">
@@ -101,7 +148,7 @@ export function AdminPage() {
                                     <button
                                         onClick={(e) => {
                                             e.preventDefault()
-                                            setIsOpen(!isOpen)
+                                            toggleGroup(group.id)
                                         }}
                                         className="p-1.5 rounded-md text-ink-muted hover:text-ink-secondary hover:bg-black/10 dark:hover:bg-white/10 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                                         aria-label="Toggle section"

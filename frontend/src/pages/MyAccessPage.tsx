@@ -162,6 +162,7 @@ function PlainEnglishSummary({
     permissions: PermissionResponse[]
 }) {
     const isAdmin = access.effectiveGlobal.includes('system:admin')
+    const isOrgAdmin = access.effectiveGlobal.includes('system:org-admin')
     const wsCount = Object.keys(access.effectiveWs).length
 
     // Index for quick description lookup (Phase 4.1's longDescription).
@@ -204,10 +205,32 @@ function PlainEnglishSummary({
                     <Shield className="w-4.5 h-4.5 text-amber-500" />
                 </div>
                 <div className="min-w-0">
-                    <p className="text-sm font-bold text-ink">You're a system administrator.</p>
+                    <p className="text-sm font-bold text-ink">You're a Super Admin.</p>
                     <p className="text-xs text-ink-secondary mt-0.5">
                         The <code className="font-mono text-[11px] bg-amber-500/10 px-1 py-0.5 rounded">system:admin</code> permission grants you every other capability.
                         You can manage every workspace, change any user's role, and override every other permission check.
+                    </p>
+                </div>
+            </motion.div>
+        )
+    }
+
+    if (isOrgAdmin) {
+        return (
+            <motion.div
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.18 }}
+                className="rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/10 to-amber-500/0 p-4 flex items-start gap-3"
+            >
+                <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
+                    <Shield className="w-4.5 h-4.5 text-amber-500" />
+                </div>
+                <div className="min-w-0">
+                    <p className="text-sm font-bold text-ink">You're an Org Admin.</p>
+                    <p className="text-xs text-ink-secondary mt-0.5">
+                        The <code className="font-mono text-[11px] bg-amber-500/10 px-1 py-0.5 rounded">system:org-admin</code> permission gives you administrator powers in every workspace and lets you create new workspaces.
+                        It does <strong>not</strong> grant user / SSO administration — those stay with Super Admin.
                     </p>
                 </div>
             </motion.div>

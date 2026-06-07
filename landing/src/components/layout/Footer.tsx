@@ -8,6 +8,8 @@ const PRODUCT_LINKS = [
 ]
 
 const RESOURCE_LINKS = [
+  { label: 'User Guide', href: '/guide' },
+  { label: 'Documentation', href: '/docs' },
   { label: 'FAQ', href: '#faq' },
   { label: 'How It Works', href: '#how-it-works' },
   { label: 'AI Assistant', href: '#ai-assistant' },

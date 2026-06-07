@@ -8,9 +8,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import WorkspaceDataSourceORM
 from backend.app.db.repositories import catalog_repo, provider_repo
+from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.workspace_visibility import compute_visible_catalog_ids
 from backend.common.models.management import (
     CatalogItemCreateRequest,
     CatalogItemUpdateRequest,
@@ -19,6 +22,15 @@ from backend.common.models.management import (
 )
 
 router = APIRouter()
+
+
+# Phase 18 — per-endpoint gates. Reads are open to any workspace-bound
+# user holding ``workspace:catalog:read`` (filtered to visible items).
+# Manage perms gate writes: workspace_admin gets them via the
+# ``workspace:admin`` implication, so members and viewers stay locked
+# out of writes without elevation.
+_REQUIRES_CATALOG_READ = requires("workspace:catalog:read", workspace_any=True)
+_REQUIRES_CATALOG_MANAGE = requires("workspace:catalog:manage", workspace_any=True)
 
 
 class CatalogItemBindingResponse(BaseModel):
@@ -37,15 +49,22 @@ class CatalogItemBindingResponse(BaseModel):
 async def list_catalog_items(
     provider_id: Optional[str] = Query(None, alias="providerId"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_CATALOG_READ),
 ):
-    """List all registered catalog items (optionally filtered by provider)."""
-    return await catalog_repo.list_catalog_items(session, provider_id)
+    """List catalog items visible to the caller (optionally filtered by provider)."""
+    items = await catalog_repo.list_catalog_items(session, provider_id)
+    visible_ids = await compute_visible_catalog_ids(session, claims)
+    if visible_ids is None:
+        return items
+    return [item for item in items if item.id in visible_ids]
 
 
 @router.post("", response_model=CatalogItemResponse, status_code=201)
 async def create_catalog_item(
     req: CatalogItemCreateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_CATALOG_MANAGE),
 ):
     """Promote a raw provider namespace/graph into a Catalog Item."""
     if not await provider_repo.get_provider(session, req.provider_id):
@@ -57,6 +76,7 @@ async def create_catalog_item(
 @router.post("/cleanup", status_code=200)
 async def cleanup_duplicates(
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_CATALOG_MANAGE),
 ):
     """Remove duplicate catalog items (keeps earliest per provider+source). Returns count deleted."""
     deleted = await catalog_repo.cleanup_duplicate_catalog_items(session)
@@ -67,6 +87,8 @@ async def cleanup_duplicates(
 async def list_catalog_bindings(
     provider_id: Optional[str] = Query(None, alias="providerId"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_CATALOG_READ),
 ):
     """Return catalog items enriched with their workspace binding (if any).
     Each catalog item can be bound to at most one workspace (1:1 constraint).
@@ -96,6 +118,11 @@ async def list_catalog_bindings(
     stmt = stmt.order_by(CatalogItemORM.created_at)
 
     result = await session.execute(stmt)
+    rows = result.all()
+    # Phase 18: filter to catalog items the caller's workspaces touch.
+    visible_ids = await compute_visible_catalog_ids(session, claims)
+    if visible_ids is not None:
+        rows = [r for r in rows if r.id in visible_ids]
     return [
         CatalogItemBindingResponse(
             id=row.id,
@@ -105,7 +132,7 @@ async def list_catalog_bindings(
             boundWorkspaceId=row.workspace_id,
             boundWorkspaceName=row.workspace_name,
         )
-        for row in result.all()
+        for row in rows
     ]
 
 
@@ -113,10 +140,15 @@ async def list_catalog_bindings(
 async def get_catalog_item(
     item_id: str = Path(...),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_CATALOG_READ),
 ):
-    """Get a single catalog item."""
+    """Get a single catalog item, 404 if not visible to the caller."""
     item = await catalog_repo.get_catalog_item(session, item_id)
     if not item:
+        raise HTTPException(status_code=404, detail=f"Catalog item '{item_id}' not found")
+    visible_ids = await compute_visible_catalog_ids(session, claims)
+    if visible_ids is not None and item_id not in visible_ids:
         raise HTTPException(status_code=404, detail=f"Catalog item '{item_id}' not found")
     return item
 
@@ -126,12 +158,13 @@ async def update_catalog_item(
     item_id: str = Path(...),
     req: CatalogItemUpdateRequest = Body(...),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_CATALOG_MANAGE),
 ):
     """Update a catalog item (name, description, ACLs, status)."""
     item = await catalog_repo.update_catalog_item(session, item_id, req)
     if not item:
         raise HTTPException(status_code=404, detail=f"Catalog item '{item_id}' not found")
-    # Note: If ACLs change such that workspaces lose access, 
+    # Note: If ACLs change such that workspaces lose access,
     # the application layer might need to handle evaluating active subscriptions.
     return item
 
@@ -141,6 +174,7 @@ async def delete_catalog_item(
     item_id: str = Path(...),
     force: bool = Query(False),
     session: AsyncSession = Depends(get_db_session),
+    _auth=Depends(_REQUIRES_CATALOG_MANAGE),
 ):
     """Delete a catalog item. Rejects if workspaces are still subscribed unless force=true."""
     from backend.app.db.models import WorkspaceDataSourceORM
@@ -172,9 +206,14 @@ async def delete_catalog_item(
 @router.get("/{item_id}/impact", response_model=ProviderImpactResponse)
 async def get_catalog_item_impact(
     item_id: str = Path(...),
-    session: AsyncSession = Depends(get_db_session)
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_CATALOG_READ),
 ):
     item = await catalog_repo.get_catalog_item_orm(session, item_id)
     if not item:
+        raise HTTPException(status_code=404, detail="Catalog item not found")
+    visible_ids = await compute_visible_catalog_ids(session, claims)
+    if visible_ids is not None and item_id not in visible_ids:
         raise HTTPException(status_code=404, detail="Catalog item not found")
     return await catalog_repo.get_catalog_item_impact(session, item_id)

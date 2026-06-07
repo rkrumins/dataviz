@@ -52,7 +52,7 @@ from backend.app.config import resilience
 from backend.app.db.models import DataSourcePollingConfigORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.db.repositories.stats_repo import get_data_source_stats
-from backend.insights_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe_ex
 
 logger = logging.getLogger(__name__)
 
@@ -322,11 +322,11 @@ async def read_stats_cache(
     refreshing = False
     if tier == "stale" and ws_id:
         try:
-            msg_id = await enqueue_stats_job_safe(ds_id, ws_id)
+            _, outcome = await enqueue_stats_job_safe_ex(ds_id, ws_id)
             refreshing = True
             logger.info(
                 "stats_cache.enqueue ds_id=%s outcome=%s",
-                ds_id, "enqueued" if msg_id else "dedup_or_redis_down",
+                ds_id, outcome,
             )
         except Exception as exc:  # pragma: no cover
             logger.warning(

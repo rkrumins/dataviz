@@ -18,6 +18,13 @@ export interface PermissionResponse {
     /** Phase 4.1: 1-3 concrete example actions, rendered as a
      *  bulleted list. Always present; empty for un-backfilled rows. */
     examples: string[]
+    /** Permissions whose grant auto-implies this one in the same
+     *  scope. Mirrors the backend resolver's shortcuts (`system:admin`,
+     *  `system:org-admin`, `workspace:admin` → leaves). The FE feeds
+     *  this into `roleEffectivePermissions` so Feature Access chips
+     *  reflect the same satisfaction logic the BE enforces — no
+     *  hardcoded leaf list on the FE. */
+    impliedBy: string[]
 }
 
 export interface RoleDefinitionResponse {

@@ -18,6 +18,21 @@ interface ProviderHealthEntry {
   lastChecked: number
 }
 
+// Compare the re-render-relevant fields only. `lastChecked` is a heartbeat
+// bumped every poll and nothing renders it, so comparing it would defeat the
+// dedupe and churn a fresh Map reference each tick.
+function healthMapsEqual(
+  a: Map<string, ProviderHealthEntry>,
+  b: Map<string, ProviderHealthEntry>,
+): boolean {
+  if (a.size !== b.size) return false
+  for (const [key, x] of a) {
+    const y = b.get(key)
+    if (!y || x.status !== y.status || x.error !== y.error) return false
+  }
+  return true
+}
+
 interface ProviderHealthState {
   /** Map of "workspaceId:dataSourceId" → health entry */
   providers: Map<string, ProviderHealthEntry>
@@ -60,6 +75,10 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
         })
       }
 
+      // Skip the write when the meaningful health snapshot is unchanged so
+      // subscribers keep their Map reference (consistent with markFromHeader's
+      // no-op dedupe below).
+      if (healthMapsEqual(get().providers, newMap)) return
       set({ providers: newMap })
     } catch {
       // Poll failure — don't clear existing data, just skip this cycle

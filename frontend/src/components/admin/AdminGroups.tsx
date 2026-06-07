@@ -26,6 +26,7 @@ import { adminUserService, type AdminUserResponse } from '@/services/adminUserSe
 import { useToast } from '@/components/ui/toast'
 import { avatarGradient, getInitials, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
+import { usePermission } from '@/store/auth'
 
 
 // ── Types & constants ────────────────────────────────────────────────
@@ -141,6 +142,12 @@ export function AdminGroups() {
     const [modal, setModal] = useState<ModalType>(null)
     const { showToast } = useToast()
 
+    // The whole page requires ``system:groups:manage`` on the
+    // backend; show the actions to viewers as disabled-with-tooltip
+    // so they understand WHY they can't act, rather than letting them
+    // click into a 403 toast.
+    const canManageGroups = usePermission('system:groups:manage')
+
 
     // ── Data fetching ────────────────────────────────────────────────
 
@@ -255,13 +262,15 @@ export function AdminGroups() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
-                    <button
-                        onClick={() => setModal({ kind: 'create' })}
-                        className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
-                    >
-                        <Plus className="w-4 h-4" />
-                        New group
-                    </button>
+                    {canManageGroups && (
+                        <button
+                            onClick={() => setModal({ kind: 'create' })}
+                            className="px-4 py-2 rounded-xl font-medium text-sm text-white bg-accent-lineage hover:brightness-110 transition-colors duration-150 flex items-center gap-2 shadow-sm shadow-accent-lineage/20"
+                        >
+                            <Plus className="w-4 h-4" />
+                            New group
+                        </button>
+                    )}
                     <button
                         onClick={() => void fetchGroups()}
                         disabled={loading}
@@ -379,7 +388,7 @@ export function AdminGroups() {
                                 ? 'Try adjusting your search query.'
                                 : 'Create a group to bind it to workspaces and grant roles in bulk.'}
                         </p>
-                        {!search && (
+                        {!search && canManageGroups && (
                             <button
                                 onClick={() => setModal({ kind: 'create' })}
                                 className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-600 text-white text-sm font-semibold shadow-sm shadow-violet-500/20"
@@ -469,25 +478,31 @@ export function AdminGroups() {
                                             <div className="flex items-center gap-1.5 justify-end">
                                                 <button
                                                     onClick={() => setModal({ kind: 'members', group: g })}
-                                                    disabled={isActing}
-                                                    title="Manage members"
-                                                    className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                                    disabled={isActing || !canManageGroups}
+                                                    title={canManageGroups
+                                                        ? 'Manage members'
+                                                        : 'You need the system:groups:manage permission to do this.'}
+                                                    className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                 >
                                                     <UserPlus className="w-4 h-4" />
                                                 </button>
                                                 <button
                                                     onClick={() => setModal({ kind: 'edit', group: g })}
-                                                    disabled={isActing || isScim}
-                                                    title={isScim ? 'SCIM-synced groups cannot be edited locally' : 'Edit'}
+                                                    disabled={isActing || isScim || !canManageGroups}
+                                                    title={!canManageGroups
+                                                        ? 'You need the system:groups:manage permission to do this.'
+                                                        : isScim ? 'SCIM-synced groups cannot be edited locally' : 'Edit'}
                                                     className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                 >
                                                     <Pencil className="w-4 h-4" />
                                                 </button>
                                                 <button
                                                     onClick={() => setModal({ kind: 'delete', group: g })}
-                                                    disabled={isActing}
-                                                    title="Delete group"
-                                                    className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors disabled:opacity-50"
+                                                    disabled={isActing || !canManageGroups}
+                                                    title={canManageGroups
+                                                        ? 'Delete group'
+                                                        : 'You need the system:groups:manage permission to do this.'}
+                                                    className="p-2 rounded-lg text-ink-muted hover:text-red-500 hover:bg-red-500/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                 >
                                                     <Trash2 className="w-4 h-4" />
                                                 </button>

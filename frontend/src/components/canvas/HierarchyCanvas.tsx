@@ -17,6 +17,7 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useLoadingToast } from '@/components/ui/toast'
@@ -36,6 +37,10 @@ import { EditorToolbar } from './EditorToolbar'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
+import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
+import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
+import { DisplayRuleTagChips } from './property-manager/DisplayRuleTagChips'
+import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { TraceToolbar } from './TraceToolbar'
@@ -87,8 +92,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Advanced search (Map + Builder + Power tools + Ask) — same surface
   // mounted on ContextView and Graph canvases.
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
+  const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
+  // Property Manager display-rule engine — publishes match sets so the
+  // HierarchyContainer rows render tag chips.
+  useDisplayRuleEngine(activeView?.id ?? null)
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
   // Edit Mode State (shared across canvases)
@@ -335,7 +344,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   return (
     <div className={cn("h-full w-full flex flex-col overflow-hidden bg-canvas relative", className)}>
       {/* Editor Toolbar - Unified with LineageCanvas */}
-      <div className="absolute top-4 left-4 z-30">
+      <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
           onSave={handleSave}
@@ -343,6 +352,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
         />
+        {/* Property Manager toggle — browse properties + author
+            display-rule tags. Mirrors the Context View affordance. */}
+        {activeView?.id && (
+          <PropertyManagerButton
+            open={propertyManagerOpen}
+            onToggle={() => setPropertyManagerOpen((v) => !v)}
+          />
+        )}
       </div>
 
       {/* Node Palette - Drag and drop entity creation */}
@@ -526,6 +543,22 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             onRevealNode={(urn, ancestorPath) =>
               revealSearchHit(urn, ancestorPath)
             }
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Property Manager — display-rule tag overlay drawer. */}
+      <AnimatePresence>
+        {activeView?.id && (
+          <PropertyManagerDrawer
+            key="property-manager-drawer"
+            viewId={activeView.id}
+            open={propertyManagerOpen}
+            onClose={() => setPropertyManagerOpen(false)}
+            onSearchPredicate={(p) => {
+              useSearchStore.getState().requestSearchRun(p)
+              setAdvancedSearchOpen(true)
+            }}
           />
         )}
       </AnimatePresence>
@@ -811,6 +844,10 @@ function HierarchyContainer({
               ))}
             </div>
           )}
+
+          {/* Display-rule tags — shared premium chip cluster (same as the
+              other canvases). */}
+          <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
 
           {/* Expand indicator */}
           {hasChildren && !isExpanded && (

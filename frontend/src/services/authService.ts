@@ -13,6 +13,7 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const AUTH_API = '/api/v1/auth'
 const ME_API = '/api/v1/me'
@@ -43,6 +44,40 @@ export interface AuthUser {
     authProvider: string
     createdAt: string
     updatedAt: string
+    /** IdP-mapped extras (department, employee_id, …). Phase 3. */
+    attributes?: Record<string, unknown>
+}
+
+/** Public summary of one configured SSO provider — returned by
+ *  ``GET /auth/providers``. No secrets. */
+export interface SsoProviderSummary {
+    id: string
+    slug: string
+    displayName: string
+    kind: string                 // 'oidc' | 'saml2' | 'custom'
+    priority: number
+    buttonLabel?: string | null
+    buttonIcon?: string | null
+}
+
+/** One linked identity on the current user. */
+export interface UserIdentity {
+    id: string
+    provider: {
+        id: string
+        slug: string
+        displayName: string
+        kind: string
+    }
+    externalId: string
+    emailAtLink?: string | null
+    createdAt: string
+    lastLoginAt?: string | null
+}
+
+export interface IdentitiesResponse {
+    passwordSet: boolean
+    identities: UserIdentity[]
 }
 
 /** Backwards-compat alias for components that still import this name. */
@@ -76,13 +111,10 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     })
     if (!res.ok) {
         const text = await res.text()
-        let detail = res.statusText
-        try {
-            const body = JSON.parse(text)
-            detail = body.detail || JSON.stringify(body)
-        } catch {
-            detail = text || res.statusText
-        }
+        // Use the shared extractor so the structured permission /
+        // validation error envelopes land as readable strings instead
+        // of "[object Object]" via ``new Error(dict)`` coercion.
+        const detail = extractErrorMessageFromText(text, res.statusText)
         throw new Error(detail)
     }
     if (res.status === 204) return undefined as T
@@ -146,9 +178,62 @@ export const authService = {
         })
     },
 
-    verifyInvite(token: string): Promise<{ valid: boolean; role: string | null }> {
-        return request<{ valid: boolean; role: string | null }>(
+    verifyInvite(token: string): Promise<{
+        valid: boolean
+        role: string | null
+        workspaceId?: string | null
+        workspaceName?: string | null
+        email?: string | null
+        /** Phase 13: groups attached on signup. ``groupIds`` mirrors
+         *  the token payload; ``groupNames`` is resolved server-side
+         *  so the banner can show friendly names. */
+        groupIds?: string[] | null
+        groupNames?: string[] | null
+    }> {
+        return request(
             `${AUTH_API}/verify-invite?token=${encodeURIComponent(token)}`,
+        )
+    },
+
+    // ── SSO discovery + self-service identities (Phase 3) ───────────
+
+    /** Public catalog of enabled SSO providers. Drives the login page
+     *  buttons. Returns ``[]`` when the registry is unconfigured. */
+    listProviders(): Promise<SsoProviderSummary[]> {
+        return request<SsoProviderSummary[]>(`${AUTH_API}/providers`)
+    },
+
+    /** Logged-in user's linked SSO identities + whether they have a
+     *  password set. Drives ``/me/identities`` page. */
+    listMyIdentities(): Promise<IdentitiesResponse> {
+        return request<IdentitiesResponse>('/api/v1/me/identities')
+    },
+
+    /** Self-service unlink. Server returns 409 when this would leave
+     *  the user without any authenticator. */
+    unlinkMyIdentity(identityId: string): Promise<void> {
+        return request<void>(
+            `/api/v1/me/identities/${encodeURIComponent(identityId)}`,
+            { method: 'DELETE' },
+        )
+    },
+
+    /** Begin a self-service link flow. Returns the IdP login URL to
+     *  navigate to; the cookie set on this call carries the link-
+     *  intent so the SSO callback binds the new identity to the
+     *  current user instead of provisioning a fresh one. */
+    startIdentityLink(providerSlug: string): Promise<{
+        loginUrl: string
+        providerSlug: string
+        providerKind: string
+    }> {
+        return request<{
+            loginUrl: string
+            providerSlug: string
+            providerKind: string
+        }>(
+            `/api/v1/me/identities/link/${encodeURIComponent(providerSlug)}/start`,
+            { method: 'POST' },
         )
     },
 }

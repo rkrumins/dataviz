@@ -23,7 +23,7 @@
  * values) is invoked with ``portal={true}`` for the same reason.
  */
 import { ExternalLink, X } from 'lucide-react'
-import { type FC, type ReactNode, useEffect, useState } from 'react'
+import { type FC, type ReactNode, memo, useEffect, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type {
@@ -98,7 +98,7 @@ export interface ConditionRowProps {
 }
 
 
-export const ConditionRow: FC<ConditionRowProps> = ({
+const ConditionRowImpl: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
     isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
     onWrap, onDuplicate, parentPath, index,
@@ -185,6 +185,16 @@ export const ConditionRow: FC<ConditionRowProps> = ({
         </RowCard>
     )
 }
+
+
+/**
+ * Memoised so that — inside VisualQueryBuilder — editing one row doesn't
+ * re-render the sibling rows. The builder hands every row referentially
+ * stable props (value, discovery, callbacks), so only the row whose
+ * ``value`` actually changed re-renders. Internal store subscriptions
+ * (bulk-select) still force their own updates independently of memo.
+ */
+export const ConditionRow = memo(ConditionRowImpl)
 
 
 // ---------------------------------------------------------------------------
