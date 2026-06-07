@@ -327,6 +327,30 @@ class FalkorDBProvider(GraphDataProvider):
         self._aggregation_sub_batch_size: int = self._MERGE_SUB_BATCH_SIZE
         self._aggregation_sub_batch_under_target_run: int = 0
 
+        # AGGREGATED edge level-stamping state. Must live on every
+        # instance from construction — ``set_entity_type_levels`` (called
+        # by ContextEngine ontology resolution) reads ``_level_digest``
+        # before ``ensure_indices`` has necessarily run.
+        #
+        # The probe runs lazily — it needs the level map (and its digest)
+        # before it can ask "are stamps fresh?". `set_entity_type_levels`
+        # triggers the probe whenever the digest changes. Until then,
+        # ``_levels_backfilled`` stays None and the trace fast path uses
+        # the label-scan fallback (correct, slower).
+        #
+        # ``_level_digest`` is the SHA-256 of the entity_type→level map
+        # currently injected onto this provider. AGGREGATED edges carry
+        # ``r.levelDigest`` set to whatever digest was current when they
+        # were stamped; a mismatch means the ontology drifted and stamps
+        # need a re-run of backfill_aggregated_levels.py.
+        #
+        # ``_levels_warning_for_digest`` throttles the "edges not stamped"
+        # warning to at most one log line per (provider lifetime, digest)
+        # pair, so per-request probes don't spam.
+        self._levels_backfilled: Optional[bool] = None
+        self._level_digest: Optional[str] = None
+        self._levels_warning_for_digest: Optional[str] = None
+
         # Phase 1.6 — operator dial for the bulk-CREATE UNWIND batch
         # size. Env-var lets operators dial back per-call cost on graphs
         # where the default 10k batch monopolizes the single FalkorDB
@@ -891,27 +915,6 @@ class FalkorDBProvider(GraphDataProvider):
                 )
             except Exception:
                 pass  # Older FalkorDB or already exists — ignore
-
-        # AGGREGATED edge level-stamping state.
-        #
-        # The probe runs lazily — it needs the level map (and its digest)
-        # before it can ask "are stamps fresh?". `set_entity_type_levels`
-        # triggers the probe whenever the digest changes. Until then,
-        # ``_levels_backfilled`` stays None and the trace fast path uses
-        # the label-scan fallback (correct, slower).
-        #
-        # ``_level_digest`` is the SHA-256 of the entity_type→level map
-        # currently injected onto this provider. AGGREGATED edges carry
-        # ``r.levelDigest`` set to whatever digest was current when they
-        # were stamped; a mismatch means the ontology drifted and stamps
-        # need a re-run of backfill_aggregated_levels.py.
-        #
-        # ``_levels_warning_for_digest`` throttles the "edges not stamped"
-        # warning to at most one log line per (provider lifetime, digest)
-        # pair, so per-request probes don't spam.
-        self._levels_backfilled: Optional[bool] = None
-        self._level_digest: Optional[str] = None
-        self._levels_warning_for_digest: Optional[str] = None
 
     @property
     def name(self) -> str:
