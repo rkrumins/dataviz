@@ -34,7 +34,9 @@ from backend.app.services.versioning.db import VersioningBase
 from backend.app.services.versioning.models import PARTITIONED_TABLES
 
 revision: str = "20260601_1200_graphver_schema"
-down_revision: Union[str, None] = "20260512_1100_jobs_current_phase"
+# Re-parented onto main's head so the greenfield graphver chain stacks last
+# (originally branched from 20260512_1100_jobs_current_phase).
+down_revision: Union[str, None] = "20260606_0100_role_expansion"
 branch_labels = None
 depends_on = None
 
