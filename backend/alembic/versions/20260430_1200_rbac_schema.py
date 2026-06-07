@@ -280,10 +280,18 @@ def upgrade() -> None:
     _seed_permissions(bind)
 
     # ── backfill: existing UserRoleORM rows → role_bindings (global) ─
-    _backfill_global_role_bindings(bind)
-
     # ── backfill: every active user × every live workspace as 'user' ─
-    _backfill_workspace_memberships(bind)
+    # These seed legacy ('user'/'admin'/'viewer') bindings and are only
+    # correct in Phase 1's original context — before the canonical `roles`
+    # table exists. Once `roles` exists the schema has advanced (Phase 3+),
+    # fk_role_bindings_role_name is/will be enforced, and Phase 5 has renamed
+    # the legacy roles away; replaying these inserts would violate the FK
+    # (ON CONFLICT DO NOTHING does not suppress FK violations). On a genuine
+    # pre-RBAC upgrade `roles` does not yet exist, so the backfill runs once
+    # as intended. On a fresh install there are no users/workspaces to seed.
+    if not _has_table(inspector, "roles"):
+        _backfill_global_role_bindings(bind)
+        _backfill_workspace_memberships(bind)
 
 
 def _seed_permissions(bind) -> None:

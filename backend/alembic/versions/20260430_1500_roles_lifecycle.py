@@ -96,29 +96,34 @@ def upgrade() -> None:
         op.create_index("idx_roles_is_system", "roles", ["is_system"])
 
     # ── 2. Seed the system roles ────────────────────────────────────
-    for name, description in _SYSTEM_ROLES:
-        bind.execute(
-            sa.text(
-                """
-                INSERT INTO roles (
-                    name, description, scope_type, scope_id, is_system,
-                    created_at, updated_at, created_by
-                )
-                VALUES (
-                    :name, :description, 'global', NULL, true,
-                    to_char(now() AT TIME ZONE 'UTC',
-                        'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
-                    to_char(now() AT TIME ZONE 'UTC',
-                        'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
-                    NULL
-                )
-                ON CONFLICT (name) DO UPDATE SET
-                    description = EXCLUDED.description,
-                    is_system = true
-                """
-            ),
-            {"name": name, "description": description},
-        )
+    # Skip on replay against an advanced schema: once fk_role_bindings_role_name
+    # exists (added later by sso_phase3), Phase 5 has already renamed/removed
+    # these legacy roles, so re-seeding them here would transiently resurrect
+    # rows Phase 5 deletes. On a genuine first run the FK does not exist yet.
+    if not _has_constraint(bind, "role_bindings", "fk_role_bindings_role_name"):
+        for name, description in _SYSTEM_ROLES:
+            bind.execute(
+                sa.text(
+                    """
+                    INSERT INTO roles (
+                        name, description, scope_type, scope_id, is_system,
+                        created_at, updated_at, created_by
+                    )
+                    VALUES (
+                        :name, :description, 'global', NULL, true,
+                        to_char(now() AT TIME ZONE 'UTC',
+                            'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
+                        to_char(now() AT TIME ZONE 'UTC',
+                            'YYYY-MM-DD"T"HH24:MI:SS.US"+00:00"'),
+                        NULL
+                    )
+                    ON CONFLICT (name) DO UPDATE SET
+                        description = EXCLUDED.description,
+                        is_system = true
+                    """
+                ),
+                {"name": name, "description": description},
+            )
 
     # ── 3. Drop the Phase-1 CHECK constraints so custom names are
     #       physically possible.
