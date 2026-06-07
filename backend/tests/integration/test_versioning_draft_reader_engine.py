@@ -49,7 +49,8 @@ async def _run() -> None:
         _e("e_13", "T1", "T3", "FLOWS")])
 
     # the engine reads the DRAFT entirely through the reader-as-provider — stack unchanged
-    eng = ContextEngine(provider=VersionedGraphReader(svc, graph_id=gid, branch_id=draft))
+    reader = VersionedGraphReader(svc, graph_id=gid, branch_id=draft)
+    eng = ContextEngine(provider=reader)
 
     nodes = await eng.get_nodes_query(NodeQuery())
     assert {n.urn for n in nodes} == {"DOM", "T1", "T3"}                  # T2 gone, T3 added
@@ -69,6 +70,38 @@ async def _run() -> None:
     # a single-node read resolves a real model
     t1 = await eng.get_node("T1")
     assert t1 is not None and t1.display_name == "T1name"
+
+    # get_children: DOM's containment children on the draft are T1, T3 (T2 deleted)
+    kids = await reader.get_children("DOM", edge_types=["CONTAINS"])
+    assert {k.urn for k in kids} == {"T1", "T3"}
+
+    # get_top_level_or_orphan_nodes: only DOM lacks an incoming containment edge.
+    # Containment types arrive via the same set_* push-down ContextEngine uses.
+    reader.set_containment_edge_types(["CONTAINS"])
+    top = await reader.get_top_level_or_orphan_nodes(root_entity_types=["Domain"])
+    assert {n.urn for n in top.nodes} == {"DOM"}
+    assert top.root_type_count == 1 and top.orphan_count == 0
+    assert top.nodes[0].child_count == 2                                 # DOM contains T1, T3
+
+    # trace_at_level (RAW lineage): downstream from T1 over FLOWS reaches T3 (draft),
+    # not T2 (deleted); the containment ancestor chain (DOM) rides along for the canvas invariant.
+    tr = await reader.trace_at_level(
+        urn="T1", level=0, upstream_depth=5, downstream_depth=5,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["CONTAINS"],
+        max_nodes=100, timeout_ms=2000, include_containment_edges=True)
+    assert {n.urn for n in tr.nodes} == {"T1", "T3", "DOM"}              # T2 absent
+    assert {e.id for e in tr.edges} == {"e_13"}                         # raw lineage on the draft
+    assert "T3" in tr.downstream_urns and not tr.upstream_urns
+    assert {e.id for e in tr.containment_edges} == {"e_d1", "e_d3"}     # ancestor chain present
+    assert not tr.truncated
+
+    # expand_aggregated (RAW): drilling DOM's subtree surfaces the intra-domain raw lineage.
+    ex = await reader.expand_aggregated(
+        source_urn="DOM", target_urn="DOM", next_level=1,
+        lineage_edge_types=["FLOWS"], containment_edge_types=["CONTAINS"],
+        max_nodes=100, timeout_ms=2000, use_raw_edges=True, include_containment_edges=True)
+    assert {e.id for e in ex.edges} == {"e_13"}
+    assert {"T1", "T3"} <= {n.urn for n in ex.nodes}
 
     # an engine bound to MAIN sees main's view (the draft changed nothing on main)
     meng = ContextEngine(provider=VersionedGraphReader(svc, graph_id=gid, branch_id=main))

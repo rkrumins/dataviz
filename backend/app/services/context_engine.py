@@ -69,6 +69,7 @@ class ContextEngine:
         session: "AsyncSession",
         data_source_id: Optional[str] = None,
         actor: Optional[str] = None,
+        branch_id: Optional[str] = None,
     ) -> "ContextEngine":
         """
         Create a ContextEngine scoped to a workspace data source.
@@ -105,6 +106,43 @@ class ContextEngine:
                 reason=f"Provider instantiation failed: {exc}",
             ) from exc
 
+        repo = SQLAlchemyOntologyRepository(session)
+        ontology_service = LocalOntologyService(repo)
+
+        # Branch-aware reads: a resolved draft swaps in the read-only Postgres reader; main,
+        # no branch, or a non-versioned data source fall through to the live provider unchanged.
+        norm = (branch_id or "").strip()
+        if norm and norm != "main" and data_source_id:
+            from .versioning.service import GraphVersioningService
+            svc = GraphVersioningService()
+            graph = await svc.get_graph_by_data_source(data_source_id)
+            if graph is not None:
+                gid = graph["graph_id"]
+                if norm != await svc.main_branch_id(gid):
+                    async with svc._session() as gv_s:
+                        try:
+                            await svc._get_branch(gv_s, gid, norm)
+                        except ValueError as exc:
+                            raise KeyError(f"branch_not_found: {norm}") from exc
+                    from ..providers.versioned_graph_reader import VersionedGraphReader
+                    engine = cls(
+                        provider=VersionedGraphReader(svc, graph_id=gid, branch_id=norm),
+                        ontology_service=ontology_service,
+                    )
+                    engine._workspace_id = workspace_id
+                    engine._data_source_id = data_source_id
+                    engine._db_session = session
+                    engine._branch_id = norm
+                    try:
+                        await engine._resolve_ontology()
+                    except Exception as exc:
+                        logger.warning(
+                            "Eager ontology resolution failed for draft ws=%s ds=%s branch=%s: %s",
+                            workspace_id, data_source_id, norm, exc,
+                        )
+                    return engine
+            # graph is None → not versioned: ignore branch_id, serve the live provider.
+
         # Out-of-the-box write-through versioning: wrap the provider so every write also
         # lands as an audited commit on the data source's versioned graph (the audit trail
         # + branch/version history). Reads delegate unchanged. Opt out with
@@ -117,8 +155,6 @@ class ContextEngine:
                 actor=actor or "system",
             )
 
-        repo = SQLAlchemyOntologyRepository(session)
-        ontology_service = LocalOntologyService(repo)
         engine = cls(provider=provider, ontology_service=ontology_service)
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id

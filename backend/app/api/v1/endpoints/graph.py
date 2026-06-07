@@ -56,6 +56,7 @@ async def get_context_engine(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
+    branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to read main."),
     session: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
 ) -> ContextEngine:
@@ -77,7 +78,7 @@ async def get_context_engine(
         if ws_id:
             return await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
-                actor=(user.id if user else None),
+                actor=(user.id if user else None), branch_id=branchId,
             )
         if connectionId:
             return await ContextEngine.for_connection(connectionId, provider_manager, session)
@@ -126,7 +127,8 @@ def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
     if not ws:
         return None
     ds = getattr(engine, "_data_source_id", None) or ""
-    return CacheScope(workspace_id=ws, data_source_id=ds)
+    branch = getattr(engine, "_branch_id", None) or ""
+    return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch)
 
 
 def _provider_health_header(engine: ContextEngine) -> str:

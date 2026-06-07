@@ -21,6 +21,7 @@ from typing import List, Optional
 
 from backend.common.models.graph import (
     ChildrenWithEdgesResult, EdgeQuery, GraphEdge, GraphNode, NodeQuery,
+    TopLevelNodesResult, TraceResult,
 )
 
 
@@ -32,6 +33,12 @@ class VersionedGraphReader:
         self._gid = graph_id
         self._branch = branch_id
         self._as_of = as_of_seq
+        # Containment edge types, pushed in by ContextEngine._resolve_ontology (the same
+        # push-down FalkorDB uses) — the structural input for the top-level/orphan read.
+        self._containment_types: List[str] = []
+
+    def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
+        self._containment_types = list(edge_types or [])
 
     @property
     def name(self) -> str:
@@ -77,3 +84,60 @@ class VersionedGraphReader:
             lineage_edge_types=lineage_edge_types, include_lineage_edges=include_lineage_edges,
             limit=limit, offset=offset)
         return ChildrenWithEdgesResult(**d)
+
+    async def get_children(
+        self, parent_urn: str, entity_types: Optional[List[str]] = None,
+        edge_types: Optional[List[str]] = None, search_query: Optional[str] = None,
+        offset: int = 0, limit: int = 100, sort_property: Optional[str] = "displayName",
+        cursor: Optional[str] = None,
+    ) -> List[GraphNode]:
+        d = await self._svc.get_children_with_edges_from_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
+            parent_urn=parent_urn, containment_edge_types=edge_types or [],
+            include_lineage_edges=False, limit=limit, offset=offset)
+        return [GraphNode(**c) for c in d["children"]]
+
+    async def get_top_level_or_orphan_nodes(
+        self, *, root_entity_types: Optional[List[str]] = None,
+        entity_types: Optional[List[str]] = None, search_query: Optional[str] = None,
+        limit: int = 100, cursor: Optional[str] = None, include_child_count: bool = True,
+    ) -> TopLevelNodesResult:
+        d = await self._svc.top_level_from_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
+            containment_edge_types=self._containment_types,
+            root_entity_types=root_entity_types, entity_types=entity_types,
+            search_query=search_query, limit=limit, cursor=cursor,
+            include_child_count=include_child_count)
+        return TopLevelNodesResult(**d)
+
+    async def trace_at_level(
+        self, urn: str, level: int, upstream_depth: int, downstream_depth: int,
+        lineage_edge_types: List[str], containment_edge_types: List[str],
+        max_nodes: int, timeout_ms: int, include_containment_edges: bool = False,
+        include_inherited_lineage: bool = True,
+    ) -> TraceResult:
+        d = await self._svc.trace_from_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
+            urn=urn, level=level, upstream_depth=upstream_depth, downstream_depth=downstream_depth,
+            lineage_edge_types=lineage_edge_types, containment_edge_types=containment_edge_types,
+            max_nodes=max_nodes, include_containment_edges=include_containment_edges)
+        return TraceResult(**d)
+
+    async def expand_aggregated(
+        self, source_urn: str, target_urn: str, next_level: int,
+        lineage_edge_types: List[str], containment_edge_types: List[str],
+        max_nodes: int, timeout_ms: int, use_raw_edges: bool = False,
+        include_containment_edges: bool = False,
+    ) -> TraceResult:
+        d = await self._svc.expand_from_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
+            source_urn=source_urn, target_urn=target_urn, next_level=next_level,
+            lineage_edge_types=lineage_edge_types, containment_edge_types=containment_edge_types,
+            max_nodes=max_nodes, include_containment_edges=include_containment_edges)
+        return TraceResult(**d)
+
+    async def get_ontology_metadata(self):
+        """The reader has no ontology surface by design — the engine resolves ontology from the
+        data source (shared by main and every draft) and passes edge-type sets into each read.
+        Raising here makes ``ContextEngine._resolve_ontology``'s graceful-degradation explicit."""
+        raise NotImplementedError("VersionedGraphReader does not introspect ontology")

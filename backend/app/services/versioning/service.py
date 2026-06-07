@@ -1472,6 +1472,317 @@ class GraphVersioningService:
             "nextCursor": (children_out[-1]["displayName"] if (children_out and has_more) else None),
         }
 
+    async def top_level_from_state(
+        self, *, graph_id: str, containment_edge_types: Sequence[str],
+        root_entity_types: Optional[Sequence[str]] = None,
+        branch_id: Optional[str] = None, as_of_seq: Optional[int] = None,
+        entity_types: Optional[Sequence[str]] = None, search_query: Optional[str] = None,
+        limit: int = 100, cursor: Optional[str] = None, include_child_count: bool = True,
+    ) -> Dict[str, object]:
+        """Branch/as-of-aware top-level/orphan read — the draft/as-of counterpart of the
+        provider's ``get_top_level_or_orphan_nodes``. A node is "top-level" iff no live edge of
+        a containment type points *at* it (root instances ∪ orphans of non-root types). Bounded:
+        discover candidate ids from the shared base ∪ the draft overlay (capped), then one
+        incident-edge scan over the candidates (bounded by their degree) classifies each and,
+        optionally, counts its OUT containment children. Keyset-paginated by displayName; mirrors
+        TopLevelNodesResult. Best-effort for very large sets — the hot path is ``main`` via FalkorDB."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        rset = {str(t) for t in (root_entity_types or [])}
+        type_set = set(entity_types) if entity_types else None
+        q = (search_query or "").strip().lower()
+
+        def matches(p: dict) -> bool:
+            if type_set is not None and p.get("entityType") not in type_set:
+                return False
+            if q:
+                hay = " ".join(str(p.get(k) or "")
+                               for k in ("displayName", "qualifiedName", "urn")).lower()
+                if q not in hay:
+                    return False
+            return True
+
+        def where(c):
+            preds = []
+            if type_set is not None:
+                preds.append(c.entity_type.in_(list(type_set)))
+            if q:
+                like = f"%{q}%"
+                preds.append(or_(func.lower(c.display_name).like(like),
+                                 func.lower(c.qualified_name).like(like),
+                                 func.lower(c.urn).like(like)))
+            return preds
+
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            base_seq, overlay_seq = await self._branch_read_seqs(
+                s, graph_id, branch_id, main_id, as_of_seq)
+            overlay_ids: List[str] = []
+            if overlay_seq is not None:
+                overlay_ids = list((await s.execute(
+                    select(NodeVersionORM.entity_id).where(
+                        NodeVersionORM.graph_id == graph_id,
+                        NodeVersionORM.branch_id == branch_id,
+                        NodeVersionORM.commit_seq <= overlay_seq,
+                    ).distinct()
+                )).scalars().all())
+            # Over-fetch: the incoming-containment filter prunes after discovery.
+            window = (limit * 4) + len(overlay_ids) + 1
+            cand = set(await self._latest_live_ids(
+                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
+            cand.update(overlay_ids)
+            vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+            nodes = {eid: p for eid, p in vals.items()
+                     if p is not None and not _is_edge_payload(p) and matches(p)}
+            inc = await self._incident_live_edges(s, graph_id, branch_id, set(nodes), as_of_seq)
+            has_incoming_cont: set = set()
+            child_count: Dict[str, int] = {}
+            for eid, p in inc.items():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)
+                if b in nodes:
+                    has_incoming_cont.add(b)
+                if include_child_count and a in nodes:
+                    child_count[a] = child_count.get(a, 0) + 1
+            top = [(eid, p) for eid, p in nodes.items() if eid not in has_incoming_cont]
+
+        top.sort(key=lambda kv: ((kv[1].get("displayName") or ""), kv[0]))
+        total = len(top)
+        after = [kv for kv in top if (kv[1].get("displayName") or "") > cursor] if cursor else top
+        page = after[:limit]
+        has_more = len(after) > limit
+        out_nodes: List[dict] = []
+        root_count = 0
+        orphan_count = 0
+        for eid, p in page:
+            nd = _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
+            if include_child_count:
+                cc = child_count.get(eid, 0)
+                nd["childCount"] = cc
+                nd["properties"] = {**nd["properties"], "childCount": cc}
+            out_nodes.append(nd)
+            if rset and p.get("entityType") in rset:
+                root_count += 1
+            else:
+                orphan_count += 1
+        return {
+            "nodes": out_nodes,
+            "totalCount": total,
+            "hasMore": has_more,
+            "nextCursor": (out_nodes[-1]["displayName"] if (out_nodes and has_more) else None),
+            "rootTypeCount": root_count,
+            "orphanCount": orphan_count,
+        }
+
+    async def _containment_ancestors(
+        self, s, graph_id: str, branch_id: str, node_ids: set,
+        cset: set, as_of_seq: Optional[int], max_climb: int = 64,
+    ) -> Tuple[set, Dict[str, dict]]:
+        """Climb live IN containment edges from *node_ids* to their roots — bounded by the
+        hierarchy depth. Returns (all node ids incl. inputs + ancestors, {edge_id: payload})."""
+        seen = set(node_ids)
+        edges: Dict[str, dict] = {}
+        frontier = set(node_ids)
+        for _ in range(max_climb):
+            if not frontier:
+                break
+            inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+            nxt: set = set()
+            for eid, p in inc.items():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)   # a = parent (source), b = child (target)
+                if b in frontier and a:
+                    edges[eid] = p
+                    if a not in seen:
+                        seen.add(a)
+                        nxt.add(a)
+            frontier = nxt
+        return seen, edges
+
+    async def _containment_descendants(
+        self, s, graph_id: str, branch_id: str, root_ids: set,
+        cset: set, as_of_seq: Optional[int], cap: int, max_depth: int = 64,
+    ) -> set:
+        """Walk live OUT containment edges down from *root_ids* — the subtree, bounded by ``cap``."""
+        seen = set(root_ids)
+        frontier = set(root_ids)
+        for _ in range(max_depth):
+            if not frontier or len(seen) >= cap:
+                break
+            inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+            nxt: set = set()
+            for eid, p in inc.items():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)   # a = parent (source), b = child (target)
+                if a in frontier and b and b not in seen:
+                    if len(seen) >= cap:
+                        break
+                    seen.add(b)
+                    nxt.add(b)
+            frontier = nxt
+        return seen
+
+    async def trace_from_state(
+        self, *, graph_id: str, urn: str, level: int,
+        upstream_depth: int, downstream_depth: int,
+        lineage_edge_types: Sequence[str], containment_edge_types: Sequence[str],
+        max_nodes: int, branch_id: Optional[str] = None, as_of_seq: Optional[int] = None,
+        include_containment_edges: bool = True,
+    ) -> Dict[str, object]:
+        """Branch/as-of-aware RAW lineage trace — the draft/as-of counterpart of the provider's
+        ``trace_at_level``. A bounded hop-by-hop BFS over lineage edges (upstream follows IN,
+        downstream follows OUT), capped at ``max_nodes``; then every result node's containment
+        ancestor chain is added so the canvas layer-assignment invariant holds. RAW only — a draft
+        has no AGGREGATED rollups (those are FalkorDB-only), so ``level`` is informational and
+        ``effectiveLevel`` echoes it. Mirrors TraceResult."""
+        lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            focus = await self._eid_for_urn(s, graph_id, branch_id, urn, as_of_seq)
+            if focus is None:
+                return {
+                    "nodes": [], "edges": [], "containmentEdges": [],
+                    "upstreamUrns": [], "downstreamUrns": [],
+                    "focus": {"urn": urn, "level": level, "entityType": "unknown"},
+                    "effectiveLevel": level, "truncated": False, "truncationReason": "orphan",
+                }
+            seen_nodes = {focus}
+            lineage_edges: Dict[str, dict] = {}
+            upstream_ids: set = set()
+            downstream_ids: set = set()
+            truncated = False
+
+            async def _bfs(direction: str, depth: int, collected: set):
+                nonlocal truncated
+                frontier = {focus}
+                for _ in range(max(0, depth)):
+                    if not frontier or len(seen_nodes) >= max_nodes:
+                        truncated = truncated or len(seen_nodes) >= max_nodes
+                        break
+                    inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+                    nxt: set = set()
+                    for eid, p in inc.items():
+                        et = (p.get("edgeType") or "").upper()
+                        if et in cset or (lset is not None and et not in lset):
+                            continue
+                        src, tgt = _edge_src_tgt(p)
+                        hit = tgt if (direction == "down" and src in frontier) else (
+                            src if (direction == "up" and tgt in frontier) else None)
+                        if not hit:
+                            continue
+                        lineage_edges[eid] = p
+                        if hit not in seen_nodes:
+                            if len(seen_nodes) >= max_nodes:
+                                truncated = True
+                                continue
+                            seen_nodes.add(hit)
+                            collected.add(hit)
+                            nxt.add(hit)
+                    frontier = nxt
+
+            await _bfs("up", upstream_depth, upstream_ids)
+            await _bfs("down", downstream_depth, downstream_ids)
+
+            cont_edges: Dict[str, dict] = {}
+            if include_containment_edges and cset:
+                seen_nodes, cont_edges = await self._containment_ancestors(
+                    s, graph_id, branch_id, set(seen_nodes), cset, as_of_seq)
+            node_vals = await self._current_values(s, graph_id, branch_id, seen_nodes, as_of_seq)
+
+        nodes = {eid: p for eid, p in node_vals.items() if p is not None and not _is_edge_payload(p)}
+        urn_of = {eid: (p.get("urn") or f"gv:{eid}") for eid, p in nodes.items()}
+        out_nodes = [_graphnode_dict(eid, urn_of[eid], nodes[eid]) for eid in nodes]
+        out_lineage = [_graphedge_dict(eid, p, urn_of) for eid, p in lineage_edges.items()
+                       if _edge_src_tgt(p)[0] in nodes and _edge_src_tgt(p)[1] in nodes]
+        out_cont = [_graphedge_dict(eid, p, urn_of) for eid, p in cont_edges.items()
+                    if _edge_src_tgt(p)[0] in nodes and _edge_src_tgt(p)[1] in nodes]
+        focus_type = (nodes.get(focus) or {}).get("entityType") or "unknown"
+        return {
+            "nodes": out_nodes,
+            "edges": out_lineage,
+            "containmentEdges": out_cont,
+            "upstreamUrns": [urn_of[e] for e in upstream_ids if e in nodes],
+            "downstreamUrns": [urn_of[e] for e in downstream_ids if e in nodes],
+            "focus": {"urn": urn, "level": level, "entityType": focus_type},
+            "effectiveLevel": level,
+            "truncated": truncated,
+            "truncationReason": ("max_nodes" if truncated else None),
+        }
+
+    async def expand_from_state(
+        self, *, graph_id: str, source_urn: str, target_urn: str, next_level: int,
+        lineage_edge_types: Sequence[str], containment_edge_types: Sequence[str],
+        max_nodes: int, branch_id: Optional[str] = None, as_of_seq: Optional[int] = None,
+        include_containment_edges: bool = True,
+    ) -> Dict[str, object]:
+        """Branch/as-of-aware RAW expand — the draft/as-of counterpart of the provider's
+        ``expand_aggregated``. A draft carries only RAW lineage, so this returns the raw lineage
+        edges from the source anchor's containment subtree to the target anchor's subtree (bounded
+        by ``max_nodes``), plus the ancestor chains for the canvas invariant. ``next_level`` is
+        informational (no level rollup on a draft). Mirrors TraceResult, focused on the source."""
+        lset = {t.upper() for t in lineage_edge_types} if lineage_edge_types else None
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        async with self._session() as s:
+            if branch_id is None:
+                branch_id = await self._main_branch_id(s, graph_id)
+            src = await self._eid_for_urn(s, graph_id, branch_id, source_urn, as_of_seq)
+            tgt = await self._eid_for_urn(s, graph_id, branch_id, target_urn, as_of_seq)
+            if src is None or tgt is None:
+                return {
+                    "nodes": [], "edges": [], "containmentEdges": [],
+                    "upstreamUrns": [], "downstreamUrns": [],
+                    "focus": {"urn": source_urn, "level": next_level, "entityType": "unknown"},
+                    "effectiveLevel": next_level, "truncated": False, "truncationReason": "orphan",
+                }
+            src_sub = await self._containment_descendants(
+                s, graph_id, branch_id, {src}, cset, as_of_seq, max_nodes) if cset else {src}
+            tgt_sub = await self._containment_descendants(
+                s, graph_id, branch_id, {tgt}, cset, as_of_seq, max_nodes) if cset else {tgt}
+            lineage_edges: Dict[str, dict] = {}
+            result_nodes: set = set()
+            for eid, p in (await self._incident_live_edges(
+                    s, graph_id, branch_id, src_sub, as_of_seq)).items():
+                et = (p.get("edgeType") or "").upper()
+                if et in cset or (lset is not None and et not in lset):
+                    continue
+                a, b = _edge_src_tgt(p)
+                if a in src_sub and b in tgt_sub:
+                    lineage_edges[eid] = p
+                    result_nodes.add(a)
+                    result_nodes.add(b)
+            truncated = len(result_nodes) >= max_nodes
+            cont_edges: Dict[str, dict] = {}
+            if include_containment_edges and cset and result_nodes:
+                result_nodes, cont_edges = await self._containment_ancestors(
+                    s, graph_id, branch_id, set(result_nodes), cset, as_of_seq)
+            node_vals = await self._current_values(s, graph_id, branch_id, result_nodes, as_of_seq)
+
+        nodes = {eid: p for eid, p in node_vals.items() if p is not None and not _is_edge_payload(p)}
+        urn_of = {eid: (p.get("urn") or f"gv:{eid}") for eid, p in nodes.items()}
+        out_nodes = [_graphnode_dict(eid, urn_of[eid], nodes[eid]) for eid in nodes]
+        out_lineage = [_graphedge_dict(eid, p, urn_of) for eid, p in lineage_edges.items()
+                       if _edge_src_tgt(p)[0] in nodes and _edge_src_tgt(p)[1] in nodes]
+        out_cont = [_graphedge_dict(eid, p, urn_of) for eid, p in cont_edges.items()
+                    if _edge_src_tgt(p)[0] in nodes and _edge_src_tgt(p)[1] in nodes]
+        focus_type = (nodes.get(src) or {}).get("entityType") or "unknown"
+        return {
+            "nodes": out_nodes,
+            "edges": out_lineage,
+            "containmentEdges": out_cont,
+            "upstreamUrns": [],
+            "downstreamUrns": [urn_of[e] for e in (result_nodes - {src}) if e in nodes],
+            "focus": {"urn": source_urn, "level": next_level, "entityType": focus_type},
+            "effectiveLevel": next_level,
+            "truncated": truncated,
+            "truncationReason": ("max_nodes" if truncated else None),
+        }
+
     async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
         """Full revision timeline of one entity (plan §7 tier 1)."""
         async with self._session() as s:

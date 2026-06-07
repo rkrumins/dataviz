@@ -207,9 +207,12 @@ class CacheScope:
     data_source_id is optional because some workspaces have a default
     data source resolved server-side; we coerce missing to the literal
     empty string so the key is stable across requests that omit it.
+    branch_id scopes the entry to a draft so a draft read can never be
+    served to main (or vice-versa); empty string = main.
     """
     workspace_id: str
     data_source_id: str = ""
+    branch_id: str = ""
 
 
 class GraphCache:
@@ -459,7 +462,7 @@ class GraphCache:
 # ─── Module-level helpers ──────────────────────────────────────────────
 
 def _gen_key(scope: CacheScope) -> str:
-    return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}"
+    return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
 
 
 def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any]) -> str:
@@ -469,7 +472,7 @@ def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{gen}:{endpoint}:{digest}"
+    return f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{gen}:{endpoint}:{digest}"
 
 
 def _build_lkg_key(scope: CacheScope, endpoint: str, params: dict[str, Any]) -> str:
@@ -480,7 +483,7 @@ def _build_lkg_key(scope: CacheScope, endpoint: str, params: dict[str, Any]) -> 
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{endpoint}:{digest}"
+    return f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{endpoint}:{digest}"
 
 
 def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
