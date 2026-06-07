@@ -124,9 +124,9 @@ class ContextEngine:
                             await svc._get_branch(gv_s, gid, norm)
                         except ValueError as exc:
                             raise KeyError(f"branch_not_found: {norm}") from exc
-                    from ..providers.versioned_graph_reader import VersionedGraphReader
+                    from ..providers.versioned_branch_provider import VersionedBranchProvider
                     engine = cls(
-                        provider=VersionedGraphReader(svc, graph_id=gid, branch_id=norm),
+                        provider=VersionedBranchProvider(svc, graph_id=gid, branch_id=norm, actor=actor),
                         ontology_service=ontology_service,
                     )
                     engine._workspace_id = workspace_id

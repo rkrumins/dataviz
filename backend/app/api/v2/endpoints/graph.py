@@ -53,7 +53,7 @@ async def get_context_engine(
     ),
     branchId: Optional[str] = Query(
         None,
-        description="Opaque draft id (br_...) or 'main'. Omit to read main.",
+        description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it.",
     ),
     session: AsyncSession = Depends(get_db_session),
 ) -> ContextEngine:

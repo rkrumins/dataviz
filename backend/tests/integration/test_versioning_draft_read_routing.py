@@ -1,9 +1,9 @@
 """Branch-aware provider selection in ContextEngine.for_workspace (journey Phase G) — Postgres.
 
-The read endpoints gained an optional branchId; this asserts the selection rule that backs it.
-A resolved draft on a versioned graph swaps in the read-only VersionedGraphReader; 'main' (and
-omission, and the opaque main id) keep the live provider; an unknown branch on a versioned graph
-is a KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-versioned data
+The graph endpoints gained an optional branchId; this asserts the selection rule that backs it.
+A resolved draft on a versioned graph swaps in the VersionedBranchProvider; 'main' (and omission,
+and the opaque main id) keep the live provider; an unknown branch on a versioned graph is a
+KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-versioned data
 source is ignored (lenient). No FalkorDB — the live provider is a stub since only the *selection*
 is under test, and ontology resolution is stubbed out so the test is independent of DB ontology.
 """
@@ -15,7 +15,7 @@ import pytest
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.service import GraphVersioningService
-from backend.app.providers.versioned_graph_reader import VersionedGraphReader
+from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
 from backend.app.services.context_engine import ContextEngine
 
 
@@ -54,9 +54,9 @@ async def _run() -> None:
         return None
     ContextEngine._resolve_ontology = _noop
     try:
-        # resolved draft on a versioned graph → the read-only reader, bound to that branch
+        # resolved draft on a versioned graph → the branch provider, bound to that branch
         eng = await _for_workspace(ds, draft)
-        assert isinstance(eng.provider, VersionedGraphReader)
+        assert isinstance(eng.provider, VersionedBranchProvider)
         assert eng.provider._branch == draft and eng._branch_id == draft
 
         # 'main' (explicit alias), the opaque main id, and omission → live provider, never a reader

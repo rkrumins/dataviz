@@ -1,23 +1,26 @@
-"""Read-only provider view of one branch in the versioned store (journey Phase G).
+"""A branch of the versioned store, exposed as one ordinary ``GraphDataProvider``.
 
-The second journey-breaking gap was that the normal graph reads only ever saw ``main`` — a
-user could not actually *work* in a draft. This adapts the bounded, branch-aware reads on
-:class:`GraphVersioningService` into the slice of the ``GraphDataProvider`` read shape that the
-:class:`ContextEngine` read stack already calls (``get_node``/``get_nodes``/``get_edges``/
-``search_nodes``/``get_children_with_edges``). Routing a draft is therefore just swapping the
-engine's provider: the engine and endpoints are otherwise untouched — main keeps reading from
-FalkorDB, a draft (or as-of) reads from here.
+The journey-breaking gap was that the normal graph endpoints only ever saw ``main`` — a user
+could view, but not actually *work in*, a draft. This makes a single branch a first-class graph
+provider: the same ``ContextEngine`` and the same ``/graph`` endpoints serve it, gated only by
+``branchId``. Reads compose the shared ``main`` base + the branch's overlay; writes are recorded
+as audited commits on the branch via ``apply_ops``. Nothing about the read/write *stack* changes
+for a draft — only which provider the engine resolves. ``main`` keeps using FalkorDB (the fast
+projection); a branch (and as-of reads) use this, bounded Postgres, never a per-draft FalkorDB
+graph.
 
-Every call is a bounded Postgres query over the shared ``main`` base + the draft's tiny overlay
-(never full state, never a per-draft FalkorDB graph). The containment/lineage edge-type sets are
-passed in by the engine (resolved from the ontology), so this object needs no ontology access.
+So the full draft journey — open it, view it, edit it through ``/nodes/create`` / ``/edges`` /
+``/save``, read your writes — is the normal graph API with ``branchId`` set, not a separate
+versioning surface. Containment/lineage edge-type sets are passed in by the engine (resolved from
+the data source's ontology, shared by every branch), so this object needs no ontology access.
 
-Read-only by design: a draft *write* goes through ``apply_ops`` on the branch (the versioned
-write path), not this object.
+Writes translate the provider's node/edge models into versioning ops and commit them to this
+branch; reads then see them composed over the base. An as-of view is a historical snapshot and is
+therefore read-only.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
     ChildrenWithEdgesResult, EdgeQuery, GraphEdge, GraphNode, NodeQuery,
@@ -25,13 +28,30 @@ from backend.common.models.graph import (
 )
 
 
-class VersionedGraphReader:
-    """A ``GraphDataProvider``-shaped read view of ``(graph_id, branch_id[, as_of_seq])``."""
+def _node_payload(node: GraphNode) -> dict:
+    return node.model_dump(by_alias=True, exclude_none=True)
 
-    def __init__(self, svc, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None):
+
+def _edge_payload(edge: GraphEdge) -> dict:
+    p: Dict[str, Any] = {"edgeType": edge.edge_type,
+                         "sourceEntityId": edge.source_urn, "targetEntityId": edge.target_urn}
+    if edge.confidence is not None:
+        p["confidence"] = edge.confidence
+    if edge.properties:
+        p["properties"] = edge.properties
+    return p
+
+
+class VersionedBranchProvider:
+    """A ``GraphDataProvider`` over one ``(graph_id, branch_id[, as_of_seq])`` — reads compose
+    base + overlay, writes commit to the branch via ``apply_ops`` (as-of views are read-only)."""
+
+    def __init__(self, svc, *, graph_id: str, branch_id: str,
+                 actor: Optional[str] = None, as_of_seq: Optional[int] = None):
         self._svc = svc
         self._gid = graph_id
         self._branch = branch_id
+        self._actor = actor or "system"
         self._as_of = as_of_seq
         # Containment edge types, pushed in by ContextEngine._resolve_ontology (the same
         # push-down FalkorDB uses) — the structural input for the top-level/orphan read.
@@ -43,8 +63,9 @@ class VersionedGraphReader:
     @property
     def name(self) -> str:
         suffix = f"@{self._as_of}" if self._as_of is not None else ""
-        return f"versioned-reader[{self._gid}:{self._branch}{suffix}]"
+        return f"versioned-branch[{self._gid}:{self._branch}{suffix}]"
 
+    # ---- reads: bounded Postgres over base + overlay -------------------- #
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         d = await self._svc.get_node_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of, urn=urn)
@@ -137,7 +158,61 @@ class VersionedGraphReader:
         return TraceResult(**d)
 
     async def get_ontology_metadata(self):
-        """The reader has no ontology surface by design — the engine resolves ontology from the
-        data source (shared by main and every draft) and passes edge-type sets into each read.
-        Raising here makes ``ContextEngine._resolve_ontology``'s graceful-degradation explicit."""
-        raise NotImplementedError("VersionedGraphReader does not introspect ontology")
+        """No ontology surface by design — the engine resolves ontology from the data source
+        (shared by main and every branch) and passes edge-type sets into each call. Raising here
+        makes ``ContextEngine._resolve_ontology``'s graceful-degradation explicit."""
+        raise NotImplementedError("VersionedBranchProvider does not introspect ontology")
+
+    # ---- writes: one audited commit on this branch via apply_ops -------- #
+    async def _commit(self, ops: List[dict], message: str) -> Optional[str]:
+        if self._as_of is not None:
+            raise PermissionError("cannot write to a historical (as-of) view")
+        return await self._svc.apply_ops(
+            graph_id=self._gid, branch_id=self._branch, ops=ops, actor=self._actor, message=message)
+
+    async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,
+                "payload": _node_payload(node)}]
+        if containment_edge is not None:
+            ops.append({"op": "create", "entity_kind": "edge", "entity_id": containment_edge.id,
+                        "payload": _edge_payload(containment_edge)})
+        await self._commit(ops, f"create node {node.urn}")
+        return True
+
+    async def create_edge(self, edge: GraphEdge) -> bool:
+        await self._commit([{"op": "create", "entity_kind": "edge", "entity_id": edge.id,
+                             "payload": _edge_payload(edge)}], f"create edge {edge.id}")
+        return True
+
+    async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
+        cur = await self._svc.entity_value(
+            graph_id=self._gid, entity_id=edge_id, branch_id=self._branch)
+        if cur is None:
+            return None
+        payload = {**cur, "properties": {**(cur.get("properties") or {}), **(properties or {})}}
+        await self._commit([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
+                             "payload": payload}], f"update edge {edge_id}")
+        return GraphEdge(
+            id=edge_id,
+            sourceUrn=payload.get("sourceEntityId") or payload.get("source_entity_id") or "",
+            targetUrn=payload.get("targetEntityId") or payload.get("target_entity_id") or "",
+            edgeType=payload.get("edgeType"),
+            confidence=payload.get("confidence"),
+            properties=payload.get("properties") or {})
+
+    async def delete_edge(self, edge_id: str) -> bool:
+        cur = await self._svc.entity_value(
+            graph_id=self._gid, entity_id=edge_id, branch_id=self._branch)
+        if cur is None:
+            return False
+        await self._commit([{"op": "delete", "entity_kind": "edge", "entity_id": edge_id,
+                             "payload": None}], f"delete edge {edge_id}")
+        return True
+
+    async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+        ops = [{"op": "create", "entity_kind": "node", "entity_id": n.urn,
+                "payload": _node_payload(n)} for n in nodes]
+        ops += [{"op": "create", "entity_kind": "edge", "entity_id": e.id,
+                 "payload": _edge_payload(e)} for e in edges]
+        await self._commit(ops, "save custom graph")
+        return True

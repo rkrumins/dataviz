@@ -56,7 +56,7 @@ async def get_context_engine(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
-    branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to read main."),
+    branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it."),
     session: AsyncSession = Depends(get_db_session),
     user=Depends(get_optional_user),
 ) -> ContextEngine:

@@ -1,10 +1,10 @@
-"""VersionedGraphReader through the real ContextEngine read stack (journey Phase G) — Postgres.
+"""VersionedBranchProvider reads through the real ContextEngine read stack (journey Phase G) — Postgres.
 
 The Phase G claim is that a draft is served by the SAME ContextEngine/endpoints with no change
 to the read stack — only the provider differs. This drives an actual ContextEngine whose
-provider is a VersionedGraphReader bound to a draft and asserts the engine's read methods
+provider is a VersionedBranchProvider bound to a draft and asserts the engine's read methods
 (get_nodes_query / search_nodes / get_edges / get_children_with_edges) return the draft's
-composed view, while a reader bound to main returns main's view. No FalkorDB involved — a draft
+composed view, while a provider bound to main returns main's view. No FalkorDB involved — a draft
 never instantiates one; this is all bounded Postgres over the shared base + the tiny overlay.
 """
 import asyncio
@@ -14,7 +14,7 @@ import pytest
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import GraphVersioningService
-from backend.app.providers.versioned_graph_reader import VersionedGraphReader
+from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
 from backend.app.services.context_engine import ContextEngine
 from backend.common.models.graph import NodeQuery, EdgeQuery
 
@@ -48,8 +48,8 @@ async def _run() -> None:
         {"op": "delete", "entity_kind": "node", "entity_id": "T2", "payload": None},
         _e("e_13", "T1", "T3", "FLOWS")])
 
-    # the engine reads the DRAFT entirely through the reader-as-provider — stack unchanged
-    reader = VersionedGraphReader(svc, graph_id=gid, branch_id=draft)
+    # the engine reads the DRAFT entirely through the branch-provider — stack unchanged
+    reader = VersionedBranchProvider(svc, graph_id=gid, branch_id=draft)
     eng = ContextEngine(provider=reader)
 
     nodes = await eng.get_nodes_query(NodeQuery())
@@ -104,7 +104,7 @@ async def _run() -> None:
     assert {"T1", "T3"} <= {n.urn for n in ex.nodes}
 
     # an engine bound to MAIN sees main's view (the draft changed nothing on main)
-    meng = ContextEngine(provider=VersionedGraphReader(svc, graph_id=gid, branch_id=main))
+    meng = ContextEngine(provider=VersionedBranchProvider(svc, graph_id=gid, branch_id=main))
     assert {n.urn for n in await meng.get_nodes_query(NodeQuery())} == {"DOM", "T1", "T2"}
     assert {e.id for e in await meng.get_edges(EdgeQuery())} == {"e_d1", "e_d2", "e_12"}
 
