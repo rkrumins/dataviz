@@ -22,6 +22,12 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
+  mergeRequest: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
+  prDiff: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'prDiff', ws, prId] as const,
+  prPreview: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'prPreview', ws, prId] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -88,6 +94,36 @@ export function useMergeRequests(wsId?: string, graphId?: string | null) {
     queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId),
     queryFn: () => api.listMergeRequests(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
+    staleTime: 15_000,
+  })
+}
+
+/** One PR's detail (works for draft MRs and fork PRs — the endpoint dispatches). */
+export function useMergeRequest(wsId?: string, prId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.mergeRequest(wsId, prId),
+    queryFn: () => api.getMergeRequest(wsId!, prId!),
+    enabled: !!wsId && !!prId,
+    staleTime: 10_000,
+  })
+}
+
+/** A PR's itemised Files Changed (for the unified ChangesPanel). */
+export function usePullRequestDiff(wsId?: string, prId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.prDiff(wsId, prId),
+    queryFn: () => api.getMergeRequestDiff(wsId!, prId!),
+    enabled: !!wsId && !!prId,
+    staleTime: 15_000,
+  })
+}
+
+/** Pre-merge dry-run: clean flag + conflict set + change counts. */
+export function usePreviewMergeRequest(wsId?: string, prId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.prPreview(wsId, prId),
+    queryFn: () => api.previewMergeRequest(wsId!, prId!),
+    enabled: !!wsId && !!prId,
     staleTime: 15_000,
   })
 }
@@ -166,6 +202,51 @@ export function useOpenMergeRequest(wsId: string, graphId: string) {
       api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, reviewers: v.reviewers }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
+    },
+  })
+}
+
+// PR review actions — keyed by prId; pass graphId so the right list refreshes (the inbox
+// aggregates PRs from many graphs). All refresh the PR detail + its graph's MR list.
+function useInvalidatePr(wsId: string) {
+  const qc = useQueryClient()
+  return (prId: string, graphId: string) => {
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequest(wsId, prId) })
+  }
+}
+
+export function useApproveMergeRequest(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string }) => api.approveMergeRequest(wsId, v.prId),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+export function useCloseMergeRequest(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string }) => api.closeMergeRequest(wsId, v.prId),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Merge a PR. Throws {@link api.MergeConflictError} on conflicts (caller resolves +
+ *  re-merges with `resolutions`) and a plain error on `approval_required`. */
+export function useMergeMergeRequest(wsId: string) {
+  const qc = useQueryClient()
+  const invalidate = useInvalidatePr(wsId)
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; message: string; resolutions?: ResolutionMap }) =>
+      api.mergeMergeRequest(wsId, v.prId, { message: v.message, resolutions: v.resolutions }),
+    onSuccess: (_r, v) => {
+      invalidate(v.prId, v.graphId)
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiff(wsId, v.prId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, v.graphId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, v.graphId) })
+      bumpMainEpoch()   // main@head moved
     },
   })
 }

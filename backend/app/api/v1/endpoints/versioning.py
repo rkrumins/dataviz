@@ -945,6 +945,18 @@ async def preview_pull_request(
         return await svc.preview_pr(pr_id=pr_id)
 
 
+@router.get("/pulls/{pr_id}/diff", response_model=DiffVsMainResponse)
+async def diff_pull_request(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Itemised Files Changed for a PR (same computation as ``/preview``, reshaped)."""
+    with _domain_errors():
+        return await svc.diff_pr(pr_id=pr_id)
+
+
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
@@ -1036,6 +1048,18 @@ async def preview_merge_request_endpoint(
 ):
     with _domain_errors():
         return await svc.preview_mr(mr_id=pr_id)
+
+
+@router.get("/merge-requests/{pr_id}/diff", response_model=DiffVsMainResponse)
+async def diff_merge_request(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Itemised Files Changed for a merge request (same computation as ``/preview``)."""
+    with _domain_errors():
+        return await svc.diff_pr(pr_id=pr_id)
 
 
 @router.post("/merge-requests/{pr_id}/approve", response_model=PrResponse)

@@ -27,6 +27,7 @@ export type ChangeOrigin =
   | { source: 'staged'; stagedChangeId: string }
   | { source: 'branch'; branchId: string }
   | { source: 'commit'; commitId: string }
+  | { source: 'pr'; prId: string }
 
 export interface GraphChange {
   /** Stable id of the entity: node URN / entityId, or edge id. The canvas keys tints by this. */

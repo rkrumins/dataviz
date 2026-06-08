@@ -445,6 +445,47 @@ def test_cascade_delete_shared_child():
     asyncio.run(_run_cascade_shared_child())
 
 
+async def _run_pr_diff_matches_preview() -> None:
+    """A draft MR's itemised diff (the review center's Files Changed) classifies the draft's
+    add/modify/delete with whole-payload before/after, and its item counts equal the
+    preview's change counts (same 3-way computation backs both)."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    n = lambda u, name: {"kind": "node", "id": u, "urn": u, "entityType": "T", "displayName": name}
+    created = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="u")
+    gid = created["graph_id"]
+    await svc.bulk_ingest(graph_id=gid, rows=[n("urn:a", "A"), n("urn:b", "B"), n("urn:c", "C")], actor="u")
+    draft = await svc.open_draft(graph_id=gid, owner="u")
+    await svc.apply_ops(
+        graph_id=gid, branch_id=draft, actor="u",
+        ops=[
+            {"op": "create", "entity_kind": "node", "entity_id": "urn:d", "payload": n("urn:d", "D")},
+            {"op": "update", "entity_kind": "node", "entity_id": "urn:a", "payload": n("urn:a", "A2")},
+            {"op": "delete", "entity_kind": "node", "entity_id": "urn:c", "payload": None},
+        ])
+    mr_id = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="u")
+
+    diff = await svc.diff_pr(pr_id=mr_id)
+    assert {e["entityId"] for e in diff["added"]} == {"urn:d"}, diff
+    assert {e["entityId"] for e in diff["modified"]} == {"urn:a"}, diff
+    assert {e["entityId"] for e in diff["removed"]} == {"urn:c"}, diff
+    assert diff["modified"][0]["before"] and diff["modified"][0]["after"]            # full payloads
+    assert diff["modified"][0]["before"] != diff["modified"][0]["after"]            # content changed
+    assert diff["removed"][0]["before"]                                             # ghost payload present
+
+    prev = await svc.preview_mr(mr_id=mr_id)
+    assert prev["clean"] is True, prev
+    assert (len(diff["added"]), len(diff["modified"]), len(diff["removed"])) == (
+        prev["changes"]["create"], prev["changes"]["update"], prev["changes"]["delete"]), (diff, prev)
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_pr_diff_matches_preview():
+    asyncio.run(_run_pr_diff_matches_preview())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("API graph draft journey (HTTP create→import→draft-edit→read→publish) e2e: OK")

@@ -494,3 +494,10 @@ export function mergeMergeRequest(
 ): Promise<CommitResponse> {
   return vfetch<CommitResponse>(`${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data))
 }
+
+/** Itemised "Files Changed" for a PR (draft MR or fork PR — the endpoint dispatches
+ *  internally), in the same shape as a branch's diff-vs-main so it renders through the
+ *  unified ChangesPanel. Counts match {@link previewMergeRequest}. */
+export function getMergeRequestDiff(wsId: string, prId: string): Promise<DiffVsMainResponse> {
+  return vfetch<DiffVsMainResponse>(`${base(wsId)}/merge-requests/${prId}/diff`)
+}

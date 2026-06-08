@@ -997,6 +997,28 @@ class GraphVersioningService:
                 "changes": _delta_stats(net_delta(theirs, merged)),
             }
 
+    async def diff_pr(self, *, pr_id: str) -> Dict[str, object]:
+        """Itemised **Files Changed** for a PR — the SAME 3-way computation as
+        :meth:`preview_mr` (so the diff's item count equals the preview's change count),
+        reshaped into the UI's ``DiffVsMainResponse`` overlay shape. Dispatches draft→main
+        vs fork→parent; the diff is the merge's net effect on the target
+        (``net_delta(theirs, merged)``), i.e. what merging this PR changes in the base."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pull request {pr_id}")
+            if self._is_draft_mr(pr):
+                graph = await s.get(GraphORM, pr.target_graph_id)
+                draft = await s.get(BranchORM, pr.source_branch_id)
+                main_id = await self._main_branch_id(s, graph.id)
+                merged, _conflicts, theirs = await self._compute_merge(
+                    s, graph.id, graph, draft, main_id, {}
+                )
+            else:
+                fork = await s.get(GraphORM, pr.graph_id)
+                merged, _conflicts, theirs = await self._compute_fork_merge(s, fork, {})
+        return _deltas_to_diff_vs_main(net_delta(theirs, merged), theirs)
+
     async def merge_mr(
         self, *, mr_id: str, actor: str, message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
@@ -3227,3 +3249,27 @@ def _delta_stats(deltas: List[Delta]) -> dict:
     for d in deltas:
         out[d.op] += 1
     return out
+
+
+def _deltas_to_diff_vs_main(
+    deltas: List[Delta], theirs: Mapping[str, Optional[dict]],
+) -> Dict[str, list]:
+    """Reshape a squash (``net_delta(theirs, merged)``) into the UI's
+    ``DiffVsMainResponse`` shape — added/removed/modified with whole-payload
+    before/after, exactly what :meth:`diff_branch_vs_base` emits — so a PR's Files
+    Changed renders through the identical canvas/diff overlay. ``before`` is the
+    target-side payload (``theirs``; a delete carries ``payload=None``, so its before
+    must come from here); ``after`` is the merged payload."""
+    added: List[dict] = []
+    removed: List[dict] = []
+    modified: List[dict] = []
+    for d in deltas:
+        before = theirs.get(d.entity_id)
+        kind = "edge" if _is_edge_payload(d.payload or before or {}) else "node"
+        if d.op == "create":
+            added.append({"entityId": d.entity_id, "kind": kind, "after": d.payload})
+        elif d.op == "delete":
+            removed.append({"entityId": d.entity_id, "kind": kind, "before": before})
+        else:
+            modified.append({"entityId": d.entity_id, "kind": kind, "before": before, "after": d.payload})
+    return {"added": added, "removed": removed, "modified": modified}

@@ -4,12 +4,16 @@
  * it, and surfaces the branch list + recent commit history. Read-only overview; the
  * editing loop lives on the canvas.
  */
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User } from 'lucide-react'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
-import { useBootstrapGraph, useBranches, useCommitLog, useResolveGraph } from '../hooks/useVersioning'
+import { useBootstrapGraph, useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
 import type { Branch } from '@/services/versioningApiService'
+import { PrListRow } from '@/features/reviews/components/PrListRow'
+import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 
 function timeAgo(iso?: string): string {
   if (!iso) return ''
@@ -29,6 +33,8 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
   const bootstrap = useBootstrapGraph(wsId)
   const branchesQ = useBranches(wsId, graphId)
   const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
+  const mrsQ = useMergeRequests(wsId, graphId)
+  const [openPrId, setOpenPrId] = useState<string | null>(null)
 
   if (resolve.isLoading) {
     return (
@@ -106,6 +112,30 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
         </div>
       </section>
 
+      {/* Merge requests */}
+      <section>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+            <GitPullRequestArrow className="w-3.5 h-3.5" /> Merge requests
+          </h4>
+          <Link to={`/workspaces/${wsId}/reviews`} className="inline-flex items-center gap-0.5 text-[11px] text-accent-lineage hover:underline">
+            View all <ChevronRight className="w-3 h-3" />
+          </Link>
+        </div>
+        {(() => {
+          const active = (mrsQ.data ?? []).filter((p) => !['merged', 'closed'].includes(p.status))
+          if (mrsQ.isLoading) return <RowSkeleton />
+          if (active.length === 0) return <p className="text-xs text-ink-muted px-1 py-2">No open merge requests.</p>
+          return (
+            <div className="space-y-1.5">
+              {active.slice(0, 4).map((pr) => (
+                <PrListRow key={pr.prId} pr={pr} onOpen={() => setOpenPrId(pr.prId)} />
+              ))}
+            </div>
+          )
+        })()}
+      </section>
+
       {/* History */}
       <section>
         <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
@@ -144,6 +174,8 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
           </ol>
         )}
       </section>
+
+      {openPrId && <PrDetailDrawer wsId={wsId} prId={openPrId} onClose={() => setOpenPrId(null)} />}
     </div>
   )
 }

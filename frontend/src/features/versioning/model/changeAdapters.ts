@@ -87,3 +87,8 @@ export function fromDiffEntries(
 export function fromDiffVsMain(resp: DiffVsMainResponse, branchId: string): ChangeSet {
   return fromDiffEntries(resp.added, resp.removed, resp.modified, { source: 'branch', branchId })
 }
+
+/** A PR's itemised "Files Changed" (the review center's diff). */
+export function fromPrDiff(resp: DiffVsMainResponse, prId: string): ChangeSet {
+  return fromDiffEntries(resp.added, resp.removed, resp.modified, { source: 'pr', prId })
+}

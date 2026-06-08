@@ -24,6 +24,7 @@ const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => 
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
+const WorkspaceReviewsPage = lazy(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
@@ -110,6 +111,7 @@ export const router = createBrowserRouter([
       // are view-driven — see /views and /explorer; there is no standalone canvas.
       { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
+      { path: 'workspaces/:wsId/reviews', element: <Lazy><WorkspaceReviewsPage /></Lazy> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },

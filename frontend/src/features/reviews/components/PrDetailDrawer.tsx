@@ -1,0 +1,254 @@
+/**
+ * PrDetailDrawer — the review surface for one PR: overview + reviewers/approval, the
+ * itemised Files Changed (unified ChangesPanel), a derived activity timeline, and the
+ * Approve / Merge / Close actions. Merge is conflict-aware: a conflict opens the
+ * ConflictResolver, whose resolutions feed straight back into a re-merge.
+ *
+ * Mounted only while a PR is selected (fresh queries per prId).
+ */
+import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck, GitPullRequestArrow,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
+import { MergeConflictError, type ResolutionMap } from '@/services/versioningApiService'
+import {
+  useMergeRequest, usePullRequestDiff,
+  useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest,
+} from '../../versioning/hooks/useVersioning'
+import { fromPrDiff } from '../../versioning/model/changeAdapters'
+import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
+import { usePermission, useAuthStore } from '@/store/auth'
+import { useToast } from '@/components/ui/toast'
+import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
+import { ConflictResolver } from './ConflictResolver'
+
+const who = (actor?: string | null) => (actor ?? 'someone').split('@')[0]
+
+function Section({ icon: Icon, title, right, children }: {
+  icon: React.ComponentType<{ className?: string }>; title: string; right?: React.ReactNode; children: React.ReactNode
+}) {
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+          <Icon className="w-3.5 h-3.5" /> {title}
+        </h4>
+        {right}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: string; onClose: () => void }) {
+  const { showToast } = useToast()
+  const canManage = usePermission('workspace:datasource:manage', wsId)
+  const user = useAuthStore((s) => s.user)
+
+  const prQ = useMergeRequest(wsId, prId)
+  const diffQ = usePullRequestDiff(wsId, prId)
+  const approve = useApproveMergeRequest(wsId)
+  const closePr = useCloseMergeRequest(wsId)
+  const merge = useMergeMergeRequest(wsId)
+
+  const pr = prQ.data
+  const changeSet = useMemo(() => (diffQ.data ? fromPrDiff(diffQ.data, prId) : null), [diffQ.data, prId])
+  // entityId → merged payload, the seed each conflict resolution starts from.
+  const seeds = useMemo(() => {
+    const out: Record<string, Record<string, unknown> | undefined> = {}
+    const d = diffQ.data
+    if (d) for (const e of [...d.added, ...d.modified]) out[e.entityId] = (e.after as Record<string, unknown>) ?? undefined
+    return out
+  }, [diffQ.data])
+
+  const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
+  const [resolverError, setResolverError] = useState<string | null>(null)
+
+  const terminal = pr?.status === 'merged' || pr?.status === 'closed'
+  const isAuthor = !!user && pr?.actor === user.id
+  const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
+  const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
+  const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && hasReviewers
+  const busy = approve.isPending || closePr.isPending || merge.isPending
+
+  const runMerge = async (resolutions?: ResolutionMap) => {
+    if (!pr) return
+    try {
+      await merge.mutateAsync({ prId, graphId: pr.graphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions })
+      setConflicts(null)
+      setResolverError(null)
+      showToast('success', `Merged into ${pr.targetBranch}.`)
+    } catch (e) {
+      if (e instanceof MergeConflictError) {
+        setConflicts(e.conflicts)
+        setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
+        return
+      }
+      const msg = (e as Error).message
+      const friendly = /approval_required/i.test(msg)
+        ? 'This PR needs approval from its reviewers before it can be merged.'
+        : msg
+      if (resolutions) setResolverError(friendly)
+      else showToast('error', friendly)
+    }
+  }
+
+  const events = useMemo(() => {
+    type Ev = { Icon: React.ComponentType<{ className?: string }>; text: string; time?: string; tint: string }
+    if (!pr) return [] as Ev[]
+    const evs: Ev[] = [{ Icon: GitPullRequestArrow, text: `Opened by ${who(pr.actor)}`, time: pr.createdAt, tint: 'bg-accent-lineage' }]
+    for (const a of pr.approvedBy ?? []) evs.push({ Icon: CheckCircle2, text: `Approved by ${who(a)}`, time: pr.updatedAt, tint: 'bg-emerald-500' })
+    if (pr.status === 'merged') evs.push({ Icon: GitMerge, text: `Merged${pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''}`, time: pr.updatedAt, tint: 'bg-violet-500' })
+    if (pr.status === 'closed') evs.push({ Icon: XCircle, text: 'Closed', time: pr.updatedAt, tint: 'bg-ink-muted' })
+    return evs
+  }, [pr])
+
+  return createPortal(
+    <AnimatePresence>
+      <motion.div className="fixed inset-0 z-[60] bg-black/40" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} onClick={onClose} />
+      <motion.aside
+        className="fixed right-0 top-0 h-full w-[520px] max-w-[92vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
+        initial={{ x: 520 }} animate={{ x: 0 }} exit={{ x: 520 }} transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-4 border-b border-glass-border/60">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] shrink-0">
+                {pr ? <PrKindIcon pr={pr} className="w-4 h-4 text-ink-muted" /> : <FileDiff className="w-4 h-4 text-ink-muted" />}
+              </span>
+              {pr && <PrStatusBadge status={pr.status} />}
+              {pr && <ApprovalPill pr={pr} />}
+            </div>
+            <h2 className="text-base font-bold text-ink leading-tight truncate">{pr ? derivePrTitle(pr) : 'Loading…'}</h2>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] shrink-0">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar px-5 py-5 space-y-6">
+          {prQ.isLoading && (
+            <div className="flex items-center gap-2 text-sm text-ink-muted py-8 justify-center">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading review…
+            </div>
+          )}
+
+          {pr && (
+            <>
+              <Section icon={GitBranch} title="Overview">
+                <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-3 space-y-2 text-sm">
+                  <div className="flex items-center gap-2 text-ink">
+                    <span className="font-mono text-[12px]">{isDraftMr(pr) ? 'draft' : (pr.sourceBranchId?.slice(0, 12) ?? 'fork')}</span>
+                    <span className="text-ink-muted">→</span>
+                    <span className="font-mono text-[12px]">{pr.targetBranch}</span>
+                  </div>
+                  <p className="text-[12px] text-ink-muted flex items-center gap-1.5">
+                    <User className="w-3.5 h-3.5" /> {who(pr.actor)}
+                    <span>·</span>
+                    <Clock className="w-3.5 h-3.5" /> opened {timeAgo(pr.createdAt)}
+                  </p>
+                  {hasReviewers && (
+                    <p className="text-[12px] text-ink-muted flex items-center gap-1.5 flex-wrap">
+                      <ShieldCheck className="w-3.5 h-3.5" /> Reviewers:
+                      {pr.reviewers!.map((r) => (
+                        <span key={r} className={cn('px-1.5 py-0.5 rounded text-[11px]', (pr.approvedBy ?? []).includes(r) ? 'bg-emerald-500/10 text-emerald-600' : 'bg-ink/5 text-ink-muted')}>
+                          {who(r)}{(pr.approvedBy ?? []).includes(r) ? ' ✓' : ''}
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                </div>
+              </Section>
+
+              {pr.status === 'conflicts' && (
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-[12px] text-amber-700 dark:text-amber-400">
+                  The target has moved — this PR has conflicts. Resolve them when you merge.
+                </div>
+              )}
+
+              <Section icon={FileDiff} title="Files changed" right={changeSet ? <ChangeCountChips changeSet={changeSet} /> : undefined}>
+                {diffQ.isLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-ink-muted py-6 justify-center">
+                    <Loader2 className="w-4 h-4 animate-spin" /> Computing diff…
+                  </div>
+                ) : changeSet ? (
+                  <ChangesPanel changeSet={changeSet} emptyHint="No changes in this PR." />
+                ) : (
+                  <p className="text-xs text-ink-muted py-3">Diff unavailable.</p>
+                )}
+              </Section>
+
+              <Section icon={Clock} title="Activity">
+                <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
+                  {events.map((ev, i) => (
+                    <li key={i} className="relative">
+                      <span className={cn('absolute -left-[1.36rem] top-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-canvas-elevated', ev.tint)} />
+                      <p className="text-sm text-ink leading-tight flex items-center gap-1.5">
+                        <ev.Icon className="w-3.5 h-3.5 text-ink-muted" /> {ev.text}
+                      </p>
+                      {ev.time && <p className="text-[11px] text-ink-muted mt-0.5">{timeAgo(ev.time)}</p>}
+                    </li>
+                  ))}
+                </ol>
+              </Section>
+            </>
+          )}
+        </div>
+
+        {/* Action bar */}
+        {pr && !terminal && canManage && (
+          <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
+            {showApprove && (
+              <button
+                onClick={() => approve.mutate({ prId, graphId: pr.graphId }, {
+                  onSuccess: () => showToast('success', 'Approved.'),
+                  onError: (e) => showToast('error', (e as Error).message),
+                })}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-emerald-600 border border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10 disabled:opacity-60"
+              >
+                <CheckCircle2 className="w-4 h-4" /> Approve
+              </button>
+            )}
+            <button
+              onClick={() => runMerge()}
+              disabled={busy}
+              className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+            >
+              {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
+              Merge
+            </button>
+            <button
+              onClick={() => closePr.mutate({ prId, graphId: pr.graphId }, {
+                onSuccess: () => { showToast('success', 'Closed.'); onClose() },
+                onError: (e) => showToast('error', (e as Error).message),
+              })}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-medium text-ink-muted border border-glass-border hover:text-rose-500 hover:border-rose-500/30 disabled:opacity-60"
+            >
+              <XCircle className="w-4 h-4" /> Close
+            </button>
+          </div>
+        )}
+
+        {conflicts && (
+          <ConflictResolver
+            conflicts={conflicts}
+            seeds={seeds}
+            busy={merge.isPending}
+            error={resolverError}
+            onCancel={() => { setConflicts(null); setResolverError(null) }}
+            onResolve={(resolutions) => runMerge(resolutions)}
+          />
+        )}
+      </motion.aside>
+    </AnimatePresence>,
+    document.body,
+  )
+}

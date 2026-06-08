@@ -5,6 +5,7 @@
  * than a generic error toast.
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, X, Loader2, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
@@ -27,6 +28,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const [message, setMessage] = useState('')
   const [conflicts, setConflicts] = useState<number | null>(null)
   const { showToast } = useToast()
+  const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   const switchToMain = useBranchStore((s) => s.switchToMain)
 
@@ -48,9 +50,10 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
     openMr.mutate(
       { branchId, title: message || undefined },
       {
-        onSuccess: () => {
+        onSuccess: (res) => {
           showToast('success', 'Merge request opened for review.')
           onClose()
+          navigate(`/workspaces/${workspaceId}/reviews?pr=${res.prId}`)
         },
         onError: handleError,
       },
