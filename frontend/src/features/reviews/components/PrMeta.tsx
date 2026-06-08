@@ -58,7 +58,8 @@ export const PrKindIcon = ({ pr, className }: { pr: PullRequest; className?: str
 
 const who = (actor?: string | null) => (actor ?? 'someone').split('@')[0]
 
-/** PRs have no stored title — derive a readable one from kind + author. */
+/** The author-supplied title if any, else a readable fallback derived from kind + author. */
 export function derivePrTitle(pr: PullRequest): string {
+  if (pr.title && pr.title.trim()) return pr.title.trim()
   return isDraftMr(pr) ? `Publish draft by ${who(pr.actor)}` : `Incoming changes from ${who(pr.actor)}`
 }

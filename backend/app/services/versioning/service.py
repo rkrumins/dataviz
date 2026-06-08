@@ -750,7 +750,7 @@ class GraphVersioningService:
 
     async def open_pr(
         self, *, source_graph_id: str, actor: str, title: Optional[str] = None,
-        reviewers: Optional[Sequence[str]] = None,
+        description: Optional[str] = None, reviewers: Optional[Sequence[str]] = None,
     ) -> str:
         """Open a PR from a fork's ``main`` back to its parent's ``main``,
         recording the current mergeability/conflict set (plan §12.5).
@@ -771,6 +771,8 @@ class GraphVersioningService:
                 target_branch="main",
                 base_commit_seq=fork.fork_base_commit_seq,
                 status="conflicts" if conflicts else "mergeable",
+                title=(title or None),
+                description=(description or None),
                 conflicts=conflicts or None,
                 reviewers=revs or None,
                 approval_status="pending" if revs else None,
@@ -801,7 +803,7 @@ class GraphVersioningService:
             pr.updated_at = _now()
             return self._pr_meta(pr)
 
-    async def close_pr(self, *, pr_id: str) -> dict:
+    async def close_pr(self, *, pr_id: str, actor: Optional[str] = None) -> dict:
         """Close a PR without merging — terminal: approve_pr and merge_pr both
         reject a closed PR. Idempotent; an already-merged PR cannot be closed."""
         async with self._session() as s:
@@ -813,6 +815,8 @@ class GraphVersioningService:
             if pr.status == "merged":
                 raise ValueError(f"pr {pr_id} is merged")
             pr.status = "closed"
+            pr.closed_at = _now()
+            pr.closed_by = actor
             pr.updated_at = _now()
             return self._pr_meta(pr)
 
@@ -923,6 +927,8 @@ class GraphVersioningService:
 
             pr.status = "merged"
             pr.resulting_commit_id = squash.id
+            pr.merged_at = _now()
+            pr.merged_by = actor
             pr.updated_at = _now()
             ps = await s.get(ProjectionStateORM, parent.id)
             if ps is not None:
@@ -938,12 +944,13 @@ class GraphVersioningService:
 
     async def open_draft_mr(
         self, *, graph_id: str, branch_id: str, actor: str,
-        title: Optional[str] = None, reviewers: Optional[Sequence[str]] = None,
+        title: Optional[str] = None, description: Optional[str] = None,
+        reviewers: Optional[Sequence[str]] = None,
     ) -> str:
         """Open a merge request from a per-user ``draft`` back to its own graph's
         ``main`` — the reviewed alternative to a bare :meth:`publish`. Records the
-        current mergeability/conflict set; ``reviewers`` makes approval a merge
-        precondition (plan §17 #5). ``title`` is accepted for API symmetry."""
+        current mergeability/conflict set + the ``title``/``description``;
+        ``reviewers`` makes approval a merge precondition (plan §17 #5)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             draft = await s.get(BranchORM, branch_id)
@@ -965,6 +972,8 @@ class GraphVersioningService:
                 target_branch="main",
                 base_commit_seq=draft.base_commit_seq,
                 status="conflicts" if conflicts else "mergeable",
+                title=(title or None),
+                description=(description or None),
                 conflicts=conflicts or None,
                 reviewers=revs or None,
                 approval_status="pending" if revs else None,
@@ -1059,6 +1068,8 @@ class GraphVersioningService:
             )
             pr.status = "merged"
             pr.resulting_commit_id = commit_id
+            pr.merged_at = _now()
+            pr.merged_by = actor
             pr.updated_at = _now()
             return commit_id
 
@@ -2084,10 +2095,13 @@ class GraphVersioningService:
             "source_branch_id": pr.source_branch_id,
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
             "base_commit_seq": pr.base_commit_seq, "status": pr.status,
+            "title": pr.title, "description": pr.description,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
             "reviewers": pr.reviewers, "approved_by": pr.approved_by,
             "approval_status": pr.approval_status, "checks_status": pr.checks_status,
             "actor": pr.actor, "created_at": pr.created_at, "updated_at": pr.updated_at,
+            "merged_at": pr.merged_at, "merged_by": pr.merged_by,
+            "closed_at": pr.closed_at, "closed_by": pr.closed_by,
         }
 
     # ------------------------------------------------------------------ #

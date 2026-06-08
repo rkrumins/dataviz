@@ -102,8 +102,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     if (!pr) return [] as Ev[]
     const evs: Ev[] = [{ Icon: GitPullRequestArrow, text: `Opened by ${who(pr.actor)}`, time: pr.createdAt, tint: 'bg-accent-lineage' }]
     for (const a of pr.approvedBy ?? []) evs.push({ Icon: CheckCircle2, text: `Approved by ${who(a)}`, time: pr.updatedAt, tint: 'bg-emerald-500' })
-    if (pr.status === 'merged') evs.push({ Icon: GitMerge, text: `Merged${pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''}`, time: pr.updatedAt, tint: 'bg-violet-500' })
-    if (pr.status === 'closed') evs.push({ Icon: XCircle, text: 'Closed', time: pr.updatedAt, tint: 'bg-ink-muted' })
+    if (pr.status === 'merged') evs.push({ Icon: GitMerge, text: `Merged by ${who(pr.mergedBy)}${pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''}`, time: pr.mergedAt ?? pr.updatedAt, tint: 'bg-violet-500' })
+    if (pr.status === 'closed') evs.push({ Icon: XCircle, text: `Closed by ${who(pr.closedBy)}`, time: pr.closedAt ?? pr.updatedAt, tint: 'bg-ink-muted' })
     return evs
   }, [pr])
 
@@ -141,6 +141,12 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
           {pr && (
             <>
+              {pr.description && pr.description.trim() && (
+                <Section icon={FileDiff} title="Description">
+                  <p className="text-sm text-ink whitespace-pre-wrap leading-relaxed">{pr.description.trim()}</p>
+                </Section>
+              )}
+
               <Section icon={GitBranch} title="Overview">
                 <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-3 space-y-2 text-sm">
                   <div className="flex items-center gap-2 text-ink">

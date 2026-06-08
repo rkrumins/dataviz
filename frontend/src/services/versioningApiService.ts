@@ -142,15 +142,21 @@ export interface PullRequest {
   targetBranch: string
   baseCommitSeq?: number | null
   status: string
+  title?: string | null
+  description?: string | null
   conflicts?: Array<Record<string, unknown>> | null
   resultingCommitId?: string | null
   reviewers?: string[] | null
   approvedBy?: string[] | null
   approvalStatus?: string | null
   checksStatus?: Record<string, unknown> | null
-  actor?: string | null
-  createdAt: string
+  actor?: string | null          // who raised it
+  createdAt: string              // when raised
   updatedAt: string
+  mergedAt?: string | null       // when + who merged
+  mergedBy?: string | null
+  closedAt?: string | null       // when + who closed
+  closedBy?: string | null
 }
 
 /** Map of entityId → resolved payload (or `null` to delete) for conflict resolution. */
@@ -459,7 +465,7 @@ export function openMergeRequest(
   wsId: string,
   graphId: string,
   branchId: string,
-  data: { title?: string; reviewers?: string[] } = {},
+  data: { title?: string; description?: string; reviewers?: string[] } = {},
 ): Promise<{ prId: string }> {
   return vfetch<{ prId: string }>(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/merge-requests`,

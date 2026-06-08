@@ -191,6 +191,8 @@ class MergeRequestORM(VersioningBase):
     target_branch = Column(Text, nullable=False, default="main")
     base_commit_seq = Column(BigInteger, nullable=True)
     status = Column(Text, nullable=False, default="open")
+    title = Column(Text, nullable=True)                   # human title + description (review UX)
+    description = Column(Text, nullable=True)
     conflicts = Column(JSONB, nullable=True)              # field-level conflict set
     resolutions = Column(JSONB, nullable=True)            # who resolved / chosen value
     reviewers = Column(JSONB, nullable=True)
@@ -198,9 +200,13 @@ class MergeRequestORM(VersioningBase):
     approval_status = Column(Text, nullable=True)
     checks_status = Column(JSONB, nullable=True)          # ontology re-validation etc.
     resulting_commit_id = Column(Text, nullable=True)
-    actor = Column(Text, nullable=True)
-    created_at = Column(Text, nullable=False, default=_now)
+    actor = Column(Text, nullable=True)                   # who raised it
+    created_at = Column(Text, nullable=False, default=_now)   # when raised
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    merged_at = Column(Text, nullable=True)               # when + who merged
+    merged_by = Column(Text, nullable=True)
+    closed_at = Column(Text, nullable=True)               # when + who closed (without merging)
+    closed_by = Column(Text, nullable=True)
 
     __table_args__ = _plain(
         Index("ix_mr_graph", "graph_id"),

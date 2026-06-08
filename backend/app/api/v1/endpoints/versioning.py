@@ -355,11 +355,14 @@ class ForkResponse(_ApiModel):
 
 
 class OpenPrRequest(_ApiModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
     reviewers: Optional[List[str]] = None
 
 
 class OpenMrRequest(_ApiModel):
     title: Optional[str] = None
+    description: Optional[str] = None
     reviewers: Optional[List[str]] = None
 
 
@@ -375,15 +378,21 @@ class PrResponse(_ApiModel):
     target_branch: str = Field(alias="targetBranch")
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
     status: str
+    title: Optional[str] = None
+    description: Optional[str] = None
     conflicts: Optional[List[dict]] = None
     resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
     reviewers: Optional[List[str]] = None
     approved_by: Optional[List[str]] = Field(default=None, alias="approvedBy")
     approval_status: Optional[str] = Field(default=None, alias="approvalStatus")
     checks_status: Optional[dict] = Field(default=None, alias="checksStatus")
-    actor: Optional[str] = None
-    created_at: str = Field(alias="createdAt")
+    actor: Optional[str] = None                                       # who raised it
+    created_at: str = Field(alias="createdAt")                        # when raised
     updated_at: str = Field(alias="updatedAt")
+    merged_at: Optional[str] = Field(default=None, alias="mergedAt")  # when + who merged
+    merged_by: Optional[str] = Field(default=None, alias="mergedBy")
+    closed_at: Optional[str] = Field(default=None, alias="closedAt")  # when + who closed
+    closed_by: Optional[str] = Field(default=None, alias="closedBy")
 
 
 # --------------------------------------------------------------------------- #
@@ -908,6 +917,8 @@ async def open_pull_request(
     with _domain_errors():
         pr_id = await svc.open_pr(
             source_graph_id=graph_id, actor=user.id,
+            title=body.title if body else None,
+            description=body.description if body else None,
             reviewers=body.reviewers if body else None,
         )
     return {"pr_id": pr_id}
@@ -971,12 +982,12 @@ async def approve_pull_request(
 @router.post("/pulls/{pr_id}/close", response_model=PrResponse)
 async def close_pull_request(
     ws_id: str, pr_id: str,
-    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),    # a manager rejects/closes
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager rejects/closes
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        return await svc.close_pr(pr_id=pr_id)
+        return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
 @router.post("/pulls/{pr_id}/merge", response_model=CommitResponse)
@@ -1012,6 +1023,7 @@ async def open_merge_request(
         pr_id = await svc.open_draft_mr(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             title=body.title if body else None,
+            description=body.description if body else None,
             reviewers=body.reviewers if body else None,
         )
     return {"pr_id": pr_id}
@@ -1076,12 +1088,12 @@ async def approve_merge_request(
 @router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
 async def close_merge_request(
     ws_id: str, pr_id: str,
-    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        return await svc.close_pr(pr_id=pr_id)
+        return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
 @router.post("/merge-requests/{pr_id}/merge", response_model=CommitResponse)

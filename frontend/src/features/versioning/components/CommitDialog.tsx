@@ -26,6 +26,7 @@ interface CommitDialogProps {
 
 export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClose }: CommitDialogProps) {
   const [message, setMessage] = useState('')
+  const [description, setDescription] = useState('')
   const [conflicts, setConflicts] = useState<number | null>(null)
   const { showToast } = useToast()
   const navigate = useNavigate()
@@ -48,7 +49,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const handleOpenMr = () => {
     setConflicts(null)
     openMr.mutate(
-      { branchId, title: message || undefined },
+      { branchId, title: message || undefined, description: description || undefined },
       {
         onSuccess: (res) => {
           showToast('success', 'Merge request opened for review.')
@@ -102,13 +103,27 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             <p className="text-xs text-ink-muted">No changes detected in this draft yet.</p>
           )}
 
-          <textarea
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Describe what changed (becomes the commit / MR title)…"
-            rows={3}
-            className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 resize-none"
-          />
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Title</label>
+            <input
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="A short summary of these changes…"
+              className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+              Description <span className="text-ink-muted/50 normal-case font-normal">· optional, for reviewers</span>
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Add context — what changed and why…"
+              rows={3}
+              className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 resize-none"
+            />
+          </div>
 
           {conflicts != null && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">

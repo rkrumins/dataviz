@@ -74,6 +74,11 @@ def upgrade() -> None:
     bind.execute(sa.text(
         f'ALTER TABLE "{schema}"."projection_state" ADD COLUMN IF NOT EXISTS falkor_provider text'
     ))
+    # merge_requests review metadata (title/description + merge/close who & when) — added
+    # after first cut for the PR review center.
+    mr = f'"{schema}"."merge_requests"'
+    for _col in ("title", "description", "merged_at", "merged_by", "closed_at", "closed_by"):
+        bind.execute(sa.text(f'ALTER TABLE {mr} ADD COLUMN IF NOT EXISTS {_col} text'))
     # Child hash partitions for the high-cardinality append-only tables.
     n = gv_config.PARTITIONS
     for tname in PARTITIONED_TABLES:

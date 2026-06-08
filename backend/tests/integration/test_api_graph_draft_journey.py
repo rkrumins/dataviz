@@ -486,6 +486,49 @@ def test_pr_diff_matches_preview():
     asyncio.run(_run_pr_diff_matches_preview())
 
 
+async def _run_pr_metadata() -> None:
+    """PR title + description and the raised/merged/closed who-and-when are persisted and
+    surfaced on the PR record."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    n = lambda u, name: {"kind": "node", "id": u, "urn": u, "entityType": "T", "displayName": name}
+    created = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="raiser")
+    gid = created["graph_id"]
+    await svc.bulk_ingest(graph_id=gid, rows=[n("urn:a", "A")], actor="raiser")
+
+    # Open with title + description (raised by 'raiser'); merge as a different actor.
+    d1 = await svc.open_draft(graph_id=gid, owner="raiser")
+    await svc.apply_ops(graph_id=gid, branch_id=d1, actor="raiser",
+        ops=[{"op": "update", "entity_kind": "node", "entity_id": "urn:a", "payload": n("urn:a", "A2")}])
+    mr = await svc.open_draft_mr(graph_id=gid, branch_id=d1, actor="raiser",
+                                 title="Rename A", description="Because reasons.")
+    meta = await svc.get_pr(mr)
+    assert meta["title"] == "Rename A" and meta["description"] == "Because reasons.", meta
+    assert meta["actor"] == "raiser" and meta["created_at"], meta          # raised by + when
+    assert meta["merged_at"] is None and meta["closed_at"] is None, meta
+
+    await svc.merge_mr(mr_id=mr, actor="merger", message="merge it")
+    meta = await svc.get_pr(mr)
+    assert meta["status"] == "merged", meta
+    assert meta["merged_by"] == "merger" and meta["merged_at"], meta       # merged by + when
+
+    # A second MR, closed (not merged) by someone else.
+    d2 = await svc.open_draft(graph_id=gid, owner="raiser")
+    await svc.apply_ops(graph_id=gid, branch_id=d2, actor="raiser",
+        ops=[{"op": "update", "entity_kind": "node", "entity_id": "urn:a", "payload": n("urn:a", "A3")}])
+    mr2 = await svc.open_draft_mr(graph_id=gid, branch_id=d2, actor="raiser", title="Another")
+    closed = await svc.close_pr(pr_id=mr2, actor="closer")
+    assert closed["status"] == "closed", closed
+    assert closed["closed_by"] == "closer" and closed["closed_at"], closed  # closed by + when
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_pr_metadata():
+    asyncio.run(_run_pr_metadata())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("API graph draft journey (HTTP create→import→draft-edit→read→publish) e2e: OK")

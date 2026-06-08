@@ -198,8 +198,8 @@ export function usePublishBranch(wsId: string, graphId: string) {
 export function useOpenMergeRequest(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { branchId: string; title?: string; reviewers?: string[] }) =>
-      api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, reviewers: v.reviewers }),
+    mutationFn: (v: { branchId: string; title?: string; description?: string; reviewers?: string[] }) =>
+      api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, description: v.description, reviewers: v.reviewers }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
     },
