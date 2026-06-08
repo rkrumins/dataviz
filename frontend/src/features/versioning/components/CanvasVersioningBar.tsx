@@ -8,12 +8,13 @@
  * the committed change counts (+ unsaved-edit hint), and Review / Publish / Discard.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2 } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
+import { usePermission } from '@/store/auth'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
-import { useAbandonDraft, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
+import { useAbandonDraft, useBootstrapGraph, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { BranchSwitcher } from './BranchSwitcher'
@@ -27,8 +28,10 @@ interface CanvasVersioningBarProps {
 
 export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersioningBarProps) {
   const { showToast } = useToast()
+  const canManage = usePermission('workspace:datasource:manage', workspaceId)
   const resolve = useResolveGraph(workspaceId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
+  const bootstrap = useBootstrapGraph(workspaceId)
 
   const branchId = useEffectiveBranchId(workspaceId, dataSourceId)
   const isDraft = !!branchId
@@ -51,8 +54,44 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
-  // No versioned graph for this data source → no chrome at all.
-  if (!dataSourceId || !graphId) return null
+  const handleEnable = () => {
+    if (!dataSourceId) return
+    bootstrap.mutate(dataSourceId, {
+      onSuccess: () => showToast('success', 'Version control enabled — you can now create drafts and review changes.'),
+      onError: (e) => showToast('error', (e as Error).message),
+    })
+  }
+
+  // No data source, or still resolving → render nothing (avoid flicker).
+  if (!dataSourceId || (resolve.isLoading && !graphId)) return null
+
+  // No versioned graph yet: offer to enable it (managers only). A premium, business-
+  // friendly empty state — this is what makes the whole feature discoverable.
+  if (!graphId) {
+    if (!canManage) return null
+    return (
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-glass-border bg-gradient-to-r from-accent-lineage/[0.07] via-canvas-elevated/40 to-transparent shrink-0">
+        <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-accent-lineage/10 border border-accent-lineage/20 shrink-0">
+          <GitBranch className="w-4 h-4 text-accent-lineage" />
+        </span>
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-ink leading-tight">Version control is off for this data source</p>
+          <p className="text-[11px] text-ink-muted leading-tight">
+            Turn it on to edit safely in drafts, review changes, and publish with full history.
+          </p>
+        </div>
+        <div className="flex-1" />
+        <button
+          onClick={handleEnable}
+          disabled={bootstrap.isPending}
+          className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60 disabled:hover:scale-100"
+        >
+          {bootstrap.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+          {bootstrap.isPending ? 'Setting up…' : 'Enable version control'}
+        </button>
+      </div>
+    )
+  }
 
   const handleDiscard = () => {
     if (!branchId) return

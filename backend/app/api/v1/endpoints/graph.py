@@ -1544,6 +1544,99 @@ async def delete_edge(
     await _invalidate_cache(engine)
 
 
+# ─── Draft batch write (atomic, server-merged) ──────────────────────────────
+
+class GraphChangeOp(BaseModel):
+    """One typed change in a draft save. ``update`` payloads are *partial* — the
+    server merges them onto the entity's current state, so the client never has to
+    reload (and risk clobbering) fields it didn't edit."""
+    op: str = Field(description="create | update | delete")
+    kind: str = Field(description="node | edge")
+    id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
+    ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
+    payload: Optional[dict] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class GraphChangesRequest(BaseModel):
+    ops: List[GraphChangeOp]
+    message: Optional[str] = None
+
+
+class GraphChangesResponse(BaseModel):
+    commit_id: Optional[str] = Field(default=None, alias="commitId")
+    assigned: dict = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True)
+async def apply_graph_changes(
+    ws_id: str,
+    request: GraphChangesRequest = Body(...),
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to edit."),
+    branchId: str = Query(..., description="Draft branch the changes are committed to."),
+    user=Depends(get_optional_user),
+):
+    """Apply a batch of canvas edits to a draft as ONE atomic commit — the unified
+    'save' path for draft editing (create/update/delete, nodes and edges, together).
+
+    ``update`` payloads are partial and merged server-side onto the entity's current
+    draft state, so the client sends only what changed. Returns the new commit id and
+    a temp-ref→entity-id map for creates so the client can reconcile optimistic ids."""
+    from backend.app.services.versioning.service import (
+        GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
+    from backend.app.services.versioning.ids import prefixed_id
+    actor = user.id if user else "system"
+    svc = GraphVersioningService()
+    g = await svc.get_graph_by_data_source(dataSourceId)
+    if g is None or g.get("workspace_id") != ws_id:
+        raise HTTPException(status_code=404, detail="no versioned graph for this data source")
+    graph_id = g["graph_id"]
+
+    assigned: dict = {}
+    ops: List[dict] = []
+    for o in request.ops:
+        kind = "edge" if o.kind == "edge" else "node"
+        if o.op == "delete":
+            if not o.id:
+                continue
+            ops.append({"op": "delete", "entity_kind": kind, "entity_id": o.id, "payload": None})
+        elif o.op == "create":
+            eid = o.id or prefixed_id("ent")
+            if o.ref:
+                assigned[o.ref] = eid
+            assigned.setdefault(eid, eid)
+            ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": o.payload or {}})
+        else:  # update — merge the partial onto current draft state (full-replace otherwise clobbers)
+            if not o.id:
+                continue
+            cur = await svc.entity_value(graph_id=graph_id, entity_id=o.id, branch_id=branchId) or {}
+            patch = o.payload or {}
+            merged = {**cur, **patch}
+            if patch.get("properties") is not None or cur.get("properties") is not None:
+                merged["properties"] = {**(cur.get("properties") or {}), **(patch.get("properties") or {})}
+            ops.append({"op": "update", "entity_kind": kind, "entity_id": o.id, "payload": merged})
+
+    if not ops:
+        return {"commitId": None, "assigned": assigned}
+
+    try:
+        commit_id = await svc.apply_ops(
+            graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
+            message=request.message or "Canvas edits")
+    except OntologyViolation as exc:
+        raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
+    except MergeConflict as exc:
+        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+    except ConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    return {"commitId": commit_id, "assigned": assigned}
+
+
 # ─── Preflight / guided-create APIs ─────────────────────────────────────────
 
 class AllowedChildOption(BaseModel):

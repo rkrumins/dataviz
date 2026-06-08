@@ -244,6 +244,25 @@ export function getGraph(wsId: string, graphId: string): Promise<Graph> {
   return vfetch<Graph>(`${base(wsId)}/graphs/${graphId}`)
 }
 
+export interface BootstrapResult {
+  graphId?: string
+  nodes?: number
+  edges?: number
+  [k: string]: unknown
+}
+
+/**
+ * "Enable version control" — create-or-seed the data source's versioned graph from
+ * its current live state (idempotent). Note: this is on the *graph* route, not the
+ * versioning route, because it snapshots the live provider into the versioned base.
+ */
+export function bootstrapGraph(wsId: string, dataSourceId: string): Promise<BootstrapResult> {
+  return vfetch<BootstrapResult>(
+    `/api/v1/${wsId}/graph/bootstrap?dataSourceId=${encodeURIComponent(dataSourceId)}`,
+    { method: 'POST' },
+  )
+}
+
 // ============================================
 // Branches / drafts
 // ============================================
@@ -290,6 +309,40 @@ export function commitDraft(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/commit`,
     jsonBody(data),
   )
+}
+
+/** One typed canvas edit for the atomic `/graph/changes` save. `update` payloads are
+ *  partial — the server merges them onto current state. */
+export interface GraphChangeOp {
+  op: 'create' | 'update' | 'delete'
+  kind: 'node' | 'edge'
+  id?: string
+  ref?: string
+  payload?: Record<string, unknown> | null
+}
+
+export interface GraphChangesResult {
+  commitId?: string | null
+  assigned: Record<string, string>
+}
+
+/**
+ * The unified draft-save path: apply a batch of canvas edits to a draft as ONE atomic,
+ * server-merged commit (create/update/delete, nodes + edges). On the *graph* route
+ * because it edits graph entities; `update` ops send only changed fields.
+ */
+export function applyGraphChanges(
+  wsId: string,
+  dataSourceId: string,
+  branchId: string,
+  ops: GraphChangeOp[],
+  message?: string,
+): Promise<GraphChangesResult> {
+  const qs = `dataSourceId=${encodeURIComponent(dataSourceId)}&branchId=${encodeURIComponent(branchId)}`
+  return vfetch<GraphChangesResult>(`/api/v1/${wsId}/graph/changes?${qs}`, {
+    method: 'POST',
+    body: JSON.stringify({ ops, message }),
+  })
 }
 
 /**

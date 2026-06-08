@@ -152,6 +152,24 @@ async def _run() -> None:
             assert any(e["after"].get("edgeType") == "LINEAGE" for e in added_edges), dvm
             assert dvm["removed"] == [] and dvm["modified"] == [], dvm
 
+            # 5c. ATOMIC draft save via POST /graph/changes — create + partial-merge update
+            #     in one commit. The update sends ONLY displayName; the server must merge
+            #     it onto current state (entityType must survive — full-replace would clobber it).
+            batch = {"ops": [
+                {"op": "create", "kind": "node", "id": "urn:t:batch", "ref": "tmp1",
+                 "payload": {"urn": "urn:t:batch", "entityType": "Table", "displayName": "Batch Node"}},
+                {"op": "update", "kind": "node", "id": "urn:t:child",
+                 "payload": {"displayName": "Child v2"}},
+            ], "message": "batch edit"}
+            r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": draft}, json=batch)
+            assert r.status_code == 200, r.text
+            assert r.json()["commitId"], r.text
+            assert r.json()["assigned"].get("tmp1") == "urn:t:batch", r.json()
+            st_b = (await c.get(f"{V1}/graphs/{gid}/branches/{draft}/state")).json()["nodes"]
+            assert "urn:t:batch" in st_b, list(st_b)
+            assert st_b["urn:t:child"]["displayName"] == "Child v2", st_b["urn:t:child"]
+            assert st_b["urn:t:child"]["entityType"] == "Table", st_b["urn:t:child"]  # merge kept it
+
             # 6. routing isolation: the same read on MAIN (no branchId) hits the live stub (empty)
             main_nodes = (await c.post(f"{GP}/nodes/query", params={"dataSourceId": ds}, json={"query": {}})).json()
             assert {n["urn"] for n in main_nodes} == set(), main_nodes

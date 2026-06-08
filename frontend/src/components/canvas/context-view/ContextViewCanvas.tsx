@@ -33,6 +33,10 @@ import { useCanvasStore, useCanvasVersion, type LineageEdge } from '@/store/canv
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
+import { useQueryClient } from '@tanstack/react-query'
+import { useBranchStore } from '@/store/branchStore'
+import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
+import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -733,6 +737,7 @@ export function ContextViewCanvas({
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
+  const queryClient = useQueryClient()
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
 
@@ -2028,6 +2033,32 @@ export function ContextViewCanvas({
              and confirming a batch of staged edits before they hit the backend. */}
         <StagedChangesPanel onConfirm={async () => {
           if (!activeWorkspaceId) return
+          // Draft mode: persist every change type to the draft branch as one atomic,
+          // server-merged commit (creates via the proven provider path, the rest via
+          // /graph/changes). This is the path that makes draft editing actually work.
+          const bs = useBranchStore.getState()
+          if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
+            try {
+              await saveStagedChangesToDraft(stagedChangeList, {
+                wsId: bs.workspaceId ?? activeWorkspaceId,
+                dataSourceId: bs.dataSourceId,
+                branchId: bs.currentBranchId,
+                provider,
+                message: `Canvas edits (${stagedChangeList.length})`,
+              })
+              // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).
+              useStagedChangesStore.setState({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
+              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(bs.workspaceId ?? undefined, bs.graphId, bs.currentBranchId) })
+              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(bs.workspaceId ?? undefined, bs.graphId, bs.currentBranchId) })
+              await saveToBackend(activeWorkspaceId)   // view/blueprint config (layers) — not graph entities
+              closeStagedChangesPanel()
+              showToast('success', 'Saved to draft.')
+            } catch (e) {
+              showToast('error', (e as Error).message)
+            }
+            return
+          }
+          // Main mode: legacy per-change apply.
           const result = stagedChangeList.length > 0
             ? await applyStagedChanges(provider, activeWorkspaceId)
             : { ok: 0, failed: 0 }

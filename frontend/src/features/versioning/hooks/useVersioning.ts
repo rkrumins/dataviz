@@ -94,6 +94,18 @@ export function useMergeRequests(wsId?: string, graphId?: string | null) {
 
 // ── Mutations ────────────────────────────────────────────────────────────────
 
+/** Enable version control for a data source (create-or-seed its versioned graph). */
+export function useBootstrapGraph(wsId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (dataSourceId: string) => api.bootstrapGraph(wsId, dataSourceId),
+    onSuccess: (_res, dataSourceId) => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+    },
+  })
+}
+
 export function useOpenDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
