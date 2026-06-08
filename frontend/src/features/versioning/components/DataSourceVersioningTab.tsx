@@ -38,8 +38,11 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
     )
   }
 
-  // Not enabled yet.
-  if (!graphId) {
+  // Not enabled — or a graph that exists but was never seeded (genesis only). Both
+  // need the seed step; treating "exists but empty" as not-enabled self-heals a
+  // bootstrap that failed partway.
+  const needsSeed = !graphId || (resolve.data?.mainHeadCommitSeq ?? 0) <= 1
+  if (needsSeed) {
     return (
       <div className="rounded-2xl border border-glass-border bg-gradient-to-br from-accent-lineage/[0.06] to-transparent p-6 text-center">
         <span className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-accent-lineage/10 border border-accent-lineage/20 mb-3">

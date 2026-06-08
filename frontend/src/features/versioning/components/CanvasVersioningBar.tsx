@@ -65,9 +65,12 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   // No data source, or still resolving → render nothing (avoid flicker).
   if (!dataSourceId || (resolve.isLoading && !graphId)) return null
 
-  // No versioned graph yet: offer to enable it (managers only). A premium, business-
-  // friendly empty state — this is what makes the whole feature discoverable.
-  if (!graphId) {
+  // No versioned graph yet — or one that exists but was never seeded (genesis only,
+  // mainHeadCommitSeq <= 1; e.g. a bootstrap that failed partway). Offer to enable/seed
+  // it (managers only). This premium empty state is what makes the feature discoverable
+  // AND self-heals a half-enabled graph.
+  const needsSeed = !graphId || (resolve.data?.mainHeadCommitSeq ?? 0) <= 1
+  if (needsSeed) {
     if (!canManage) return null
     return (
       <div className="flex items-center gap-3 px-4 py-2 border-b border-glass-border bg-gradient-to-r from-accent-lineage/[0.07] via-canvas-elevated/40 to-transparent shrink-0">
