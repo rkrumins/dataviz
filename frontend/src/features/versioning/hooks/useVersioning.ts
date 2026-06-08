@@ -232,6 +232,16 @@ export function useCloseMergeRequest(wsId: string) {
   })
 }
 
+/** Edit a PR's title/description in place. */
+export function useUpdateMergeRequest(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; title?: string; description?: string }) =>
+      api.updateMergeRequest(wsId, v.prId, { title: v.title, description: v.description }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
 /** Merge a PR. Throws {@link api.MergeConflictError} on conflicts (caller resolves +
  *  re-merges with `resolutions`) and a plain error on `approval_required`. */
 export function useMergeMergeRequest(wsId: string) {

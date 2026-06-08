@@ -507,3 +507,15 @@ export function mergeMergeRequest(
 export function getMergeRequestDiff(wsId: string, prId: string): Promise<DiffVsMainResponse> {
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/merge-requests/${prId}/diff`)
 }
+
+/** Edit a PR's title/description (review metadata). PATCH: omitted fields are untouched. */
+export function updateMergeRequest(
+  wsId: string,
+  prId: string,
+  data: { title?: string; description?: string },
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
+}

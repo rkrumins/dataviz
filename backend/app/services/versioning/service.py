@@ -820,6 +820,23 @@ class GraphVersioningService:
             pr.updated_at = _now()
             return self._pr_meta(pr)
 
+    async def update_pr(
+        self, *, pr_id: str, title: Optional[str] = None, description: Optional[str] = None,
+    ) -> dict:
+        """Edit a PR's human title + description (review metadata only — does not touch the
+        merge or status). PATCH semantics: a field left ``None`` is untouched, an empty
+        string clears it."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            if title is not None:
+                pr.title = title.strip() or None
+            if description is not None:
+                pr.description = description.strip() or None
+            pr.updated_at = _now()
+            return self._pr_meta(pr)
+
     @staticmethod
     def _pr_ontology_check(parent: GraphORM, deltas, kind_by_entity) -> dict:
         """Re-validate a PR's merged result against the *target* graph's ontology

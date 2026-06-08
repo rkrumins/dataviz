@@ -10,14 +10,15 @@ import { useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck, GitPullRequestArrow,
+  X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
+  GitPullRequestArrow, Pencil, Check,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { MergeConflictError, type ResolutionMap } from '@/services/versioningApiService'
 import {
   useMergeRequest, usePullRequestDiff,
-  useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest,
+  useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
 } from '../../versioning/hooks/useVersioning'
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
@@ -54,8 +55,29 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const approve = useApproveMergeRequest(wsId)
   const closePr = useCloseMergeRequest(wsId)
   const merge = useMergeMergeRequest(wsId)
+  const update = useUpdateMergeRequest(wsId)
 
   const pr = prQ.data
+
+  // In-place title/description editing (managers).
+  const [editing, setEditing] = useState(false)
+  const [editTitle, setEditTitle] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const startEdit = () => {
+    setEditTitle(pr?.title ?? '')
+    setEditDesc(pr?.description ?? '')
+    setEditing(true)
+  }
+  const saveEdit = () => {
+    if (!pr) return
+    update.mutate(
+      { prId, graphId: pr.graphId, title: editTitle, description: editDesc },
+      {
+        onSuccess: () => { setEditing(false); showToast('success', 'Updated.') },
+        onError: (e) => showToast('error', (e as Error).message),
+      },
+    )
+  }
   const changeSet = useMemo(() => (diffQ.data ? fromPrDiff(diffQ.data, prId) : null), [diffQ.data, prId])
   // entityId → merged payload, the seed each conflict resolution starts from.
   const seeds = useMemo(() => {
@@ -124,7 +146,18 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               {pr && <PrStatusBadge status={pr.status} />}
               {pr && <ApprovalPill pr={pr} />}
             </div>
-            <h2 className="text-base font-bold text-ink leading-tight truncate">{pr ? derivePrTitle(pr) : 'Loading…'}</h2>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <h2 className="text-base font-bold text-ink leading-tight truncate">{pr ? derivePrTitle(pr) : 'Loading…'}</h2>
+              {pr && canManage && !editing && (
+                <button
+                  onClick={startEdit}
+                  title="Edit title & description"
+                  className="p-1 rounded-md text-ink-muted/60 hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] shrink-0"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
           <button onClick={onClose} className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] shrink-0">
             <X className="w-5 h-5" />
@@ -141,7 +174,45 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
           {pr && (
             <>
-              {pr.description && pr.description.trim() && (
+              {editing && (
+                <div className="rounded-xl border border-accent-lineage/30 bg-accent-lineage/[0.05] p-3 space-y-2.5">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Title</label>
+                    <input
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      autoFocus
+                      placeholder="A short summary…"
+                      className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">Description</label>
+                    <textarea
+                      value={editDesc}
+                      onChange={(e) => setEditDesc(e.target.value)}
+                      rows={4}
+                      placeholder="Context for reviewers…"
+                      className="w-full rounded-lg border border-glass-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 resize-none"
+                    />
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-lg text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+                      Cancel
+                    </button>
+                    <button
+                      onClick={saveEdit}
+                      disabled={update.isPending}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+                    >
+                      {update.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                      Save
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!editing && pr.description && pr.description.trim() && (
                 <Section icon={FileDiff} title="Description">
                   <p className="text-sm text-ink whitespace-pre-wrap leading-relaxed">{pr.description.trim()}</p>
                 </Section>

@@ -366,6 +366,12 @@ class OpenMrRequest(_ApiModel):
     reviewers: Optional[List[str]] = None
 
 
+class UpdatePrRequest(_ApiModel):
+    """Edit a PR's title/description. A field left unset is untouched."""
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+
 class OpenPrResponse(_ApiModel):
     pr_id: str = Field(alias="prId")
 
@@ -945,6 +951,18 @@ async def get_pull_request(
     return pr
 
 
+@router.patch("/pulls/{pr_id}", response_model=PrResponse)
+async def update_pull_request(
+    ws_id: str, pr_id: str, body: UpdatePrRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Edit a PR's title/description (review metadata)."""
+    with _domain_errors():
+        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description)
+
+
 @router.get("/pulls/{pr_id}/preview", response_model=MergePreviewResponse)
 async def preview_pull_request(
     ws_id: str, pr_id: str,
@@ -1049,6 +1067,18 @@ async def get_merge_request(
     pr: dict = Depends(pr_in_workspace),
 ):
     return pr
+
+
+@router.patch("/merge-requests/{pr_id}", response_model=PrResponse)
+async def update_merge_request(
+    ws_id: str, pr_id: str, body: UpdatePrRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Edit a merge request's title/description (review metadata)."""
+    with _domain_errors():
+        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description)
 
 
 @router.get("/merge-requests/{pr_id}/preview", response_model=MergePreviewResponse)

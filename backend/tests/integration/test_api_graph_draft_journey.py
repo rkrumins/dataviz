@@ -508,6 +508,12 @@ async def _run_pr_metadata() -> None:
     assert meta["actor"] == "raiser" and meta["created_at"], meta          # raised by + when
     assert meta["merged_at"] is None and meta["closed_at"] is None, meta
 
+    # Edit in place — PATCH semantics: an omitted field is left untouched.
+    edited = await svc.update_pr(pr_id=mr, title="Rename A nicely")
+    assert edited["title"] == "Rename A nicely" and edited["description"] == "Because reasons.", edited
+    edited = await svc.update_pr(pr_id=mr, description="Clearer reasons.")
+    assert edited["title"] == "Rename A nicely" and edited["description"] == "Clearer reasons.", edited
+
     await svc.merge_mr(mr_id=mr, actor="merger", message="merge it")
     meta = await svc.get_pr(mr)
     assert meta["status"] == "merged", meta
