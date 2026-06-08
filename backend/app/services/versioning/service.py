@@ -353,6 +353,7 @@ class GraphVersioningService:
         message: Optional[str] = None,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         actor_groups: Sequence[str] = (),
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
@@ -402,6 +403,24 @@ class GraphVersioningService:
                     for c in changes
                 ]
                 head_state = materialize(base_state, ops)
+
+            # Cascade containment deletes (ontology-driven): expand a deleted node to its
+            # subtree + all incident edges so a checkpoint can't orphan descendants or dangle
+            # edges — parity with apply_ops, via the same shared helper.
+            del_nodes = {c.entity_id for c in changes
+                         if c.op == "delete" and c.entity_kind == "node"}
+            if del_nodes:
+                subtree, inc_edges = await self._cascade_deletes(
+                    s, graph_id, branch_id, del_nodes, containment_edge_types)
+                extra = [e for e in (subtree | set(inc_edges)) if e not in base_state]
+                extra_cur = await self._current_values(s, graph_id, branch_id, extra) if extra else {}
+                for e in extra:
+                    cur = extra_cur.get(e)
+                    if cur is None:
+                        continue
+                    base_state[e] = cur            # so net_delta sees a delete
+                    head_state[e] = None           # tombstone the descendant / incident edge
+                    kind_by_entity[e] = "edge" if _is_edge_payload(cur) else "node"
             deltas = net_delta(base_state, head_state)
 
             commit_seq = await self._next_seq(s, graph_id, branch_id)
@@ -2019,6 +2038,7 @@ class GraphVersioningService:
     def _graph_meta(g: GraphORM) -> Dict[str, object]:
         return {
             "graph_id": g.id, "workspace_id": g.workspace_id, "tenant_id": g.tenant_id,
+            "data_source_id": g.data_source_id,
             "kind": g.kind, "base_ontology_id": g.base_ontology_id,
             "fork_parent_graph_id": g.fork_parent_graph_id,
             "fork_base_commit_seq": g.fork_base_commit_seq,
@@ -2361,6 +2381,7 @@ class GraphVersioningService:
         self, *, graph_id: str, rows, actor: str, source: str = "external",
         idempotency_key: Optional[str] = None, message: str = "external sync",
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -2415,7 +2436,8 @@ class GraphVersioningService:
             if conflicts:
                 raise MergeConflict(conflicts)
 
-            self._cascade_incident_edges(merged)
+            self._cascade_containment(merged, containment_edge_types)   # drop orphaned descendants
+            self._cascade_incident_edges(merged)                        # then their dangling edges
             self._assert_referential_integrity(merged)
             deltas = net_delta(ours, merged)                 # changes to apply on top of current main
             if not deltas:
@@ -2507,6 +2529,7 @@ class GraphVersioningService:
     async def apply_ops(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
         message: str = "edit", branch_id: Optional[str] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -2527,7 +2550,8 @@ class GraphVersioningService:
         for attempt in range(config.COMMIT_MAX_RETRIES):
             try:
                 return await self._apply_ops_once(
-                    graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id)
+                    graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
+                    containment_edge_types=containment_edge_types)
             except IntegrityError:
                 if attempt + 1 >= config.COMMIT_MAX_RETRIES:
                     raise ConcurrencyError(
@@ -2537,6 +2561,7 @@ class GraphVersioningService:
     async def _apply_ops_once(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
         message: str, branch_id: Optional[str],
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> Optional[str]:
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
@@ -2557,16 +2582,25 @@ class GraphVersioningService:
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
 
-            # Cascade: a deleted node tombstones its currently-live incident edges
-            # (bounded by node degree via ix_ev_source/ix_ev_target).
+            # Cascade a node delete to its containment subtree (ontology-driven) AND every
+            # live edge incident to any deleted node (source or target, ANY type) — so no
+            # descendant is orphaned and no edge dangles. One commit ⇒ the cascade is atomic.
             deleted_nodes = {eid for eid, v in new_vals.items()
                              if v is None and kind_by_entity.get(eid) == "node"}
-            for eid, payload in (await self._incident_live_edges(s, graph_id, bid, deleted_nodes)).items():
-                if eid in new_vals:
-                    continue
-                src = payload.get("sourceEntityId") or payload.get("source_entity_id")
-                tgt = payload.get("targetEntityId") or payload.get("target_entity_id")
-                if src in deleted_nodes or tgt in deleted_nodes:
+            if deleted_nodes:
+                subtree, inc_edges = await self._cascade_deletes(
+                    s, graph_id, bid, deleted_nodes, containment_edge_types)
+                new_desc = [d for d in subtree if d not in new_vals]
+                if new_desc:
+                    desc_vals = await self._current_values(s, graph_id, bid, new_desc)
+                    for d in new_desc:
+                        if desc_vals.get(d) is not None:        # a live descendant node
+                            new_vals[d] = None
+                            cur_vals[d] = desc_vals[d]
+                            kind_by_entity[d] = "node"
+                for eid, payload in inc_edges.items():           # all incident edges, any type
+                    if eid in new_vals:
+                        continue
                     new_vals[eid] = None
                     cur_vals.setdefault(eid, payload)
                     kind_by_entity[eid] = "edge"
@@ -2794,18 +2828,22 @@ class GraphVersioningService:
         """Latest value (``commit_seq <= seq``) per entity in *ids* — O(ids) via
         DISTINCT ON (``ix_*_entity_hist``). Deleted → ``None``; absent ids omitted."""
         out: Dict[str, Optional[dict]] = {}
-        if not ids:
+        id_list = list(ids)
+        if not id_list:
             return out
         for model in (NodeVersionORM, EdgeVersionORM):
-            stmt = (
-                select(model.entity_id, model.op, model.payload)
-                .where(model.graph_id == graph_id, model.branch_id == branch_id,
-                       model.entity_id.in_(list(ids)), model.commit_seq <= seq)
-                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                .distinct(model.entity_id)
-            )
-            for eid, op, payload in (await s.execute(stmt)).all():
-                out[eid] = None if op == "delete" else payload
+            # Chunk the IN-list — asyncpg caps bind params at 32767 and a cascade delete
+            # can touch tens of thousands of entities in one pass.
+            for chunk in _chunks(id_list, _IN_LIST_MAX):
+                stmt = (
+                    select(model.entity_id, model.op, model.payload)
+                    .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                           model.entity_id.in_(chunk), model.commit_seq <= seq)
+                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                    .distinct(model.entity_id)
+                )
+                for eid, op, payload in (await s.execute(stmt)).all():
+                    out[eid] = None if op == "delete" else payload
         return out
 
     async def _current_values(
@@ -2842,14 +2880,60 @@ class GraphVersioningService:
             return {}
         cand: set = set()
         for col in (EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id):
-            rows = (await s.execute(
-                select(EdgeVersionORM.entity_id).where(
-                    EdgeVersionORM.graph_id == graph_id, col.in_(ids),
-                ).distinct()
-            )).scalars().all()
-            cand.update(rows)
+            for chunk in _chunks(ids, _IN_LIST_MAX):   # bind-param-safe IN-list (see _values_at)
+                rows = (await s.execute(
+                    select(EdgeVersionORM.entity_id).where(
+                        EdgeVersionORM.graph_id == graph_id, col.in_(chunk),
+                    ).distinct()
+                )).scalars().all()
+                cand.update(rows)
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
+
+    async def _cascade_deletes(
+        self, s, graph_id: str, branch_id: str, root_node_ids,
+        containment_edge_types, as_of_seq: Optional[int] = None,
+    ) -> Tuple[set, Dict[str, dict]]:
+        """The full tombstone set for deleting *root_node_ids* on a branch:
+
+        * the **containment subtree** of nodes (transitive children via the ontology's
+          containment edge types — `containment_edge_types`, resolved live by the caller,
+          never hardcoded), and
+        * **every live edge incident** to any of those nodes (source OR target, ANY type —
+          containment, lineage, aggregated — so nothing dangles).
+
+        Lineage-connected nodes are NOT added to the node set; only their edges are cleaned.
+        Returns ``(subtree_node_ids, {edge_entity_id: payload})``. The same helper backs the
+        read-only delete-impact preview AND the commit-time cascade, so they always agree."""
+        roots = {r for r in root_node_ids if r}
+        if not roots:
+            return set(), {}
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        subtree = await self._containment_descendants(
+            s, graph_id, branch_id, set(roots), cset, as_of_seq, _CASCADE_MAX_NODES,
+        ) if cset else set(roots)
+        subtree |= roots
+        edges = await self._incident_live_edges(s, graph_id, branch_id, subtree, as_of_seq)
+        return subtree, edges
+
+    async def delete_impact(
+        self, *, graph_id: str, branch_id: str, root_urn: str, containment_edge_types,
+    ) -> Dict[str, object]:
+        """Read-only preview: what deleting the node at *root_urn* would remove on this
+        branch — the containment subtree (node payloads) + all incident edges (edge
+        payloads). Same traversal as the commit-time cascade, so the preview matches the
+        result. Empty when the urn doesn't resolve to a live node."""
+        async with self._session() as s:
+            root = await self._eid_for_urn(s, graph_id, branch_id, root_urn)
+            if root is None:
+                return {"nodes": [], "edges": []}
+            subtree, edges = await self._cascade_deletes(
+                s, graph_id, branch_id, {root}, containment_edge_types)
+            node_vals = await self._current_values(s, graph_id, branch_id, list(subtree))
+            nodes = [{"entityId": eid, **(node_vals[eid] or {})}
+                     for eid in subtree if node_vals.get(eid) is not None]
+            edge_list = [{"entityId": eid, **(p or {})} for eid, p in edges.items()]
+            return {"nodes": nodes, "edges": edge_list}
 
     async def _eid_for_urn(
         self, s, graph_id: str, branch_id: str, urn: str, as_of_seq: Optional[int] = None,
@@ -2915,6 +2999,39 @@ class GraphVersioningService:
         ]
         for eid in cascaded:
             state[eid] = None
+        return cascaded
+
+    @staticmethod
+    def _cascade_containment(state: Dict[str, Optional[dict]], containment_edge_types) -> List[str]:
+        """Tombstone the containment-descendants of every tombstoned node, in-memory over a
+        FULL state (the sync/merge path's analog of the DB-backed `_cascade_deletes`).
+        Ontology-driven via *containment_edge_types* — walks parent→child along containment
+        edges present in the state. Mutates ``state``; returns the cascaded node ids.
+        (Incident-edge cleanup runs separately via `_cascade_incident_edges`.)"""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if not cset:
+            return []
+        children: Dict[str, set] = {}
+        for p in state.values():
+            if p is None or not _is_edge_payload(p):
+                continue
+            if (p.get("edgeType") or "").upper() not in cset:
+                continue
+            src = p.get("sourceEntityId") or p.get("source_entity_id")
+            tgt = p.get("targetEntityId") or p.get("target_entity_id")
+            if src and tgt:
+                children.setdefault(src, set()).add(tgt)
+        cascaded: List[str] = []
+        frontier = {eid for eid, p in state.items() if p is None}
+        while frontier:
+            nxt: set = set()
+            for parent in frontier:
+                for child in children.get(parent, ()):
+                    if state.get(child) is not None:
+                        state[child] = None
+                        cascaded.append(child)
+                        nxt.add(child)
+            frontier = nxt
         return cascaded
 
     @staticmethod
@@ -3033,6 +3150,14 @@ def _chunks(seq, n):
 # PostgreSQL's own 65535. Stay under it with headroom. A multi-row INSERT costs
 # rows × columns params.
 _PG_MAX_BIND_PARAMS = 32000
+
+# Max ids in a single ``... IN (:ids)`` predicate (the list dominates the param count;
+# a handful of fixed predicates add the rest) — keeps a cascade's bounded reads safe.
+_IN_LIST_MAX = 20000
+
+# Upper bound on a single cascade-delete's containment subtree, so a pathological graph
+# can't run unbounded. Generous; the chunked writes handle the volume.
+_CASCADE_MAX_NODES = 1_000_000
 
 
 def _rows_per_insert(dicts: List[dict]) -> int:

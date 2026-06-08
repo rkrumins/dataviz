@@ -1557,6 +1557,18 @@ async def delete_edge(
 
 # ─── Draft batch write (atomic, server-merged) ──────────────────────────────
 
+async def _resolve_containment_types(engine: ContextEngine) -> List[str]:
+    """The CURRENT ontology's containment edge types (resolved live, 5-min cached on the
+    engine — never a stored snapshot, never hardcoded), driving the delete cascade. Empty
+    on failure → the cascade degrades to the node + its own incident edges (no descendant
+    discovery), which is safe."""
+    try:
+        meta = await engine.get_ontology_metadata()
+        return list(getattr(meta, "containment_edge_types", None) or [])
+    except Exception:
+        return []
+
+
 class GraphChangeOp(BaseModel):
     """One typed change in a draft save. ``update`` payloads are *partial* — the
     server merges them onto the entity's current state, so the client never has to
@@ -1591,13 +1603,16 @@ async def apply_graph_changes(
     dataSourceId: str = Query(..., description="Data source whose versioned graph to edit."),
     branchId: str = Query(..., description="Draft branch the changes are committed to."),
     user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
 ):
     """Apply a batch of canvas edits to a draft as ONE atomic commit — the unified
     'save' path for draft editing (create/update/delete, nodes and edges, together).
 
     ``update`` payloads are partial and merged server-side onto the entity's current
-    draft state, so the client sends only what changed. Returns the new commit id and
-    a temp-ref→entity-id map for creates so the client can reconcile optimistic ids."""
+    draft state, so the client sends only what changed. Deleting a node cascades to its
+    containment subtree + all incident edges (ontology-driven, resolved live). Returns the
+    new commit id and a temp-ref→entity-id map for creates so the client can reconcile
+    optimistic ids."""
     from backend.app.services.versioning.service import (
         GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
     from backend.app.services.versioning.ids import prefixed_id
@@ -1638,7 +1653,8 @@ async def apply_graph_changes(
     try:
         commit_id = await svc.apply_ops(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
-            message=request.message or "Canvas edits")
+            message=request.message or "Canvas edits",
+            containment_edge_types=await _resolve_containment_types(engine))
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:
@@ -1646,6 +1662,36 @@ async def apply_graph_changes(
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     return {"commitId": commit_id, "assigned": assigned}
+
+
+class DeleteImpactResponse(BaseModel):
+    """What deleting a node would remove: its containment subtree (nodes) + every incident
+    edge (any type). Payloads are passed through as-is (camelCase node/edge dicts)."""
+    nodes: List[dict]
+    edges: List[dict]
+
+
+@router.get("/nodes/{urn}/delete-impact", response_model=DeleteImpactResponse)
+async def delete_impact(
+    urn: str,
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to inspect."),
+    branchId: str = Query(..., description="Draft branch to compute the impact on."),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Preview the cascade for deleting ``urn`` on a draft: the containment subtree + all
+    incident edges that would be removed. Read-only, computed on demand (the lazy-loaded
+    canvas needn't hold the subtree) via the SAME helper the commit uses — so the preview
+    matches the result. Ontology containment edge types are resolved live."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    svc = GraphVersioningService()
+    g = await svc.get_graph_by_data_source(dataSourceId)
+    if g is None or g.get("workspace_id") != ws_id:
+        raise HTTPException(status_code=404, detail="no versioned graph for this data source")
+    return await svc.delete_impact(
+        graph_id=g["graph_id"], branch_id=branchId, root_urn=urn,
+        containment_edge_types=await _resolve_containment_types(engine))
 
 
 # ─── Preflight / guided-create APIs ─────────────────────────────────────────

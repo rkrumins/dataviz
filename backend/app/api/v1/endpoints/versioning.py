@@ -132,6 +132,25 @@ def _domain_errors():
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+async def _live_containment_types(
+    session: AsyncSession, workspace_id: Optional[str], data_source_id: Optional[str],
+) -> List[str]:
+    """The CURRENT ontology's containment edge types (live, never a stored snapshot, never
+    hardcoded), driving the delete cascade on the provider-independent versioning write
+    paths (checkpoint/sync). Resolved straight from the ontology service (management DB) —
+    no provider needed, so it keeps the versioning store provider-independent. Best-effort:
+    [] on failure, so the cascade still cleans the node + its own edges."""
+    try:
+        from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from backend.app.ontology.service import LocalOntologyService
+        ont = LocalOntologyService(SQLAlchemyOntologyRepository(session))
+        resolved = await ont.resolve(workspace_id=workspace_id, data_source_id=data_source_id)
+        return list(getattr(resolved, "containment_edge_types", None) or [])
+    except Exception:
+        logger.exception("containment-type resolution failed (ws=%s ds=%s)", workspace_id, data_source_id)
+        return []
+
+
 # --------------------------------------------------------------------------- #
 # Models (camelCase wire, snake_case Python — matches the app convention)       #
 # --------------------------------------------------------------------------- #
@@ -533,11 +552,13 @@ async def checkpoint(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         commit_id = await svc.checkpoint(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, message=body.message,
-            resolutions=body.resolutions,
+            resolutions=body.resolutions, containment_edge_types=cset,
         )
     return {"commit_id": commit_id, "staged_changes": commit_id is not None}
 
@@ -831,11 +852,13 @@ async def sync_ingest(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Re-sync an authoritative external snapshot (ndjson, one node/edge per line) into
     ``main`` as a single ``sync`` commit via 3-way merge: user edits to untouched fields
     survive; a field both sides changed conflicts (409) under ``strategy=merge`` or takes
-    the external value under ``strategy=external_wins``. Idempotent on ``idempotencyKey``."""
+    the external value under ``strategy=external_wins``. A node the snapshot drops cascades
+    to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``."""
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():
@@ -846,10 +869,11 @@ async def sync_ingest(
             rows.append(json.loads(line))
         except json.JSONDecodeError:
             rows.append({"kind": "__malformed__"})        # rejected by the service
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         report = await svc.sync_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, source=source,
-            idempotency_key=idempotency_key, strategy=strategy,
+            idempotency_key=idempotency_key, strategy=strategy, containment_edge_types=cset,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)
