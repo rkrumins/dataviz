@@ -9,6 +9,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
+import { useDiffDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
 import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
@@ -101,15 +102,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(node.id))
 
   const stagedColor = directChange ? stagedChangeColor(directChange.type) : (hasDescendantChange ? 'cascade' : null)
+  // Branch-diff overlay: when "Review changes" is on, tint nodes that differ from
+  // main using the same vocabulary. Uncommitted staged edits take precedence.
+  const diffStatus = useDiffDecoration().statusForEntity(node.urn ?? node.id)
+  const diffColor: 'green' | 'amber' | 'red' | null =
+    diffStatus === 'added' ? 'green' : diffStatus === 'modified' ? 'amber' : diffStatus === 'removed' ? 'red' : null
+  const reviewColor = stagedColor ?? diffColor
   const stagedSummary = directChange?.summary
     ?? (hasDescendantChange ? 'Contains staged changes' : undefined)
+    ?? (diffStatus ? `${diffStatus} vs main` : undefined)
 
   // Strong, full-width background tint — the user wanted the ENTIRE row to
   // glow in the change color so the canvas reads as a heatmap of pending edits.
   // Direct changes get saturated tints; cascade indicates child changes with a
   // muted left-bar treatment so it's spottable but not overpowering.
   const stagedRowClass = (() => {
-    switch (stagedColor) {
+    switch (reviewColor) {
       case 'green':
         return 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20'
       case 'red':
