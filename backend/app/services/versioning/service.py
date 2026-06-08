@@ -23,6 +23,7 @@ Design choices honoured here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -113,6 +114,18 @@ class GraphVersioningService:
         self._session = session_factory
         self._merkle = MerkleStore()
 
+    @contextlib.asynccontextmanager
+    async def _session_scope(self, session=None):
+        """Run within a caller-provided session (the caller owns commit/rollback, so
+        several service calls compose into ONE atomic transaction) or, when none is
+        given, open a fresh self-committing one. Lets the bootstrap create the graph
+        and seed it in a single all-or-nothing transaction."""
+        if session is not None:
+            yield session
+        else:
+            async with self._session() as s:
+                yield s
+
     # ------------------------------------------------------------------ #
     # Graph + branch lifecycle                                            #
     # ------------------------------------------------------------------ #
@@ -129,10 +142,14 @@ class GraphVersioningService:
         falkor_provider: Optional[str] = None,
         ontology_spec: Optional[Mapping] = None,
         ontology_enforcement: Optional[str] = None,
+        session=None,
     ) -> Dict[str, str]:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
-        genesis commit + projection state.  Returns ids and the genesis seq."""
-        async with self._session() as s:
+        genesis commit + projection state.  Returns ids and the genesis seq.
+
+        Pass ``session`` to compose with a following ingest in one transaction (the
+        atomic bootstrap), so a seed failure also rolls back the graph creation."""
+        async with self._session_scope(session) as s:
             graph = GraphORM(
                 data_source_id=data_source_id,
                 workspace_id=workspace_id,
@@ -2247,14 +2264,19 @@ class GraphVersioningService:
     async def bulk_ingest(
         self, *, graph_id: str, rows, actor: str,
         idempotency_key: Optional[str] = None, message: str = "bulk import",
+        session=None,
     ) -> Dict[str, object]:
         """Day-0 / large-delta import (plan §4, §10): validate rows, assign stable
         entity_ids (urn-keyed for idempotent re-sync), and write ONE ``import``
         commit on ``main`` via **chunked bulk inserts** — never row-by-row. Invalid
         rows are skipped and returned in a ``rejected`` report; valid rows still
         land. Idempotent on ``idempotency_key`` (a retry returns the first commit).
-        """
-        async with self._session() as s:
+
+        ATOMIC: the whole import (every insert chunk + the Merkle update + the commit
+        row) runs in one transaction — any chunk failing rolls the entire commit back,
+        so a graph is never left partially seeded. Pass ``session`` to fold this into a
+        larger transaction (e.g. create-graph + seed as one unit)."""
+        async with self._session_scope(session) as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")

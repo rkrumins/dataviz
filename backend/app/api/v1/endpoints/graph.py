@@ -106,16 +106,27 @@ async def bootstrap_versioned_graph_endpoint(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Seed the data source's versioned graph from the provider's current state so branches
-    and history cover the whole graph. Idempotent — safe to re-run as a backfill."""
+    and history cover the whole graph. Idempotent — safe to re-run as a backfill.
+
+    ATOMIC: create-graph + seed run in ONE transaction, so a failure never leaves a
+    half-enabled graph (a graph row with no imported data). Provider reads happen first,
+    outside the transaction."""
     from backend.app.services.versioning.service import GraphVersioningService
-    from backend.app.providers.versioned_bootstrap import bootstrap_versioned_graph
+    from backend.app.providers.versioned_bootstrap import collect_provider_rows
     actor = user.id if user else "system"
     svc = GraphVersioningService()
     res = await svc.resolve_graph(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
-    graph_id = res["graph_id"] if res is not None else (
-        await svc.create_graph(data_source_id=dataSourceId, workspace_id=ws_id, actor=actor))["graph_id"]
-    return await bootstrap_versioned_graph(svc, engine.provider, graph_id, actor=actor)
+    # Pure source reads (no DB writes) up front — don't hold the seed transaction open
+    # while paging a large provider.
+    rows = await collect_provider_rows(engine.provider)
+    async with svc._session() as s:
+        graph_id = res["graph_id"] if res is not None else (
+            await svc.create_graph(
+                data_source_id=dataSourceId, workspace_id=ws_id, actor=actor, session=s))["graph_id"]
+        return await svc.bulk_ingest(
+            graph_id=graph_id, rows=rows, actor=actor,
+            idempotency_key=f"bootstrap:{graph_id}", message="bootstrap import", session=s)
 
 
 # ------------------------------------------------------------------ #

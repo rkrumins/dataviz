@@ -200,9 +200,9 @@ def test_api_graph_draft_journey_e2e():
     asyncio.run(_run())
 
 
-def _large_ndjson(n_nodes: int, n_edges: int) -> str:
-    """A graph big enough that one commit's edge INSERT exceeds PostgreSQL's 65535
-    bind-param cap unless batches are sized by column count (17 cols × 5000 = 85k)."""
+def _large_rows(n_nodes: int, n_edges: int) -> list:
+    """A graph big enough that one commit's edge INSERT exceeds the bind-param cap
+    unless batches are sized by column count (17 cols × 5000 = 85k)."""
     rows = [{"kind": "node", "id": f"urn:n:{i}", "urn": f"urn:n:{i}",
              "entityType": "Table", "displayName": f"N{i}"} for i in range(n_nodes)]
     for k in range(n_edges):
@@ -211,7 +211,11 @@ def _large_ndjson(n_nodes: int, n_edges: int) -> str:
             b = (b + 1) % n_nodes
         rows.append({"kind": "edge", "id": f"e_{k}", "edgeType": "LINEAGE",
                      "source": f"urn:n:{a}", "target": f"urn:n:{b}"})
-    return "\n".join(json.dumps(r) for r in rows)
+    return rows
+
+
+def _large_ndjson(n_nodes: int, n_edges: int) -> str:
+    return "\n".join(json.dumps(r) for r in _large_rows(n_nodes, n_edges))
 
 
 async def _run_bulk_param_limit() -> None:
@@ -235,6 +239,80 @@ async def _run_bulk_param_limit() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_bulk_ingest_respects_pg_param_limit():
     asyncio.run(_run_bulk_param_limit())
+
+
+async def _run_ingest_atomic_across_chunks() -> None:
+    """A failure AFTER the chunked inserts (here: during the Merkle update) must roll
+    back the WHOLE commit — every insert chunk, the commit row, the head bump. No
+    partial state is left behind."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u"))["graph_id"]
+
+    orig = svc._commit_merkle
+    async def _boom(*a, **k):  # fails after _bulk_insert_versions has run its chunks
+        raise RuntimeError("injected mid-commit failure")
+    svc._commit_merkle = _boom  # type: ignore[assignment]
+    raised = False
+    try:
+        await svc.bulk_ingest(graph_id=gid, rows=_large_rows(100, 5000), actor="u")
+    except RuntimeError:
+        raised = True
+    finally:
+        svc._commit_merkle = orig  # type: ignore[assignment]
+
+    assert raised, "ingest should have raised"
+    # Whole commit rolled back: main is still at genesis (seq 1), nothing imported.
+    assert (await svc.get_graph(gid))["main_head_commit_seq"] == 1
+    log = await svc.commit_log(graph_id=gid)
+    assert all(c["kind"] != "import" for c in log), log
+    # A clean retry (no injected failure) then fully succeeds.
+    rep = await svc.bulk_ingest(graph_id=gid, rows=_large_rows(100, 5000), actor="u")
+    assert rep["ingested"] == 5100, rep
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_ingest_atomic_across_chunks():
+    asyncio.run(_run_ingest_atomic_across_chunks())
+
+
+async def _run_bootstrap_create_and_seed_atomic() -> None:
+    """create-graph + seed share ONE transaction, so a seed failure also rolls back the
+    graph creation — never a half-enabled (graph-exists-but-empty) state."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+
+    orig = svc._commit_merkle
+    async def _boom(*a, **k):
+        raise RuntimeError("injected seed failure")
+    svc._commit_merkle = _boom  # type: ignore[assignment]
+    raised = False
+    try:
+        async with svc._session() as s:  # mirrors the bootstrap endpoint's atomic scope
+            gid = (await svc.create_graph(
+                data_source_id=ds, workspace_id="ws1", actor="u", session=s))["graph_id"]
+            await svc.bulk_ingest(
+                graph_id=gid, rows=_large_rows(10, 20), actor="u",
+                idempotency_key=f"bootstrap:{gid}", session=s)
+    except RuntimeError:
+        raised = True
+    finally:
+        svc._commit_merkle = orig  # type: ignore[assignment]
+
+    assert raised, "seed should have raised"
+    # The graph creation rolled back with the failed seed — no half-enabled graph.
+    assert await svc.get_graph_by_data_source(ds) is None
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_bootstrap_create_and_seed_atomic():
+    asyncio.run(_run_bootstrap_create_and_seed_atomic())
 
 
 if __name__ == "__main__":
