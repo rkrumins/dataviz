@@ -21,6 +21,9 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useLoadingToast } from '@/components/ui/toast'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
+import { useBranchStore } from '@/store/branchStore'
+import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
+import { DiffReviewRail } from '@/features/versioning/components/DiffReviewRail'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -74,12 +77,16 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // unrelated canvas. Stale trace-added edges in the canvas store are
   // wiped naturally by view B's hydration cycle, so only the trace state
   // needs explicit cleanup here.
+  // Also clears on branch switch: a draft and main are different graph states, so a
+  // trace started on one must not bleed onto the other (the canvas rehydrates from the
+  // branch-scoped provider when currentBranchId changes — see ViewExecutionContext).
   const activeViewId = activeView?.id
+  const currentBranchId = useBranchStore((s) => s.currentBranchId)
   useEffect(() => {
     const { clearTrace, resetAddedEdgeIds } = useTraceStore.getState()
     clearTrace()
     resetAddedEdgeIds()
-  }, [activeViewId])
+  }, [activeViewId, currentBranchId])
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
@@ -102,34 +109,45 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
       fallback={(error, reset) => <CanvasError error={error} onRetry={reset} />}
     >
     <ReactFlowProvider>
-    <div className={cn("relative w-full h-full", className)}>
-      <AnimatePresence>
-        <motion.div
-          key={layoutType}
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          className="absolute inset-0"
-        >
-          <Suspense fallback={<CanvasLoader />}>
-            <CanvasComponent />
-          </Suspense>
-        </motion.div>
-      </AnimatePresence>
-
-      {hydrationError && (
-        <ProviderUnavailableOverlay message={hydrationError} />
+    <div className={cn("relative w-full h-full flex flex-col", className)}>
+      {activeView?.workspaceId && (
+        <CanvasVersioningBar
+          workspaceId={activeView.workspaceId}
+          dataSourceId={activeView.dataSourceId ?? null}
+        />
       )}
+      <div className="relative flex-1 min-h-0">
+        <AnimatePresence>
+          <motion.div
+            key={layoutType}
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="absolute inset-0"
+          >
+            <Suspense fallback={<CanvasLoader />}>
+              <CanvasComponent />
+            </Suspense>
+          </motion.div>
+        </AnimatePresence>
 
-      {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
-        <div className="absolute top-4 left-4 z-10 pointer-events-none">
-          <ViewBadge
-            name={activeView.name}
-            layoutType={layoutType}
-            entityCount={activeView.content.visibleEntityTypes.length}
-          />
-        </div>
-      )}
+        {hydrationError && (
+          <ProviderUnavailableOverlay message={hydrationError} />
+        )}
+
+        {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
+          <div className="absolute top-4 left-4 z-10 pointer-events-none">
+            <ViewBadge
+              name={activeView.name}
+              layoutType={layoutType}
+              entityCount={activeView.content.visibleEntityTypes.length}
+            />
+          </div>
+        )}
+
+        {/* Diff review rail — shown when "Review changes" is toggled in a draft. */}
+        <DiffReviewRail />
+      </div>
     </div>
     </ReactFlowProvider>
     </ErrorBoundary>
