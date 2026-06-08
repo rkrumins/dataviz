@@ -26,6 +26,7 @@ from typing import Optional
 from fastapi import (
     APIRouter, Depends, File, HTTPException, UploadFile, status,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,6 +115,59 @@ async def get_branding(session: AsyncSession = Depends(get_db_session)):
     return _to_dto(snap)
 
 
+# Canvas background the installed-app splash uses behind the icon. Matches
+# the dark theme-color in index.html; not currently a brandable field.
+_MANIFEST_BACKGROUND = "#0d1117"
+
+
+@public_router.get("/manifest.webmanifest")
+async def get_manifest(session: AsyncSession = Depends(get_db_session)):
+    """Dynamic PWA manifest built from the branding singleton — name,
+    icons, and theme colour follow the live brand so an installed app /
+    mobile chrome reflects a rebrand. Public (no auth): the browser
+    fetches it without a session, same as the favicon."""
+    snap = await branding_repo.get_snapshot(session)
+    icons = []
+    # favicon first (small/any), then the logo if a distinct one is set.
+    for src in (snap.favicon_url, snap.logo_url):
+        if src and src not in {i["src"] for i in icons}:
+            icons.append({
+                "src": src,
+                "sizes": "any",
+                "type": _icon_mime(src),
+            })
+    manifest = {
+        "name": snap.app_name,
+        "short_name": snap.short_name or snap.app_name,
+        "description": snap.description,
+        "start_url": "/",
+        "display": "standalone",
+        "theme_color": snap.accent_color,
+        "background_color": _MANIFEST_BACKGROUND,
+        "icons": icons,
+    }
+    return JSONResponse(
+        manifest, media_type="application/manifest+json",
+    )
+
+
+def _icon_mime(src: str) -> str:
+    """Best-effort icon MIME for the manifest from the src extension /
+    data-URI prefix. Defaults to PNG when unknown."""
+    if src.startswith("data:"):
+        return src[5:].split(";", 1)[0] or "image/png"
+    lowered = src.lower()
+    if lowered.endswith(".svg"):
+        return "image/svg+xml"
+    if lowered.endswith(".ico"):
+        return "image/x-icon"
+    if lowered.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if lowered.endswith(".webp"):
+        return "image/webp"
+    return "image/png"
+
+
 # ── Admin ─────────────────────────────────────────────────────────────
 @admin_router.get("", response_model=BrandingDTO, response_model_by_alias=True)
 async def get_branding_admin(
@@ -144,6 +198,20 @@ async def update_branding(
     except ConflictingVersion as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
+    await _audit(session, admin.id, int(row.version or 1))
+    return _to_dto(await branding_repo.get_snapshot(session))
+
+
+@admin_router.post(
+    "/reset", response_model=BrandingDTO, response_model_by_alias=True,
+)
+async def reset_branding(
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Clear all overrides so branding reverts to the deployment
+    (``APP_BRAND_*``) defaults."""
+    row = await branding_repo.reset_config(session, updated_by=admin.id)
     await _audit(session, admin.id, int(row.version or 1))
     return _to_dto(await branding_repo.get_snapshot(session))
 
@@ -203,7 +271,7 @@ async def _audit(session: AsyncSession, actor: str, version: int) -> None:
     try:
         await user_repo.create_outbox_event(
             session, event_type="branding.updated",
-            payload={"actor": actor, "version": version},
+            payload={"actor_id": actor, "version": version},
         )
     except Exception:  # noqa: BLE001
         pass

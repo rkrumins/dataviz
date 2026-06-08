@@ -272,6 +272,7 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.sso_mapping.created": ("info", _summary_sso_mapping("created")),
     "idp.provider.created": ("info", _summary_idp_provider("created")),
     "idp.provider.updated": ("info", _summary_idp_provider("updated")),
+    "branding.updated": ("info", lambda p: "Branding settings updated"),
     "user.approved": ("info", _summary_user_status("approved")),
     "user.reactivated": ("info", _summary_user_status("reactivated")),
     "rbac.access_request.approved": ("info", _summary_access_request("approved")),

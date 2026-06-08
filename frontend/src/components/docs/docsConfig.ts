@@ -48,7 +48,7 @@ export const docEntries: DocEntry[] = [
     slug: 'overview',
     section: 'getting-started',
     title: 'Project Overview',
-    description: 'What Synodic is and how the platform works',
+    description: 'What {brand} is and how the platform works',
     importFn: () => import('@docs/OVERVIEW.md?raw'),
   },
   {
@@ -128,21 +128,21 @@ export const faqEntries: FAQEntry[] = [
   // General
   {
     category: 'General',
-    question: 'What is Synodic?',
+    question: 'What is {brand}?',
     answer:
-      'Synodic is a **data lineage visualization platform** that connects to graph databases (FalkorDB, Neo4j, DataHub) and renders interactive lineage maps. It helps teams understand how data flows across systems — from source to dashboard.',
+      '{brand} is a **data lineage visualization platform** that connects to graph databases (FalkorDB, Neo4j, DataHub) and renders interactive lineage maps. It helps teams understand how data flows across systems — from source to dashboard.',
   },
   {
     category: 'General',
-    question: 'What databases does Synodic support?',
+    question: 'What databases does {brand} support?',
     answer:
-      'Synodic supports **FalkorDB** (default, Redis-protocol graph DB), **Neo4j**, and **DataHub** as graph providers. The management database uses **PostgreSQL** in production or **SQLite** for local development.',
+      '{brand} supports **FalkorDB** (default, Redis-protocol graph DB), **Neo4j**, and **DataHub** as graph providers. The management database uses **PostgreSQL** in production or **SQLite** for local development.',
   },
   {
     category: 'General',
-    question: 'Is Synodic open source?',
+    question: 'Is {brand} open source?',
     answer:
-      'Yes. Synodic is open source and available on GitHub. Contributions, issues, and feature requests are welcome.',
+      'Yes. {brand} is open source and available on GitHub. Contributions, issues, and feature requests are welcome.',
   },
 
   // Setup
@@ -182,7 +182,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Concepts',
     question: 'What is a CatalogItem?',
     answer:
-      'A **CatalogItem** is a named graph or dataset discovered from a provider. When you connect a provider, Synodic discovers available graphs and registers them as catalog items. Catalog items can then be bound to workspaces.',
+      'A **CatalogItem** is a named graph or dataset discovered from a provider. When you connect a provider, {brand} discovers available graphs and registers them as catalog items. Catalog items can then be bound to workspaces.',
   },
   {
     category: 'Concepts',

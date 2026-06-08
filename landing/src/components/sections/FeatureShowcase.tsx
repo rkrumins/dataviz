@@ -5,6 +5,7 @@ import { GranularityZoom } from '@/components/visuals/GranularityZoom'
 import { PersonaToggleDemo } from '@/components/visuals/PersonaToggleDemo'
 import { CanvasPreview } from '@/components/visuals/CanvasPreview'
 import { Badge } from '@/components/ui/Badge'
+import { BRAND } from '@/config/brand'
 
 /*
  * Unified feature showcase — merges the old FeatureShowcase + UniversalLineage
@@ -140,7 +141,7 @@ const FEATURES = [
     icon: Plug,
     title: 'Extensible to any catalog',
     description:
-      'Build a connector to OpenMetadata, Collibra, Atlan, or any catalog where your metadata already lives. Nexus Lineage becomes the visualization layer — no data duplication required.',
+      `Build a connector to OpenMetadata, Collibra, Atlan, or any catalog where your metadata already lives. ${BRAND.name} becomes the visualization layer — no data duplication required.`,
     color: '#7147e8',
     comingSoon: true,
     visual: (
@@ -184,7 +185,7 @@ export function FeatureShowcase() {
           <span className="gradient-text">on purpose</span>
         </h2>
         <p className="text-lg text-ink-secondary max-w-2xl mx-auto">
-          Six capabilities that separate Nexus Lineage from static lineage diagrams and metadata catalogs.
+          Six capabilities that separate {BRAND.name} from static lineage diagrams and metadata catalogs.
         </p>
       </div>
 

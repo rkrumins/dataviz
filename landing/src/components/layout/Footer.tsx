@@ -1,4 +1,5 @@
 import { Github, MessageCircle } from 'lucide-react'
+import { BRAND } from '@/config/brand'
 
 const PRODUCT_LINKS = [
   { label: 'Features', href: '#features' },
@@ -34,9 +35,9 @@ export function Footer() {
           {/* Brand */}
           <div className="col-span-2 md:col-span-1">
             <a href="#hero" className="flex items-center gap-2.5 mb-4">
-              <img src="/nexus-icon.svg" alt="Nexus Lineage" className="w-7 h-7" />
+              <img src="/nexus-icon.svg" alt={BRAND.name} className="w-7 h-7" />
               <span className="font-display font-semibold text-ink">
-                Nexus<span className="text-accent-lineage">Lineage</span>
+                {BRAND.name}
               </span>
             </a>
             <p className="text-sm text-ink-secondary leading-relaxed">
@@ -104,7 +105,7 @@ export function Footer() {
         {/* Copyright */}
         <div className="mt-12 pt-8 border-t border-[var(--nx-border-subtle)] text-center">
           <p className="text-xs text-ink-muted">
-            &copy; {new Date().getFullYear()} Nexus Lineage Contributors. Open source under the Apache 2.0 license.
+            &copy; {new Date().getFullYear()} {BRAND.name} Contributors. Open source under the Apache 2.0 license.
           </p>
         </div>
       </div>

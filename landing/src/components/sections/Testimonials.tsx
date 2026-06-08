@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { Quote } from 'lucide-react'
 import { Section } from '@/components/layout/Section'
 import { Card } from '@/components/ui/Card'
+import { BRAND } from '@/config/brand'
 
 const TESTIMONIALS = [
   {
@@ -12,7 +13,7 @@ const TESTIMONIALS = [
     color: '#6366f1',
   },
   {
-    quote: 'We evaluated DataHub and Collibra. Neither could do interactive graph exploration at our scale — 3M edges. Nexus Lineage handles it without breaking a sweat.',
+    quote: `We evaluated DataHub and Collibra. Neither could do interactive graph exploration at our scale — 3M edges. ${BRAND.name} handles it without breaking a sweat.`,
     author: 'Marcus Rivera',
     role: 'Staff Data Engineer',
     company: 'E-commerce Platform',

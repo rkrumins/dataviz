@@ -72,3 +72,37 @@ async def test_logo_upload_rejects_bad_mime(test_client: AsyncClient):
         files={"file": ("logo.txt", b"nope", "text/plain")},
     )
     assert resp.status_code == 415
+
+
+# ── reset ─────────────────────────────────────────────────────────────
+
+async def test_admin_reset_reverts_to_env_default(
+    test_client: AsyncClient, monkeypatch,
+):
+    monkeypatch.setenv("APP_BRAND_NAME", "Default Co")
+    # Override, then reset back to the env default.
+    await test_client.patch(
+        "/api/v1/admin/branding", json={"appName": "Overridden"},
+    )
+    resp = await test_client.post("/api/v1/admin/branding/reset")
+    assert resp.status_code == 200
+    assert resp.json()["appName"] == "Default Co"
+
+    again = await test_client.get("/api/v1/branding")
+    assert again.json()["appName"] == "Default Co"
+
+
+# ── manifest ──────────────────────────────────────────────────────────
+
+async def test_manifest_reflects_brand(test_client: AsyncClient):
+    await test_client.patch(
+        "/api/v1/admin/branding",
+        json={"appName": "Manifest Co", "accentColor": "#123456"},
+    )
+    resp = await test_client.get("/api/v1/branding/manifest.webmanifest")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/manifest+json")
+    body = resp.json()
+    assert body["name"] == "Manifest Co"
+    assert body["theme_color"] == "#123456"
+    assert isinstance(body["icons"], list)

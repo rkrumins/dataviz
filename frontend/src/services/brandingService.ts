@@ -71,6 +71,13 @@ export function updateBranding(patch: BrandingPatch): Promise<Branding> {
     })
 }
 
+/** Reset all branding to the deployment (env) defaults. */
+export function resetBranding(): Promise<Branding> {
+    return authFetch<Branding>(`${API}/admin/branding/reset`, {
+        method: 'POST',
+    })
+}
+
 /** Upload a logo or favicon image (multipart). Stored base64 server-side. */
 export function uploadBrandingImage(
     kind: 'logo' | 'favicon',

@@ -182,3 +182,26 @@ async def update_config(
     row.updated_by = updated_by
     await session.flush()
     return row
+
+
+_WRITABLE_COLUMNS = (
+    "app_name", "short_name", "description",
+    "logo_url", "logo_data", "logo_mime",
+    "favicon_url", "favicon_data", "favicon_mime",
+    "accent_color", "copyright_text", "support_email", "login_tagline",
+)
+
+
+async def reset_config(
+    session: AsyncSession,
+    *,
+    updated_by: Optional[str] = None,
+) -> ApplicationBrandingORM:
+    """Clear every writable column so the snapshot falls back entirely to
+    the ``APP_BRAND_*`` env defaults. Deliberately version-unchecked: it's
+    an explicit, confirmed admin action, not a concurrent edit."""
+    return await update_config(
+        session,
+        updated_by=updated_by,
+        **{col: "" for col in _WRITABLE_COLUMNS},
+    )

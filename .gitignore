@@ -156,6 +156,9 @@ activemq-data/
 
 # Environments
 .env
+# Landing-site branding defaults are public (no secrets) and must ship so the
+# index.html %VITE_BRAND_*% tokens resolve in a fresh build.
+!landing/.env
 .envrc
 .venv
 env/

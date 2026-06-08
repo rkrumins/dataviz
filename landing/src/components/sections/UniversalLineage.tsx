@@ -3,6 +3,7 @@ import { Database, ArrowRightLeft, Globe, Layers, ShieldCheck, Unplug, Plug, Eye
 import { Section } from '@/components/layout/Section'
 import { Card } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
+import { BRAND } from '@/config/brand'
 
 const PROVIDERS = [
   { name: 'FalkorDB', desc: 'Redis-protocol graph engine', color: '#6366f1', port: '6379' },
@@ -24,7 +25,7 @@ const BENEFITS = [
   {
     icon: Unplug,
     title: 'No migration required',
-    description: 'Point at your existing graph database and start visualizing. Nexus Lineage reads your data in place — it never copies, moves, or modifies your source.',
+    description: `Point at your existing graph database and start visualizing. ${BRAND.name} reads your data in place — it never copies, moves, or modifies your source.`,
     color: '#6366f1',
   },
   {
@@ -36,7 +37,7 @@ const BENEFITS = [
   {
     icon: Plug,
     title: 'Connect to any existing catalog',
-    description: 'Build a connector to OpenMetadata, Collibra, Alation, or any catalog where your metadata already lives. Nexus Lineage becomes the visualization layer on top — no need to re-ingest or duplicate data into yet another store.',
+    description: `Build a connector to OpenMetadata, Collibra, Alation, or any catalog where your metadata already lives. ${BRAND.name} becomes the visualization layer on top — no need to re-ingest or duplicate data into yet another store.`,
     color: '#7147e8',
   },
   {
@@ -94,7 +95,7 @@ export function UniversalLineage() {
 
           <p className="text-base text-ink-secondary leading-relaxed mb-6">
             Most lineage tools lock you into one graph database, one metadata format, one vendor's
-            ecosystem. Nexus Lineage flips that model. It connects to <em>your</em> graph — wherever
+            ecosystem. {BRAND.name} flips that model. It connects to <em>your</em> graph — wherever
             it is, however it's stored — and materializes interactive lineage on top.
           </p>
 
@@ -105,7 +106,7 @@ export function UniversalLineage() {
           </p>
 
           <p className="text-base text-ink-secondary leading-relaxed mb-8">
-            Already using a metadata catalog? Build a connector and Nexus Lineage becomes the
+            Already using a metadata catalog? Build a connector and {BRAND.name} becomes the
             interactive visualization layer on top of the data you already have. Create hundreds
             of contextual views — each scoped to a team, domain, or use case — without
             touching the underlying data.
@@ -167,7 +168,7 @@ export function UniversalLineage() {
               ))}
             </div>
             <p className="text-2xs text-ink-muted mt-3 leading-relaxed">
-              Build a connector to any catalog where your metadata lives. Nexus Lineage reads it, visualizes it, and lets you create unlimited views — without moving a single byte of data.
+              Build a connector to any catalog where your metadata lives. {BRAND.name} reads it, visualizes it, and lets you create unlimited views — without moving a single byte of data.
             </p>
           </motion.div>
         </div>

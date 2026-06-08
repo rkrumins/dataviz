@@ -1,5 +1,6 @@
 import { Check, X, Minus } from 'lucide-react'
 import { Section } from '@/components/layout/Section'
+import { BRAND } from '@/config/brand'
 
 type Status = 'yes' | 'no' | 'partial'
 
@@ -29,7 +30,7 @@ const ROWS: Row[] = [
 ]
 
 const COMPETITORS = [
-  { key: 'nexus' as const, label: 'Nexus', highlight: true, icon: true },
+  { key: 'nexus' as const, label: BRAND.shortName, highlight: true, icon: true },
   { key: 'openmetadata' as const, label: 'OpenMetadata', highlight: false },
   { key: 'datahub' as const, label: 'DataHub', highlight: false },
   { key: 'atlas' as const, label: 'Atlas', highlight: false },
@@ -49,7 +50,7 @@ export function Comparison() {
     <Section id="comparison">
       <div className="text-center mb-16">
         <h2 className="text-3xl md:text-4xl font-display font-bold tracking-tight mb-4">
-          How Nexus Lineage{' '}
+          How {BRAND.name}{' '}
           <span className="gradient-text">compares</span>
         </h2>
         <p className="text-lg text-ink-secondary max-w-2xl mx-auto">
@@ -73,7 +74,7 @@ export function Comparison() {
                 <th key={c.key} className="text-center py-4 px-3">
                   {c.icon ? (
                     <div className="flex flex-col items-center gap-1">
-                      <img src="/nexus-icon.svg" alt="Nexus Lineage" className="w-6 h-6" />
+                      <img src="/nexus-icon.svg" alt={BRAND.name} className="w-6 h-6" />
                       <span className="font-display font-bold text-accent-lineage text-xs">{c.label}</span>
                     </div>
                   ) : (
@@ -111,7 +112,7 @@ export function Comparison() {
       <div className="mt-10 glass-panel rounded-2xl p-6 max-w-2xl mx-auto text-center">
         <p className="text-sm text-ink-secondary leading-relaxed">
           <strong className="text-ink">Different tools, different strengths.</strong> OpenMetadata and DataHub
-          excel at metadata ingestion with 100+ connectors. Nexus Lineage excels at <em>visualizing and
+          excel at metadata ingestion with 100+ connectors. {BRAND.name} excels at <em>visualizing and
           exploring</em> lineage interactively — connecting directly to your graph without requiring you
           to re-ingest data into yet another store.
         </p>

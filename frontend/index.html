@@ -3,11 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/nexus-icon.svg" />
+    <link rel="apple-touch-icon" href="/nexus-icon.svg" />
+    <link rel="manifest" href="/api/v1/branding/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#fafbfc" media="(prefers-color-scheme: light)" />
     <title>NexusLineage</title>
-    
+
+    <!-- Pre-hydration brand paint: apply the cached title/favicon/accent
+         from a previous visit synchronously, before React boots, so a
+         rebranded deployment doesn't flash the default identity. The cache
+         is written by applyBranding() (see src/store/branding.ts); the key
+         must stay in sync with BRAND_CACHE_KEY there. -->
+    <script>
+      (function () {
+        try {
+          var c = JSON.parse(localStorage.getItem('nx-brand-cache') || 'null')
+          if (!c) return
+          if (c.title) document.title = c.title
+          if (c.favicon) {
+            var icon = document.querySelector("link[rel~='icon']")
+            if (icon) icon.href = c.favicon
+            var apple = document.querySelector("link[rel='apple-touch-icon']")
+            if (apple) apple.href = c.favicon
+          }
+          if (c.accent) {
+            document.documentElement.style.setProperty('--nx-accent-lineage', c.accent)
+          }
+        } catch (e) { /* no-op: first visit or storage unavailable */ }
+      })()
+    </script>
+
     <!-- Preload fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

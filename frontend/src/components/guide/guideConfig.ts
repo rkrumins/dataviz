@@ -149,8 +149,8 @@ export const guideEntries: GuideEntry[] = [
   {
     slug: 'welcome',
     section: 'start-here',
-    title: 'Welcome to Synodic',
-    description: 'What Synodic is, who it’s for, and how to use this guide',
+    title: 'Welcome to {brand}',
+    description: 'What {brand} is, who it’s for, and how to use this guide',
     readingTime: '4 min',
     importFn: () => import('@docs/guide/WELCOME.md?raw'),
   },
@@ -263,7 +263,7 @@ export const guideEntries: GuideEntry[] = [
     slug: 'ways-of-working',
     section: 'reference',
     title: 'Ways of Working',
-    description: 'Conventions and habits that make Synodic shine for teams',
+    description: 'Conventions and habits that make {brand} shine for teams',
     readingTime: '7 min',
     importFn: () => import('@docs/guide/WAYS_OF_WORKING.md?raw'),
   },
@@ -398,18 +398,18 @@ export const guideFaqs: GuideFAQ[] = [
   },
   {
     category: 'Getting started',
-    question: 'Do I need to be an engineer to use Synodic?',
+    question: 'Do I need to be an engineer to use {brand}?',
     answer:
       'No. This guide is written for everyone. Viewers and Builders never touch code — only Administrators deal with connections, and even that is wizard-driven.',
   },
   {
-    category: 'Using Synodic',
+    category: 'Using {brand}',
     question: 'What’s the difference between a View and the Explorer?',
     answer:
       'A **View** is a curated, saved snapshot someone built. The **Explorer** is an open canvas for your own investigations. Start in Views to learn the landscape; use the Explorer to answer new questions. See [Exploring the Graph](/guide/exploring-graph).',
   },
   {
-    category: 'Using Synodic',
+    category: 'Using {brand}',
     question: 'Can I break anything by clicking around?',
     answer:
       'No. Looking, panning, zooming, and tracing never change data. Editing, saving, and sharing always require a deliberate action.',

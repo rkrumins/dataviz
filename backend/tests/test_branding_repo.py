@@ -69,6 +69,24 @@ async def test_matching_version_succeeds(db_session: AsyncSession):
     assert row.version == snap.version + 1
 
 
+# ── reset ─────────────────────────────────────────────────────────────
+
+async def test_reset_clears_overrides_to_env_defaults(
+    db_session: AsyncSession, monkeypatch,
+):
+    monkeypatch.setenv("APP_BRAND_NAME", "Env Name")
+    # Override several fields (including an uploaded logo)...
+    await branding_repo.update_config(
+        db_session, app_name="Custom", accent_color="#abcdef",
+        logo_data="QUJD", logo_mime="image/png",
+    )
+    # ...then reset clears them so the snapshot resolves to env defaults.
+    await branding_repo.reset_config(db_session, updated_by="admin_1")
+    snap = await branding_repo.get_snapshot(db_session)
+    assert snap.app_name == "Env Name"
+    assert snap.logo_url == ""  # env default (no upload, no URL)
+
+
 # ── logo / favicon resolution ─────────────────────────────────────────
 
 async def test_uploaded_logo_resolves_to_data_uri(db_session: AsyncSession):

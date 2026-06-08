@@ -10,14 +10,14 @@
  * "someone else changed this" prompt rather than silently overwriting.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import { useQuery } from '@tanstack/react-query'
 import {
     Palette, Type, ImageIcon, Scale, Loader2, Check, Upload, Trash2,
     RotateCcw, AlertCircle, Info,
 } from 'lucide-react'
 import {
-    fetchAdminBranding, updateBranding, uploadBrandingImage,
+    fetchAdminBranding, updateBranding, uploadBrandingImage, resetBranding,
     type Branding, type BrandingPatch,
 } from '@/services/brandingService'
 import { useBrandingStore } from '@/store/branding'
@@ -71,6 +71,8 @@ export function AdminBranding() {
     const [saved, setSaved] = useState(false)
     const [saveError, setSaveError] = useState<string | null>(null)
     const [conflict, setConflict] = useState(false)
+    const [showReset, setShowReset] = useState(false)
+    const [resetting, setResetting] = useState(false)
 
     // Sync local form when the query resolves (or after a refetch).
     useEffect(() => {
@@ -133,6 +135,20 @@ export function AdminBranding() {
             setSaveError(errMsg(e))
         } finally {
             setSaving(false)
+        }
+    }
+
+    /** Reset every field back to the deployment (env) defaults. */
+    async function handleReset() {
+        setResetting(true)
+        setSaveError(null)
+        try {
+            absorb(await resetBranding())
+            setShowReset(false)
+        } catch (e) {
+            setSaveError(errMsg(e))
+        } finally {
+            setResetting(false)
         }
     }
 
@@ -346,9 +362,18 @@ export function AdminBranding() {
                                 <RotateCcw className="w-4 h-4" /> Discard
                             </button>
                         )}
-                        <span className="ml-auto text-[11px] text-ink-muted">
-                            Empty fields fall back to deployment defaults.
-                        </span>
+                        <div className="ml-auto flex items-center gap-3">
+                            <span className="text-[11px] text-ink-muted hidden sm:inline">
+                                Empty fields fall back to deployment defaults.
+                            </span>
+                            <button
+                                onClick={() => setShowReset(true)}
+                                disabled={saving || resetting}
+                                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-ink-muted hover:text-accent-warning hover:bg-accent-warning/10 transition-colors disabled:opacity-50"
+                            >
+                                <RotateCcw className="w-4 h-4" /> Reset to defaults
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -367,7 +392,79 @@ export function AdminBranding() {
                     />
                 </div>
             </div>
+
+            <ResetConfirmModal
+                open={showReset}
+                loading={resetting}
+                onClose={() => setShowReset(false)}
+                onConfirm={handleReset}
+            />
         </div>
+    )
+}
+
+function ResetConfirmModal({
+    open, loading, onClose, onConfirm,
+}: {
+    open: boolean
+    loading: boolean
+    onClose: () => void
+    onConfirm: () => void
+}) {
+    return (
+        <AnimatePresence>
+            {open && (
+                <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+                    onClick={() => !loading && onClose()}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="branding-reset-title"
+                >
+                    <motion.div
+                        initial={{ scale: 0.96, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0.96, opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-xl p-6"
+                    >
+                        <h3 id="branding-reset-title" className="text-lg font-bold text-ink mb-2">
+                            Reset to defaults
+                        </h3>
+                        <p className="text-sm text-ink-muted mb-6 leading-relaxed">
+                            Clear every branding override — name, logo, favicon, colours
+                            and legal text — and revert to this deployment's defaults?
+                            This applies immediately and can't be undone.
+                        </p>
+                        <div className="flex justify-end gap-3">
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                disabled={loading}
+                                className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={onConfirm}
+                                disabled={loading}
+                                className="px-4 py-2 rounded-xl text-sm font-semibold bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition-colors flex items-center gap-2"
+                            >
+                                {loading ? <Loader2 className="w-4 h-4 animate-spin" />
+                                    : <RotateCcw className="w-4 h-4" />}
+                                Reset
+                            </button>
+                        </div>
+                    </motion.div>
+                </motion.div>
+            )}
+        </AnimatePresence>
     )
 }
 

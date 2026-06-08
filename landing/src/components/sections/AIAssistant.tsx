@@ -4,6 +4,7 @@ import { Sparkles, Send, MessageSquare, BarChart3, GitBranch, Search, ShieldChec
 import { Section } from '@/components/layout/Section'
 import { Badge } from '@/components/ui/Badge'
 import { Card } from '@/components/ui/Card'
+import { BRAND } from '@/config/brand'
 
 /*
  * AI Assistant — a key selling point. Full section with interactive
@@ -128,7 +129,7 @@ export function AIAssistant() {
               <Sparkles size={11} className="text-white" />
             </div>
             <div>
-              <div className="text-xs font-semibold text-ink">Nexus AI</div>
+              <div className="text-xs font-semibold text-ink">{BRAND.name} AI</div>
               <div className="text-2xs text-ink-muted">Querying Customer Pipeline view</div>
             </div>
             <div className="ml-auto flex items-center gap-1">

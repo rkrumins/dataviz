@@ -5,6 +5,7 @@ import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { Button } from '@/components/ui/Button'
 import { MobileMenu } from './MobileMenu'
 import { useScrollspy } from '@/hooks/useScrollspy'
+import { BRAND } from '@/config/brand'
 
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
@@ -48,10 +49,10 @@ export function Navbar() {
       >
         <div className="max-w-7xl mx-auto px-6 lg:px-8 h-16 flex items-center justify-between">
           {/* Logo */}
-          <a href="#hero" className="flex items-center gap-2.5 group" aria-label="Nexus Lineage — home">
+          <a href="#hero" className="flex items-center gap-2.5 group" aria-label={`${BRAND.name} — home`}>
             <img src="/nexus-icon.svg" alt="" className="w-8 h-8" />
             <span className="font-display font-semibold text-lg tracking-tight text-ink">
-              Nexus<span className="text-accent-lineage">Lineage</span>
+              {BRAND.name}
             </span>
           </a>
 
