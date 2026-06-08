@@ -132,17 +132,25 @@ class MerkleStore:
 
     # ---- internals -------------------------------------------------------- #
     async def _as_of_many(self, s, graph_id, branch_id, paths: Iterable[Path], seq: int) -> Dict[Path, dict]:
-        path_list = list(paths)
-        if not path_list or seq < 1:
+        path_strs = [_path_str(p) for p in paths]
+        if not path_strs or seq < 1:
             return {}
-        rows = (await s.execute(
-            select(MerkleNodeORM.path, MerkleNodeORM.hash, MerkleNodeORM.bucket).where(
-                MerkleNodeORM.graph_id == graph_id, MerkleNodeORM.branch_id == branch_id,
-                MerkleNodeORM.path.in_([_path_str(p) for p in path_list]),
-                MerkleNodeORM.commit_seq <= seq,
-            ).order_by(MerkleNodeORM.path, MerkleNodeORM.commit_seq.desc()).distinct(MerkleNodeORM.path)
-        )).all()
-        return {_parse_path(p): {"hash": h, "bucket": b} for p, h, b in rows}
+        # A large commit's `need` set can hold tens of thousands of paths; asyncpg caps
+        # bind params at 32767 per statement, so chunk the IN-list (the other predicates
+        # add only 3 params) and merge.
+        out: Dict[Path, dict] = {}
+        CHUNK = 20000
+        for i in range(0, len(path_strs), CHUNK):
+            rows = (await s.execute(
+                select(MerkleNodeORM.path, MerkleNodeORM.hash, MerkleNodeORM.bucket).where(
+                    MerkleNodeORM.graph_id == graph_id, MerkleNodeORM.branch_id == branch_id,
+                    MerkleNodeORM.path.in_(path_strs[i:i + CHUNK]),
+                    MerkleNodeORM.commit_seq <= seq,
+                ).order_by(MerkleNodeORM.path, MerkleNodeORM.commit_seq.desc()).distinct(MerkleNodeORM.path)
+            )).all()
+            for p, h, b in rows:
+                out[_parse_path(p)] = {"hash": h, "bucket": b}
+        return out
 
     async def _walk(self, s, graph_id, branch_id, prefix: Path, m: int, n: int, out: Dict[str, Tuple]) -> None:
         hm = (await self._as_of_many(s, graph_id, branch_id, {prefix}, m)).get(prefix)

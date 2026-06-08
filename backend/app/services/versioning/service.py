@@ -2648,11 +2648,15 @@ class GraphVersioningService:
             head_rows.append(dict(graph_id=graph_id, branch_id=branch_id, entity_id=d.entity_id,
                                   entity_kind="edge", head_version_id=vid, content_hash=d.content_hash,
                                   is_tombstone=False, updated_at=now))
-        for batch in _chunks(node_dicts, config.INGEST_BATCH_SIZE):
+        # PostgreSQL caps bind parameters at 65535 PER statement. A multi-row INSERT
+        # uses rows × columns params, so chunking purely by row count (e.g. 5000 rows ×
+        # 17 edge columns = 85k) overflows it. Size each batch by the column count so a
+        # large bootstrap commit (thousands of nodes/edges) stays under the cap.
+        for batch in _chunks(node_dicts, _rows_per_insert(node_dicts)):
             await s.execute(pg_insert(NodeVersionORM).values(batch))
-        for batch in _chunks(edge_dicts, config.INGEST_BATCH_SIZE):
+        for batch in _chunks(edge_dicts, _rows_per_insert(edge_dicts)):
             await s.execute(pg_insert(EdgeVersionORM).values(batch))
-        for batch in _chunks(head_rows, config.INGEST_BATCH_SIZE):
+        for batch in _chunks(head_rows, _rows_per_insert(head_rows)):
             stmt = pg_insert(EntityHeadORM).values(batch)
             await s.execute(stmt.on_conflict_do_update(
                 index_elements=["graph_id", "branch_id", "entity_id"],
@@ -2999,8 +3003,21 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
 
 
 def _chunks(seq, n):
-    for i in range(0, len(seq), n):
-        yield seq[i:i + n]
+    for i in range(0, len(seq), max(1, n)):
+        yield seq[i:i + max(1, n)]
+
+
+# asyncpg caps bind parameters at 32767 (signed int16) per statement — stricter than
+# PostgreSQL's own 65535. Stay under it with headroom. A multi-row INSERT costs
+# rows × columns params.
+_PG_MAX_BIND_PARAMS = 32000
+
+
+def _rows_per_insert(dicts: List[dict]) -> int:
+    """Rows per multi-row INSERT so rows × columns stays under the bind-param cap.
+    Bounded by ``INGEST_BATCH_SIZE`` so it never exceeds the configured batch size."""
+    ncols = len(dicts[0]) if dicts else 1
+    return max(1, min(config.INGEST_BATCH_SIZE, _PG_MAX_BIND_PARAMS // ncols))
 
 
 def _delta_stats(deltas: List[Delta]) -> dict:

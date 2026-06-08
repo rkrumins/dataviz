@@ -200,6 +200,43 @@ def test_api_graph_draft_journey_e2e():
     asyncio.run(_run())
 
 
+def _large_ndjson(n_nodes: int, n_edges: int) -> str:
+    """A graph big enough that one commit's edge INSERT exceeds PostgreSQL's 65535
+    bind-param cap unless batches are sized by column count (17 cols × 5000 = 85k)."""
+    rows = [{"kind": "node", "id": f"urn:n:{i}", "urn": f"urn:n:{i}",
+             "entityType": "Table", "displayName": f"N{i}"} for i in range(n_nodes)]
+    for k in range(n_edges):
+        a, b = k % n_nodes, (k * 7 + 1) % n_nodes
+        if a == b:
+            b = (b + 1) % n_nodes
+        rows.append({"kind": "edge", "id": f"e_{k}", "edgeType": "LINEAGE",
+                     "source": f"urn:n:{a}", "target": f"urn:n:{b}"})
+    return "\n".join(json.dumps(r) for r in rows)
+
+
+async def _run_bulk_param_limit() -> None:
+    from httpx import ASGITransport, AsyncClient
+    await models.create_schema_and_partitions()
+    app, _G = _build_app()
+    ds = "ds_" + os.urandom(4).hex()
+    V1 = "/api/v1/ws1/versioning"
+    try:
+        c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        async with c:
+            gid = (await c.post(f"{V1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})).json()["graphId"]
+            # 100 nodes + 5000 edges in ONE commit → 5000×17 = 85k params if unchunked.
+            r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_large_ndjson(100, 5000))
+            assert r.status_code == 200, r.text
+            assert r.json()["ingested"] == 5100, r.json()
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_bulk_ingest_respects_pg_param_limit():
+    asyncio.run(_run_bulk_param_limit())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("API graph draft journey (HTTP create→import→draft-edit→read→publish) e2e: OK")
