@@ -29,6 +29,7 @@ import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
+import { useDiffDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
@@ -677,6 +678,8 @@ function HierarchyContainer({
     isSpotlightDim,
     isHidden: isHiddenByCanvasFilter,
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
+  // Branch-diff overlay — tint rows that differ from main when "Review changes" is on.
+  const diffStatus = useDiffDecoration().statusForEntity(node.urn ?? node.id)
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
@@ -745,6 +748,10 @@ function HierarchyContainer({
           isFocusNode && "ring-4 ring-amber-400 ring-offset-2 shadow-[0_0_30px_rgba(251,191,36,0.5)] scale-[1.02] z-50",
           isHighlighted && !isFocusNode && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.3)]",
           isDimmed && "opacity-30 grayscale-[0.6] blur-[0.3px] scale-[0.98]",
+          // Branch-diff overlay — same vocabulary as the Changes panel + other canvases.
+          diffStatus === 'added' && !isSelected && !isFocusNode && "ring-2 ring-emerald-500/70",
+          diffStatus === 'modified' && !isSelected && !isFocusNode && "ring-2 ring-amber-500/70",
+          diffStatus === 'removed' && !isSelected && "ring-2 ring-rose-500/70 opacity-70",
         )}
         style={{
           borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',

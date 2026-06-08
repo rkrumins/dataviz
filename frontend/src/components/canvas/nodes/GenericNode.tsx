@@ -10,6 +10,7 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
+import { useDiffDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 
 // Dynamic icon component
@@ -155,6 +156,8 @@ export const GenericNode = memo(function GenericNode({
   const searchUrn = (entityFields['urn'] as string | undefined) ?? id
   const schemaForBadge = useSchemaStore((s) => s.schema)
   const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
+  // Branch-diff overlay — tint nodes that differ from main when "Review changes" is on.
+  const diffStatus = useDiffDecoration().statusForEntity(searchUrn)
   // GraphCanvas nodes are typically uncollapsed (they render their
   // children as separate React Flow nodes), so the ancestor badge
   // only makes sense on nodes that have collapsed children
@@ -236,7 +239,16 @@ export const GenericNode = memo(function GenericNode({
           // Generic traced node (neither up nor down but in path)
           isTraced && !isFocus && !isUpstream && !isDownstream && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.4)] z-50",
           // Jump-to-node arrival pulse — one-shot ring animation
-          isPulsing && "lineage-pulse"
+          isPulsing && "lineage-pulse",
+          // Branch-diff overlay (added / modified / removed) — same vocabulary as the
+          // Changes panel + ContextView tinting. Skipped while selected/traced so those
+          // primary rings win.
+          diffStatus === 'added' && !selected && !isFocus && !isTraced
+            && "ring-2 ring-emerald-500/70 shadow-[0_0_18px_-2px_rgba(16,185,129,0.5)]",
+          diffStatus === 'modified' && !selected && !isFocus && !isTraced
+            && "ring-2 ring-amber-500/70 shadow-[0_0_18px_-2px_rgba(245,158,11,0.5)]",
+          diffStatus === 'removed' && !selected
+            && "ring-2 ring-rose-500/70 opacity-70 shadow-[0_0_18px_-2px_rgba(244,63,94,0.5)]"
         )}
         style={{
           borderColor: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
