@@ -2,15 +2,17 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown } from 'lucide-react'
 import { Section } from '@/components/layout/Section'
+import { useBrand } from '@/context/BrandContext'
+import { interpolateBrand } from '@/lib/brandText'
 
 const ITEMS = [
   {
-    q: 'What graph databases does Nexus Lineage support?',
+    q: 'What graph databases does {brand} support?',
     a: 'Out of the box: FalkorDB (Redis-protocol, optimized for speed), Neo4j (enterprise graph), and DataHub (metadata catalog ingestion). The pluggable GraphDataProvider interface means you can add custom backends without forking the core.',
   },
   {
     q: 'How does it differ from DataHub or Apache Atlas?',
-    a: 'DataHub and Atlas are metadata catalogs — they store metadata and show static lineage diagrams. Nexus Lineage is a lineage-first visualization platform with an interactive canvas (pan, zoom, trace), multi-granularity zoom (column → table → domain), and pre-computed aggregated edges for instant traversal at any scale.',
+    a: 'DataHub and Atlas are metadata catalogs — they store metadata and show static lineage diagrams. {brand} is a lineage-first visualization platform with an interactive canvas (pan, zoom, trace), multi-granularity zoom (column → table → domain), and pre-computed aggregated edges for instant traversal at any scale.',
   },
   {
     q: 'Can it handle millions of edges?',
@@ -34,7 +36,7 @@ const ITEMS = [
   },
   {
     q: 'Do I need to migrate my data?',
-    a: 'No. Nexus Lineage connects to your existing graph database. It reads your data in place and writes only AGGREGATED summary edges. Your source data is never modified.',
+    a: 'No. {brand} connects to your existing graph database. It reads your data in place and writes only AGGREGATED summary edges. Your source data is never modified.',
   },
   {
     q: 'Can I connect it to my existing metadata catalog (OpenMetadata, Collibra, etc.)?',
@@ -51,6 +53,7 @@ const ITEMS = [
 ]
 
 function AccordionItem({ q, a }: { q: string; a: string }) {
+  const brand = useBrand()
   const [open, setOpen] = useState(false)
 
   return (
@@ -61,7 +64,7 @@ function AccordionItem({ q, a }: { q: string; a: string }) {
         aria-expanded={open}
       >
         <span className="text-base font-medium text-ink group-hover:text-accent-lineage transition-colors">
-          {q}
+          {interpolateBrand(q, brand)}
         </span>
         <motion.div
           animate={{ rotate: open ? 180 : 0 }}
@@ -81,7 +84,7 @@ function AccordionItem({ q, a }: { q: string; a: string }) {
             className="overflow-hidden"
           >
             <p className="pb-5 text-sm text-ink-secondary leading-relaxed max-w-3xl">
-              {a}
+              {interpolateBrand(a, brand)}
             </p>
           </motion.div>
         )}
@@ -91,6 +94,7 @@ function AccordionItem({ q, a }: { q: string; a: string }) {
 }
 
 export function FAQ() {
+  const brand = useBrand()
   return (
     <Section id="faq" alt>
       <div className="max-w-3xl mx-auto">
@@ -99,7 +103,7 @@ export function FAQ() {
             Frequently asked questions
           </h2>
           <p className="text-lg text-ink-secondary">
-            Everything you need to know about Nexus Lineage.
+            Everything you need to know about {brand.name}.
           </p>
         </div>
         <div className="glass-panel rounded-2xl px-6 md:px-8">

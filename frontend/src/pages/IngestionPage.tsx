@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { Server, Layers, Activity, DatabaseZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
@@ -57,9 +58,7 @@ export function IngestionPage() {
     const [counts, setCounts] = useState({ providers: -1, catalogs: 0, workspaces: 0, hasOntology: false })
     const [loadError, setLoadError] = useState<string | null>(null)
 
-    useEffect(() => {
-        document.title = 'Ingestion · Synodic'
-    }, [])
+    useDocumentTitle('Ingestion')
 
     // Phase 18: providers + catalog reads are workspace-scoped. The
     // backend filters to what the caller's workspaces touch; the FE

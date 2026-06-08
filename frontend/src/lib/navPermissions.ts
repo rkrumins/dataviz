@@ -68,6 +68,7 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
  */
 export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec> = {
     overview:      { kind: 'perm', perm: 'system:admin' },
+    branding:      { kind: 'perm', perm: 'system:admin' },
     features:      { kind: 'perm', perm: 'system:admin' },
     announcements: { kind: 'perm', perm: 'system:admin' },
     users:         { kind: 'perm', perm: 'system:admin' },

@@ -5,6 +5,8 @@ import { GranularityZoom } from '@/components/visuals/GranularityZoom'
 import { PersonaToggleDemo } from '@/components/visuals/PersonaToggleDemo'
 import { CanvasPreview } from '@/components/visuals/CanvasPreview'
 import { Badge } from '@/components/ui/Badge'
+import { useBrand } from '@/context/BrandContext'
+import { interpolateBrand } from '@/lib/brandText'
 
 /*
  * Unified feature showcase — merges the old FeatureShowcase + UniversalLineage
@@ -140,7 +142,7 @@ const FEATURES = [
     icon: Plug,
     title: 'Extensible to any catalog',
     description:
-      'Build a connector to OpenMetadata, Collibra, Atlan, or any catalog where your metadata already lives. Nexus Lineage becomes the visualization layer — no data duplication required.',
+      'Build a connector to OpenMetadata, Collibra, Atlan, or any catalog where your metadata already lives. {brand} becomes the visualization layer — no data duplication required.',
     color: '#7147e8',
     comingSoon: true,
     visual: (
@@ -176,6 +178,7 @@ const FEATURES = [
 ]
 
 export function FeatureShowcase() {
+  const brand = useBrand()
   return (
     <Section id="showcase" alt>
       <div className="text-center mb-16">
@@ -184,7 +187,7 @@ export function FeatureShowcase() {
           <span className="gradient-text">on purpose</span>
         </h2>
         <p className="text-lg text-ink-secondary max-w-2xl mx-auto">
-          Six capabilities that separate Nexus Lineage from static lineage diagrams and metadata catalogs.
+          Six capabilities that separate {brand.name} from static lineage diagrams and metadata catalogs.
         </p>
       </div>
 
@@ -211,7 +214,7 @@ export function FeatureShowcase() {
                   {feat.title}
                 </h3>
                 <p className="text-base text-ink-secondary leading-relaxed">
-                  {feat.description}
+                  {interpolateBrand(feat.description, brand)}
                 </p>
               </div>
               <div className={reversed ? 'lg:order-1' : ''}>

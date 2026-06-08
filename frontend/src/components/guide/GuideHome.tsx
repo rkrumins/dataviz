@@ -26,6 +26,8 @@ import {
   guideFaqs,
 } from './guideConfig'
 import { guideMarkdownComponents } from './guideMarkdown'
+import { interpolateBrand } from '@/lib/brandText'
+import { useBrand } from '@/store/branding'
 
 const fade = {
   hidden: { opacity: 0, y: 16 },
@@ -37,6 +39,8 @@ const fade = {
 }
 
 export function GuideHome() {
+  const brand = useBrand()
+  const interp = (t: string) => interpolateBrand(t, brand)
   const [query, setQuery] = useState('')
   const q = query.trim().toLowerCase()
 
@@ -65,7 +69,7 @@ export function GuideHome() {
         <motion.div initial="hidden" animate="show" custom={0} variants={fade}>
           <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 border border-indigo-500/20">
             <Sparkles className="w-3.5 h-3.5" />
-            Synodic User Guide
+            {brand.appName} User Guide
           </span>
           <h1 className="mt-5 font-display text-4xl sm:text-5xl font-bold tracking-tight text-ink leading-[1.1]">
             Everything you need to make
@@ -75,7 +79,7 @@ export function GuideHome() {
             </span>
           </h1>
           <p className="mt-4 max-w-2xl text-base sm:text-lg text-ink-secondary leading-relaxed">
-            A single stop-shop for using Synodic — what it does, how to use it,
+            A single stop-shop for using {brand.appName} — what it does, how to use it,
             and the key journeys for everyone from people browsing views to the
             admins who run the platform.
           </p>
@@ -133,7 +137,7 @@ export function GuideHome() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-semibold text-ink truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-                            {e.title}
+                            {interp(e.title)}
                           </span>
                           {persona && (
                             <span className={cn('text-[10px] font-semibold', persona.accent.text)}>
@@ -141,7 +145,7 @@ export function GuideHome() {
                             </span>
                           )}
                         </div>
-                        <p className="text-xs text-ink-muted truncate">{e.description}</p>
+                        <p className="text-xs text-ink-muted truncate">{interp(e.description)}</p>
                       </div>
                     </Link>
                   )
@@ -187,13 +191,13 @@ export function GuideHome() {
                           {p.tagline}
                         </p>
                         <p className="mt-3 text-sm text-ink-secondary leading-relaxed">
-                          {p.intro}
+                          {interp(p.intro)}
                         </p>
                         <div className="mt-4 pt-4 border-t border-glass-border space-y-1.5">
                           {entries.slice(0, 3).map((e) => (
                             <div key={e.slug} className="flex items-center gap-2 text-xs text-ink-muted">
                               <div className={cn('w-1 h-1 rounded-full', p.accent.text)} />
-                              <span className="truncate">{e.title}</span>
+                              <span className="truncate">{interp(e.title)}</span>
                             </div>
                           ))}
                         </div>
@@ -209,7 +213,7 @@ export function GuideHome() {
             </Section>
 
             {/* ── Key journeys ────────────────────────────── */}
-            <Section title="Key journeys" subtitle="The things people actually come to Synodic to do.">
+            <Section title="Key journeys" subtitle={`The things people actually come to ${brand.appName} to do.`}>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {keyJourneys.map((j, i) => {
                   const persona = getPersona(j.persona)
@@ -302,7 +306,7 @@ export function GuideHome() {
                               to={`/guide/${e.slug}`}
                               className="block rounded-lg px-2 py-1.5 -mx-2 text-sm text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                             >
-                              {e.title}
+                              {interp(e.title)}
                             </Link>
                           </li>
                         ))}
@@ -362,6 +366,8 @@ function Section({
 }
 
 function FaqAccordion() {
+  const brand = useBrand()
+  const interp = (t: string) => interpolateBrand(t, brand)
   const [open, setOpen] = useState<number | null>(0)
   return (
     <div className="space-y-2 max-w-3xl">
@@ -381,7 +387,7 @@ function FaqAccordion() {
               onClick={() => setOpen(isOpen ? null : i)}
               className="w-full flex items-center justify-between px-4 py-3.5 text-left"
             >
-              <span className="text-sm font-semibold text-ink pr-4">{f.question}</span>
+              <span className="text-sm font-semibold text-ink pr-4">{interp(f.question)}</span>
               <ChevronDown
                 className={cn(
                   'w-4 h-4 text-ink-muted shrink-0 transition-transform duration-200',
@@ -392,7 +398,7 @@ function FaqAccordion() {
             {isOpen && (
               <div className="px-4 pb-4 prose-synodic text-sm">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={guideMarkdownComponents}>
-                  {f.answer}
+                  {interp(f.answer)}
                 </ReactMarkdown>
               </div>
             )}

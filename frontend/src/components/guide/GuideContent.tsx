@@ -22,6 +22,8 @@ import {
   getPagerNeighbors,
 } from './guideConfig'
 import { guideMarkdownComponents } from './guideMarkdown'
+import { interpolateBrand } from '@/lib/brandText'
+import { useBrand } from '@/store/branding'
 
 // Strip the inline markdown that doesn't survive into a heading's rendered
 // text, so slug ids match what rehype-slug produces.
@@ -53,6 +55,8 @@ function extractHeadings(md: string): { id: string; text: string }[] {
 }
 
 export function GuideContent() {
+  const brand = useBrand()
+  const interp = (t: string) => interpolateBrand(t, brand)
   const { slug } = useParams<{ slug: string }>()
   const location = useLocation()
   const entry = slug ? getGuideEntry(slug) : undefined
@@ -112,7 +116,7 @@ export function GuideContent() {
           </>
         )}
         <ChevronRight className="w-3 h-3" />
-        <span className="text-ink font-medium">{entry.title}</span>
+        <span className="text-ink font-medium">{interp(entry.title)}</span>
       </nav>
 
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px] gap-10">
@@ -147,7 +151,7 @@ export function GuideContent() {
               rehypePlugins={[rehypeSlug, rehypeHighlight]}
               components={guideMarkdownComponents}
             >
-              {content ?? ''}
+              {interp(content ?? '')}
             </ReactMarkdown>
           </article>
 
@@ -162,7 +166,7 @@ export function GuideContent() {
                   <ChevronLeft className="w-3 h-3" /> Previous
                 </span>
                 <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-                  {prev.title}
+                  {interp(prev.title)}
                 </span>
               </Link>
             ) : (
@@ -177,7 +181,7 @@ export function GuideContent() {
                   Next <ChevronRight className="w-3 h-3" />
                 </span>
                 <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-                  {next.title}
+                  {interp(next.title)}
                 </span>
               </Link>
             )}

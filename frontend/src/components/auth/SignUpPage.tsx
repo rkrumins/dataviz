@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Lock, User, AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, Sparkles } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 
@@ -31,6 +32,7 @@ const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yell
 const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
 
 export function SignUpPage() {
+    const brand = useBrand()
     const [firstName, setFirstName] = useState('')
     const [lastName, setLastName] = useState('')
     const [email, setEmail] = useState('')
@@ -160,7 +162,7 @@ export function SignUpPage() {
                             <ShieldCheck className="w-8 h-8 text-white" />
                         </motion.div>
                         <h1 className="text-3xl font-bold tracking-tight text-ink mb-2">
-                            Nexus<span className="gradient-text">Lineage</span>
+                            <span className="gradient-text">{brand.appName}</span>
                         </h1>
                         <p className="text-sm text-ink-secondary text-center">
                             {inviteToken && inviteValid
@@ -427,7 +429,7 @@ export function SignUpPage() {
                 >
                     <span>v0.1.0</span>
                     <span>•</span>
-                    <span>© 2026 Nexus Lineage</span>
+                    <span>{brand.copyrightText}</span>
                 </motion.div>
             </motion.div>
 

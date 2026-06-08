@@ -5,6 +5,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { authService, type SsoProviderSummary } from '@/services/authService'
 import { cn } from '@/lib/utils'
+import { useBrand } from '@/store/branding'
 
 
 // SSO is initiated by a top-level GET so the IdP redirect flow works
@@ -125,6 +126,7 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
 }
 
 export function LoginPage() {
+    const brand = useBrand()
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
     const navigate = useNavigate()
@@ -224,10 +226,10 @@ export function LoginPage() {
                             <ShieldCheck className="w-8 h-8 text-white" />
                         </motion.div>
                         <h1 className="text-3xl font-bold tracking-tight text-ink mb-2">
-                            Nexus<span className="gradient-text">Lineage</span>
+                            <span className="gradient-text">{brand.appName}</span>
                         </h1>
                         <p className="text-sm text-ink-secondary text-center">
-                            Sign in to access your data workspace
+                            {brand.loginTagline}
                         </p>
                     </div>
 
@@ -346,7 +348,7 @@ export function LoginPage() {
                 >
                     <span>v0.1.0</span>
                     <span>•</span>
-                    <span>© 2026 Nexus Lineage</span>
+                    <span>{brand.copyrightText}</span>
                 </motion.div>
             </motion.div>
 

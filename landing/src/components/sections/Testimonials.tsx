@@ -2,6 +2,8 @@ import { motion } from 'framer-motion'
 import { Quote } from 'lucide-react'
 import { Section } from '@/components/layout/Section'
 import { Card } from '@/components/ui/Card'
+import { useBrand } from '@/context/BrandContext'
+import { interpolateBrand } from '@/lib/brandText'
 
 const TESTIMONIALS = [
   {
@@ -12,7 +14,7 @@ const TESTIMONIALS = [
     color: '#6366f1',
   },
   {
-    quote: 'We evaluated DataHub and Collibra. Neither could do interactive graph exploration at our scale — 3M edges. Nexus Lineage handles it without breaking a sweat.',
+    quote: 'We evaluated DataHub and Collibra. Neither could do interactive graph exploration at our scale — 3M edges. {brand} handles it without breaking a sweat.',
     author: 'Marcus Rivera',
     role: 'Staff Data Engineer',
     company: 'E-commerce Platform',
@@ -28,6 +30,7 @@ const TESTIMONIALS = [
 ]
 
 export function Testimonials() {
+  const brand = useBrand()
   return (
     <Section id="testimonials" alt>
       <div className="text-center mb-16">
@@ -49,7 +52,7 @@ export function Testimonials() {
             <Card className="h-full flex flex-col" accentColor={color}>
               <Quote size={20} className="text-ink-muted/30 mb-3" />
               <p className="text-sm text-ink-secondary leading-relaxed flex-1 mb-6">
-                "{quote}"
+                "{interpolateBrand(quote, brand)}"
               </p>
               <div className="flex items-center gap-3 pt-4 border-t border-[var(--nx-border-subtle)]">
                 <div
