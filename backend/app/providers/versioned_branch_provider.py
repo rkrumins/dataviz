@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
-    ChildrenWithEdgesResult, EdgeQuery, GraphEdge, GraphNode, NodeQuery,
+    AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge, GraphNode, NodeQuery,
     TopLevelNodesResult, TraceResult,
 )
 
@@ -156,6 +156,17 @@ class VersionedBranchProvider:
             lineage_edge_types=lineage_edge_types, containment_edge_types=containment_edge_types,
             max_nodes=max_nodes, include_containment_edges=include_containment_edges)
         return TraceResult(**d)
+
+    async def get_aggregated_edges_between(
+        self, source_urns: List[str], target_urns: Optional[List[str]],
+        granularity: Any, containment_edges: List[str], lineage_edges: List[str],
+        *, timeout: Optional[float] = None,
+    ) -> AggregatedEdgeResult:
+        """AGGREGATED rollups are a published-``main`` projection (FalkorDB) concept — a draft
+        branch has none materialised. Return an empty result, exactly as the FalkorDB provider
+        does before a backfill; the engine finds no ``materialize_*`` hook on this provider and
+        degrades gracefully (no rollups), so the draft canvas still renders from raw edges."""
+        return AggregatedEdgeResult(aggregated_edges=[], total_source_edges=0)
 
     async def get_ontology_metadata(self):
         """No ontology surface by design — the engine resolves ontology from the data source
