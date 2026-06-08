@@ -8,8 +8,11 @@ import {
   getEntriesForSection,
   getPersona,
 } from './guideConfig'
+import { interpolateBrand } from '@/lib/brandText'
+import { useBrand } from '@/store/branding'
 
 export function GuideSidebar() {
+  const brand = useBrand()
   const [search, setSearch] = useState('')
 
   const q = search.trim().toLowerCase()
@@ -33,7 +36,7 @@ export function GuideSidebar() {
             <h1 className="text-lg font-bold text-ink leading-tight group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
               User Guide
             </h1>
-            <p className="text-[11px] text-ink-muted">Synodic Platform</p>
+            <p className="text-[11px] text-ink-muted">{brand.appName}</p>
           </div>
         </NavLink>
 
@@ -137,6 +140,7 @@ function SidebarLink({
   title: string
   description?: string
 }) {
+  const brand = useBrand()
   return (
     <NavLink
       to={`/guide/${slug}`}
@@ -150,9 +154,9 @@ function SidebarLink({
       }
     >
       <div className="flex flex-col min-w-0 flex-1">
-        <span className="text-sm font-semibold truncate leading-tight">{title}</span>
+        <span className="text-sm font-semibold truncate leading-tight">{interpolateBrand(title, brand)}</span>
         {description && (
-          <span className="text-[10px] text-ink-muted truncate mt-0.5">{description}</span>
+          <span className="text-[10px] text-ink-muted truncate mt-0.5">{interpolateBrand(description, brand)}</span>
         )}
       </div>
     </NavLink>

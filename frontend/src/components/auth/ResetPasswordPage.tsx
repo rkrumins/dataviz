@@ -9,6 +9,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Key, Lock, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, ArrowLeft } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 
@@ -37,6 +38,7 @@ const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yell
 const STRENGTH_LABELS = ['Very weak', 'Weak', 'Fair', 'Strong', 'Very strong']
 
 export function ResetPasswordPage() {
+    const brand = useBrand()
     const [searchParams] = useSearchParams()
     const [token, setToken] = useState(searchParams.get('token') || '')
     const [password, setPassword] = useState('')
@@ -141,7 +143,7 @@ export function ResetPasswordPage() {
                             <ShieldCheck className="w-8 h-8 text-white" />
                         </motion.div>
                         <h1 className="text-3xl font-bold tracking-tight text-ink mb-2">
-                            Nexus<span className="gradient-text">Lineage</span>
+                            <span className="gradient-text">{brand.appName}</span>
                         </h1>
                         <p className="text-sm text-ink-secondary text-center">
                             {success ? 'Password reset successful' : 'Set your new password'}
@@ -346,7 +348,7 @@ export function ResetPasswordPage() {
                 >
                     <span>v0.1.0</span>
                     <span>&bull;</span>
-                    <span>&copy; 2026 Nexus Lineage</span>
+                    <span>{brand.copyrightText}</span>
                 </motion.div>
             </motion.div>
         </div>

@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
     Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
@@ -179,9 +180,7 @@ export function WorkspaceDetailPage() {
     }, [workspace])
 
     // ── Document title ────────────────────────────────────
-    useEffect(() => {
-        document.title = workspace ? `${workspace.name} · Workspaces` : 'Workspace · Synodic'
-    }, [workspace])
+    useDocumentTitle(workspace ? `${workspace.name} · Workspaces` : 'Workspace')
 
     // ── Derived data ───────────────────────────────────────
     const ontologyNameMap = useMemo(() => {

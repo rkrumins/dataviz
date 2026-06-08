@@ -6,10 +6,13 @@ import rehypeHighlight from 'rehype-highlight'
 import { getEntryBySlug, getSectionById } from './docsConfig'
 import { markdownComponents } from './MarkdownComponents'
 import { useDocsLoader } from '@/hooks/useDocsLoader'
+import { interpolateBrand } from '@/lib/brandText'
+import { useBrand } from '@/store/branding'
 import { ChevronRight, FileText } from 'lucide-react'
 
 export function DocsContent() {
   const { slug } = useParams<{ slug: string }>()
+  const brand = useBrand()
   const entry = slug ? getEntryBySlug(slug) : undefined
   const section = entry ? getSectionById(entry.section) : undefined
   const { content, isLoading, error } = useDocsLoader(entry)
@@ -70,7 +73,7 @@ export function DocsContent() {
           rehypePlugins={[rehypeSlug, rehypeHighlight]}
           components={markdownComponents}
         >
-          {content ?? ''}
+          {interpolateBrand(content ?? '', brand)}
         </ReactMarkdown>
       </article>
 

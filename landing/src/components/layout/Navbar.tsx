@@ -5,6 +5,7 @@ import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { Button } from '@/components/ui/Button'
 import { MobileMenu } from './MobileMenu'
 import { useScrollspy } from '@/hooks/useScrollspy'
+import { useBrand } from '@/context/BrandContext'
 
 const NAV_LINKS = [
   { label: 'Features', href: '#features' },
@@ -21,6 +22,7 @@ export function Navbar() {
   const [scrolled, setScrolled] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const activeId = useScrollspy(SECTION_IDS)
+  const brand = useBrand()
 
   useEffect(() => {
     const handler = () => setScrolled(window.scrollY > 40)
@@ -48,10 +50,10 @@ export function Navbar() {
       >
         <div className="max-w-7xl mx-auto px-6 lg:px-8 h-16 flex items-center justify-between">
           {/* Logo */}
-          <a href="#hero" className="flex items-center gap-2.5 group" aria-label="Nexus Lineage — home">
-            <img src="/nexus-icon.svg" alt="" className="w-8 h-8" />
+          <a href="#hero" className="flex items-center gap-2.5 group" aria-label={`${brand.name} — home`}>
+            <img src={brand.logoSrc} alt="" className="w-8 h-8" />
             <span className="font-display font-semibold text-lg tracking-tight text-ink">
-              Nexus<span className="text-accent-lineage">Lineage</span>
+              {brand.name}
             </span>
           </a>
 

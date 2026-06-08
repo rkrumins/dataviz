@@ -9,11 +9,12 @@ import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
     BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
-    UserCog, Users2, KeyRound, Network, History,
+    UserCog, Users2, KeyRound, Network, History, Palette,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission } from '@/store/auth'
 import { useAdminSectionSpec } from '@/store/navCatalogue'
+import { useBrand } from '@/store/branding'
 
 // Administration sidebar is split into two sections — "System" for
 // platform-wide configuration and "Identity & Access" for the people
@@ -32,6 +33,7 @@ const adminGroups = [
         path: '',
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
+            { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
         ]
@@ -53,6 +55,7 @@ const adminGroups = [
 
 export function AdminPage() {
     const location = useLocation()
+    const brand = useBrand()
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
     // Permission gate per admin sub-item, driven by the centralised nav
@@ -61,6 +64,7 @@ export function AdminPage() {
     // drop out of the group. ``useAdminSectionSpec`` resolves the live
     // spec from the store.
     const overviewVisible      = useNavPermission(useAdminSectionSpec('overview'))
+    const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
     const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
     const usersVisible         = useNavPermission(useAdminSectionSpec('users'))
@@ -71,6 +75,7 @@ export function AdminPage() {
 
     const itemVisibility: Record<string, boolean> = {
         overview:      overviewVisible,
+        branding:      brandingVisible,
         features:      featuresVisible,
         announcements: announcementsVisible,
         users:         usersVisible,
@@ -201,7 +206,7 @@ export function AdminPage() {
 
                 {/* Version tag */}
                 <div className="px-6 py-4 border-t border-glass-border">
-                    <p className="text-[10px] text-ink-muted text-center">Synodic Admin v1.0</p>
+                    <p className="text-[10px] text-ink-muted text-center">{brand.appName} Admin v1.0</p>
                 </div>
             </aside>
 

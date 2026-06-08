@@ -3,8 +3,11 @@ import { NavLink } from 'react-router-dom'
 import { BookOpen, Search, HelpCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { docSections, docEntries, getEntriesForSection } from './docsConfig'
+import { interpolateBrand } from '@/lib/brandText'
+import { useBrand } from '@/store/branding'
 
 export function DocsSidebar() {
+  const brand = useBrand()
   const [search, setSearch] = useState('')
 
   const filteredEntries = search
@@ -30,7 +33,7 @@ export function DocsSidebar() {
           </div>
           <div>
             <h1 className="text-lg font-bold text-ink leading-tight">Documentation</h1>
-            <p className="text-[11px] text-ink-muted">Synodic Platform</p>
+            <p className="text-[11px] text-ink-muted">{brand.appName}</p>
           </div>
         </div>
 
@@ -110,6 +113,7 @@ export function DocsSidebar() {
 }
 
 function SidebarLink({ slug, title, description }: { slug: string; title: string; description?: string }) {
+  const brand = useBrand()
   return (
     <NavLink
       to={`/docs/${slug}`}
@@ -123,9 +127,9 @@ function SidebarLink({ slug, title, description }: { slug: string; title: string
       }
     >
       <div className="flex flex-col min-w-0 flex-1">
-        <span className="text-sm font-semibold truncate leading-tight">{title}</span>
+        <span className="text-sm font-semibold truncate leading-tight">{interpolateBrand(title, brand)}</span>
         {description && (
-          <span className="text-[10px] text-ink-muted truncate mt-0.5">{description}</span>
+          <span className="text-[10px] text-ink-muted truncate mt-0.5">{interpolateBrand(description, brand)}</span>
         )}
       </div>
     </NavLink>

@@ -14,6 +14,7 @@ const WorkspaceViewsManager = lazy(() => import('@/pages/WorkspaceViewsManager')
 const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
+const AdminBranding = lazy(() => import('@/components/admin/AdminBranding').then(m => ({ default: m.AdminBranding })))
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
 const AdminGroups = lazy(() => import('@/components/admin/AdminGroups').then(m => ({ default: m.AdminGroups })))
@@ -167,6 +168,14 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="overview">
                 <Lazy><AdminOverview /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'branding',
+            element: (
+              <RequireNav group="admin" sectionKey="branding">
+                <Lazy><AdminBranding /></Lazy>
               </RequireNav>
             ),
           },

@@ -16,6 +16,7 @@ import {
   enablePermissionPolling,
   disablePermissionPolling,
 } from '@/store/permissionPoller'
+import { useBrandingStore } from '@/store/branding'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -92,6 +93,13 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
 
   return <>{children}</>
 }
+
+// Branding is public and independent of auth — kick the fetch off at module
+// load so the tab title, favicon and accent colour resolve as early as
+// possible (the store is seeded with stock defaults, so first paint is
+// always correct even before this resolves). Fire-and-forget: a failure
+// keeps the seed in place.
+void useBrandingStore.getState().loadBranding()
 
 // GraphProvider manages the RemoteGraphProvider lifecycle internally,
 // creating a workspace-scoped instance whenever the active workspace changes.

@@ -16,6 +16,7 @@ from .endpoints import (
     admin_sso_config,
     me_identities,
     audit,
+    branding,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -197,6 +198,16 @@ api_router.include_router(
 # ── Public announcements (no auth — all users see banners) ────────────
 api_router.include_router(
     announcements.router, prefix="/announcements", tags=["announcements"],
+)
+
+# ── Branding (white-label app identity) ───────────────────────────────
+# Public GET — the login page, tab title and favicon need branding
+# before a session exists. Admin PATCH/upload is system:admin-gated.
+api_router.include_router(
+    branding.public_router, prefix="/branding", tags=["branding"],
+)
+api_router.include_router(
+    branding.admin_router, prefix="/admin/branding", tags=["admin:branding"],
 )
 # Aggregation service: /api/v1/admin/...
 # Phase 19: per-endpoint workspace-scoped gates inside the router

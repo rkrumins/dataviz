@@ -10,10 +10,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AtSign, ChevronRight, AlertCircle, ShieldCheck, CheckCircle2, ArrowLeft } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
 
 export function ForgotPasswordPage() {
+    const brand = useBrand()
     const [email, setEmail] = useState('')
     const [isLoading, setIsLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -85,7 +87,7 @@ export function ForgotPasswordPage() {
                             <ShieldCheck className="w-8 h-8 text-white" />
                         </motion.div>
                         <h1 className="text-3xl font-bold tracking-tight text-ink mb-2">
-                            Nexus<span className="gradient-text">Lineage</span>
+                            <span className="gradient-text">{brand.appName}</span>
                         </h1>
                         <p className="text-sm text-ink-secondary text-center">
                             {submitted ? 'Reset request submitted' : 'Reset your password'}
@@ -226,7 +228,7 @@ export function ForgotPasswordPage() {
                 >
                     <span>v0.1.0</span>
                     <span>&bull;</span>
-                    <span>&copy; 2026 Nexus Lineage</span>
+                    <span>{brand.copyrightText}</span>
                 </motion.div>
             </motion.div>
         </div>

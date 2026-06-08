@@ -4,10 +4,14 @@ import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
+import { interpolateBrand } from '@/lib/brandText'
+import { useBrand } from '@/store/branding'
 import { faqEntries } from './docsConfig'
 import { markdownComponents } from './MarkdownComponents'
 
 export function DocsFAQ() {
+  const brand = useBrand()
+  const interp = (t: string) => interpolateBrand(t, brand)
   const [openIndex, setOpenIndex] = useState<number | null>(null)
 
   // Group entries by category
@@ -33,7 +37,7 @@ export function DocsFAQ() {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-ink">Frequently Asked Questions</h1>
-          <p className="text-sm text-ink-muted">Everything you need to know about Synodic</p>
+          <p className="text-sm text-ink-muted">Everything you need to know about {brand.appName}</p>
         </div>
       </div>
 
@@ -62,7 +66,7 @@ export function DocsFAQ() {
                       className="w-full flex items-center justify-between px-4 py-3.5 text-left"
                     >
                       <span className="text-sm font-semibold text-ink pr-4">
-                        {item.question}
+                        {interp(item.question)}
                       </span>
                       <ChevronDown
                         className={cn(
@@ -85,7 +89,7 @@ export function DocsFAQ() {
                               remarkPlugins={[remarkGfm]}
                               components={markdownComponents}
                             >
-                              {item.answer}
+                              {interp(item.answer)}
                             </ReactMarkdown>
                           </div>
                         </motion.div>

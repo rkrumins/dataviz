@@ -1,6 +1,7 @@
 import { Compass, RefreshCcw, Lock } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
 import { Section } from '@/components/layout/Section'
+import { useBrand } from '@/context/BrandContext'
 
 /*
  * Three high-level value propositions — the "why" before the "how."
@@ -33,12 +34,13 @@ const PROPS = [
 ]
 
 export function ValueProps() {
+  const brand = useBrand()
   return (
     <Section id="features">
       <div className="text-center mb-16">
         <h2 className="text-3xl md:text-4xl font-display font-bold tracking-tight mb-4">
           Why teams choose{' '}
-          <span className="gradient-text">Nexus Lineage</span>
+          <span className="gradient-text">{brand.name}</span>
         </h2>
         <p className="text-lg text-ink-secondary max-w-2xl mx-auto">
           Built for the complexity that other tools pretend doesn't exist.
