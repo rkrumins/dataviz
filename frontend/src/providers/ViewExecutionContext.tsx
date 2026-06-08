@@ -22,6 +22,7 @@ import type { GraphSchema } from './GraphDataProvider'
 import type { GraphProviderContextValueExtended } from './GraphProviderContext'
 import { useGraphProviderContext, ProviderOverride } from './GraphProviderContext'
 import { getOrCreateProvider, poolKey } from './providerPool'
+import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderStatus } from '@/store/providerStatus'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
@@ -120,29 +121,37 @@ export function ViewExecutionProvider({
   }, [workspaces, workspaceId, dataSourceId])
   const providerStatus = useProviderStatus(providerId)
 
+  // ── Draft scoping: the active branch (if this scope owns one) routes every read
+  // through ?branchId=. A draft is never the shared global (main) provider. ──
+  const effectiveBranchId = useEffectiveBranchId(workspaceId, dataSourceId)
+  const mainEpoch = useBranchStore((s) => s.mainEpoch)
+
   // ── Decide whether to reuse the global provider or create a scoped one ──
   const scopeMatchesGlobal =
+    !effectiveBranchId &&
     workspaceId === globalCtx.workspaceId &&
     (dataSourceId === globalCtx.dataSourceId || (!dataSourceId && !globalCtx.dataSourceId))
 
   const scopedProvider = useMemo(() => {
     if (scopeMatchesGlobal) return globalCtx.provider
-    return getOrCreateProvider(workspaceId, dataSourceId)
-  }, [scopeMatchesGlobal, workspaceId, dataSourceId, globalCtx.provider])
+    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId)
+  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, globalCtx.provider])
 
   // ── Provider version: global if matching, otherwise local counter ──
   const [localVersion, setLocalVersion] = useState(1)
-  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId))
+  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId))
 
   useEffect(() => {
-    const key = poolKey(workspaceId, dataSourceId)
+    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId)
     if (key !== prevScopeRef.current) {
       prevScopeRef.current = key
       setLocalVersion(v => v + 1)
     }
-  }, [workspaceId, dataSourceId])
+  }, [workspaceId, dataSourceId, effectiveBranchId])
 
-  const providerVersion = scopeMatchesGlobal ? globalCtx.providerVersion : localVersion
+  // mainEpoch bumps on publish/merge → folds into the version so schema + hydration
+  // (keyed by providerVersion) refetch once main has moved.
+  const providerVersion = (scopeMatchesGlobal ? globalCtx.providerVersion : localVersion) + mainEpoch
 
   // ── Background connectivity check for scoped providers ──
   const [providerReady, setProviderReady] = useState(scopeMatchesGlobal)

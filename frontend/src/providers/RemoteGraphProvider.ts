@@ -76,6 +76,11 @@ export interface RemoteGraphProviderOptions {
     workspaceId?: string
     /** Data source ID. When set, appended as ?dataSourceId= to workspace-scoped routes. */
     dataSourceId?: string
+    /**
+     * Draft branch ID. When set, appended as ?branchId= so every read serves the
+     * draft (composed base+overlay) instead of live main. Omit for trunk/main.
+     */
+    branchId?: string
     /** @deprecated Legacy connection ID. Use workspaceId instead. */
     connectionId?: string
 }
@@ -85,6 +90,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     private readonly workspaceId?: string
     private readonly dataSourceId?: string
+    private readonly branchId?: string
     private readonly connectionId?: string
     private readonly circuitBreaker: CircuitBreaker
 
@@ -99,6 +105,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
     constructor(options?: RemoteGraphProviderOptions) {
         this.workspaceId = options?.workspaceId
         this.dataSourceId = options?.dataSourceId
+        this.branchId = options?.branchId
         this.connectionId = options?.connectionId
         this.circuitBreaker = getCircuitBreaker(this.workspaceId, this.dataSourceId)
     }
@@ -150,6 +157,11 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // Data source targeting within a workspace
         if (this.workspaceId && this.dataSourceId) {
             url.searchParams.set('dataSourceId', this.dataSourceId)
+        }
+
+        // Draft targeting: serve the draft branch (base+overlay) instead of live main.
+        if (this.workspaceId && this.branchId) {
+            url.searchParams.set('branchId', this.branchId)
         }
 
         // Legacy fallback: append connectionId as query param
