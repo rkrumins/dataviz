@@ -119,6 +119,42 @@ export interface DiffVsMainResponse {
   modified: DiffEntry[]
 }
 
+/** One row of the hierarchical diff. `kind`: a `container` (expandable, nests changed
+ *  descendants), a `bucket` (type/edgeType grouping of parent-less changes), or a `leaf`
+ *  (a single change with whole-payload before/after). `childTotal > 0` ⇒ expandable. */
+export interface DiffTreeNode {
+  key: string
+  kind: 'container' | 'bucket' | 'leaf'
+  label: string
+  entityType?: string | null
+  status?: 'added' | 'modified' | 'removed' | 'unchanged' | null
+  counts: { added: number; modified: number; removed: number }
+  childTotal: number
+  deleted: boolean
+  before?: Record<string, unknown> | null
+  after?: Record<string, unknown> | null
+}
+
+/** Top of the hierarchical diff: capped top-level groups + global counts (== the flat
+ *  diff's) + an entityType impact rollup for the summary header. */
+export interface DiffSummaryResponse {
+  groups: DiffTreeNode[]
+  groupTotal: number
+  counts: { added: number; modified: number; removed: number }
+  impact: Record<string, number>
+}
+
+export interface DiffChildrenResponse {
+  entries: DiffTreeNode[]
+  total: number
+}
+
+/** Active-PR counts for a view's canvas indicator. */
+export interface ViewPrCounts {
+  fromView: number
+  onDataSource: number
+}
+
 export interface CommitLogResponse {
   commits: Array<Record<string, unknown>>
 }
@@ -388,10 +424,11 @@ export function getCommitState(wsId: string, graphId: string, commitId: string):
 export function getCommitLog(
   wsId: string,
   graphId: string,
-  params: { branchId?: string; limit?: number; offset?: number } = {},
+  params: { branchId?: string; originatingViewId?: string; limit?: number; offset?: number } = {},
 ): Promise<CommitLogResponse> {
   const sp = new URLSearchParams()
   if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.originatingViewId) sp.set('originatingViewId', params.originatingViewId)
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
   const qs = sp.toString()
@@ -421,6 +458,52 @@ export function getDiff(
 /** UI-shaped diff of a draft vs its base (whole payloads + before/after). */
 export function getDiffVsMain(wsId: string, graphId: string, branchId: string): Promise<DiffVsMainResponse> {
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main`)
+}
+
+// ============================================
+// Hierarchical (containment-tree) diff — lazy, capped, business-friendly
+// ============================================
+
+/** Top-level groups of a draft's changes as a containment tree (canvas Changes panel). */
+export function getBranchDiffSummary(
+  wsId: string, graphId: string, branchId: string, limit?: number,
+): Promise<DiffSummaryResponse> {
+  const qs = limit != null ? `?limit=${limit}` : ''
+  return vfetch<DiffSummaryResponse>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main/summary${qs}`,
+  )
+}
+
+/** One group's direct children in a draft's hierarchical diff (lazy-load step). */
+export function getBranchDiffChildren(
+  wsId: string, graphId: string, branchId: string, containerKey: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<DiffChildrenResponse> {
+  const sp = new URLSearchParams({ containerKey })
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  return vfetch<DiffChildrenResponse>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main/children?${sp}`,
+  )
+}
+
+/** Top-level groups of a PR's Files Changed as a containment tree. */
+export function getMergeRequestDiffSummary(
+  wsId: string, prId: string, limit?: number,
+): Promise<DiffSummaryResponse> {
+  const qs = limit != null ? `?limit=${limit}` : ''
+  return vfetch<DiffSummaryResponse>(`${base(wsId)}/merge-requests/${prId}/diff/summary${qs}`)
+}
+
+/** One group's direct children in a PR's hierarchical diff (lazy-load step). */
+export function getMergeRequestDiffChildren(
+  wsId: string, prId: string, containerKey: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<DiffChildrenResponse> {
+  const sp = new URLSearchParams({ containerKey })
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  return vfetch<DiffChildrenResponse>(`${base(wsId)}/merge-requests/${prId}/diff/children?${sp}`)
 }
 
 /** What deleting a node would remove on a draft: its containment subtree (nodes) + every
@@ -506,6 +589,45 @@ export function mergeMergeRequest(
  *  unified ChangesPanel. Counts match {@link previewMergeRequest}. */
 export function getMergeRequestDiff(wsId: string, prId: string): Promise<DiffVsMainResponse> {
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/merge-requests/${prId}/diff`)
+}
+
+// ============================================
+// View- / data-source-scoped PR access (the canvas review layer)
+// ============================================
+
+/** PRs raised from a view (matched via the source branch's originating view). */
+export function listViewPullRequests(
+  wsId: string, viewId: string,
+  params: { status?: string; limit?: number; offset?: number } = {},
+): Promise<PullRequest[]> {
+  const sp = new URLSearchParams()
+  if (params.status) sp.set('status', params.status)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return vfetch<PullRequest[]>(
+    `${base(wsId)}/views/${encodeURIComponent(viewId)}/pull-requests${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** All PRs against a data source (every view on it). */
+export function listDataSourcePullRequests(
+  wsId: string, dataSourceId: string,
+  params: { status?: string; limit?: number; offset?: number } = {},
+): Promise<PullRequest[]> {
+  const sp = new URLSearchParams()
+  if (params.status) sp.set('status', params.status)
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return vfetch<PullRequest[]>(
+    `${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/pull-requests${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** Active-PR counts for a view's indicator (from-this-view + on-its-data-source). */
+export function getViewPrCounts(wsId: string, viewId: string): Promise<ViewPrCounts> {
+  return vfetch<ViewPrCounts>(`${base(wsId)}/views/${encodeURIComponent(viewId)}/pull-requests/count`)
 }
 
 /** Edit a PR's title/description (review metadata). PATCH: omitted fields are untouched. */

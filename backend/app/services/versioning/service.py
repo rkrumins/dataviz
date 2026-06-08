@@ -105,6 +105,10 @@ class ApprovalRequired(RuntimeError):
 #: editor and maintainer may edit; only maintainer (and the owner) may manage/publish.
 ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 
+# Terminal PR statuses — a merged or closed PR no longer "needs attention", so it is excluded
+# from the active-PR scope the view indicator counts (the rest: open/mergeable/approved/conflicts).
+_TERMINAL_PR_STATUS = ("merged", "closed")
+
 
 class GraphVersioningService:
     """Service over the ``graphver`` store.  Each public method is one
@@ -1023,6 +1027,22 @@ class GraphVersioningService:
                 "changes": _delta_stats(net_delta(theirs, merged)),
             }
 
+    async def _pr_merge_states(self, s, pr):
+        """``(merged, theirs)`` for a PR — the 3-way merge result and the target side, the
+        shared basis for both the flat diff and the hierarchical summary. Dispatches
+        draft→main vs fork→parent (same as :meth:`diff_pr` / :meth:`preview_mr`)."""
+        if self._is_draft_mr(pr):
+            graph = await s.get(GraphORM, pr.target_graph_id)
+            draft = await s.get(BranchORM, pr.source_branch_id)
+            main_id = await self._main_branch_id(s, graph.id)
+            merged, _conflicts, theirs = await self._compute_merge(
+                s, graph.id, graph, draft, main_id, {}
+            )
+        else:
+            fork = await s.get(GraphORM, pr.graph_id)
+            merged, _conflicts, theirs = await self._compute_fork_merge(s, fork, {})
+        return merged, theirs
+
     async def diff_pr(self, *, pr_id: str) -> Dict[str, object]:
         """Itemised **Files Changed** for a PR — the SAME 3-way computation as
         :meth:`preview_mr` (so the diff's item count equals the preview's change count),
@@ -1033,17 +1053,39 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            if self._is_draft_mr(pr):
-                graph = await s.get(GraphORM, pr.target_graph_id)
-                draft = await s.get(BranchORM, pr.source_branch_id)
-                main_id = await self._main_branch_id(s, graph.id)
-                merged, _conflicts, theirs = await self._compute_merge(
-                    s, graph.id, graph, draft, main_id, {}
-                )
-            else:
-                fork = await s.get(GraphORM, pr.graph_id)
-                merged, _conflicts, theirs = await self._compute_fork_merge(s, fork, {})
+            merged, theirs = await self._pr_merge_states(s, pr)
         return _deltas_to_diff_vs_main(net_delta(theirs, merged), theirs)
+
+    async def diff_pr_summary(
+        self, *, pr_id: str, containment_edge_types, limit: int = 200,
+    ) -> Dict[str, object]:
+        """Top level of a PR's **hierarchical** Files Changed: changed entities grouped into
+        a containment tree (top-level containers + type buckets) with rolled-up counts and an
+        entityType impact summary, capped at ``limit``. Same 3-way merge as :meth:`diff_pr`
+        (so the global counts equal the flat diff's), reshaped lazily so a huge change set
+        stays a bounded response (children load per :meth:`diff_pr_children`)."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pull request {pr_id}")
+            merged, theirs = await self._pr_merge_states(s, pr)
+        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        return _hierarchy_summary_view(index, limit)
+
+    async def diff_pr_children(
+        self, *, pr_id: str, container_key: str, containment_edge_types,
+        limit: int = 200, offset: int = 0,
+    ) -> Dict[str, object]:
+        """One container's (or bucket's) direct children in a PR's hierarchical diff — the
+        lazy-load step behind :meth:`diff_pr_summary`. Sub-containers come back as expandable
+        group rows; leaves carry whole-payload before/after for the diff overlay."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pull request {pr_id}")
+            merged, theirs = await self._pr_merge_states(s, pr)
+        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        return _hierarchy_children_view(index, container_key, limit, offset)
 
     async def merge_mr(
         self, *, mr_id: str, actor: str, message: str,
@@ -1917,23 +1959,28 @@ class GraphVersioningService:
             "message": c.message, "actor": c.actor, "contributors": c.contributors,
             "source_branch_id": c.source_branch_id,
             "source_commit_count": c.source_commit_count,
+            "originating_view_id": c.originating_view_id,
             "merkle_root": c.merkle_root, "stats": c.stats, "created_at": c.created_at,
         }
 
     async def commit_log(
         self, *, graph_id: str, branch_id: Optional[str] = None,
-        limit: int = 100, offset: int = 0,
+        originating_view_id: Optional[str] = None, limit: int = 100, offset: int = 0,
     ) -> List[dict]:
-        """Newest-first commit log for a branch (default ``main``) of a graph
-        (plan §7). A fork's log holds only its own divergence — inherited history
-        lives on the parent."""
+        """Newest-first commit log for a graph (plan §7). Default: a branch (``main`` if
+        unset). When ``originating_view_id`` is given, scope to commits attributed to that
+        view across branches instead (the view's change history). A fork's log holds only its
+        own divergence — inherited history lives on the parent."""
         async with self._session() as s:
-            if branch_id is None:
-                branch_id = await self._main_branch_id(s, graph_id)
+            stmt = select(CommitORM).where(CommitORM.graph_id == graph_id)
+            if originating_view_id is not None:
+                stmt = stmt.where(CommitORM.originating_view_id == originating_view_id)
+            else:
+                if branch_id is None:
+                    branch_id = await self._main_branch_id(s, graph_id)
+                stmt = stmt.where(CommitORM.branch_id == branch_id)
             rows = (await s.execute(
-                select(CommitORM).where(
-                    CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
-                ).order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
+                stmt.order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
             )).scalars().all()
             return [self._commit_meta(r) for r in rows]
     async def diff_commits(
@@ -2001,6 +2048,141 @@ class GraphVersioningService:
             elif b != a:
                 modified.append({"entityId": eid, "kind": kind, "before": b, "after": a})
         return {"added": added, "removed": removed, "modified": modified}
+
+    async def diff_branch_summary(
+        self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
+    ) -> Dict[str, object]:
+        """Hierarchical counterpart of :meth:`diff_branch_vs_base` — the draft's changes as a
+        containment tree for the canvas Changes panel. Built on the same O(draft) change set,
+        augmented with the *unchanged* containment ancestors of the changed nodes so edits nest
+        under their real container (a column under its table) without composing full state."""
+        async with self._session() as s:
+            merged, theirs = await self._branch_diff_states(
+                s, graph_id, branch_id, containment_edge_types)
+        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        return _hierarchy_summary_view(index, limit)
+
+    async def diff_branch_children(
+        self, *, graph_id: str, branch_id: str, container_key: str, containment_edge_types,
+        limit: int = 200, offset: int = 0,
+    ) -> Dict[str, object]:
+        """One container's direct children in a draft's hierarchical diff (lazy-load step)."""
+        async with self._session() as s:
+            merged, theirs = await self._branch_diff_states(
+                s, graph_id, branch_id, containment_edge_types)
+        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types):
+        """``(merged, theirs)`` for a draft restricted to its own changes PLUS the unchanged
+        containment skeleton (ancestor nodes + the containment edges linking them) of the
+        changed nodes. The skeleton is added identically to both sides, so ``net_delta`` still
+        yields exactly the draft's changes — the extra entries only give the hierarchy real
+        containers to nest under. Stays O(draft + ancestors): no full-state composition."""
+        branch = await self._get_branch(s, graph_id, branch_id)
+        main_id = await self._main_branch_id(s, graph_id)
+        base_seq = branch.base_commit_seq or 0
+        changed: set = set()
+        for model in (NodeVersionORM, EdgeVersionORM):
+            rows = (await s.execute(
+                select(model.entity_id).where(
+                    model.graph_id == graph_id, model.branch_id == branch_id,
+                ).distinct()
+            )).scalars().all()
+            changed.update(rows)
+        if not changed:
+            return {}, {}
+        before = await self._values_at(s, graph_id, main_id, changed, base_seq)
+        after = await self._current_values(s, graph_id, branch_id, list(changed))
+        theirs: Dict[str, Optional[dict]] = {eid: before.get(eid) for eid in changed}
+        merged: Dict[str, Optional[dict]] = {eid: after.get(eid) for eid in changed}
+
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        if cset:
+            skel_nodes, skel_edges = await self._containment_skeleton(
+                s, graph_id, branch_id, changed, after, cset)
+            for eid, p in {**skel_edges, **skel_nodes}.items():
+                if eid not in changed:                 # add only the unchanged structure
+                    theirs[eid] = p
+                    merged[eid] = p
+            # Label any container referenced by a containment edge but not yet present — e.g.
+            # the surviving parent of a deleted subtree (the skeleton walk seeds from live
+            # nodes only, so it never reaches it). Bounded: one lookup of the missing parents.
+            referenced: set = set()
+            for p in theirs.values():
+                if p and _is_edge_payload(p) and (p.get("edgeType") or "").upper() in cset:
+                    src = p.get("sourceEntityId") or p.get("source_entity_id")
+                    if src:
+                        referenced.add(src)
+            missing = referenced - merged.keys()
+            if missing:
+                for eid, p in (await self._current_values(s, graph_id, branch_id, missing)).items():
+                    if p is not None:
+                        theirs[eid] = p
+                        merged[eid] = p
+        return merged, theirs
+
+    async def _containment_skeleton(self, s, graph_id, branch_id, changed, changed_after, cset):
+        """Walk UP from the changed *live* nodes to their roots via incoming containment edges,
+        returning ``({node_eid: payload}, {edge_eid: payload})`` for the unchanged structure
+        linking changes to their containers. Bounded by (changed nodes × containment depth)."""
+        skel_nodes: Dict[str, dict] = {}
+        skel_edges: Dict[str, dict] = {}
+        frontier = {
+            eid for eid in changed
+            if changed_after.get(eid) is not None and not _is_edge_payload(changed_after.get(eid) or {})
+        }
+        seen = set(frontier)
+        depth = 0
+        while frontier and depth < 64:
+            links = await self._incoming_containment_edges(s, graph_id, branch_id, frontier, cset)
+            to_fetch: set = set()
+            next_frontier: set = set()
+            for _child, (edge_eid, parent_eid, edge_p) in links.items():
+                skel_edges.setdefault(edge_eid, edge_p)
+                if parent_eid not in seen:
+                    seen.add(parent_eid)
+                    next_frontier.add(parent_eid)
+                    if parent_eid not in changed:
+                        to_fetch.add(parent_eid)
+            if to_fetch:
+                vals = await self._current_values(s, graph_id, branch_id, to_fetch)
+                for eid, p in vals.items():
+                    if p is not None:
+                        skel_nodes[eid] = p
+            frontier = next_frontier
+            depth += 1
+        return skel_nodes, skel_edges
+
+    async def _incoming_containment_edges(self, s, graph_id, branch_id, child_ids, cset):
+        """Live containment edges whose TARGET is in *child_ids* →
+        ``{child_eid: (edge_eid, parent_eid, payload)}`` — the child→parent step of the
+        upward walk, bounded by ``|child_ids|`` (≈ one parent each) via ix_ev_target."""
+        ids = list(child_ids)
+        if not ids:
+            return {}
+        cand: set = set()
+        for chunk in _chunks(ids, _IN_LIST_MAX):
+            rows = (await s.execute(
+                select(EdgeVersionORM.entity_id).where(
+                    EdgeVersionORM.graph_id == graph_id,
+                    EdgeVersionORM.target_entity_id.in_(chunk),
+                ).distinct()
+            )).scalars().all()
+            cand.update(rows)
+        vals = await self._current_values(s, graph_id, branch_id, cand)
+        out: Dict[str, Tuple[str, str, dict]] = {}
+        child_set = set(child_ids)
+        for eid, p in vals.items():
+            if p is None or not _is_edge_payload(p):
+                continue
+            if (p.get("edgeType") or "").upper() not in cset:
+                continue
+            src = p.get("sourceEntityId") or p.get("source_entity_id")
+            tgt = p.get("targetEntityId") or p.get("target_entity_id")
+            if src and tgt and tgt in child_set:
+                out[tgt] = (eid, src, p)
+        return out
 
     async def get_graph(self, graph_id: str) -> Optional[Dict[str, object]]:
         """Graph metadata (or ``None``) — also the API's tenant-isolation guard."""
@@ -2072,17 +2254,60 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             return None if pr is None else self._pr_meta(pr)
 
+    @staticmethod
+    def _pulls_filtered(stmt, *, target_graph_id, data_source_id, originating_view_id,
+                        status, active_only):
+        """Apply the optional PR scope filters shared by :meth:`list_pulls`/:meth:`count_pulls`.
+        ``data_source_id`` joins the target graph (all PRs on a data source & its views);
+        ``originating_view_id`` joins the source branch (PRs raised from one view) — both stay
+        within the versioning store, so the join is local. ``active_only`` drops the terminal
+        (merged/closed) PRs — the "still needs attention" set the indicator counts."""
+        if data_source_id is not None:
+            stmt = stmt.join(GraphORM, GraphORM.id == MergeRequestORM.target_graph_id).where(
+                GraphORM.data_source_id == data_source_id)
+        if target_graph_id is not None:
+            stmt = stmt.where(MergeRequestORM.target_graph_id == target_graph_id)
+        if originating_view_id is not None:
+            stmt = stmt.join(BranchORM, BranchORM.id == MergeRequestORM.source_branch_id).where(
+                BranchORM.originating_view_id == originating_view_id)
+        if status is not None:
+            stmt = stmt.where(MergeRequestORM.status == status)
+        if active_only:
+            stmt = stmt.where(MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS))
+        return stmt
+
     async def list_pulls(
-        self, *, target_graph_id: str, limit: int = 100, offset: int = 0
+        self, *, target_graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
+        originating_view_id: Optional[str] = None, status: Optional[str] = None,
+        active_only: bool = False, limit: int = 100, offset: int = 0,
     ) -> List[dict]:
-        """PRs targeting a graph's ``main`` (the base owner's review queue), newest first."""
+        """PRs in scope, newest first. Scope is any combination of: a target graph's ``main``
+        (the base owner's review queue), a data source (every view's PRs against it), or a
+        single originating view — optionally narrowed to one ``status`` or to ``active_only``
+        (not merged/closed)."""
         async with self._session() as s:
-            rows = (await s.execute(
-                select(MergeRequestORM)
-                .where(MergeRequestORM.target_graph_id == target_graph_id)
-                .order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
-            )).scalars().all()
+            stmt = self._pulls_filtered(
+                select(MergeRequestORM), target_graph_id=target_graph_id,
+                data_source_id=data_source_id, originating_view_id=originating_view_id,
+                status=status, active_only=active_only,
+            ).order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
+            rows = (await s.execute(stmt)).scalars().all()
             return [self._pr_meta(pr) for pr in rows]
+
+    async def count_pulls(
+        self, *, target_graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
+        originating_view_id: Optional[str] = None, status: Optional[str] = None,
+        active_only: bool = False,
+    ) -> int:
+        """Count PRs matching the same scope filters as :meth:`list_pulls` — for the view's
+        PR indicator (active PRs from this view vs on its whole data source)."""
+        async with self._session() as s:
+            stmt = self._pulls_filtered(
+                select(func.count(MergeRequestORM.id)), target_graph_id=target_graph_id,
+                data_source_id=data_source_id, originating_view_id=originating_view_id,
+                status=status, active_only=active_only,
+            )
+            return int((await s.execute(stmt)).scalar_one())
 
     @staticmethod
     def _graph_meta(g: GraphORM) -> Dict[str, object]:
@@ -3304,3 +3529,184 @@ def _deltas_to_diff_vs_main(
         else:
             modified.append({"entityId": d.entity_id, "kind": kind, "before": before, "after": d.payload})
     return {"added": added, "removed": removed, "modified": modified}
+
+
+# --------------------------------------------------------------------------- #
+# Hierarchical diff — reshape a flat squash into a lazy-loadable containment    #
+# tree for the review UIs (canvas Changes panel + PR Files Changed). Pure /     #
+# in-memory over two materialised states, so it is unit-testable without a DB.  #
+# --------------------------------------------------------------------------- #
+_OP_STATUS = {"create": "added", "update": "modified", "delete": "removed"}
+
+
+def _build_diff_hierarchy(
+    merged: Mapping[str, Optional[dict]],
+    theirs: Mapping[str, Optional[dict]],
+    containment_edge_types,
+) -> dict:
+    """Index a flat squash (``net_delta(theirs, merged)``) as a containment tree.
+
+    Changed nodes nest under their real containment parent, walked up to a root; a change with
+    no containment parent is bucketed by entityType; a non-containment edge change is bucketed
+    by edgeType. Containment-edge changes are *structural* — implied by their child node's
+    create/delete — so they count toward the global totals but never get their own row. The PR
+    path passes full merge states (every container present); the branch path passes its changes
+    plus the unchanged ancestor skeleton. O(changed + containment edges in the states).
+
+    Returns an index consumed by :func:`_hierarchy_summary_view` / `_hierarchy_children_view`.
+    """
+    cset = {t.upper() for t in (containment_edge_types or [])}
+    deltas = net_delta(theirs, merged)
+    delta_by_eid: Dict[str, Delta] = {d.entity_id: d for d in deltas}
+
+    def payload_of(eid: str) -> dict:
+        p = merged.get(eid)
+        return (p if p is not None else theirs.get(eid)) or {}
+
+    def is_edge(eid: str) -> bool:
+        return _is_edge_payload(payload_of(eid))
+
+    # child -> parent from containment edges (theirs first so merged wins on a reparent; a
+    # deleted edge survives only in theirs, keeping a deleted child under its old parent).
+    parent_of: Dict[str, str] = {}
+    for state in (theirs, merged):
+        for p in state.values():
+            if not p or not _is_edge_payload(p):
+                continue
+            if (p.get("edgeType") or "").upper() not in cset:
+                continue
+            src = p.get("sourceEntityId") or p.get("source_entity_id")
+            tgt = p.get("targetEntityId") or p.get("target_entity_id")
+            if src and tgt:
+                parent_of[tgt] = src
+
+    changed_nodes = [eid for eid in delta_by_eid if not is_edge(eid)]
+    changed_edges = [eid for eid in delta_by_eid if is_edge(eid)]
+
+    def ancestors(eid: str) -> List[str]:
+        chain: List[str] = []
+        cur = parent_of.get(eid)
+        while cur is not None and cur not in chain and len(chain) < 64:
+            chain.append(cur)
+            cur = parent_of.get(cur)
+        return chain
+
+    # relevant tree nodes = changed nodes + their (possibly unchanged) containment ancestors
+    relevant: set = set(changed_nodes)
+    for eid in changed_nodes:
+        relevant.update(ancestors(eid))
+
+    children_of: Dict[str, List[str]] = {}              # forest: each node has ≤1 parent
+    for eid in relevant:
+        par = parent_of.get(eid)
+        if par in relevant:
+            children_of.setdefault(par, []).append(eid)
+
+    buckets: Dict[str, List[str]] = {}
+    roots: List[str] = []
+    for eid in relevant:
+        if parent_of.get(eid) in relevant:
+            continue                                     # nested under a relevant container
+        if eid in children_of:
+            roots.append(eid)                            # top-level container w/ changed descendants
+        else:                                            # parent-less changed leaf → type bucket
+            buckets.setdefault("type:" + (payload_of(eid).get("entityType") or "Other"), []).append(eid)
+    for eid in changed_edges:
+        p = payload_of(eid)
+        if (p.get("edgeType") or "").upper() in cset:
+            continue                                     # structural containment edge — suppressed
+        buckets.setdefault("edge:" + (p.get("edgeType") or "Relationship"), []).append(eid)
+
+    # per-container rollup of changed-node counts (memoised DFS over the forest)
+    subtree: Dict[str, dict] = {}
+
+    def rollup(eid: str) -> dict:
+        if eid in subtree:
+            return subtree[eid]
+        c = {"added": 0, "modified": 0, "removed": 0}
+        d = delta_by_eid.get(eid)
+        if d is not None and not is_edge(eid):
+            c[_OP_STATUS[d.op]] += 1
+        for ch in children_of.get(eid, ()):
+            cc = rollup(ch)
+            for k in c:
+                c[k] += cc[k]
+        subtree[eid] = c
+        return c
+
+    def node_view(eid: str) -> dict:
+        d = delta_by_eid.get(eid)
+        child = children_of.get(eid, [])
+        p = payload_of(eid)
+        single = {"added": 0, "modified": 0, "removed": 0}
+        if d is not None:
+            single[_OP_STATUS[d.op]] += 1
+        return {
+            "key": eid,
+            "kind": "container" if child else "leaf",
+            "label": p.get("displayName") or p.get("urn") or eid,
+            "entityType": p.get("entityType"),
+            "status": _OP_STATUS[d.op] if d else "unchanged",
+            "counts": rollup(eid) if child else single,
+            "childTotal": len(child),
+            "deleted": bool(d and d.op == "delete"),
+            "before": theirs.get(eid),
+            "after": merged.get(eid),
+        }
+
+    def bucket_view(key: str) -> dict:
+        members = buckets[key]
+        c = {"added": 0, "modified": 0, "removed": 0}
+        for m in members:
+            d = delta_by_eid.get(m)
+            if d:
+                c[_OP_STATUS[d.op]] += 1
+        kind, _, name = key.partition(":")
+        return {
+            "key": key, "kind": "bucket", "label": name,
+            "entityType": name if kind == "type" else None,
+            "status": None, "counts": c, "childTotal": len(members),
+            "deleted": False, "before": None, "after": None,
+        }
+
+    root_views = sorted(
+        (node_view(e) for e in roots),
+        key=lambda g: (-sum(g["counts"].values()), g["label"].lower()),
+    )
+    bucket_views = sorted((bucket_view(k) for k in buckets), key=lambda g: g["label"].lower())
+
+    counts = {"added": 0, "modified": 0, "removed": 0}
+    for d in deltas:
+        counts[_OP_STATUS[d.op]] += 1
+    impact: Dict[str, int] = {}
+    for eid in relevant:
+        et = payload_of(eid).get("entityType") or "Other"
+        impact[et] = impact.get(et, 0) + 1
+
+    return {
+        "top": root_views + bucket_views,
+        "counts": counts,
+        "impact": impact,
+        "children_of": children_of,
+        "buckets": buckets,
+        "node_view": node_view,
+    }
+
+
+def _hierarchy_summary_view(index: dict, limit: int) -> dict:
+    """Top-level groups (capped) + global counts + the entityType impact rollup."""
+    top = index["top"]
+    return {
+        "groups": top[: max(0, limit)],
+        "groupTotal": len(top),
+        "counts": index["counts"],
+        "impact": index["impact"],
+    }
+
+
+def _hierarchy_children_view(index: dict, key: str, limit: int, offset: int) -> dict:
+    """One group's direct children (a page) — containers first, then leaves, label-ordered."""
+    member_eids = index["children_of"].get(key) or index["buckets"].get(key) or []
+    views = [index["node_view"](e) for e in member_eids]
+    views.sort(key=lambda v: (0 if v["kind"] == "container" else 1, v["label"].lower(), v["key"]))
+    return {"entries": views[offset: offset + max(0, limit)], "total": len(views)}
