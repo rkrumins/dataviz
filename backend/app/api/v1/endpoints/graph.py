@@ -1666,9 +1666,15 @@ async def apply_graph_changes(
 
 class DeleteImpactResponse(BaseModel):
     """What deleting a node would remove: its containment subtree (nodes) + every incident
-    edge (any type). Payloads are passed through as-is (camelCase node/edge dicts)."""
+    edge (any type). Lists are capped for the UI; ``*Total`` give the true counts. Payloads
+    are passed through as-is (camelCase node/edge dicts)."""
     nodes: List[dict]
     edges: List[dict]
+    node_total: int = Field(default=0, alias="nodeTotal")
+    edge_total: int = Field(default=0, alias="edgeTotal")
+
+    class Config:
+        populate_by_name = True
 
 
 @router.get("/nodes/{urn}/delete-impact", response_model=DeleteImpactResponse)

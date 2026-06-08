@@ -331,18 +331,27 @@ export function useCanvasInteractions(
         // Stage the (single) root delete. The backend cascades the containment subtree +
         // all incident edges authoritatively; `cascade` (from the delete-impact preview)
         // lets the staged-changes panel showcase exactly what will be removed.
-        const stageDelete = (cascade?: { nodeCount: number; edgeCount: number; descUrns: string[] }) => {
-            const more = cascade && (cascade.nodeCount > 1 || cascade.edgeCount > 0)
+        const stageDelete = (
+            cascade?: { nodes: any[]; edges: any[]; nodeTotal: number; edgeTotal: number; descUrns: string[] },
+        ) => {
+            const more = cascade && (cascade.nodeTotal > 1 || cascade.edgeTotal > 0)
             const summary = more
-                ? `Delete '${label}' — also removes ${cascade!.nodeCount - 1} contained `
-                  + `${cascade!.nodeCount === 2 ? 'entity' : 'entities'}, `
-                  + `${cascade!.edgeCount} relationship${cascade!.edgeCount === 1 ? '' : 's'}`
+                ? `Delete '${label}' — also removes ${cascade!.nodeTotal - 1} contained `
+                  + `${cascade!.nodeTotal === 2 ? 'entity' : 'entities'}, `
+                  + `${cascade!.edgeTotal} relationship${cascade!.edgeTotal === 1 ? '' : 's'}`
                 : `Delete '${label}'`
             stagedChanges.stage({
                 type: 'delete_entity',
                 targetId: nodeId,
                 targetUrn: urn,
-                before: { node: { ...node }, cascadeNodeCount: cascade?.nodeCount, cascadeEdgeCount: cascade?.edgeCount },
+                // `cascade` carries the full impact preview so the staged-changes review can
+                // itemise exactly what will be removed (CascadeImpactList).
+                before: {
+                    node: { ...node },
+                    cascade: cascade
+                        ? { nodes: cascade.nodes, edges: cascade.edges, nodeTotal: cascade.nodeTotal, edgeTotal: cascade.edgeTotal }
+                        : undefined,
+                },
                 after: null,
                 summary,
                 apply: async () => {
@@ -358,7 +367,8 @@ export function useCanvasInteractions(
 
         // In a draft, fetch the cascade impact on demand (the canvas is lazy-loaded, so only
         // the backend knows the full subtree). Mark the *loaded* descendants pending-delete so
-        // the user sees the impact immediately; the staged summary states the full count.
+        // the user sees the impact immediately; the staged change carries the full itemised
+        // preview for the review panel.
         const bs = useBranchStore.getState()
         if (bs.currentBranchId && bs.graphId && bs.dataSourceId && bs.workspaceId) {
             getDeleteImpact(bs.workspaceId, bs.dataSourceId, bs.currentBranchId, urn)
@@ -367,7 +377,10 @@ export function useCanvasInteractions(
                         .map(n => String(n.urn ?? n.entityId ?? ''))
                         .filter(id => id && id !== urn)
                     descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: 'delete' }))
-                    stageDelete({ nodeCount: impact.nodes.length, edgeCount: impact.edges.length, descUrns })
+                    stageDelete({
+                        nodes: impact.nodes, edges: impact.edges,
+                        nodeTotal: impact.nodeTotal, edgeTotal: impact.edgeTotal, descUrns,
+                    })
                 })
                 .catch(() => stageDelete())   // preview unavailable — still stage the root delete
         } else {

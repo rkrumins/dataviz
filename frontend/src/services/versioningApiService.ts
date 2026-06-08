@@ -422,6 +422,9 @@ export function getDiffVsMain(wsId: string, graphId: string, branchId: string): 
 export interface DeleteImpact {
   nodes: Array<Record<string, unknown>>
   edges: Array<Record<string, unknown>>
+  /** True totals (the `nodes`/`edges` lists are capped for the UI). */
+  nodeTotal: number
+  edgeTotal: number
 }
 
 export function getDeleteImpact(

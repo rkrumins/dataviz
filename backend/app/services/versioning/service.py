@@ -2890,6 +2890,50 @@ class GraphVersioningService:
         vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
         return {eid: p for eid, p in vals.items() if p is not None}
 
+    async def _cascade_subtree(
+        self, s, graph_id: str, branch_id: str, root_ids: set,
+        cset: set, as_of_seq: Optional[int], cap: int, max_depth: int = 64,
+    ) -> set:
+        """Containment subtree to delete when *root_ids* are deleted, respecting SHARED
+        children: a descendant is included only when ALL of its containment parents are in
+        the delete set — a child that still has a surviving parent is re-parented, not
+        deleted. BFS from the roots; a child is (re)considered whenever any of its parents is
+        newly deleted, so multi-parent (DAG) containment converges correctly."""
+        deleted = set(root_ids)
+        frontier = set(root_ids)
+        for _ in range(max_depth):
+            if not frontier or len(deleted) >= cap:
+                break
+            # Children reachable via containment OUT-edges from the newly-deleted frontier.
+            inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, as_of_seq)
+            candidates: set = set()
+            for p in inc.values():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)              # a = parent (source), b = child (target)
+                if a in frontier and b and b not in deleted:
+                    candidates.add(b)
+            if not candidates:
+                break
+            # Gather EVERY containment parent of each candidate; delete it only when they're
+            # all already in the delete set (otherwise a surviving parent keeps it alive).
+            cand_inc = await self._incident_live_edges(s, graph_id, branch_id, candidates, as_of_seq)
+            parents_of: Dict[str, set] = {}
+            for p in cand_inc.values():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, b = _edge_src_tgt(p)
+                if b in candidates and a:
+                    parents_of.setdefault(b, set()).add(a)
+            nxt: set = set()
+            for c in candidates:
+                ps = parents_of.get(c)
+                if ps and ps <= deleted and len(deleted) < cap:
+                    deleted.add(c)
+                    nxt.add(c)
+            frontier = nxt
+        return deleted
+
     async def _cascade_deletes(
         self, s, graph_id: str, branch_id: str, root_node_ids,
         containment_edge_types, as_of_seq: Optional[int] = None,
@@ -2898,7 +2942,7 @@ class GraphVersioningService:
 
         * the **containment subtree** of nodes (transitive children via the ontology's
           containment edge types — `containment_edge_types`, resolved live by the caller,
-          never hardcoded), and
+          never hardcoded; shared children with a surviving parent are kept), and
         * **every live edge incident** to any of those nodes (source OR target, ANY type —
           containment, lineage, aggregated — so nothing dangles).
 
@@ -2909,7 +2953,7 @@ class GraphVersioningService:
         if not roots:
             return set(), {}
         cset = {t.upper() for t in (containment_edge_types or [])}
-        subtree = await self._containment_descendants(
+        subtree = await self._cascade_subtree(
             s, graph_id, branch_id, set(roots), cset, as_of_seq, _CASCADE_MAX_NODES,
         ) if cset else set(roots)
         subtree |= roots
@@ -2918,22 +2962,26 @@ class GraphVersioningService:
 
     async def delete_impact(
         self, *, graph_id: str, branch_id: str, root_urn: str, containment_edge_types,
+        limit: int = 1000,
     ) -> Dict[str, object]:
         """Read-only preview: what deleting the node at *root_urn* would remove on this
         branch — the containment subtree (node payloads) + all incident edges (edge
-        payloads). Same traversal as the commit-time cascade, so the preview matches the
-        result. Empty when the urn doesn't resolve to a live node."""
+        payloads), with accurate totals (the lists are capped at ``limit`` for the UI, the
+        totals are not). Same traversal as the commit-time cascade, so the preview matches
+        the result. Empty when the urn doesn't resolve to a live node."""
         async with self._session() as s:
             root = await self._eid_for_urn(s, graph_id, branch_id, root_urn)
             if root is None:
-                return {"nodes": [], "edges": []}
+                return {"nodes": [], "edges": [], "node_total": 0, "edge_total": 0}
             subtree, edges = await self._cascade_deletes(
                 s, graph_id, branch_id, {root}, containment_edge_types)
             node_vals = await self._current_values(s, graph_id, branch_id, list(subtree))
-            nodes = [{"entityId": eid, **(node_vals[eid] or {})}
-                     for eid in subtree if node_vals.get(eid) is not None]
-            edge_list = [{"entityId": eid, **(p or {})} for eid, p in edges.items()]
-            return {"nodes": nodes, "edges": edge_list}
+            live_node_ids = [eid for eid in subtree if node_vals.get(eid) is not None]
+            edge_ids = list(edges)
+            nodes = [{"entityId": eid, **(node_vals[eid] or {})} for eid in live_node_ids[:limit]]
+            edge_list = [{"entityId": eid, **(edges[eid] or {})} for eid in edge_ids[:limit]]
+            return {"nodes": nodes, "edges": edge_list,
+                    "node_total": len(live_node_ids), "edge_total": len(edge_ids)}
 
     async def _eid_for_urn(
         self, s, graph_id: str, branch_id: str, urn: str, as_of_seq: Optional[int] = None,
@@ -3012,6 +3060,7 @@ class GraphVersioningService:
         if not cset:
             return []
         children: Dict[str, set] = {}
+        parents_of: Dict[str, set] = {}
         for p in state.values():
             if p is None or not _is_edge_payload(p):
                 continue
@@ -3021,14 +3070,20 @@ class GraphVersioningService:
             tgt = p.get("targetEntityId") or p.get("target_entity_id")
             if src and tgt:
                 children.setdefault(src, set()).add(tgt)
+                parents_of.setdefault(tgt, set()).add(src)
         cascaded: List[str] = []
-        frontier = {eid for eid, p in state.items() if p is None}
+        deleted = {eid for eid, p in state.items() if p is None}
+        frontier = set(deleted)
         while frontier:
             nxt: set = set()
             for parent in frontier:
                 for child in children.get(parent, ()):
-                    if state.get(child) is not None:
+                    if child in deleted:
+                        continue
+                    ps = parents_of.get(child)               # delete only if NO parent survives
+                    if ps and ps <= deleted:
                         state[child] = None
+                        deleted.add(child)
                         cascaded.append(child)
                         nxt.add(child)
             frontier = nxt

@@ -18,6 +18,7 @@ import {
   type StagedChange,
   type StagedChangeType,
 } from '@/store/stagedChangesStore'
+import { CascadeImpactList } from '@/features/versioning/components/CascadeImpactList'
 
 // Section labels — slight tone shift from the change type for human readability.
 const TYPE_LABELS: Record<StagedChangeType, string> = {
@@ -559,20 +560,29 @@ function ChangeRow({
                 transition={{ duration: 0.18, ease: 'easeOut' }}
                 className="overflow-hidden"
               >
-                <div className="mt-2.5 grid grid-cols-2 gap-2">
-                  <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
-                    <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">Before</p>
-                    <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
-                      {change.before === undefined ? '—' : JSON.stringify(change.before, null, 2)}
-                    </pre>
+                {change.type === 'delete_entity' && (change.before as any)?.cascade ? (
+                  // Itemised cascade impact — the full set of contained entities + edges
+                  // this delete will remove (from the live delete-impact preview).
+                  <CascadeImpactList
+                    impact={(change.before as any).cascade}
+                    rootUrn={change.targetUrn}
+                  />
+                ) : (
+                  <div className="mt-2.5 grid grid-cols-2 gap-2">
+                    <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
+                      <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">Before</p>
+                      <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
+                        {change.before === undefined ? '—' : JSON.stringify(change.before, null, 2)}
+                      </pre>
+                    </div>
+                    <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
+                      <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">After</p>
+                      <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
+                        {change.after === undefined ? '—' : JSON.stringify(change.after, null, 2)}
+                      </pre>
+                    </div>
                   </div>
-                  <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
-                    <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">After</p>
-                    <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
-                      {change.after === undefined ? '—' : JSON.stringify(change.after, null, 2)}
-                    </pre>
-                  </div>
-                </div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

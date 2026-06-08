@@ -400,6 +400,51 @@ def test_cascade_delete_checkpoint():
     asyncio.run(_run_cascade_delete_checkpoint())
 
 
+async def _run_cascade_shared_child() -> None:
+    """Multi-parent containment: a child with two parents survives while either parent lives
+    (only its edge to the deleted parent is cleaned); it's deleted only once ALL its
+    containment parents are gone."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    n = lambda u: {"kind": "node", "id": u, "urn": u, "entityType": "T", "displayName": u}
+    e = lambda i, s, t: {"kind": "edge", "id": i, "edgeType": _CET, "source": s, "target": t}
+    rows = [
+        n("urn:p1"), n("urn:p2"), n("urn:shared"), n("urn:only1"),
+        e("e_p1_shared", "urn:p1", "urn:shared"),   # shared has TWO containment parents
+        e("e_p2_shared", "urn:p2", "urn:shared"),
+        e("e_p1_only1", "urn:p1", "urn:only1"),      # only1 has just p1
+    ]
+    created = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="u")
+    gid = created["graph_id"]
+    await svc.bulk_ingest(graph_id=gid, rows=rows, actor="u")
+    draft = await svc.open_draft(graph_id=gid, owner="u")
+
+    # Deleting p1: only1 (sole-parent) cascades; shared SURVIVES (p2 still owns it).
+    impact = await svc.delete_impact(graph_id=gid, branch_id=draft, root_urn="urn:p1", containment_edge_types=[_CET])
+    assert {x.get("urn") for x in impact["nodes"]} == {"urn:p1", "urn:only1"}, impact
+    await svc.apply_ops(
+        graph_id=gid, branch_id=draft, actor="u", containment_edge_types=[_CET],
+        ops=[{"op": "delete", "entity_kind": "node", "entity_id": "urn:p1", "payload": None}])
+    st = await svc.materialize_state(graph_id=gid, branch_id=draft)
+    assert {"urn:shared", "urn:p2"} <= set(st["nodes"]), st["nodes"]            # shared kept
+    assert "urn:p1" not in st["nodes"] and "urn:only1" not in st["nodes"], st["nodes"]
+    assert "e_p1_shared" not in st["edges"] and "e_p2_shared" in st["edges"], st["edges"]  # only p1's edge cleaned
+
+    # Deleting the remaining parent p2: shared now has no surviving parent → it goes.
+    await svc.apply_ops(
+        graph_id=gid, branch_id=draft, actor="u", containment_edge_types=[_CET],
+        ops=[{"op": "delete", "entity_kind": "node", "entity_id": "urn:p2", "payload": None}])
+    st2 = await svc.materialize_state(graph_id=gid, branch_id=draft)
+    assert "urn:shared" not in st2["nodes"], st2["nodes"]
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_cascade_delete_shared_child():
+    asyncio.run(_run_cascade_shared_child())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("API graph draft journey (HTTP create→import→draft-edit→read→publish) e2e: OK")
