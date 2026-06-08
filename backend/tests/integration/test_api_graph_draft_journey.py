@@ -143,6 +143,15 @@ async def _run() -> None:
             edges = (await c.post(f"{GP}/edges/query", params=qd, json={"query": {}})).json()
             assert any(e["edgeType"] == "LINEAGE" for e in edges), edges
 
+            # 5b. UI-shaped diff of the draft vs its base — the added node + edges come back
+            #     as whole payloads (what the canvas overlay / Changes panel render).
+            dvm = (await c.get(f"{V1}/graphs/{gid}/branches/{draft}/diff-vs-main")).json()
+            added_nodes = [e for e in dvm["added"] if e["kind"] == "node"]
+            added_edges = [e for e in dvm["added"] if e["kind"] == "edge"]
+            assert any(e["after"]["urn"] == new_urn for e in added_nodes), dvm
+            assert any(e["after"].get("edgeType") == "LINEAGE" for e in added_edges), dvm
+            assert dvm["removed"] == [] and dvm["modified"] == [], dvm
+
             # 6. routing isolation: the same read on MAIN (no branchId) hits the live stub (empty)
             main_nodes = (await c.post(f"{GP}/nodes/query", params={"dataSourceId": ds}, json={"query": {}})).json()
             assert {n["urn"] for n in main_nodes} == set(), main_nodes

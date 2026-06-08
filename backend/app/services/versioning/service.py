@@ -1872,6 +1872,50 @@ class GraphVersioningService:
                             a[eid] = v
             return diff_states(a, b)
 
+    async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+        """UI-shaped net diff of a draft against its base (``main`` at the branch
+        point): full node/edge payloads with before/after, classified
+        added/removed/modified. This is the shape the canvas diff overlay needs —
+        a removed entity renders as a ghost, so it carries its whole payload, not
+        just an id.
+
+        Unlike :meth:`diff_commits` (two seqs on one branch), this is a *cross-branch*
+        diff: a draft numbers its commits in its own seq space, so the change set is
+        the entities the draft wrote rows for (bounded by draft size). ``before`` is
+        each entity's value on ``main`` at the branch point; ``after`` its effective
+        value on the draft (base overlaid with the draft's edits)."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            base_seq = branch.base_commit_seq or 0
+            changed: set = set()
+            for model in (NodeVersionORM, EdgeVersionORM):
+                rows = (await s.execute(
+                    select(model.entity_id).where(
+                        model.graph_id == graph_id, model.branch_id == branch_id,
+                    ).distinct()
+                )).scalars().all()
+                changed.update(rows)
+            if not changed:
+                return {"added": [], "removed": [], "modified": []}
+            before = await self._values_at(s, graph_id, main_id, changed, base_seq)
+            after = await self._current_values(s, graph_id, branch_id, list(changed))
+        added: List[dict] = []
+        removed: List[dict] = []
+        modified: List[dict] = []
+        for eid in changed:
+            b, a = before.get(eid), after.get(eid)
+            if b is None and a is None:
+                continue
+            kind = "edge" if _is_edge_payload(a or b or {}) else "node"
+            if b is None:
+                added.append({"entityId": eid, "kind": kind, "after": a})
+            elif a is None:
+                removed.append({"entityId": eid, "kind": kind, "before": b})
+            elif b != a:
+                modified.append({"entityId": eid, "kind": kind, "before": b, "after": a})
+        return {"added": added, "removed": removed, "modified": modified}
+
     async def get_graph(self, graph_id: str) -> Optional[Dict[str, object]]:
         """Graph metadata (or ``None``) — also the API's tenant-isolation guard."""
         async with self._session() as s:

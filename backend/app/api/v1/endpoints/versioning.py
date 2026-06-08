@@ -313,6 +313,22 @@ class DiffResponse(_ApiModel):
     modified: Dict[str, dict]
 
 
+class DiffEntry(_ApiModel):
+    """One changed entity with whole-payload before/after — the canvas overlay
+    renders added/removed entities in full (a removed node becomes a ghost), so
+    ids alone (``DiffResponse``) are not enough."""
+    entity_id: str = Field(alias="entityId")
+    kind: str                              # "node" | "edge"
+    before: Optional[dict] = None
+    after: Optional[dict] = None
+
+
+class DiffVsMainResponse(_ApiModel):
+    added: List[DiffEntry]
+    removed: List[DiffEntry]
+    modified: List[DiffEntry]
+
+
 class ForkResponse(_ApiModel):
     graph_id: str = Field(alias="graphId")
     main_branch_id: str = Field(alias="mainBranchId")
@@ -646,6 +662,20 @@ async def get_diff(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     return await svc.diff_commits(graph_id=graph_id, branch_id=branch_id, from_seq=from_seq, to_seq=to_seq)
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main", response_model=DiffVsMainResponse)
+async def get_diff_vs_main(
+    ws_id: str, graph_id: str, branch_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Net diff of a draft against its base (``main`` at the branch point), returned
+    as whole node/edge payloads with before/after — the shape the canvas diff overlay
+    and Changes panel consume directly, without client-side state joins."""
+    with _domain_errors():
+        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id)
 
 
 @router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)
