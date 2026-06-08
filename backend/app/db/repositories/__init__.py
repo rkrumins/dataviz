@@ -18,6 +18,7 @@ from . import (
     user_identity_repo,
     user_attribute_repo,
     app_auth_config_repo,
+    branding_repo,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "user_identity_repo",
     "user_attribute_repo",
     "app_auth_config_repo",
+    "branding_repo",
 ]

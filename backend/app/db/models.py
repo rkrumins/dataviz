@@ -1145,6 +1145,53 @@ class AppAuthConfigORM(Base):
         )
 
 
+class ApplicationBrandingORM(Base):
+    """Singleton row carrying the white-label branding for the
+    deployment (app name, logo, accent colour, legal text, …).
+
+    Same shape as ``AppAuthConfigORM``: one row pinned to
+    ``'singleton'`` by CHECK, an optimistic ``version`` the admin UI
+    echoes back on PATCH, and a migration that seeds it from the
+    ``APP_BRAND_*`` env vars. The repository falls back to those same
+    env defaults for any NULL column, so env vars act as defaults and
+    the DB row overrides them.
+
+    Logo/favicon each support two mutually-compatible sources: a
+    pasted ``*_url`` OR an uploaded image stored base64 in ``*_data``
+    (+ ``*_mime``). When both are set the uploaded data wins.
+    """
+    __tablename__ = "application_branding"
+
+    id = Column(Text, primary_key=True, default="singleton")
+    app_name = Column(Text, nullable=True)
+    short_name = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)
+    # Logo: URL reference and/or uploaded base64 payload.
+    logo_url = Column(Text, nullable=True)
+    logo_data = Column(Text, nullable=True)   # base64 image bytes
+    logo_mime = Column(Text, nullable=True)   # e.g. image/svg+xml, image/png
+    # Favicon: URL reference and/or uploaded base64 payload.
+    favicon_url = Column(Text, nullable=True)
+    favicon_data = Column(Text, nullable=True)
+    favicon_mime = Column(Text, nullable=True)
+    accent_color = Column(Text, nullable=True)
+    copyright_text = Column(Text, nullable=True)
+    support_email = Column(Text, nullable=True)
+    login_tagline = Column(Text, nullable=True)
+    version = Column(Integer, nullable=False, default=1)
+    updated_at = Column(Text, nullable=False, default=_now)
+    updated_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "id = 'singleton'", name="ck_application_branding_singleton",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ApplicationBranding name={self.app_name} v={self.version}>"
+
+
 # ------------------------------------------------------------------ #
 # user_roles  (one row per user × role)                                #
 # ------------------------------------------------------------------ #

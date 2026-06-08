@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
 import {
     Database, Plus, Edit2, Settings, AlertTriangle,
@@ -58,9 +59,7 @@ export function WorkspacesPage() {
     // users who can't create avoids a wizard-open → submit → 403 dance.
     const canCreateWorkspace = useAuthStore(s => s.can('system:workspaces:create'))
 
-    useEffect(() => {
-        document.title = 'Workspaces · Synodic'
-    }, [])
+    useDocumentTitle('Workspaces')
 
     /* ── URL-synced state ── */
     const searchQuery = searchParams.get('q') || ''

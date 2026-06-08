@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
+import { BrandLogo } from '@/components/brand/BrandLogo'
+import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell } from '@/components/layout/NotificationBell'
 import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
@@ -117,25 +119,10 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         <div className="flex items-center gap-3 min-w-0">
           {/* Logo */}
           <div className="flex items-center gap-2 shrink-0">
-            <div className={cn(
-              "w-8 h-8 rounded-lg flex items-center justify-center",
-              "bg-gradient-to-br from-accent-lineage to-accent-business"
-            )}>
-              <svg
-                viewBox="0 0 24 24"
-                className="w-5 h-5 text-white"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            </div>
+            <BrandLogo className="w-8 h-8" glyphClassName="w-5 h-5" />
             <div>
               <h1 className="font-display font-semibold text-lg leading-none">
-                NexusLineage
+                <BrandName short />
               </h1>
               <p className="text-2xs text-ink-muted">
                 {persona === 'business' ? 'Business View' : 'Technical View'}

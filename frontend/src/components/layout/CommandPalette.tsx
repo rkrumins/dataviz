@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
+import { useBrand } from '@/store/branding'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useRecentViews } from '@/hooks/useRecentViews'
@@ -53,6 +54,7 @@ const CATEGORY_HEADINGS: Record<SearchCategory, string> = {
 }
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+  const brand = useBrand()
   const [search, setSearch] = useState('')
   const navigate = useNavigate()
   const { toggleMode, mode } = usePersonaStore()
@@ -406,7 +408,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   <kbd className="kbd">ESC</kbd> Close
                 </span>
               </div>
-              <span>Powered by NexusLineage</span>
+              <span>Powered by {brand.shortName}</span>
             </div>
           </Command>
         </div>
