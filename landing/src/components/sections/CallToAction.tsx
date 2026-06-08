@@ -4,7 +4,7 @@ import { Github, MessageCircle, CheckCircle2 } from 'lucide-react'
 import { Section } from '@/components/layout/Section'
 import { Button } from '@/components/ui/Button'
 import { AnimatedCounter } from '@/components/ui/AnimatedCounter'
-import { BRAND } from '@/config/brand'
+import { useBrand } from '@/context/BrandContext'
 
 const STATS = [
   { value: 2400, suffix: '+', label: 'GitHub Stars' },
@@ -13,6 +13,7 @@ const STATS = [
 ]
 
 export function CallToAction() {
+  const brand = useBrand()
   const [email, setEmail] = useState('')
   const [submitted, setSubmitted] = useState(false)
   const [error, setError] = useState('')
@@ -50,7 +51,7 @@ export function CallToAction() {
             <span className="gradient-text">Community driven.</span>
           </h2>
           <p className="text-lg text-ink-secondary max-w-xl mx-auto mb-10">
-            {BRAND.name} is open source under the Apache 2.0 license. Join the community shaping
+            {brand.name} is open source under the Apache 2.0 license. Join the community shaping
             the future of data lineage.
           </p>
 
@@ -100,7 +101,7 @@ export function CallToAction() {
               <motion.div key="form" exit={{ opacity: 0, scale: 0.95 }}>
                 <h3 className="text-2xl font-display font-bold mb-3">Ready to see it in action?</h3>
                 <p className="text-ink-secondary mb-6">
-                  Get a personalized walkthrough of {BRAND.name} for your data team.
+                  Get a personalized walkthrough of {brand.name} for your data team.
                 </p>
                 <form
                   className="flex flex-col sm:flex-row gap-3 max-w-md mx-auto"
