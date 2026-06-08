@@ -417,6 +417,23 @@ export function getDiffVsMain(wsId: string, graphId: string, branchId: string): 
   return vfetch<DiffVsMainResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-vs-main`)
 }
 
+/** What deleting a node would remove on a draft: its containment subtree (nodes) + every
+ *  incident edge. Read-only, on-demand — powers the pre-commit cascade preview. */
+export interface DeleteImpact {
+  nodes: Array<Record<string, unknown>>
+  edges: Array<Record<string, unknown>>
+}
+
+export function getDeleteImpact(
+  wsId: string,
+  dataSourceId: string,
+  branchId: string,
+  urn: string,
+): Promise<DeleteImpact> {
+  const qs = `dataSourceId=${encodeURIComponent(dataSourceId)}&branchId=${encodeURIComponent(branchId)}`
+  return vfetch<DeleteImpact>(`/api/v1/${wsId}/graph/nodes/${encodeURIComponent(urn)}/delete-impact?${qs}`)
+}
+
 // ============================================
 // Publish / merge-request path
 // ============================================

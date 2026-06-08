@@ -315,6 +315,91 @@ def test_bootstrap_create_and_seed_atomic():
     asyncio.run(_run_bootstrap_create_and_seed_atomic())
 
 
+# Domain → Dataset → Table → Column via a CUSTOM containment edge type ("OWNS", not the
+# literal "CONTAINS" — proving the cascade is ontology-driven, not hardcoded), plus an
+# outgoing lineage edge (col→out) and an incoming one (out2→tbl) to prove edge cleanup is
+# source-AND-target and that lineage *neighbours* survive (only their edges are cleaned).
+_CET = "OWNS"
+
+
+def _cascade_tree_rows() -> list:
+    n = lambda u, t: {"kind": "node", "id": u, "urn": u, "entityType": t, "displayName": u}
+    e = lambda i, et, s, t: {"kind": "edge", "id": i, "edgeType": et, "source": s, "target": t}
+    return [
+        n("urn:dom", "Domain"), n("urn:ds", "Dataset"), n("urn:tbl", "Table"),
+        n("urn:col", "Column"), n("urn:out", "Table"), n("urn:out2", "Table"),
+        e("e_d_ds", _CET, "urn:dom", "urn:ds"), e("e_ds_t", _CET, "urn:ds", "urn:tbl"),
+        e("e_t_c", _CET, "urn:tbl", "urn:col"),
+        e("e_lin_out", "LINEAGE", "urn:col", "urn:out"),   # subtree node is the SOURCE
+        e("e_lin_in", "LINEAGE", "urn:out2", "urn:tbl"),   # subtree node is the TARGET
+    ]
+
+
+async def _seed_cascade_graph(svc):
+    ds = "ds_" + os.urandom(4).hex()
+    created = await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u")
+    await svc.bulk_ingest(graph_id=created["graph_id"], rows=_cascade_tree_rows(), actor="u")
+    draft = await svc.open_draft(graph_id=created["graph_id"], owner="u")
+    return created["graph_id"], created["main_branch_id"], draft
+
+
+async def _run_cascade_delete_apply_ops() -> None:
+    """Deleting a node removes its whole containment subtree + every incident edge (source or
+    target, any type); lineage neighbours survive; the cascade is ontology-driven (custom
+    containment type); the draft delete leaves main untouched."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    gid, main_id, draft = await _seed_cascade_graph(svc)
+
+    # Read-only preview == what the commit will do.
+    impact = await svc.delete_impact(
+        graph_id=gid, branch_id=draft, root_urn="urn:dom", containment_edge_types=[_CET])
+    assert {n.get("urn") for n in impact["nodes"]} == {"urn:dom", "urn:ds", "urn:tbl", "urn:col"}, impact
+    assert {"e_d_ds", "e_ds_t", "e_t_c", "e_lin_out", "e_lin_in"} <= {e["entityId"] for e in impact["edges"]}
+
+    # Commit the delete on the draft, ontology-driven by the custom containment type.
+    await svc.apply_ops(
+        graph_id=gid, branch_id=draft, actor="u", containment_edge_types=[_CET],
+        ops=[{"op": "delete", "entity_kind": "node", "entity_id": "urn:dom", "payload": None}])
+
+    st = await svc.materialize_state(graph_id=gid, branch_id=draft)
+    assert set(st["nodes"]) == {"urn:out", "urn:out2"}, st["nodes"]   # subtree gone, lineage nbrs live
+    assert set(st["edges"]) == set(), st["edges"]                     # every incident edge cleaned
+    main = await svc.materialize_state(graph_id=gid, branch_id=main_id)
+    assert {"urn:dom", "urn:col"} <= set(main["nodes"]), main["nodes"]  # draft-only — main untouched
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_cascade_delete_apply_ops():
+    asyncio.run(_run_cascade_delete_apply_ops())
+
+
+async def _run_cascade_delete_checkpoint() -> None:
+    """All-paths: the same parent-delete through the stage+checkpoint path cascades
+    identically (not apply_ops-only)."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    gid, _main_id, draft = await _seed_cascade_graph(svc)
+
+    await svc.stage_changes(
+        graph_id=gid, branch_id=draft, actor="u",
+        ops=[{"op": "delete", "entity_kind": "node", "entity_id": "urn:dom"}])
+    await svc.checkpoint(graph_id=gid, branch_id=draft, actor="u", containment_edge_types=[_CET])
+
+    st = await svc.materialize_state(graph_id=gid, branch_id=draft)
+    assert set(st["nodes"]) == {"urn:out", "urn:out2"}, st["nodes"]
+    assert set(st["edges"]) == set(), st["edges"]
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_cascade_delete_checkpoint():
+    asyncio.run(_run_cascade_delete_checkpoint())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("API graph draft journey (HTTP create→import→draft-edit→read→publish) e2e: OK")
