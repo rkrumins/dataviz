@@ -8,11 +8,12 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2, X, Save,
     Trash2, GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
-    Users, ShieldOff, Send,
+    Users, ShieldOff, Send, GitPullRequestArrow,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
 import { workspaceService, type DataSourceResponse, type WorkspaceDataSourceImpactResponse } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -138,8 +139,8 @@ export function WorkspaceDetailPage() {
     // link straight to a specific tab — used by the WorkspacesPage
     // "Members" shortcut.
     const tabParam = searchParams.get('tab') as
-        | 'sources' | 'views' | 'aggregation' | 'ontology' | 'members' | null
-    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'members'>(
+        | 'sources' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | null
+    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members'>(
         tabParam ?? 'sources',
     )
 
@@ -487,6 +488,7 @@ export function WorkspaceDetailPage() {
                     { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length, hint: 'Saved visual perspectives on your data' },
                     { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
                     { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
+                    { id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' },
                     ...(canManageMembers
                         ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
                         : []),
@@ -638,6 +640,21 @@ export function WorkspaceDetailPage() {
                         </p>
                     </div>
                     <WorkspaceOntologyTimeline dataSources={workspace.dataSources} ontologyMap={ontologyMap} />
+                </>
+            )}
+
+            {/* ── Reviews Tab (merge requests) ────────────── */}
+            {activeSection === 'reviews' && wsId && (
+                <>
+                    <div className="flex items-start gap-3 py-4 mb-2">
+                        <Info className="w-4 h-4 text-accent-lineage shrink-0 mt-0.5" />
+                        <p className="text-sm text-ink-secondary leading-relaxed">
+                            Merge requests propose changes to a data source's published graph. Review the itemised
+                            changes, resolve any conflicts, and approve or merge.
+                            <span className="text-ink-muted"> Spans every versioned data source in this workspace.</span>
+                        </p>
+                    </div>
+                    <WorkspaceReviewsInbox wsId={wsId} />
                 </>
             )}
 

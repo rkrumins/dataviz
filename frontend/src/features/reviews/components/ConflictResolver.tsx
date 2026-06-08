@@ -14,41 +14,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ResolutionMap } from '@/services/versioningApiService'
-
-type Side = 'theirs' | 'ours' | 'base'
-
-interface Conflict {
-  entity_id: string
-  path: (string | number)[]
-  base?: unknown
-  ours?: unknown
-  theirs?: unknown
-  kind?: string
-}
-
-/** Normalise a raw backend conflict (snake_case, possibly camelCase) into our shape. */
-function normalize(raw: Record<string, unknown>): Conflict {
-  return {
-    entity_id: String(raw.entity_id ?? raw.entityId ?? ''),
-    path: (raw.path as (string | number)[]) ?? [],
-    base: raw.base,
-    ours: raw.ours,
-    theirs: raw.theirs,
-    kind: raw.kind as string | undefined,
-  }
-}
-
-/** Immutable deep-set of `value` at `path` within `obj`. Empty path replaces the whole entity. */
-function setIn(obj: Record<string, unknown>, path: (string | number)[], value: unknown): Record<string, unknown> {
-  if (path.length === 0) return (value ?? {}) as Record<string, unknown>
-  const [head, ...rest] = path
-  const clone: any = Array.isArray(obj) ? [...obj] : { ...obj }
-  clone[head] = rest.length === 0 ? value : setIn((clone[head] ?? {}) as Record<string, unknown>, rest, value)
-  return clone
-}
+import {
+  type Side, normalizeConflict, conflictKey as ckey, groupByEntity, buildResolutions,
+} from '../conflictResolution'
 
 const SIDE_LABEL: Record<Side, string> = { theirs: 'Current target', ours: 'This PR', base: 'Original' }
-const ckey = (c: Conflict) => `${c.entity_id}::${c.path.join('.')}`
 
 function ValuePreview({ value }: { value: unknown }) {
   if (value === undefined || value === null) return <span className="italic text-ink-muted/60">— none —</span>
@@ -72,16 +42,8 @@ export function ConflictResolver({
   onCancel: () => void
   onResolve: (resolutions: ResolutionMap) => void
 }) {
-  const normalized = useMemo(() => conflicts.map((c) => normalize(c)).filter((c) => c.entity_id), [conflicts])
-  const byEntity = useMemo(() => {
-    const m = new Map<string, Conflict[]>()
-    for (const c of normalized) {
-      const arr = m.get(c.entity_id)
-      if (arr) arr.push(c)
-      else m.set(c.entity_id, [c])
-    }
-    return m
-  }, [normalized])
+  const normalized = useMemo(() => conflicts.map((c) => normalizeConflict(c)).filter((c) => c.entity_id), [conflicts])
+  const byEntity = useMemo(() => groupByEntity(normalized), [normalized])
 
   // Per-field pick (default: take this PR's change) + per-entity delete toggle.
   const [picks, setPicks] = useState<Record<string, Side>>(() =>
@@ -89,22 +51,7 @@ export function ConflictResolver({
   )
   const [deleted, setDeleted] = useState<Record<string, boolean>>({})
 
-  const build = (): ResolutionMap => {
-    const res: ResolutionMap = {}
-    for (const [eid, list] of byEntity) {
-      if (deleted[eid]) {
-        res[eid] = null
-        continue
-      }
-      let payload: Record<string, unknown> = { ...(seeds[eid] ?? {}) }
-      for (const c of list) {
-        const side = picks[ckey(c)] ?? 'ours'
-        payload = setIn(payload, c.path, c[side])
-      }
-      res[eid] = payload
-    }
-    return res
-  }
+  const build = (): ResolutionMap => buildResolutions(byEntity, picks, deleted, seeds)
 
   return createPortal(
     <AnimatePresence>
