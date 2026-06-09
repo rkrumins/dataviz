@@ -1315,6 +1315,29 @@ class GraphVersioningService:
                 "fresh": projected >= committed,
             }
 
+    async def ensure_projection_target(
+        self, *, graph_id: str, falkor_graph_name: str,
+    ) -> Optional[str]:
+        """Pin a graph's FalkorDB projection to ``falkor_graph_name`` (the data source's real graph —
+        the one the canvas reads). Self-healing: graphs auto-created before the name was injected are
+        pinned to an orphan ``gv_<id>`` that nothing reads, so merged main state never surfaces.
+        Re-pointing here and resetting ``projected_commit_seq`` to 0 makes the next projection replay
+        the full committed ``main`` window ``(0, target]`` into the real graph — idempotent
+        MERGE/DETACH DELETE, so it converges to exactly committed main (deletes included), once.
+        Returns the OLD name when it changed (so the caller can drop the now-orphaned graph), else
+        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None or graph.fork_parent_graph_id is not None:
+                return None
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is None or ps.falkor_graph_name == falkor_graph_name:
+                return None
+            old = ps.falkor_graph_name
+            ps.falkor_graph_name = falkor_graph_name
+            ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection
+            return old
+
     async def neighbors_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, depth: int = 1,
