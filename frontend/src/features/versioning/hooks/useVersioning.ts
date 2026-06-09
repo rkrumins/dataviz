@@ -32,6 +32,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'prDiffSummary', ws, prId] as const,
   branchDiffSummary: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'branchDiffSummary', ws, gid, bid] as const,
+  commitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'commitDiffSummary', ws, gid, cid] as const,
   viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
     [...VERSIONING_KEYS.all, 'viewPrs', ws, viewId, status ?? 'all'] as const,
   dataSourcePrs: (ws?: string, dsId?: string | null, status?: string | null) =>
@@ -161,6 +163,16 @@ export function useBranchDiffSummary(
     queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+  })
+}
+
+/** One commit's hierarchical diff — the History tab drill-down (gated on an expanded commit). */
+export function useCommitDiffSummary(wsId?: string, graphId?: string | null, commitId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.commitDiffSummary(wsId, graphId, commitId),
+    queryFn: () => api.getCommitDiffSummary(wsId!, graphId!, commitId!),
+    enabled: !!wsId && !!graphId && !!commitId,
+    staleTime: 60_000,   // a commit is immutable
   })
 }
 

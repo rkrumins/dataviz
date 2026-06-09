@@ -817,6 +817,43 @@ async def get_diff_vs_main_children(
             containment_edge_types=cset, limit=limit, offset=offset)
 
 
+@router.get("/graphs/{graph_id}/commits/{commit_id}/diff/summary",
+            response_model=DiffSummaryResponse)
+async def get_commit_diff_summary(
+    ws_id: str, graph_id: str, commit_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Hierarchical summary of one commit's changes — the History tab's drill-down."""
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.diff_commit_summary(
+            graph_id=graph_id, commit_id=commit_id, containment_edge_types=cset, limit=limit)
+
+
+@router.get("/graphs/{graph_id}/commits/{commit_id}/diff/children",
+            response_model=DiffChildrenResponse)
+async def get_commit_diff_children(
+    ws_id: str, graph_id: str, commit_id: str,
+    container_key: str = Query(..., alias="containerKey"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One group's direct children in a commit's hierarchical diff (lazy-load)."""
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.diff_commit_children(
+            graph_id=graph_id, commit_id=commit_id, container_key=container_key,
+            containment_edge_types=cset, limit=limit, offset=offset)
+
+
 @router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)
 async def graph_neighbors(
     ws_id: str, graph_id: str,

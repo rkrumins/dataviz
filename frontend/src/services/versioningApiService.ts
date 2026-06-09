@@ -487,6 +487,29 @@ export function getBranchDiffChildren(
   )
 }
 
+/** Top-level groups of one commit's changes as a containment tree (History drill-down). */
+export function getCommitDiffSummary(
+  wsId: string, graphId: string, commitId: string, limit?: number,
+): Promise<DiffSummaryResponse> {
+  const qs = limit != null ? `?limit=${limit}` : ''
+  return vfetch<DiffSummaryResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${encodeURIComponent(commitId)}/diff/summary${qs}`,
+  )
+}
+
+/** One group's direct children in a commit's hierarchical diff (lazy-load step). */
+export function getCommitDiffChildren(
+  wsId: string, graphId: string, commitId: string, containerKey: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<DiffChildrenResponse> {
+  const sp = new URLSearchParams({ containerKey })
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  return vfetch<DiffChildrenResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${encodeURIComponent(commitId)}/diff/children?${sp}`,
+  )
+}
+
 /** Top-level groups of a PR's Files Changed as a containment tree. */
 export function getMergeRequestDiffSummary(
   wsId: string, prId: string, limit?: number,

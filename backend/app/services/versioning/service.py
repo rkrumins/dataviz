@@ -2108,6 +2108,27 @@ class GraphVersioningService:
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
+    async def diff_commit_summary(
+        self, *, graph_id: str, commit_id: str, containment_edge_types, limit: int = 200,
+    ) -> Dict[str, object]:
+        """Hierarchical summary of ONE commit's changes — the History tab's drill-down. Same
+        containment tree as the draft/PR diff, scoped to exactly the rows this commit wrote; the
+        global counts equal the flat ``diff_commits`` tally for the commit's window."""
+        async with self._session() as s:
+            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types)
+        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        return _hierarchy_summary_view(index, limit)
+
+    async def diff_commit_children(
+        self, *, graph_id: str, commit_id: str, container_key: str, containment_edge_types,
+        limit: int = 200, offset: int = 0,
+    ) -> Dict[str, object]:
+        """One container's direct children in a commit's hierarchical diff (lazy-load step)."""
+        async with self._session() as s:
+            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types)
+        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        return _hierarchy_children_view(index, container_key, limit, offset)
+
     async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types):
         """``(merged, theirs)`` for a draft restricted to its own changes PLUS the unchanged
         containment skeleton (ancestor nodes + the containment edges linking them) of the
@@ -2131,30 +2152,71 @@ class GraphVersioningService:
         after = await self._current_values(s, graph_id, branch_id, list(changed))
         theirs: Dict[str, Optional[dict]] = {eid: before.get(eid) for eid in changed}
         merged: Dict[str, Optional[dict]] = {eid: after.get(eid) for eid in changed}
-
         cset = {t.upper() for t in (containment_edge_types or [])}
-        if cset:
-            skel_nodes, skel_edges = await self._containment_skeleton(
-                s, graph_id, branch_id, changed, after, cset)
-            for eid, p in {**skel_edges, **skel_nodes}.items():
-                if eid not in changed:                 # add only the unchanged structure
+        await self._augment_containment_skeleton(
+            s, graph_id, branch_id, changed, after, theirs, merged, cset)
+        return merged, theirs
+
+    async def _augment_containment_skeleton(
+        self, s, graph_id, branch_id, changed, after, theirs, merged, cset,
+    ):
+        """Add the *unchanged* containment skeleton (ancestor nodes + the containment edges linking
+        them) of the changed nodes to BOTH ``theirs`` and ``merged`` identically — so ``net_delta``
+        still yields exactly the changes, while the hierarchy gets real containers to nest under.
+        Shared by the draft and per-commit diff paths so they can't drift. Resolved at branch head
+        (containment is stable); mutates ``theirs``/``merged`` in place; no-op when ``cset`` empty."""
+        if not cset:
+            return
+        skel_nodes, skel_edges = await self._containment_skeleton(
+            s, graph_id, branch_id, changed, after, cset)
+        for eid, p in {**skel_edges, **skel_nodes}.items():
+            if eid not in changed:                 # add only the unchanged structure
+                theirs[eid] = p
+                merged[eid] = p
+        # Label any container referenced by a containment edge but not yet present — e.g. the
+        # surviving parent of a deleted subtree (the skeleton walk seeds from live nodes only, so
+        # it never reaches it). Bounded: one lookup of the missing parents.
+        referenced: set = set()
+        for p in theirs.values():
+            if p and _is_edge_payload(p) and (p.get("edgeType") or "").upper() in cset:
+                src = p.get("sourceEntityId") or p.get("source_entity_id")
+                if src:
+                    referenced.add(src)
+        missing = referenced - merged.keys()
+        if missing:
+            for eid, p in (await self._current_values(s, graph_id, branch_id, missing)).items():
+                if p is not None:
                     theirs[eid] = p
                     merged[eid] = p
-            # Label any container referenced by a containment edge but not yet present — e.g.
-            # the surviving parent of a deleted subtree (the skeleton walk seeds from live
-            # nodes only, so it never reaches it). Bounded: one lookup of the missing parents.
-            referenced: set = set()
-            for p in theirs.values():
-                if p and _is_edge_payload(p) and (p.get("edgeType") or "").upper() in cset:
-                    src = p.get("sourceEntityId") or p.get("source_entity_id")
-                    if src:
-                        referenced.add(src)
-            missing = referenced - merged.keys()
-            if missing:
-                for eid, p in (await self._current_values(s, graph_id, branch_id, missing)).items():
-                    if p is not None:
-                        theirs[eid] = p
-                        merged[eid] = p
+
+    async def _commit_diff_states(self, s, graph_id, commit_id, containment_edge_types):
+        """``(merged, theirs)`` for a single commit — exactly the rows it wrote (the
+        ``(seq-1, seq]`` window). before/after are resolved with the SAME primitives as
+        :meth:`diff_commits` (``_values_at`` + the fork copy-on-write 'before' fallback), so a
+        commit's hierarchical summary counts equal the flat ``diff_commits`` tally for every kind
+        of commit; the containment skeleton (resolved at branch head) gives the changes their
+        containers to nest under."""
+        commit = await s.get(CommitORM, (graph_id, commit_id))
+        if commit is None:
+            raise ValueError(f"unknown commit {commit_id}")
+        branch_id, seq = commit.branch_id, commit.commit_seq
+        changed = await self._changed_in_window(s, graph_id, branch_id, seq - 1, seq)
+        if not changed:
+            return {}, {}
+        before = await self._values_at(s, graph_id, branch_id, changed, seq - 1)
+        after = await self._values_at(s, graph_id, branch_id, changed, seq)
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            for eid in changed:                    # fork CoW: inherited 'before' value
+                if eid not in before:
+                    v = await self._entity_value_at(s, graph_id, branch_id, eid, seq - 1)
+                    if v is not None:
+                        before[eid] = v
+        theirs: Dict[str, Optional[dict]] = {eid: before.get(eid) for eid in changed}
+        merged: Dict[str, Optional[dict]] = {eid: after.get(eid) for eid in changed}
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        await self._augment_containment_skeleton(
+            s, graph_id, branch_id, changed, after, theirs, merged, cset)
         return merged, theirs
 
     async def _containment_skeleton(self, s, graph_id, branch_id, changed, changed_after, cset):
