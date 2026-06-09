@@ -12,6 +12,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
 import { useViewCommitLog, useCommitDiffSummary } from '../hooks/useVersioning'
+import { kindMeta } from '../model/commitKind'
 import { NodeDiffBadge } from './NodeDiffBadge'
 import { ChangeTreePanel } from './ChangeTreePanel'
 
@@ -49,6 +50,10 @@ function CommitRow({
 }) {
   const commitId = commit.commit_id as string
   const stats = (commit.stats ?? {}) as Record<string, unknown>
+  const kind = kindMeta(commit.kind)
+  // On a squash (publish/merge) actor is the publisher; contributors are everyone who actually edited.
+  const contributors = Array.isArray(commit.contributors) ? (commit.contributors as string[]) : []
+  const others = contributors.filter((c) => c && c !== commit.actor)
   // Only fetch the diff once the row is opened (immutable commit → long staleTime).
   const summaryQ = useCommitDiffSummary(wsId, graphId, expanded ? commitId : null)
   const fetchChildren = useCallback(
@@ -66,11 +71,17 @@ function CommitRow({
             <span className="truncate group-hover:text-ink">
               {(commit.message as string) || `${commit.kind ?? 'commit'} #${commit.commit_seq ?? ''}`}
             </span>
+            <span className={cn('shrink-0 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded', kind.cls)}>
+              {kind.label}
+            </span>
           </p>
           <StatChips stats={stats} />
         </div>
         <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5 flex-wrap pl-5">
           <User className="w-3 h-3" /> {who(commit.actor)}
+          {others.length > 0 && (
+            <span title="Everyone who edited this revision">· edits by {others.map(who).join(', ')}</span>
+          )}
           <span>·</span>
           <span>{timeAgo(commit.created_at as string)}</span>
           {originatingViewLabel && (

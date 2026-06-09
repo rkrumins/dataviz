@@ -14,6 +14,7 @@ import { useBootstrapGraph, useBranches, useCommitLog, useMergeRequests, useReso
 import type { Branch } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
+import { kindMeta } from '../model/commitKind'
 
 function timeAgo(iso?: string): string {
   if (!iso) return ''
@@ -148,11 +149,17 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
             {commits.slice(0, 12).map((c, i) => {
               const stats = (c.stats ?? {}) as Record<string, number>
               const total = (stats.created ?? 0) + (stats.updated ?? 0) + (stats.deleted ?? 0)
+              const kind = kindMeta(c.kind)
               return (
                 <li key={(c.commit_id as string) ?? i} className="relative">
                   <span className="absolute -left-[1.36rem] top-0.5 w-2.5 h-2.5 rounded-full bg-accent-lineage ring-2 ring-canvas-elevated" />
-                  <p className="text-sm text-ink leading-tight">
-                    {(c.message as string) || `${c.kind ?? 'commit'} #${c.commit_seq ?? ''}`}
+                  <p className="text-sm text-ink leading-tight flex items-center gap-1.5 min-w-0">
+                    <span className="truncate">
+                      {(c.message as string) || `${c.kind ?? 'commit'} #${c.commit_seq ?? ''}`}
+                    </span>
+                    <span className={cn('shrink-0 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded', kind.cls)}>
+                      {kind.label}
+                    </span>
                   </p>
                   <p className="text-[11px] text-ink-muted flex items-center gap-2 mt-0.5">
                     <span className="inline-flex items-center gap-1">

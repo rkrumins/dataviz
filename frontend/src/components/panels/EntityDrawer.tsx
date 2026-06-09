@@ -31,13 +31,15 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
+import { useSchemaStore, useActiveView } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
+import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
+import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -86,6 +88,15 @@ export function EntityDrawer({
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
+
+  // Versioning context for the per-entity History section — resolve the active view's data source
+  // to its graph (cached; the same resolve the canvas versioning bar uses). Null when version
+  // control isn't enabled, in which case the History section hides.
+  const activeView = useActiveView()
+  const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null)
+  const historyWsId = activeView?.workspaceId
+  const historyGraphId = resolve.data?.graphId ?? null
+  const historyMainBranch = resolve.data?.mainBranchId ?? null
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
@@ -566,6 +577,9 @@ export function EntityDrawer({
               copiedUrn={copiedUrn}
               onFocusNode={onFocusNode}
               onLocateMany={onLocateMany}
+              wsId={historyWsId}
+              graphId={historyGraphId}
+              mainBranchId={historyMainBranch}
             />
           )}
 
@@ -787,6 +801,9 @@ interface ViewModeContentProps {
   copiedUrn: boolean
   onFocusNode?: (nodeId: string) => void | Promise<void>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  wsId?: string
+  graphId?: string | null
+  mainBranchId?: string | null
 }
 
 function ViewModeContent({
@@ -799,6 +816,9 @@ function ViewModeContent({
   copiedUrn,
   onFocusNode,
   onLocateMany,
+  wsId,
+  graphId,
+  mainBranchId,
 }: ViewModeContentProps) {
   const hasAdditional = Object.keys(propertiesBag).length > 0
   return (
@@ -867,14 +887,12 @@ function ViewModeContent({
         onLocateMany={onLocateMany}
       />
 
-      {/* Recent Activity */}
-      <Section title="Recent Activity" icon={LucideIcons.History} action={<ComingSoonChip />}>
-        <div className="space-y-3">
-          <ActivityRow action="Schema updated" time="2 hours ago" user="system" />
-          <ActivityRow action="Classification added" time="1 day ago" user="jane.doe@company.com" />
-          <ActivityRow action="Created" time="2 weeks ago" user="data-catalog" />
-        </div>
-      </Section>
+      {/* History — real per-entity revision history (main line). Hidden when version control is off. */}
+      {wsId && graphId && (
+        <Section title="History" icon={LucideIcons.History}>
+          <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} />
+        </Section>
+      )}
     </div>
   )
 }
@@ -1142,26 +1160,6 @@ function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps)
 // ============================================
 // Helper Components
 // ============================================
-
-interface ActivityRowProps {
-  action: string
-  time: string
-  user: string
-}
-
-function ActivityRow({ action, time, user }: ActivityRowProps) {
-  return (
-    <div className="flex items-center gap-3">
-      <div className="w-8 h-8 rounded-full bg-black/5 dark:bg-white/5 flex items-center justify-center flex-shrink-0">
-        <LucideIcons.Users className="w-4 h-4 text-ink-muted" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-ink truncate">{action}</p>
-        <p className="text-xs text-ink-muted">{user} • {time}</p>
-      </div>
-    </div>
-  )
-}
 
 export default EntityDrawer
 
