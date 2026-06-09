@@ -84,6 +84,42 @@ def get_falkor_read_factory():
     return _read_factory or None
 
 
+_projector = None  # lazily built FalkorDB projector for synchronous read-your-writes projection
+_SYNC_PROJECTION_TIMEOUT_SECS = 10.0
+
+
+def _get_projector():
+    """Projector for synchronous projection after an interactive write, built once over the SAME
+    cached FalkorDB pool as the read path. ``None`` when FalkorDB is unavailable → the caller defers
+    to the async worker + Postgres read fallback."""
+    global _projector
+    if _projector is None:
+        factory = get_falkor_read_factory()
+        if factory is None:
+            return None
+        from backend.app.services.versioning.projection import FalkorProjector
+        _projector = FalkorProjector(factory)
+    return _projector
+
+
+async def project_now(graph_id: str) -> None:
+    """Refresh a graph's FalkorDB cache up to its committed head, run IN-PROCESS as a FastAPI
+    background task right after a main-advancing write — so the cache catches up promptly without
+    depending on a separate projection worker (the original "merge has no effect" cause). NEVER
+    raises (the Postgres commit already landed). On any failure (FalkorDB down/slow/apply error) or
+    when FalkorDB is unconfigured, defer to the async worker via ``nudge_projection``; the
+    watermark-gated Postgres read fallback (and the "refreshing" badge) cover the brief window."""
+    proj = _get_projector()
+    if proj is None:
+        await nudge_projection(graph_id)
+        return
+    try:
+        await asyncio.wait_for(proj.project_graph(graph_id), _SYNC_PROJECTION_TIMEOUT_SECS)
+    except Exception as exc:
+        logger.warning("synchronous projection for %s failed; deferring to async worker: %s", graph_id, exc)
+        await nudge_projection(graph_id)
+
+
 async def graph_in_workspace(
     ws_id: str,
     graph_id: str,
@@ -662,7 +698,7 @@ async def publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
         )
-    background.add_task(nudge_projection, graph_id)   # post-commit, best-effort
+    background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
 
@@ -689,7 +725,7 @@ async def revert_commit(
         new_commit_id = await svc.revert_commit(
             graph_id=graph_id, commit_id=commit_id, actor=user.id, message=body.message,
         )
-    background.add_task(nudge_projection, graph_id)
+    background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": new_commit_id}
 
 
@@ -1194,7 +1230,7 @@ async def merge_pull_request(
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
-    background.add_task(nudge_projection, str(_pr["target_graph_id"]))   # base graph got the commit
+    background.add_task(project_now, str(_pr["target_graph_id"]))   # base graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}
 
 
@@ -1400,5 +1436,5 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
-    background.add_task(nudge_projection, str(_pr["target_graph_id"]))
+    background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}
