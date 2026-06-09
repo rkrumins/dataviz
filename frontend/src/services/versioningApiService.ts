@@ -90,6 +90,7 @@ export interface Watermark {
   committed: number
   projected: number
   fresh: boolean
+  status?: string   // idle | projecting | rebuilding | evicted — only projecting/rebuilding = actively catching up
 }
 
 export interface StateResponse {

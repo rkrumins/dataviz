@@ -381,6 +381,10 @@ class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
     fresh: bool          # projected >= committed
+    # Projection lifecycle: idle | projecting | rebuilding | evicted. Only projecting/rebuilding mean
+    # the cache is ACTIVELY catching up — the "refreshing…" badge keys off this, not bare staleness
+    # (an idle-but-behind graph just means no FalkorDB worker is running; reads use Postgres).
+    status: str = "idle"
 
 
 class StateResponse(_ApiModel):
@@ -773,7 +777,8 @@ async def get_watermark(
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
     wm = await svc.projection_watermark(graph_id)
-    return {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
+    return {"committed": wm["committed"], "projected": wm["projected"],
+            "fresh": wm["fresh"], "status": wm["status"]}
 
 
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)

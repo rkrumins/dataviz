@@ -78,14 +78,20 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
   })
 }
 
-/** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s while the
- *  FalkorDB cache lags the committed head (`!fresh`) and stops once it has caught up. */
+/** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
+ *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
+ *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
+ *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up. */
 export function useProjectionWatermark(wsId?: string, graphId?: string | null) {
   return useQuery({
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => (q.state.data && q.state.data.fresh === false ? 3_000 : false),
+    refetchInterval: (q) => {
+      const d = q.state.data
+      const active = d?.status === 'projecting' || d?.status === 'rebuilding'
+      return d && d.fresh === false && active ? 3_000 : false
+    },
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })

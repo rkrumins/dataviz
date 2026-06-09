@@ -1,12 +1,16 @@
 /**
- * RefreshingBadge — a small "Refreshing…" pill shown while the FalkorDB read cache of `main`
- * lags the committed head (e.g. just after a bulk ingest, or while a cold/evicted cache rebuilds).
- * Reads stay CORRECT from Postgres meanwhile (the watermark-gated fallback); this only tells the
- * user the fast cache is catching up. Polls only while behind, then stops.
+ * RefreshingBadge — a small "Refreshing…" pill shown ONLY while the FalkorDB read cache of `main`
+ * is actively catching up (projection `status` of projecting/rebuilding). Reads stay CORRECT from
+ * Postgres meanwhile (the watermark-gated fallback). A graph that is merely behind-and-idle (e.g. no
+ * FalkorDB projection worker is running) is NOT "refreshing" — so we don't nag; the cache simply
+ * isn't the active read path. Polls only while actively projecting, then stops.
  */
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useProjectionWatermark } from '../hooks/useVersioning'
+
+// Only these projection states mean the cache is genuinely catching up right now.
+const ACTIVE_PROJECTION = new Set(['projecting', 'rebuilding'])
 
 export function RefreshingBadge({ workspaceId, graphId, className }: {
   workspaceId: string
@@ -14,7 +18,7 @@ export function RefreshingBadge({ workspaceId, graphId, className }: {
   className?: string
 }) {
   const wm = useProjectionWatermark(workspaceId, graphId)
-  if (!graphId || wm.data?.fresh !== false) return null
+  if (!graphId || wm.data?.fresh !== false || !ACTIVE_PROJECTION.has(wm.data?.status ?? 'idle')) return null
   return (
     <span
       className={cn(
