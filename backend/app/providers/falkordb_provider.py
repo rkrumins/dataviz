@@ -4225,6 +4225,14 @@ class FalkorDBProvider(GraphDataProvider):
         Returns the number of NEW edges created in this flush (the running
         live counter; the authoritative final count is taken once at the
         end of the run).
+
+        Crash-resume note: MERGE-on-aggKey keeps the AGGREGATED *topology*
+        exact (one edge per ancestor pair, never duplicated). The ``weight``
+        counter, however, accumulates via ON MATCH within a generation, so a
+        crash between a page's flush and its checkpoint can re-add at most
+        one page's contributions on resume — a bounded over-count on a soft
+        ranking signal that fully self-heals on the next clean rebuild (a
+        fresh epoch resets weights via the ON MATCH ``ELSE`` branch).
         """
         from backend.app.services.aggregation.cancel import JobCancelled
         from datetime import datetime, timezone
