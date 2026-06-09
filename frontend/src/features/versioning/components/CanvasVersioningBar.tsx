@@ -15,10 +15,11 @@ import { usePermission } from '@/store/auth'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
-import { useAbandonDraft, useBootstrapGraph, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
+import { useAbandonDraft, useBootstrapGraph, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { BranchSwitcher } from './BranchSwitcher'
+import { PullLatestButton } from './PullLatestButton'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
@@ -61,6 +62,12 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   }, [isDraft, changeSet, setActiveChangeSet])
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
+
+  // Is the active draft behind main? Drives the toolbar "Pull latest" — derived locally (like the switcher).
+  const branchesQ = useBranches(workspaceId, graphId)
+  const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
+  const activeBranch = (branchesQ.data ?? []).find((b) => b.branchId === branchId)
+  const behindMain = isDraft && !!activeBranch && (activeBranch.baseCommitSeq ?? 0) < mainHead
 
   const handleEnable = () => {
     if (!dataSourceId) return
@@ -171,6 +178,11 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
               {showDiff ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
               {showDiff ? 'Hide changes' : 'Review changes'}
             </button>
+
+            <PullLatestButton
+              variant="bar" wsId={workspaceId} graphId={graphId ?? ''}
+              branchId={branchId} behind={behindMain}
+            />
 
             <button
               onClick={() => setShowPublish(true)}

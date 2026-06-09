@@ -6,7 +6,7 @@
  *
  * Mounted only while a PR is selected (fresh queries per prId).
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -101,6 +101,11 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
   const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && hasReviewers
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
+
+  // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
+  // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
+  // clears it and invalidates this PR, so pr.behind flips false and keeps it cleared.
+  useEffect(() => { setNeedsPull(!terminal && !!pr?.behind) }, [pr?.behind, terminal])
 
   const runMerge = async (resolutions?: ResolutionMap) => {
     if (!pr) return
@@ -314,7 +319,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         {pr && !terminal && needsPull && (
           <div className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span>This draft is behind <strong>main</strong>. Pull the latest changes (resolving any conflicts) before it can be merged.</span>
+            <span>This draft is behind <strong>main</strong>{pr.behindBy ? ` by ${pr.behindBy} commit${pr.behindBy === 1 ? '' : 's'}` : ''}. Pull the latest changes (resolving any conflicts) before it can be merged.</span>
           </div>
         )}
 

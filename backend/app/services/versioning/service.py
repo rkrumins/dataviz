@@ -880,7 +880,7 @@ class GraphVersioningService:
             if pr.approval_status == "approved" and pr.status == "mergeable":
                 pr.status = "approved"
             pr.updated_at = _now()
-            return self._pr_meta(pr)
+            return await self._pr_meta(s, pr)
 
     async def close_pr(self, *, pr_id: str, actor: Optional[str] = None) -> dict:
         """Close a PR without merging — terminal: approve_pr and merge_pr both
@@ -890,14 +890,14 @@ class GraphVersioningService:
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status == "closed":
-                return self._pr_meta(pr)              # idempotent
+                return await self._pr_meta(s, pr)              # idempotent
             if pr.status == "merged":
                 raise ValueError(f"pr {pr_id} is merged")
             pr.status = "closed"
             pr.closed_at = _now()
             pr.closed_by = actor
             pr.updated_at = _now()
-            return self._pr_meta(pr)
+            return await self._pr_meta(s, pr)
 
     async def update_pr(
         self, *, pr_id: str, title: Optional[str] = None, description: Optional[str] = None,
@@ -914,7 +914,7 @@ class GraphVersioningService:
             if description is not None:
                 pr.description = description.strip() or None
             pr.updated_at = _now()
-            return self._pr_meta(pr)
+            return await self._pr_meta(s, pr)
 
     @staticmethod
     def _pr_ontology_check(parent: GraphORM, deltas, kind_by_entity) -> dict:
@@ -2426,7 +2426,7 @@ class GraphVersioningService:
     async def get_pr(self, pr_id: str) -> Optional[dict]:
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, pr_id)
-            return None if pr is None else self._pr_meta(pr)
+            return None if pr is None else await self._pr_meta(s, pr)
 
     @staticmethod
     def _pulls_filtered(stmt, *, target_graph_id, data_source_id, originating_view_id,
@@ -2466,7 +2466,7 @@ class GraphVersioningService:
                 status=status, active_only=active_only,
             ).order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
             rows = (await s.execute(stmt)).scalars().all()
-            return [self._pr_meta(pr) for pr in rows]
+            return [await self._pr_meta(s, pr) for pr in rows]
 
     async def count_pulls(
         self, *, target_graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
@@ -2504,13 +2504,22 @@ class GraphVersioningService:
             "created_by": b.created_by, "created_at": b.created_at, "updated_at": b.updated_at,
         }
 
-    @staticmethod
-    def _pr_meta(pr: MergeRequestORM) -> dict:
+    async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
+        # A draft MR is "behind" when its base lags the target graph's main head; the FE gates
+        # Merge on this so reviewers pull latest first (mirrors the merge_mr/publish gate). Fork
+        # PRs aren't gated, so behind stays null for them. (``s.get`` is identity-mapped, so
+        # listing many PRs on one graph doesn't re-query the head.)
+        behind = behind_by = None
+        if self._is_draft_mr(pr):
+            graph = await s.get(GraphORM, pr.target_graph_id)
+            behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - (pr.base_commit_seq or 0))
+            behind = behind_by > 0
         return {
             "pr_id": pr.id, "graph_id": pr.graph_id, "source_graph_id": pr.source_graph_id,
             "source_branch_id": pr.source_branch_id,
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
             "base_commit_seq": pr.base_commit_seq, "status": pr.status,
+            "behind": behind, "behind_by": behind_by,
             "title": pr.title, "description": pr.description,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
             "reviewers": pr.reviewers, "approved_by": pr.approved_by,

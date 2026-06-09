@@ -8,13 +8,14 @@
  * no versioned graph (the common case until a graph is created).
  */
 import { useEffect, useRef, useState } from 'react'
-import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal, ArrowDownToLine } from 'lucide-react'
+import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
-import { useBranches, useOpenDraft, usePullLatestDraft, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import type { Branch } from '@/services/versioningApiService'
+import { PullLatestButton } from './PullLatestButton'
 
 interface BranchSwitcherProps {
   workspaceId: string
@@ -35,7 +36,6 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
   const branchesQ = useBranches(workspaceId, graphId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
-  const pullLatest = usePullLatestDraft(workspaceId, graphId ?? '')
 
   const currentBranchId = useBranchStore((s) => s.currentBranchId)
   const setResolved = useBranchStore((s) => s.setResolved)
@@ -79,22 +79,6 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — edits stay isolated until merged.`)
           setNewName('')
           setCreating(false)
-        },
-        onError: (e) => showToast('error', (e as Error).message),
-      },
-    )
-  }
-
-  const handlePull = (branchId: string) => {
-    pullLatest.mutate(
-      { branchId },
-      {
-        onSuccess: (res) => {
-          if (res.clean) {
-            showToast('success', res.alreadyUpToDate ? 'Already up to date with main.' : 'Pulled the latest changes from main.')
-          } else {
-            showToast('error', 'This draft conflicts with main — open its merge review to resolve before merging.')
-          }
         },
         onError: (e) => showToast('error', (e as Error).message),
       },
@@ -148,8 +132,12 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                   subtitle={draftSubtitle(b)}
                   active={b.branchId === currentBranchId}
                   status={behind ? 'behind' : 'up-to-date'}
-                  onPull={canManage && behind ? () => handlePull(b.branchId) : undefined}
-                  pulling={pullLatest.isPending && pullLatest.variables?.branchId === b.branchId}
+                  pullSlot={canManage ? (
+                    <PullLatestButton
+                      variant="row" wsId={workspaceId} graphId={graphId ?? ''}
+                      branchId={b.branchId} behind={behind}
+                    />
+                  ) : undefined}
                   onClick={() => {
                     switchToDraft(b.branchId, b.originatingViewId ?? null)
                     setOpen(false)
@@ -212,8 +200,7 @@ function BranchRow({
   subtitle,
   active,
   status,
-  onPull,
-  pulling,
+  pullSlot,
   onClick,
 }: {
   icon: React.ReactNode
@@ -221,8 +208,7 @@ function BranchRow({
   subtitle: string
   active: boolean
   status?: 'behind' | 'up-to-date'
-  onPull?: () => void
-  pulling?: boolean
+  pullSlot?: React.ReactNode
   onClick: () => void
 }) {
   return (
@@ -238,17 +224,7 @@ function BranchRow({
         )}
         {active && <Check className="w-4 h-4 text-accent-lineage shrink-0" />}
       </button>
-      {onPull && (
-        <button
-          onClick={onPull}
-          disabled={pulling}
-          title="Pull the latest changes from main into this draft"
-          className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage hover:bg-canvas-base disabled:opacity-50"
-        >
-          {pulling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowDownToLine className="w-3.5 h-3.5" />}
-          Pull
-        </button>
-      )}
+      {pullSlot}
     </div>
   )
 }

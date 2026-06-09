@@ -488,6 +488,9 @@ class PrResponse(_ApiModel):
     target_graph_id: str = Field(alias="targetGraphId")
     target_branch: str = Field(alias="targetBranch")
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
+    # Draft MR only: lags the target's main head and must pull latest before it can merge.
+    behind: Optional[bool] = None
+    behind_by: Optional[int] = Field(default=None, alias="behindBy")
     status: str
     title: Optional[str] = None
     description: Optional[str] = None

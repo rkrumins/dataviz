@@ -96,6 +96,23 @@ async def _run() -> None:
         d = (await c.get(f"{ws1}/graphs/{gid}/branches/{mid}/diff", params={"fromSeq": 1, "toSeq": 2}, headers=h)).json()
         assert set(d["added"]) == {"A", "B", "E1"}
 
+        # ── rebase ("pull latest"): RBAC + up-to-date no-op + behind→clean ─
+        rb = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
+        # read-only caller may not rebase (manage-gated) → 403
+        assert (await c.post(f"{ws1}/graphs/{gid}/branches/{rb}/rebase", json={}, headers=_hdr(R))).status_code == 403
+        up = await c.post(f"{ws1}/graphs/{gid}/branches/{rb}/rebase", json={}, headers=h)   # up to date → clean no-op
+        assert up.status_code == 200, up.text
+        assert up.json()["clean"] is True and set(up.json()) >= {"clean", "conflicts", "changes"}
+        # advance main under it (publish another draft adding C), then the rebase pulls main forward
+        adv = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
+        await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/changes", headers=h, json={"ops": [
+            {"op": "create", "entityKind": "node", "entityId": "C", "payload": {"displayName": "Gamma"}}]})
+        await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/commit", json={}, headers=h)
+        await c.post(f"{ws1}/graphs/{gid}/branches/{adv}/publish", json={"message": "add C"}, headers=h)
+        pulled = await c.post(f"{ws1}/graphs/{gid}/branches/{rb}/rebase", json={}, headers=h)
+        assert pulled.status_code == 200 and pulled.json()["clean"] is True, pulled.text
+        assert "C" in (await c.get(f"{ws1}/graphs/{gid}/branches/{rb}/state", headers=h)).json()["nodes"]
+
         # ── fork/PR governance ───────────────────────────────────────────
         # read-only caller may fork and open a PR …
         fork = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).json()

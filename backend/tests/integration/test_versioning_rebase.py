@@ -54,6 +54,8 @@ async def _run() -> None:
 
     # ── the others are now behind → HARD-blocked at merge AND publish ──
     mr2 = await svc.open_draft_mr(graph_id=gid, branch_id=d2, actor="bob")
+    pr2 = await svc.get_pr(mr2)
+    assert pr2["behind"] is True and pr2["behind_by"] >= 1     # meta surfaces staleness for the FE gate
     with pytest.raises(NotUpToDate):
         await svc.merge_mr(mr_id=mr2, actor="bob", message="merge y")
     with pytest.raises(NotUpToDate):
@@ -62,6 +64,7 @@ async def _run() -> None:
     # ── pull latest into d2: non-overlapping → clean, becomes up-to-date, then merges ──
     r = await svc.rebase_draft(graph_id=gid, branch_id=d2, actor="bob")
     assert r["clean"] is True and r["base_commit_seq"] == head
+    assert (await svc.get_pr(mr2))["behind"] is False          # rebase cleared the merge gate
     st2 = await svc.materialize_state(graph_id=gid, branch_id=d2)             # pulled main's A.f=2 + own B.f=2
     assert st2["nodes"]["A"]["f"] == 2 and st2["nodes"]["B"]["f"] == 2
     assert await svc.merge_mr(mr_id=mr2, actor="bob", message="merge y")

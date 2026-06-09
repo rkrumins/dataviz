@@ -288,6 +288,12 @@ export function usePullLatestDraft(wsId: string, graphId: string) {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(wsId, graphId, v.branchId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, v.branchId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+      // The draft's base advanced — any MR/PR for it is no longer "behind"; refresh PR detail + lists
+      // so the merge gate clears.
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'mr'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
     },
   })
 }
@@ -316,7 +322,9 @@ export function usePublishBranch(wsId: string, graphId: string) {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
-      // main@head moved — force live graph reads to refetch.
+      // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
+      // the FalkorDB cache catches up, and force live graph reads to refetch.
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
       bumpMainEpoch()
     },
   })
@@ -391,6 +399,8 @@ export function useMergeMergeRequest(wsId: string) {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiff(wsId, v.prId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, v.graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, v.graphId) })
+      // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved
     },
   })

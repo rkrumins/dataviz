@@ -12,7 +12,7 @@ import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishBranch, useOpenMergeRequest } from '../hooks/useVersioning'
-import { MergeConflictError } from '@/services/versioningApiService'
+import { MergeConflictError, NotUpToDateError } from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import type { ChangeSet } from '../model/changeModel'
 
@@ -28,6 +28,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
   const [conflicts, setConflicts] = useState<number | null>(null)
+  const [notUpToDate, setNotUpToDate] = useState(false)
   const { showToast } = useToast()
   const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
@@ -41,6 +42,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const handleError = (e: unknown) => {
     if (e instanceof MergeConflictError) {
       setConflicts(e.conflicts.length)
+    } else if (e instanceof NotUpToDateError) {
+      setNotUpToDate(true)
     } else {
       showToast('error', (e as Error).message)
     }
@@ -48,6 +51,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
 
   const handleOpenMr = () => {
     setConflicts(null)
+    setNotUpToDate(false)
     openMr.mutate(
       { branchId, title: message || undefined, description: description || undefined },
       {
@@ -63,6 +67,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
 
   const handlePublish = () => {
     setConflicts(null)
+    setNotUpToDate(false)
     publish.mutate(
       { branchId, message: message || 'Publish draft' },
       {
@@ -131,6 +136,16 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
               <div className="text-[11px] text-ink-muted">
                 <span className="font-medium text-amber-500">Main has moved — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
                 Open a merge request to resolve them, or abandon this draft and re-open it from the latest main.
+              </div>
+            </div>
+          )}
+
+          {notUpToDate && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="text-[11px] text-ink-muted">
+                <span className="font-medium text-amber-500">This draft is behind main.</span>{' '}
+                Use “Pull latest” on the toolbar to bring in the newest changes, then publish.
               </div>
             </div>
           )}

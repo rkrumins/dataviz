@@ -187,6 +187,8 @@ export interface PullRequest {
   targetGraphId: string
   targetBranch: string
   baseCommitSeq?: number | null
+  behind?: boolean | null         // draft MR: base lags main head — must pull latest before merge
+  behindBy?: number | null
   status: string
   title?: string | null
   description?: string | null
