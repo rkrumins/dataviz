@@ -461,6 +461,7 @@ class GraphVersioningService:
                 kind="checkpoint" if branch.head_commit_id else "edit",
                 message=message or f"checkpoint by {actor}",
                 actor=actor,
+                originating_view_id=branch.originating_view_id,   # attribute to the draft's view
             )
             s.add(commit)
             await s.flush()
@@ -3937,11 +3938,19 @@ def _build_diff_hierarchy(
         single = {"added": 0, "modified": 0, "removed": 0}
         if d is not None:
             single[_OP_STATUS[d.op]] += 1
+        if is_edge(eid):                                  # edge change → "source → target" + edgeType
+            src = p.get("sourceEntityId") or p.get("source_entity_id") or "?"
+            tgt = p.get("targetEntityId") or p.get("target_entity_id") or "?"
+            label = f"{payload_of(src).get('displayName') or src} → {payload_of(tgt).get('displayName') or tgt}"
+            entity_type = p.get("edgeType")
+        else:
+            label = p.get("displayName") or p.get("urn") or eid
+            entity_type = p.get("entityType")
         return {
             "key": eid,
             "kind": "container" if child else "leaf",
-            "label": p.get("displayName") or p.get("urn") or eid,
-            "entityType": p.get("entityType"),
+            "label": label,
+            "entityType": entity_type,
             "status": _OP_STATUS[d.op] if d else "unchanged",
             "counts": rollup(eid) if child else single,
             "childTotal": len(child),
@@ -3977,6 +3986,12 @@ def _build_diff_hierarchy(
     impact: Dict[str, int] = {}
     for eid in relevant:
         et = payload_of(eid).get("entityType") or "Other"
+        impact[et] = impact.get(et, 0) + 1
+    for eid in changed_edges:                              # surface relationship changes too
+        p = payload_of(eid)
+        if (p.get("edgeType") or "").upper() in cset:
+            continue                                       # structural containment edge — not surfaced
+        et = p.get("edgeType") or "Relationship"
         impact[et] = impact.get(et, 0) + 1
 
     return {

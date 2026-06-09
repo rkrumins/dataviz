@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
+import { useActiveView } from '@/store/schema'
 import { useBranches, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import type { Branch } from '@/services/versioningApiService'
 import { PullLatestButton } from './PullLatestButton'
@@ -34,6 +35,9 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const resolve = useResolveGraph(workspaceId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
+  // The view the draft is created from — attributes the draft's commits to it so the view's History
+  // ("This view") and the per-draft timeline populate.
+  const originatingViewId = useActiveView()?.id ?? null
   const branchesQ = useBranches(workspaceId, graphId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
 
@@ -71,10 +75,10 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
 
   const handleCreate = () => {
     openDraft.mutate(
-      { name: newName.trim() || undefined },
+      { name: newName.trim() || undefined, originatingViewId: originatingViewId ?? undefined },
       {
         onSuccess: (r) => {
-          switchToDraft(r.branchId)
+          switchToDraft(r.branchId, originatingViewId)
           setOpen(false)
           showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — edits stay isolated until merged.`)
           setNewName('')

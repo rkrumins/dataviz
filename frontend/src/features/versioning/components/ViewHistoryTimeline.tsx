@@ -1,51 +1,73 @@
 /**
- * ViewHistoryTimeline — a view's change history. Defaults to commits attributed to this
- * view (across branches); a toggle widens to the whole graph's `main` log. Each commit is
- * **expandable** (lazy per-commit diff) via the shared {@link CommitRow}. In graph-wide mode,
- * commits from other views are labelled so you can see where a change originated.
+ * ViewHistoryTimeline — change history with up to three scopes:
+ *  • This draft  — the active draft's own checkpoints, so you can review your individual commits
+ *    before raising a PR (shown only while on a draft).
+ *  • This view   — commits attributed to this view across branches (its drafts + merges).
+ *  • Whole graph — the graph's full `main` log (every merge / import / genesis).
+ * Each commit is expandable (lazy per-commit diff) via the shared {@link CommitRow}.
  */
-import { useCallback, useMemo, useState } from 'react'
-import { Loader2, Eye, Layers } from 'lucide-react'
+import { useCallback, useMemo, useState, type ComponentType } from 'react'
+import { Loader2, Eye, Layers, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useViewCommitLog } from '../hooks/useVersioning'
+import { useCommitLog, useViewCommitLog } from '../hooks/useVersioning'
 import { CommitRow } from './CommitRow'
+
+type Scope = 'draft' | 'view' | 'graph'
 
 export function ViewHistoryTimeline({
   wsId,
   graphId,
   viewId,
+  branchId,
 }: {
   wsId: string
   graphId: string
   viewId?: string | null
+  branchId?: string | null
 }) {
-  const [graphWide, setGraphWide] = useState(!viewId)
+  const onDraft = !!branchId
+  const [scope, setScope] = useState<Scope>(onDraft ? 'draft' : viewId ? 'view' : 'graph')
   const [limit, setLimit] = useState(25)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const q = useViewCommitLog(wsId, graphId, { viewId, graphWide, limit })
-  const commits = useMemo(
-    () => (q.data?.commits ?? []) as Array<Record<string, unknown>>,
-    [q.data],
-  )
-  const canScope = !!viewId
+
+  // Only the active scope fetches — pass graphId=null to disable the inactive hook.
+  const draftQ = useCommitLog(wsId, scope === 'draft' ? graphId : null, branchId ?? null)
+  const viewQ = useViewCommitLog(wsId, scope === 'draft' ? null : graphId, {
+    viewId, graphWide: scope === 'graph', limit,
+  })
+  const q = scope === 'draft' ? draftQ : viewQ
+  const commits = useMemo(() => (q.data?.commits ?? []) as Array<Record<string, unknown>>, [q.data])
   const toggle = useCallback((id: string) => setExpandedId((prev) => (prev === id ? null : id)), [])
+
+  const scopeBtns: Array<{ id: Scope; label: string; Icon: ComponentType<{ className?: string }>; show: boolean }> = [
+    { id: 'draft', label: 'This draft', Icon: GitBranch, show: onDraft },
+    { id: 'view', label: 'This view', Icon: Eye, show: !!viewId },
+    { id: 'graph', label: 'Whole graph', Icon: Layers, show: true },
+  ]
+  const visible = scopeBtns.filter((b) => b.show)
+
+  const emptyMsg =
+    scope === 'draft' ? 'No commits on this draft yet — make a change and save it.'
+      : scope === 'graph' ? 'No commits yet.'
+        : 'No changes from this view yet.'
 
   return (
     <div className="space-y-3">
-      {canScope && (
+      {visible.length > 1 && (
         <div className="inline-flex rounded-lg border border-glass-border overflow-hidden text-xs">
-          <button
-            onClick={() => setGraphWide(false)}
-            className={cn('px-2.5 py-1 font-medium', !graphWide ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay')}
-          >
-            <Eye className="w-3.5 h-3.5 inline mr-1" /> This view
-          </button>
-          <button
-            onClick={() => setGraphWide(true)}
-            className={cn('px-2.5 py-1 font-medium border-l border-glass-border', graphWide ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay')}
-          >
-            <Layers className="w-3.5 h-3.5 inline mr-1" /> Whole graph
-          </button>
+          {visible.map((b, i) => (
+            <button
+              key={b.id}
+              onClick={() => setScope(b.id)}
+              className={cn(
+                'px-2.5 py-1 font-medium',
+                i > 0 && 'border-l border-glass-border',
+                scope === b.id ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+              )}
+            >
+              <b.Icon className="w-3.5 h-3.5 inline mr-1" /> {b.label}
+            </button>
+          ))}
         </div>
       )}
 
@@ -55,9 +77,7 @@ export function ViewHistoryTimeline({
         </div>
       ) : commits.length === 0 ? (
         <div className="py-10 text-center">
-          <p className="text-sm text-ink-muted">
-            {graphWide ? 'No commits yet.' : 'No changes from this view yet.'}
-          </p>
+          <p className="text-sm text-ink-muted">{emptyMsg}</p>
         </div>
       ) : (
         <>
@@ -65,7 +85,7 @@ export function ViewHistoryTimeline({
             {commits.map((c, i) => {
               const cid = (c.commit_id as string) ?? String(i)
               const originatingViewLabel =
-                graphWide && c.originating_view_id && c.originating_view_id !== viewId
+                scope === 'graph' && c.originating_view_id && c.originating_view_id !== viewId
                   ? (c.originating_view_id as string).slice(-6)
                   : null
               return (
@@ -81,7 +101,7 @@ export function ViewHistoryTimeline({
               )
             })}
           </ol>
-          {commits.length >= limit && (
+          {scope !== 'draft' && commits.length >= limit && (
             <button
               onClick={() => setLimit((l) => l + 25)}
               className="text-[11px] text-accent-lineage hover:underline py-1"

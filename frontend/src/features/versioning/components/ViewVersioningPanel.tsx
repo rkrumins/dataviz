@@ -119,7 +119,7 @@ export function ViewVersioningPanel({
             ))}
 
           {tab === 'history' && (
-            <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} />
+            <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} />
           )}
         </div>
       </motion.aside>
