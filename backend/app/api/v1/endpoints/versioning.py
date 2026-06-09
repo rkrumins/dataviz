@@ -31,10 +31,11 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import requires
+from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.auth_service.interface import User
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.messaging import nudge_projection
@@ -46,6 +47,7 @@ from backend.app.services.versioning.service import (
     MergeConflict,
     NotUpToDate,
     OntologyViolation,
+    Viewer,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,17 @@ router = APIRouter()
 # Permission constants (a graph is a data source — reuse its perms).
 _READ = "workspace:datasource:read"
 _MANAGE = "workspace:datasource:manage"
+
+
+async def viewer_ctx(
+    ws_id: str,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> Viewer:
+    """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
+    ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
+    the token; no DB hit. Endpoints still keep their ``requires(_READ)`` gate for the baseline."""
+    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -137,15 +150,20 @@ async def graph_in_workspace(
 async def pr_in_workspace(
     ws_id: str,
     pr_id: str,
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ) -> dict:
-    """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is
-    governed by the base owner's workspace)."""
+    """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is governed by the
+    base owner's workspace) AND that the caller may see it — its author, an assigned reviewer, or a
+    manager. A non-participant gets 404 (don't leak that the PR exists)."""
     pr = await svc.get_pr(pr_id)
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
     base = await svc.get_graph(str(pr["target_graph_id"]))
     if base is None or base["workspace_id"] != ws_id:
+        raise HTTPException(status_code=404, detail="pull request not found in workspace")
+    if not (viewer.can_manage or pr.get("actor") == viewer.actor
+            or viewer.actor in (pr.get("reviewers") or [])):
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     return pr
 
@@ -485,6 +503,10 @@ class PrResponse(_ApiModel):
     pr_id: str = Field(alias="prId")
     graph_id: str = Field(alias="graphId")
     source_branch_id: str = Field(alias="sourceBranchId")
+    # The source draft's owner/name — surfaced on the single-PR read so the review drawer can show
+    # who owns the draft (only populated by GET /…/{pr_id}, not the list endpoints).
+    source_branch_owner: Optional[str] = Field(default=None, alias="sourceBranchOwner")
+    source_branch_name: Optional[str] = Field(default=None, alias="sourceBranchName")
     target_graph_id: str = Field(alias="targetGraphId")
     target_branch: str = Field(alias="targetBranch")
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
@@ -557,9 +579,10 @@ async def list_branches(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return await svc.list_branches(graph_id=graph_id, limit=limit, offset=offset)
+    return await svc.list_branches(graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
 
 
 @router.get("/resolve", response_model=ResolveResponse)
@@ -778,9 +801,11 @@ async def get_state(
     as_of_seq: Optional[int] = Query(None, ge=0, alias="asOfSeq"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
+    with _domain_errors():
+        state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq, viewer=viewer)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
@@ -791,11 +816,12 @@ async def get_commit_state(
     ws_id: str, graph_id: str, commit_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Full graph state as of a specific commit (time-travel by commit id)."""
     with _domain_errors():
-        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id)
+        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id, viewer=viewer)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
@@ -806,9 +832,11 @@ async def get_entity_history(
     ws_id: str, graph_id: str, entity_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return {"entity_id": entity_id, "versions": await svc.entity_history(graph_id=graph_id, entity_id=entity_id)}
+    return {"entity_id": entity_id,
+            "versions": await svc.entity_history(graph_id=graph_id, entity_id=entity_id, viewer=viewer)}
 
 
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)
@@ -820,13 +848,15 @@ async def get_commit_log(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Commit log for a branch (default ``main``), or — with ``originatingViewId`` — the
     change history attributed to one view across branches."""
-    return {"commits": await svc.commit_log(
-        graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
-        limit=limit, offset=offset)}
+    with _domain_errors():
+        return {"commits": await svc.commit_log(
+            graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
+            limit=limit, offset=offset, viewer=viewer)}
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff", response_model=DiffResponse)
@@ -836,9 +866,12 @@ async def get_diff(
     to_seq: int = Query(..., ge=0, alias="toSeq"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return await svc.diff_commits(graph_id=graph_id, branch_id=branch_id, from_seq=from_seq, to_seq=to_seq)
+    with _domain_errors():
+        return await svc.diff_commits(graph_id=graph_id, branch_id=branch_id,
+                                      from_seq=from_seq, to_seq=to_seq, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main", response_model=DiffVsMainResponse)
@@ -846,13 +879,14 @@ async def get_diff_vs_main(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Net diff of a draft against its base (``main`` at the branch point), returned
     as whole node/edge payloads with before/after — the shape the canvas diff overlay
     and Changes panel consume directly, without client-side state joins."""
     with _domain_errors():
-        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id)
+        return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/summary",
@@ -862,6 +896,7 @@ async def get_diff_vs_main_summary(
     limit: int = Query(200, ge=1, le=1000),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -870,7 +905,7 @@ async def get_diff_vs_main_summary(
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.diff_branch_summary(
-            graph_id=graph_id, branch_id=branch_id, containment_edge_types=cset, limit=limit)
+            graph_id=graph_id, branch_id=branch_id, containment_edge_types=cset, limit=limit, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/children",
@@ -882,6 +917,7 @@ async def get_diff_vs_main_children(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -890,7 +926,7 @@ async def get_diff_vs_main_children(
     with _domain_errors():
         return await svc.diff_branch_children(
             graph_id=graph_id, branch_id=branch_id, container_key=container_key,
-            containment_edge_types=cset, limit=limit, offset=offset)
+            containment_edge_types=cset, limit=limit, offset=offset, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/commits/{commit_id}/diff/summary",
@@ -900,6 +936,7 @@ async def get_commit_diff_summary(
     limit: int = Query(200, ge=1, le=1000),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -907,7 +944,7 @@ async def get_commit_diff_summary(
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.diff_commit_summary(
-            graph_id=graph_id, commit_id=commit_id, containment_edge_types=cset, limit=limit)
+            graph_id=graph_id, commit_id=commit_id, containment_edge_types=cset, limit=limit, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/commits/{commit_id}/diff/children",
@@ -919,6 +956,7 @@ async def get_commit_diff_children(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -927,7 +965,7 @@ async def get_commit_diff_children(
     with _domain_errors():
         return await svc.diff_commit_children(
             graph_id=graph_id, commit_id=commit_id, container_key=container_key,
-            containment_edge_types=cset, limit=limit, offset=offset)
+            containment_edge_types=cset, limit=limit, offset=offset, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)
@@ -1153,9 +1191,10 @@ async def list_pull_requests(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset)
+    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
 
 
 @router.get("/pulls/{pr_id}", response_model=PrResponse)
@@ -1304,10 +1343,11 @@ async def list_merge_requests(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """All merge requests targeting this graph's ``main`` (draft MRs + incoming fork PRs)."""
-    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset)
+    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
 
 
 # --------------------------------------------------------------------------- #
@@ -1321,11 +1361,12 @@ async def list_view_pull_requests(
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _view: dict = Depends(view_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """PRs raised from this view (matched via the source branch's ``originating_view_id``)."""
     return await svc.list_pulls(
-        originating_view_id=view_id, status=pr_status, limit=limit, offset=offset)
+        originating_view_id=view_id, status=pr_status, limit=limit, offset=offset, viewer=viewer)
 
 
 @router.get("/views/{view_id}/pull-requests/count", response_model=ViewPrCountResponse)
@@ -1333,15 +1374,16 @@ async def count_view_pull_requests(
     ws_id: str, view_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     view: dict = Depends(view_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Active-PR counts for the view's indicator: ``fromView`` (raised from this view) and
     ``onDataSource`` (against the view's whole data source) — both excluding merged/closed."""
-    from_view = await svc.count_pulls(originating_view_id=view_id, active_only=True)
+    from_view = await svc.count_pulls(originating_view_id=view_id, active_only=True, viewer=viewer)
     on_ds = 0
     ds = view.get("data_source_id")
     if ds:
-        on_ds = await svc.count_pulls(data_source_id=ds, active_only=True)
+        on_ds = await svc.count_pulls(data_source_id=ds, active_only=True, viewer=viewer)
     return {"fromView": from_view, "onDataSource": on_ds}
 
 
@@ -1352,6 +1394,7 @@ async def list_data_source_pull_requests(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """All PRs against a data source (every view on it). Tenant-isolated: the data source's
@@ -1360,7 +1403,7 @@ async def list_data_source_pull_requests(
     if g is None or g["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="data source not found in workspace")
     return await svc.list_pulls(
-        data_source_id=data_source_id, status=pr_status, limit=limit, offset=offset)
+        data_source_id=data_source_id, status=pr_status, limit=limit, offset=offset, viewer=viewer)
 
 
 @router.get("/merge-requests/{pr_id}", response_model=PrResponse)

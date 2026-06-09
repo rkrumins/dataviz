@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -123,6 +124,15 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # Terminal PR statuses — a merged or closed PR no longer "needs attention", so it is excluded
 # from the active-PR scope the view indicator counts (the rest: open/mergeable/approved/conflicts).
 _TERMINAL_PR_STATUS = ("merged", "closed")
+
+
+@dataclass(frozen=True)
+class Viewer:
+    """Who is asking — used to scope draft/PR reads. ``can_manage`` is workspace
+    ``datasource:manage`` (managers see everything). Supplied only from the HTTP layer;
+    when a read is called without a Viewer (internal callers / tests) no scoping is applied."""
+    actor: str
+    can_manage: bool = False
 
 
 class GraphVersioningService:
@@ -1252,6 +1262,7 @@ class GraphVersioningService:
 
     async def materialize_state(
         self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,
+        viewer: Optional[Viewer] = None,
     ) -> Dict[str, Dict[str, dict]]:
         """Node/edge payloads for a branch (fork-aware composition). ``as_of_seq``
         reconstructs the state at ``commit_seq <= as_of_seq`` (time-travel); ``None``
@@ -1261,6 +1272,7 @@ class GraphVersioningService:
         projection is the hot read path and sits behind the same API.
         """
         async with self._session() as s:
+            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
             state = (
                 await self._composed_state(s, graph_id, branch_id)
                 if as_of_seq is None
@@ -1274,7 +1286,7 @@ class GraphVersioningService:
             return {"nodes": nodes, "edges": edges}
 
     async def state_at_commit(
-        self, *, graph_id: str, commit_id: str
+        self, *, graph_id: str, commit_id: str, viewer: Optional[Viewer] = None,
     ) -> Dict[str, Dict[str, dict]]:
         """Full branch state as of a specific commit (time-travel by commit id)."""
         async with self._session() as s:
@@ -1282,6 +1294,7 @@ class GraphVersioningService:
             if c is None:
                 raise ValueError(f"unknown commit {commit_id}")
             branch_id, seq = c.branch_id, c.commit_seq
+            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
         return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq)
 
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
@@ -2023,8 +2036,11 @@ class GraphVersioningService:
             "truncationReason": ("max_nodes" if truncated else None),
         }
 
-    async def entity_history(self, *, graph_id: str, entity_id: str) -> List[dict]:
-        """Full revision timeline of one entity (plan §7 tier 1)."""
+    async def entity_history(
+        self, *, graph_id: str, entity_id: str, viewer: Optional[Viewer] = None,
+    ) -> List[dict]:
+        """Full revision timeline of one entity (plan §7 tier 1). With a ``viewer``, versions written
+        on drafts the caller can't read are dropped (the published main history stays visible)."""
         async with self._session() as s:
             rows = (
                 await s.execute(
@@ -2047,6 +2063,9 @@ class GraphVersioningService:
                         .order_by(EdgeVersionORM.commit_seq, EdgeVersionORM.created_at)
                     )
                 ).scalars().all()
+            if viewer is not None and not viewer.can_manage:
+                ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
+                rows = [r for r in rows if r.branch_id in ok]
             return [
                 {
                     "commit_id": r.commit_id,
@@ -2078,11 +2097,13 @@ class GraphVersioningService:
     async def commit_log(
         self, *, graph_id: str, branch_id: Optional[str] = None,
         originating_view_id: Optional[str] = None, limit: int = 100, offset: int = 0,
+        viewer: Optional[Viewer] = None,
     ) -> List[dict]:
         """Newest-first commit log for a graph (plan §7). Default: a branch (``main`` if
         unset). When ``originating_view_id`` is given, scope to commits attributed to that
         view across branches instead (the view's change history). A fork's log holds only its
-        own divergence — inherited history lives on the parent."""
+        own divergence — inherited history lives on the parent. With a ``viewer``, a draft branch
+        is gated (owner/manager/member/PR-reviewer) and the view-scoped log drops non-viewable drafts."""
         async with self._session() as s:
             stmt = select(CommitORM).where(CommitORM.graph_id == graph_id)
             if originating_view_id is not None:
@@ -2090,19 +2111,25 @@ class GraphVersioningService:
             else:
                 if branch_id is None:
                     branch_id = await self._main_branch_id(s, graph_id)
+                await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
                 stmt = stmt.where(CommitORM.branch_id == branch_id)
             rows = (await s.execute(
                 stmt.order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
             )).scalars().all()
+            if viewer is not None and not viewer.can_manage and originating_view_id is not None:
+                ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
+                rows = [r for r in rows if r.branch_id in ok]
             return [self._commit_meta(r) for r in rows]
     async def diff_commits(
-        self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int
+        self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int,
+        viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
         """Field-level diff between two commits of a branch (plan §7), **O(changed)**:
         scans only the version rows in ``(from_seq, to_seq]`` (a commit writes rows
         only for changed entities), then resolves each changed entity's value at
         each endpoint. Never reconstructs full graph state."""
         async with self._session() as s:
+            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
             changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
             if not changed:
                 return {"added": [], "removed": [], "modified": {}}
@@ -2117,7 +2144,7 @@ class GraphVersioningService:
                             a[eid] = v
             return diff_states(a, b)
 
-    async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+    async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None) -> Dict[str, object]:
         """UI-shaped net diff of a draft against its base (``main`` at the branch
         point): full node/edge payloads with before/after, classified
         added/removed/modified. This is the shape the canvas diff overlay needs —
@@ -2131,6 +2158,7 @@ class GraphVersioningService:
         value on the draft (base overlaid with the draft's edits)."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
+            await self._assert_branch_readable(s, branch, viewer)
             main_id = await self._main_branch_id(s, graph_id)
             base_seq = branch.base_commit_seq or 0
             changed: set = set()
@@ -2163,6 +2191,7 @@ class GraphVersioningService:
 
     async def diff_branch_summary(
         self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
+        viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
         """Hierarchical counterpart of :meth:`diff_branch_vs_base` — the draft's changes as a
         containment tree for the canvas Changes panel. Built on the same O(draft) change set,
@@ -2170,49 +2199,51 @@ class GraphVersioningService:
         under their real container (a column under its table) without composing full state."""
         async with self._session() as s:
             merged, theirs = await self._branch_diff_states(
-                s, graph_id, branch_id, containment_edge_types)
+                s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
     async def diff_branch_children(
         self, *, graph_id: str, branch_id: str, container_key: str, containment_edge_types,
-        limit: int = 200, offset: int = 0,
+        limit: int = 200, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
         """One container's direct children in a draft's hierarchical diff (lazy-load step)."""
         async with self._session() as s:
             merged, theirs = await self._branch_diff_states(
-                s, graph_id, branch_id, containment_edge_types)
+                s, graph_id, branch_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
     async def diff_commit_summary(
         self, *, graph_id: str, commit_id: str, containment_edge_types, limit: int = 200,
+        viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
         """Hierarchical summary of ONE commit's changes — the History tab's drill-down. Same
         containment tree as the draft/PR diff, scoped to exactly the rows this commit wrote; the
         global counts equal the flat ``diff_commits`` tally for the commit's window."""
         async with self._session() as s:
-            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types)
+            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
     async def diff_commit_children(
         self, *, graph_id: str, commit_id: str, container_key: str, containment_edge_types,
-        limit: int = 200, offset: int = 0,
+        limit: int = 200, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
         """One container's direct children in a commit's hierarchical diff (lazy-load step)."""
         async with self._session() as s:
-            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types)
+            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
-    async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types):
+    async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types, viewer=None):
         """``(merged, theirs)`` for a draft restricted to its own changes PLUS the unchanged
         containment skeleton (ancestor nodes + the containment edges linking them) of the
         changed nodes. The skeleton is added identically to both sides, so ``net_delta`` still
         yields exactly the draft's changes — the extra entries only give the hierarchy real
         containers to nest under. Stays O(draft + ancestors): no full-state composition."""
         branch = await self._get_branch(s, graph_id, branch_id)
+        await self._assert_branch_readable(s, branch, viewer)
         main_id = await self._main_branch_id(s, graph_id)
         base_seq = branch.base_commit_seq or 0
         changed: set = set()
@@ -2266,7 +2297,7 @@ class GraphVersioningService:
                     theirs[eid] = p
                     merged[eid] = p
 
-    async def _commit_diff_states(self, s, graph_id, commit_id, containment_edge_types):
+    async def _commit_diff_states(self, s, graph_id, commit_id, containment_edge_types, viewer=None):
         """``(merged, theirs)`` for a single commit — exactly the rows it wrote (the
         ``(seq-1, seq]`` window). before/after are resolved with the SAME primitives as
         :meth:`diff_commits` (``_values_at`` + the fork copy-on-write 'before' fallback), so a
@@ -2277,6 +2308,7 @@ class GraphVersioningService:
         if commit is None:
             raise ValueError(f"unknown commit {commit_id}")
         branch_id, seq = commit.branch_id, commit.commit_seq
+        await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
         changed = await self._changed_in_window(s, graph_id, branch_id, seq - 1, seq)
         if not changed:
             return {}, {}
@@ -2413,29 +2445,52 @@ class GraphVersioningService:
         }
 
     async def list_branches(
-        self, *, graph_id: str, limit: int = 100, offset: int = 0
+        self, *, graph_id: str, limit: int = 100, offset: int = 0,
+        viewer: Optional[Viewer] = None,
     ) -> List[dict]:
-        """Branches of a graph (``main`` + drafts/forks), oldest first."""
+        """Branches of a graph (``main`` + drafts/forks), oldest first. With a ``viewer`` who isn't a
+        manager, only ``main`` + the caller's own or shared drafts are returned — others' private
+        drafts aren't browsable (so the switcher won't list them)."""
         async with self._session() as s:
             rows = (await s.execute(
                 select(BranchORM).where(BranchORM.graph_id == graph_id)
                 .order_by(BranchORM.created_at).limit(limit).offset(offset)
             )).scalars().all()
+            if viewer is not None and not viewer.can_manage:
+                member_ids = set((await s.execute(
+                    select(BranchMemberORM.branch_id)
+                    .join(BranchORM, BranchORM.id == BranchMemberORM.branch_id)
+                    .where(BranchORM.graph_id == graph_id,
+                           BranchMemberORM.subject_type == "user",
+                           BranchMemberORM.subject_id == viewer.actor)
+                )).scalars().all())
+                rows = [b for b in rows
+                        if b.kind == "main" or b.owner == viewer.actor or b.id in member_ids]
             return [self._branch_meta(b) for b in rows]
 
     async def get_pr(self, pr_id: str) -> Optional[dict]:
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, pr_id)
-            return None if pr is None else await self._pr_meta(s, pr)
+            if pr is None:
+                return None
+            meta = await self._pr_meta(s, pr)
+            # Enrich with the SOURCE branch's owner/name so the review drawer can show who owns the
+            # draft (one PK lookup; only on the single-PR read, not the list, to avoid an N+1).
+            src = await s.get(BranchORM, pr.source_branch_id) if pr.source_branch_id else None
+            if src is not None:
+                meta["source_branch_owner"] = src.owner
+                meta["source_branch_name"] = src.name
+            return meta
 
     @staticmethod
     def _pulls_filtered(stmt, *, target_graph_id, data_source_id, originating_view_id,
-                        status, active_only):
+                        status, active_only, viewer=None):
         """Apply the optional PR scope filters shared by :meth:`list_pulls`/:meth:`count_pulls`.
         ``data_source_id`` joins the target graph (all PRs on a data source & its views);
         ``originating_view_id`` joins the source branch (PRs raised from one view) — both stay
         within the versioning store, so the join is local. ``active_only`` drops the terminal
-        (merged/closed) PRs — the "still needs attention" set the indicator counts."""
+        (merged/closed) PRs — the "still needs attention" set the indicator counts. A non-manager
+        ``viewer`` only sees PRs they authored or are a reviewer on (the inbox is scoped)."""
         if data_source_id is not None:
             stmt = stmt.join(GraphORM, GraphORM.id == MergeRequestORM.target_graph_id).where(
                 GraphORM.data_source_id == data_source_id)
@@ -2448,22 +2503,26 @@ class GraphVersioningService:
             stmt = stmt.where(MergeRequestORM.status == status)
         if active_only:
             stmt = stmt.where(MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS))
+        if viewer is not None and not viewer.can_manage:
+            stmt = stmt.where(or_(MergeRequestORM.actor == viewer.actor,
+                                  MergeRequestORM.reviewers.contains([viewer.actor])))
         return stmt
 
     async def list_pulls(
         self, *, target_graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
         originating_view_id: Optional[str] = None, status: Optional[str] = None,
         active_only: bool = False, limit: int = 100, offset: int = 0,
+        viewer: Optional[Viewer] = None,
     ) -> List[dict]:
         """PRs in scope, newest first. Scope is any combination of: a target graph's ``main``
         (the base owner's review queue), a data source (every view's PRs against it), or a
         single originating view — optionally narrowed to one ``status`` or to ``active_only``
-        (not merged/closed)."""
+        (not merged/closed). A non-manager ``viewer`` only sees PRs they authored or review."""
         async with self._session() as s:
             stmt = self._pulls_filtered(
                 select(MergeRequestORM), target_graph_id=target_graph_id,
                 data_source_id=data_source_id, originating_view_id=originating_view_id,
-                status=status, active_only=active_only,
+                status=status, active_only=active_only, viewer=viewer,
             ).order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
             rows = (await s.execute(stmt)).scalars().all()
             return [await self._pr_meta(s, pr) for pr in rows]
@@ -2471,7 +2530,7 @@ class GraphVersioningService:
     async def count_pulls(
         self, *, target_graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
         originating_view_id: Optional[str] = None, status: Optional[str] = None,
-        active_only: bool = False,
+        active_only: bool = False, viewer: Optional[Viewer] = None,
     ) -> int:
         """Count PRs matching the same scope filters as :meth:`list_pulls` — for the view's
         PR indicator (active PRs from this view vs on its whole data source)."""
@@ -2479,7 +2538,7 @@ class GraphVersioningService:
             stmt = self._pulls_filtered(
                 select(func.count(MergeRequestORM.id)), target_graph_id=target_graph_id,
                 data_source_id=data_source_id, originating_view_id=originating_view_id,
-                status=status, active_only=active_only,
+                status=status, active_only=active_only, viewer=viewer,
             )
             return int((await s.execute(stmt)).scalar_one())
 
@@ -2582,6 +2641,47 @@ class GraphVersioningService:
         role = await self._branch_role(s, branch, actor, groups)
         if role != "maintainer":
             raise AccessDenied(f"{actor} lacks maintainer access to draft {branch.id}")
+
+    # ── Read visibility (draft privacy + PR scoping) ──────────────────────────
+    async def _is_pr_participant_for_branch(self, s, branch_id: str, actor: str) -> bool:
+        """True if *actor* authored or is a reviewer of any MR sourced from this branch — lets PR
+        reviewers read the draft's commits/diff without being draft members. One indexed lookup."""
+        row = (await s.execute(
+            select(MergeRequestORM.id).where(
+                MergeRequestORM.source_branch_id == branch_id,
+                or_(MergeRequestORM.actor == actor,
+                    MergeRequestORM.reviewers.contains([actor])),
+            ).limit(1)
+        )).first()
+        return row is not None
+
+    async def _branch_readable(self, s, branch: BranchORM, viewer: "Viewer") -> bool:
+        """Who may READ a branch's history/content. ``main`` is readable by any
+        ``datasource:read`` caller; a draft is private to its owner + workspace managers (+ explicit
+        members of a shared draft) + reviewers of a PR raised from it. Owner/manager short-circuit
+        before any extra query, so the common paths stay O(1)."""
+        if branch.kind == "main":
+            return True
+        if viewer.can_manage or branch.owner == viewer.actor:
+            return True
+        if branch.is_shared and await self._branch_role(s, branch, viewer.actor) is not None:
+            return True
+        return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
+
+    async def _assert_branch_readable(self, s, branch: BranchORM, viewer: Optional["Viewer"]) -> None:
+        """No-op when ``viewer`` is None (internal/test callers); else raise on a private draft."""
+        if viewer is not None and not await self._branch_readable(s, branch, viewer):
+            raise AccessDenied(f"{viewer.actor} cannot view branch {branch.id}")
+
+    async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
+        """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
+        (view-scoped commit logs, entity history). Bounded by the distinct branches involved."""
+        out: set = set()
+        for bid in {b for b in branch_ids if b}:
+            b = await s.get(BranchORM, bid)
+            if b is not None and await self._branch_readable(s, b, viewer):
+                out.add(bid)
+        return out
 
     async def _next_seq(self, s, graph_id: str, branch_id: str) -> int:
         cur = (

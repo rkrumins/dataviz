@@ -11,17 +11,18 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
-  GitPullRequestArrow, Pencil, Check, ArrowDownToLine, AlertTriangle,
+  GitPullRequestArrow, Pencil, Check, ArrowDownToLine, AlertTriangle, GitCommitHorizontal,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { MergeConflictError, NotUpToDateError, type ResolutionMap } from '@/services/versioningApiService'
 import {
-  useMergeRequest, usePullRequestDiff, usePullLatestDraft,
+  useMergeRequest, usePullRequestDiff, usePullLatestDraft, useCommitLog,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
 } from '../../versioning/hooks/useVersioning'
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
+import { CommitRow } from '../../versioning/components/CommitRow'
 import { usePermission, useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useToast } from '@/components/ui/toast'
@@ -61,6 +62,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
+
+  // Pre-merge: the draft's individual commits (each with its author), expandable to per-commit diffs.
+  // Draft MRs only — a fork PR's source branch lives on another graph (legacy), so leave it disabled.
+  // Reviewers/managers are authorised to read these by the backend's PR-participant rule.
+  const isDraftPr = !!pr && isDraftMr(pr)
+  const commitsQ = useCommitLog(wsId, isDraftPr ? pr!.graphId : null, pr?.sourceBranchId ?? null)
+  const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
+  const [expandedCommit, setExpandedCommit] = useState<string | null>(null)
+  const toggleCommit = (id: string) => setExpandedCommit((p) => (p === id ? null : id))
 
   // In-place title/description editing (managers).
   const [editing, setEditing] = useState(false)
@@ -268,6 +278,11 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                     <span>·</span>
                     <Clock className="w-3.5 h-3.5" /> opened {timeAgo(pr.createdAt)}
                   </p>
+                  {pr.sourceBranchOwner && (
+                    <p className="text-[12px] text-ink-muted flex items-center gap-1.5">
+                      <GitBranch className="w-3.5 h-3.5" /> Draft owner: <span className="text-ink">{who(pr.sourceBranchOwner)}</span>
+                    </p>
+                  )}
                   {hasReviewers && (
                     <p className="text-[12px] text-ink-muted flex items-center gap-1.5 flex-wrap">
                       <ShieldCheck className="w-3.5 h-3.5" /> Reviewers:
@@ -280,6 +295,34 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                   )}
                 </div>
               </Section>
+
+              {isDraftPr && (
+                <Section icon={GitCommitHorizontal} title={`Commits${commits.length ? ` (${commits.length})` : ''}`}>
+                  {commitsQ.isLoading ? (
+                    <div className="flex items-center gap-2 text-[12px] text-ink-muted py-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading commits…
+                    </div>
+                  ) : commits.length === 0 ? (
+                    <p className="text-[12px] text-ink-muted py-1">No commits on this draft yet.</p>
+                  ) : (
+                    <ol className="relative ml-1.5 border-l border-glass-border space-y-3.5 pl-4">
+                      {commits.map((c, i) => {
+                        const cid = (c.commit_id as string) ?? String(i)
+                        return (
+                          <CommitRow
+                            key={cid}
+                            commit={c}
+                            wsId={wsId}
+                            graphId={pr.graphId}
+                            expanded={expandedCommit === cid}
+                            onToggle={toggleCommit}
+                          />
+                        )
+                      })}
+                    </ol>
+                  )}
+                </Section>
+              )}
 
               {pr.status === 'conflicts' && (
                 <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2.5 text-[12px] text-amber-700 dark:text-amber-400">

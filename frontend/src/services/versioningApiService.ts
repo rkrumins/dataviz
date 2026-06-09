@@ -184,6 +184,8 @@ export interface PullRequest {
   prId: string
   graphId: string
   sourceBranchId: string
+  sourceBranchOwner?: string | null   // owner of the source draft (only on the single-PR read)
+  sourceBranchName?: string | null
   targetGraphId: string
   targetBranch: string
   baseCommitSeq?: number | null
