@@ -1,11 +1,14 @@
 """Branch-aware provider selection in ContextEngine.for_workspace (journey Phase G) — Postgres.
 
 The graph endpoints gained an optional branchId; this asserts the selection rule that backs it.
-A resolved draft on a versioned graph swaps in the VersionedBranchProvider; 'main' (and omission,
-and the opaque main id) keep the live provider; an unknown branch on a versioned graph is a
-KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-versioned data
-source is ignored (lenient). No FalkorDB — the live provider is a stub since only the *selection*
-is under test, and ontology resolution is stubbed out so the test is independent of DB ontology.
+A resolved draft on a versioned graph swaps in the VersionedBranchProvider. For 'main' (and
+omission, and the opaque main id) the rule is read-your-writes: the live provider when the FalkorDB
+projection is fresh (the hot path), but the Postgres reader when the projection lags the committed
+head (e.g. just after a merge) so the change is visible immediately. An unknown branch on a
+versioned graph is a KeyError (which the dependency maps to HTTP 404); and a branchId against a
+NON-versioned data source is ignored (lenient). No FalkorDB — the live provider is a stub since only
+the *selection* is under test; ontology resolution and the projection watermark are stubbed so the
+test is independent of DB ontology and any running projector.
 """
 import asyncio
 import os
@@ -45,9 +48,11 @@ async def _run() -> None:
          "payload": {"urn": "N1", "entityType": "Table", "displayName": "N1"}}])
     draft = await svc.open_draft(graph_id=gid, owner="u")
 
-    # Isolate the selection rule: no write-through wrap, no ontology DB dependency.
+    # Isolate the selection rule: no write-through wrap, no ontology DB dependency, and a
+    # deterministic projection watermark (no FalkorDB / projector running here).
     prev_writes = vconfig.VERSIONED_WRITES_ENABLED
     prev_resolve = ContextEngine._resolve_ontology
+    prev_wm = GraphVersioningService.projection_watermark
     vconfig.VERSIONED_WRITES_ENABLED = False
 
     async def _noop(self):
@@ -59,10 +64,23 @@ async def _run() -> None:
         assert isinstance(eng.provider, VersionedBranchProvider)
         assert eng.provider._branch == draft and eng._branch_id == draft
 
-        # 'main' (explicit alias), the opaque main id, and omission → live provider, never a reader
+        # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live provider
+        async def _fresh(self, graph_id):
+            return {"fresh": True, "committed": 1, "projected": 1}
+        GraphVersioningService.projection_watermark = _fresh
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
             assert isinstance(e.provider, _StubProvider)
+
+        # same reads, but the projection LAGS the committed head → read-your-writes serves main
+        # from the Postgres reader so a just-merged change is visible before the projector catches up
+        async def _stale(self, graph_id):
+            return {"fresh": False, "committed": 2, "projected": 1}
+        GraphVersioningService.projection_watermark = _stale
+        for b in ("main", main, None):
+            e = await _for_workspace(ds, b)
+            assert isinstance(e.provider, VersionedBranchProvider)
+            assert e.provider._branch == main
 
         # unknown branch on a versioned graph → KeyError (the dependency maps this to HTTP 404)
         with pytest.raises(KeyError):
@@ -74,6 +92,7 @@ async def _run() -> None:
     finally:
         vconfig.VERSIONED_WRITES_ENABLED = prev_writes
         ContextEngine._resolve_ontology = prev_resolve
+        GraphVersioningService.projection_watermark = prev_wm
 
     await db.dispose_engine()
 

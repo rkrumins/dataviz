@@ -23,6 +23,7 @@ import {
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { usePermission, useAuthStore } from '@/store/auth'
+import { useBranchStore } from '@/store/branchStore'
 import { useToast } from '@/components/ui/toast'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
@@ -49,6 +50,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const user = useAuthStore((s) => s.user)
+  const switchToMain = useBranchStore((s) => s.switchToMain)
 
   const prQ = useMergeRequest(wsId, prId)
   const diffQ = usePullRequestDiff(wsId, prId)
@@ -104,6 +106,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       setConflicts(null)
       setResolverError(null)
       showToast('success', `Merged into ${pr.targetBranch}.`)
+      // Land on the freshly-merged main and close the drawer (mirror CommitDialog) so the canvas
+      // reflects the merge; read-your-writes serves main even before the projection catches up.
+      switchToMain()
+      onClose()
     } catch (e) {
       if (e instanceof MergeConflictError) {
         setConflicts(e.conflicts)
