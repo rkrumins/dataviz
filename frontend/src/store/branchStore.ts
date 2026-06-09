@@ -116,11 +116,14 @@ export const useBranchStore = create<BranchState>((set, get) => ({
       activeChangeSet: null,
     }),
 
+  // Visibility only — never touches activeChangeSet. The diff data is owned by the
+  // CanvasVersioningBar effect (a faithful reflection of the draft-vs-main query) and is cleared
+  // solely on a branch change (switchToMain/switchToDraft). Toggling the overlay off then on must
+  // NOT drop it, or it can't be restored without a full page reload.
   setShowDiff: (on, source = null) =>
     set((s) => ({
       showDiff: on,
       diffSource: on ? source ?? s.diffSource : null,
-      activeChangeSet: on ? s.activeChangeSet : null,
     })),
 
   setActiveChangeSet: (cs) => set({ activeChangeSet: cs }),

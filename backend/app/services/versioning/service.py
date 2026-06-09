@@ -2130,7 +2130,8 @@ class GraphVersioningService:
         only for changed entities), then resolves each changed entity's value at
         each endpoint. Never reconstructs full graph state."""
         async with self._session() as s:
-            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._assert_branch_readable(s, branch, viewer)
             changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
             if not changed:
                 return {"added": [], "removed": [], "modified": {}}
@@ -2143,6 +2144,16 @@ class GraphVersioningService:
                         v = await self._entity_value_at(s, graph_id, branch_id, eid, from_seq)
                         if v is not None:
                             a[eid] = v
+            # Draft: entities inherited from main have no row on the branch at ``from_seq``; resolve
+            # their 'before' from main@base_commit_seq so deletes/modifies of base entities diff
+            # correctly (else a base-delete collapses to None→None and is dropped). Mirrors
+            # :meth:`_commit_diff_states` — keeps the per-commit summary == flat diff invariant.
+            if branch.kind != "main" and branch.base_commit_seq:
+                main_id = await self._main_branch_id(s, graph_id)
+                inherit = {eid for eid in changed if eid not in a}
+                if inherit:
+                    base_a = await self._values_at(s, graph_id, main_id, inherit, branch.base_commit_seq)
+                    a.update({eid: v for eid, v in base_a.items() if v is not None})
             return diff_states(a, b)
 
     async def diff_branch_vs_base(self, *, graph_id: str, branch_id: str, viewer: Optional[Viewer] = None) -> Dict[str, object]:
@@ -2309,7 +2320,8 @@ class GraphVersioningService:
         if commit is None:
             raise ValueError(f"unknown commit {commit_id}")
         branch_id, seq = commit.branch_id, commit.commit_seq
-        await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+        branch = await self._get_branch(s, graph_id, branch_id)
+        await self._assert_branch_readable(s, branch, viewer)
         changed = await self._changed_in_window(s, graph_id, branch_id, seq - 1, seq)
         if not changed:
             return {}, {}
@@ -2322,6 +2334,16 @@ class GraphVersioningService:
                     v = await self._entity_value_at(s, graph_id, branch_id, eid, seq - 1)
                     if v is not None:
                         before[eid] = v
+        # A draft inherits unchanged entities from main: a commit that deletes/modifies a
+        # base-inherited entity has NO row on the draft before ``seq``, so its 'before' is missing
+        # and a delete would collapse to None→None (dropped by net_delta → empty diff despite real
+        # stats). Resolve those from main@base_commit_seq, mirroring :meth:`_branch_diff_states`.
+        if branch.kind != "main" and branch.base_commit_seq:
+            main_id = await self._main_branch_id(s, graph_id)
+            inherit = {eid for eid in changed if eid not in before}
+            if inherit:
+                base_before = await self._values_at(s, graph_id, main_id, inherit, branch.base_commit_seq)
+                before.update({eid: v for eid, v in base_before.items() if v is not None})
         theirs: Dict[str, Optional[dict]] = {eid: before.get(eid) for eid in changed}
         merged: Dict[str, Optional[dict]] = {eid: after.get(eid) for eid in changed}
         cset = {t.upper() for t in (containment_edge_types or [])}

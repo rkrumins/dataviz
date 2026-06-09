@@ -97,10 +97,10 @@ async def _run() -> None:
         graph_id=gid, commit_id=c_del, container_key="T1", containment_edge_types=CONT))["entries"]}
     assert d_t1["C2"]["status"] == "removed" and d_t1["C2"]["deleted"] is True
 
-    # ---- a DRAFT commit: same raw-window semantics as diff_commits (the invariant holds for
-    # drafts too), and the head skeleton still nests the change under its base-resident container.
-    # (An edit of a base-inherited entity reads as "added" on the draft — no prior draft row —
-    # exactly as the existing diff_commits/getDiff shows it.) ----
+    # ---- a DRAFT commit: the invariant holds for drafts too, and the head skeleton nests the
+    # change under its base-resident container. An EDIT of a base-inherited entity reads as
+    # "modified" against its true base value (the per-commit/flat diff resolve 'before' from
+    # main@base_commit_seq — a base entity has no row on the draft before this commit). ----
     d = await svc.open_draft(graph_id=gid, owner="u2")
     c_draft = await svc.apply_ops(graph_id=gid, branch_id=d, actor="u2", message="draft edit C3",
                                   containment_edge_types=CONT, ops=[_u("C3", "c3_draft")])
@@ -110,7 +110,26 @@ async def _run() -> None:
     assert dsum["counts"] == _flat_counts(flat_d), (dsum["counts"], _flat_counts(flat_d))   # invariant
     dd = {e["key"]: e for e in (await svc.diff_commit_children(
         graph_id=gid, commit_id=c_draft, container_key="T1", containment_edge_types=CONT))["entries"]}
-    assert dd["C3"]["after"]["displayName"] == "c3_draft" and dd["C3"]["key"] == "C3", dd  # nested under T1
+    assert dd["C3"]["status"] == "modified" and dd["C3"]["key"] == "C3", dd                 # not "added"
+    assert dd["C3"]["before"]["displayName"] == "c3" and dd["C3"]["after"]["displayName"] == "c3_draft", dd
+
+    # ---- a DRAFT DELETE of a base-inherited node must show as REMOVED, not an empty diff. This is
+    # the reported bug: 'before' was read only from the draft branch, so a base entity's delete
+    # collapsed to None→None, net_delta dropped it, and the per-commit diff rendered empty ("No
+    # changes in this commit") despite a real −N stats badge. 'before' now comes from the base. ----
+    d2 = await svc.open_draft(graph_id=gid, owner="u3")
+    c_drop = await svc.apply_ops(graph_id=gid, branch_id=d2, actor="u3", message="draft drop T2",
+                                 containment_edge_types=CONT,
+                                 ops=[{"op": "delete", "entity_kind": "node", "entity_id": "T2", "payload": None}])
+    drop_seq = {m["commit_id"]: m["commit_seq"] for m in await svc.commit_log(graph_id=gid, branch_id=d2)}[c_drop]
+    flat_drop = await svc.diff_commits(graph_id=gid, branch_id=d2, from_seq=drop_seq - 1, to_seq=drop_seq)
+    drop_sum = await svc.diff_commit_summary(graph_id=gid, commit_id=c_drop, containment_edge_types=CONT)
+    assert drop_sum["counts"] == _flat_counts(flat_drop), (drop_sum["counts"], _flat_counts(flat_drop))  # invariant
+    assert drop_sum["groups"], "draft delete of a base entity must not render an empty diff"
+    assert drop_sum["counts"]["removed"] >= 1, drop_sum["counts"]
+    drop_kids = {e["key"]: e for e in (await svc.diff_commit_children(
+        graph_id=gid, commit_id=c_drop, container_key="DOM", containment_edge_types=CONT))["entries"]}
+    assert drop_kids["T2"]["status"] == "removed" and drop_kids["T2"]["deleted"] is True, drop_kids
 
     # unknown commit → domain error (404 at the endpoint)
     try:
