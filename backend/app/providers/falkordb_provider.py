@@ -41,6 +41,29 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
+# Exception class names that indicate a Redis Cluster routing change (the
+# slot moved to another node) or a transient connection drop where a
+# single client rebuild + retry is the right response. Matched by name so
+# we don't hard-import redis cluster exceptions at module load.
+_CLUSTER_REDIRECT_EXC_NAMES = frozenset({
+    "MovedError", "AskError", "ClusterDownError", "TryAgainError",
+    "ConnectionError", "TimeoutError",
+})
+
+
+def _is_cluster_redirect(exc: BaseException) -> bool:
+    """True when *exc* (or its cause) looks like a cluster redirect /
+    transient connection error worth one transparent rebuild + retry."""
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        if type(seen).__name__ in _CLUSTER_REDIRECT_EXC_NAMES:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 def _redact_redis_url(url: str) -> str:
     """Strip embedded credentials from a Redis URL for safe logging.
 
@@ -285,12 +308,26 @@ class FalkorDBProvider(GraphDataProvider):
         projection_mode: str = "in_source",
         username: Optional[str] = None,
         password: Optional[str] = None,
+        connection_config: Optional[dict] = None,
     ):
         self._host = host
         self._port = port
         self._graph_name = graph_name
         self._seed_file = seed_file
         self._projection_mode = projection_mode  # "in_source" or "dedicated"
+        # Connection topology config (standalone / sentinel / cluster).
+        # Rides the provider record's extra_config["falkordbConnection"].
+        # None / absent / "standalone" → legacy single-host behavior.
+        # Resolved lazily in _ensure_connected via the connection factory.
+        self._connection_config = connection_config
+        self._conn_cfg = None  # populated by _ensure_connected (FalkorDBConnConfig)
+        # Failover state: a monotonic generation bumped on each client
+        # rebuild, plus a lock so concurrent MOVED/connection errors
+        # coalesce into a single rebuild instead of a thundering herd.
+        self._conn_generation = 0
+        self._failover_lock = asyncio.Lock()
+        self._proj_db = None   # separate client for {graph}_proj on cluster
+        self._proj_pool = None
         # P1.6 — credentials previously dropped silently in
         # ProviderManager._create_provider_instance, causing NOAUTH errors
         # to be mis-classified as network failures and triggering false
@@ -485,38 +522,53 @@ class FalkorDBProvider(GraphDataProvider):
             # on a semaphore inside the loop itself). The circuit-breaker
             # proxy around this provider translates the failure into
             # ProviderUnavailable before it reaches the web tier.
-            from redis.asyncio import ConnectionPool, Redis
-            from falkordb.asyncio import FalkorDB
+            from redis.asyncio import Redis
+            from backend.app.providers.falkordb_connection import (
+                load_connection_config,
+                build_graph_client,
+                build_cache_redis_fallback,
+            )
 
-            # Pool for graph (Cypher) queries — used by FalkorDB client.
-            # FALKORDB_SOCKET_TIMEOUT controls how long a single Cypher
-            # query can run before the socket times out.  The default 10s
-            # is generous for normal reads but necessary for batch MERGE
-            # operations in the aggregation worker.  The old 3s default
-            # caused "Timeout reading from localhost:6379" on any
-            # moderately-sized UNWIND+MERGE, tripping the circuit breaker
-            # and killing the entire provider (including API traffic).
+            # Resolve the connection topology (standalone / sentinel /
+            # cluster). Default mode is standalone → byte-for-byte the
+            # legacy single-host path. Sentinel/Cluster route via the
+            # connection factory's adapter (the FalkorDB client only
+            # accepts ``connection_pool=``). A single FalkorDB graph key
+            # lives on one node, so cluster mode routes to the owning node.
+            self._conn_cfg = load_connection_config(
+                self._connection_config,
+                host=self._host, port=self._port,
+                username=self._username, password=self._password,
+            )
+            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. The
+            # default 10s is generous for reads but necessary for batch
+            # MERGE in the aggregation worker. Host/port are supplied by
+            # the factory per mode, so they're omitted from pool_kwargs.
             graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
             socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
-            # P1.6 — auth credentials propagated to the driver. When the
-            # operator has configured a password on the FalkorDB instance,
-            # the ConnectionPool issues AUTH transparently on every new
-            # connection. Without this, queries return NOAUTH, the breaker
-            # mis-classifies as a network failure, and we trip a false
-            # outage.
-            _pool_kwargs: dict = {
-                "host": self._host,
-                "port": self._port,
+            _graph_pool_kwargs: dict = {
                 "max_connections": graph_pool_size,
                 "socket_connect_timeout": 2.0,
                 "socket_timeout": socket_timeout,
                 "decode_responses": True,
             }
+            # P1.6 — auth credentials propagated to the driver so the pool
+            # issues AUTH transparently (else NOAUTH is mis-classified as a
+            # network failure and trips a false breaker outage).
             if self._username:
-                _pool_kwargs["username"] = self._username
+                _graph_pool_kwargs["username"] = self._username
             if self._password:
-                _pool_kwargs["password"] = self._password
-            self._pool = ConnectionPool(**_pool_kwargs)
+                _graph_pool_kwargs["password"] = self._password
+            if self._conn_cfg.mode != "standalone":
+                logger.info(
+                    "FalkorDB provider connecting graph %r via %s",
+                    self._graph_name, self._conn_cfg.describe(),
+                )
+            self._db, self._pool = await build_graph_client(
+                self._conn_cfg,
+                graph_name=self._graph_name,
+                pool_kwargs=_graph_pool_kwargs,
+            )
             # Redis for non-graph ops (caching, materialization tracking,
             # ancestor chains, stats). When CACHE_REDIS_URL is set, these
             # go to a DEDICATED Redis instance — fully decoupled from
@@ -555,35 +607,39 @@ class FalkorDBProvider(GraphDataProvider):
                     self._redis_pool = None  # managed by from_url
                 else:
                     # Cache Redis falls back to the FalkorDB instance — same
-                    # host, same auth (P1.6). This is dev-compat only: in
+                    # topology, same auth (P1.6). Dev-compat only: in
                     # production CACHE_REDIS_URL MUST be set to a separate
-                    # Redis so a FalkorDB outage doesn't take caching with
-                    # it. Warn loudly so ops can spot the misconfiguration.
+                    # Redis. Mode-aware via the connection factory:
+                    # standalone/sentinel build a fallback client; cluster
+                    # returns None (cache needs cross-slot SCAN/pipelines a
+                    # single node can't serve), and the provider degrades to
+                    # cache-disabled rather than misbehaving.
                     logger.warning(
                         "CACHE_REDIS_URL is not set; FalkorDB provider's "
                         "ancestor/URN caches will share the FalkorDB instance "
-                        "(host=%s:%s). A FalkorDB outage will also disable "
-                        "caching. Set CACHE_REDIS_URL to a dedicated Redis "
-                        "in production.", self._host, self._port,
+                        "(%s). A FalkorDB outage will also disable caching. "
+                        "Set CACHE_REDIS_URL to a dedicated Redis in "
+                        "production.", self._conn_cfg.describe(),
                     )
                     _redis_pool_kwargs: dict = {
-                        "host": self._host,
-                        "port": self._port,
                         "max_connections": redis_pool_size,
                         "socket_connect_timeout": 2.0,
                         "socket_timeout": socket_timeout,
                         "decode_responses": True,
                     }
-                    if self._username:
-                        _redis_pool_kwargs["username"] = self._username
-                    if self._password:
-                        _redis_pool_kwargs["password"] = self._password
-                    self._redis_pool = ConnectionPool(**_redis_pool_kwargs)
-                    _raw_redis = Redis(connection_pool=self._redis_pool)
+                    _raw_redis = build_cache_redis_fallback(
+                        self._conn_cfg, pool_kwargs=_redis_pool_kwargs,
+                    )
+                    self._redis_pool = None
                 # Wrap in TimeoutRedis — every async call and pipeline.execute()
                 # automatically gets an asyncio.wait_for() deadline. No call-site
                 # wrapping needed. See backend/common/adapters/timeout_redis.py.
-                self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
+                if _raw_redis is None:
+                    # Cluster mode without a dedicated cache Redis → degrade.
+                    self._redis = None
+                    self._redis_available = False
+                else:
+                    self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
             except Exception as exc:
                 # Cache Redis construction failed. Provider continues
                 # without cache; queries are slower but available.
@@ -593,12 +649,25 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 self._redis = None
                 self._redis_available = False
-            self._db = FalkorDB(connection_pool=self._pool)
+            # self._db was built by the connection factory above.
             self._graph = self._db.select_graph(self._graph_name)
 
-            # Set up projection graph if using dedicated mode
+            # Set up projection graph if using dedicated mode. On a Redis
+            # Cluster, {graph}_proj may hash to a DIFFERENT shard than
+            # {graph}, so route it through its own owning-node client; in
+            # standalone/sentinel it shares the same client.
             if self._projection_mode == "dedicated":
-                self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
+                proj_name = f"{self._graph_name}_proj"
+                if self._conn_cfg.mode == "cluster":
+                    self._proj_db, self._proj_pool = await build_graph_client(
+                        self._conn_cfg,
+                        graph_name=proj_name,
+                        pool_kwargs=_graph_pool_kwargs,
+                    )
+                    self._proj_graph = self._proj_db.select_graph(proj_name)
+                else:
+                    self._proj_db = self._db
+                    self._proj_graph = self._db.select_graph(proj_name)
 
             # Verify the pool with one cheap round-trip — if this fails, we
             # treat the connect as failed and the caller's circuit breaker
@@ -683,32 +752,125 @@ class FalkorDBProvider(GraphDataProvider):
     def _db_timeout_ms(seconds: float) -> int:
         return max(500, int(seconds * 1000) - 500)
 
+    async def _rebuild_graph_client_for_failover(self, seen_generation: int) -> None:
+        """Re-resolve and rebuild the FalkorDB client(s) after a cluster
+        MOVED / connection drop. Coalesced: if another task already
+        rebuilt past ``seen_generation`` we no-op. In cluster mode this
+        re-discovers the node owning the graph key; in sentinel/standalone
+        it reconnects against the (possibly newly-promoted) master/host.
+        """
+        if self._conn_cfg is None:
+            return
+        async with self._failover_lock:
+            if seen_generation != self._conn_generation:
+                return  # someone else already rebuilt for this failure
+            from backend.app.providers.falkordb_connection import build_graph_client
+
+            socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
+            graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
+            pool_kwargs: dict = {
+                "max_connections": graph_pool_size,
+                "socket_connect_timeout": 2.0,
+                "socket_timeout": socket_timeout,
+                "decode_responses": True,
+            }
+            if self._username:
+                pool_kwargs["username"] = self._username
+            if self._password:
+                pool_kwargs["password"] = self._password
+
+            old_pool, old_proj_pool = self._pool, self._proj_pool
+            self._db, self._pool = await build_graph_client(
+                self._conn_cfg, graph_name=self._graph_name, pool_kwargs=pool_kwargs,
+            )
+            self._graph = self._db.select_graph(self._graph_name)
+            if self._projection_mode == "dedicated":
+                proj_name = f"{self._graph_name}_proj"
+                if self._conn_cfg.mode == "cluster":
+                    self._proj_db, self._proj_pool = await build_graph_client(
+                        self._conn_cfg, graph_name=proj_name, pool_kwargs=pool_kwargs,
+                    )
+                    self._proj_graph = self._proj_db.select_graph(proj_name)
+                else:
+                    self._proj_db = self._db
+                    self._proj_graph = self._db.select_graph(proj_name)
+            self._conn_generation += 1
+            logger.warning(
+                "FalkorDB %s: rebuilt client after failover (generation %d, %s).",
+                self._graph_name, self._conn_generation, self._conn_cfg.describe(),
+            )
+            # Best-effort close of superseded pools. In-flight ops on them
+            # either complete or fail and are retried by _run_guarded.
+            for p in (old_pool, old_proj_pool):
+                if p is not None and p is not self._pool and p is not self._proj_pool:
+                    try:
+                        await p.aclose()
+                    except Exception:
+                        pass
+
+    async def _run_guarded(self, call: Callable[[], Awaitable[Any]]) -> Any:
+        """Execute a graph call with one transparent failover retry in
+        cluster mode. ``call`` must reference ``self._graph`` / ``self._proj``
+        lazily so the retry picks up the rebuilt client. Standalone/sentinel
+        modes call through unchanged (the master pool self-heals on
+        failover, and the circuit breaker + worker resume handle the rest).
+        """
+        try:
+            return await call()
+        except Exception as exc:
+            if (
+                self._conn_cfg is None
+                or self._conn_cfg.mode != "cluster"
+                or not _is_cluster_redirect(exc)
+            ):
+                raise
+            gen = self._conn_generation
+            logger.warning(
+                "FalkorDB %s: cluster redirect/connection error (%s) — "
+                "rebuilding client and retrying once.",
+                self._graph_name, type(exc).__name__,
+            )
+            await self._rebuild_graph_client_for_failover(gen)
+            return await call()
+
     async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the source graph."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
-        async with self._query_semaphore:
+
+        async def _call():
             return await asyncio.wait_for(
                 self._graph.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
 
+        async with self._query_semaphore:
+            return await self._run_guarded(_call)
+
     async def _query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded write query on the source graph."""
         t = timeout if timeout is not None else self._WRITE_TIMEOUT
-        async with self._query_semaphore:
+
+        async def _call():
             return await asyncio.wait_for(
                 self._graph.query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
 
+        async with self._query_semaphore:
+            return await self._run_guarded(_call)
+
     async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the projection graph."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
-        async with self._query_semaphore:
+
+        async def _call():
             return await asyncio.wait_for(
                 self._proj.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
+
+        async with self._query_semaphore:
+            return await self._run_guarded(_call)
 
     def _quiesce_p95(self) -> float:
         """p95 of the rolling write-latency window (seconds). 0 if window empty."""
@@ -788,24 +950,26 @@ class FalkorDBProvider(GraphDataProvider):
         self._check_quiesce_gate()
 
         t = timeout if timeout is not None else self._WRITE_TIMEOUT
+
+        async def _call():
+            t_start = time.monotonic()
+            try:
+                return await asyncio.wait_for(
+                    self._proj.query(
+                        cypher, params=params or {},
+                        timeout=self._db_timeout_ms(t),
+                    ),
+                    timeout=t,
+                )
+            finally:
+                # Record latency regardless of success/failure so quiesce
+                # trips even when slow writes are also erroring out (the
+                # symptom we'd want to back off from).
+                self._record_write_latency(time.monotonic() - t_start)
+
         async with self._write_semaphore:
             async with self._query_semaphore:
-                t_start = time.monotonic()
-                try:
-                    result = await asyncio.wait_for(
-                        self._proj.query(
-                            cypher, params=params or {},
-                            timeout=self._db_timeout_ms(t),
-                        ),
-                        timeout=t,
-                    )
-                finally:
-                    # Record latency regardless of success/failure so
-                    # quiesce trips even when slow writes are also
-                    # erroring out (the symptom we'd want to back off
-                    # from).
-                    self._record_write_latency(time.monotonic() - t_start)
-                return result
+                return await self._run_guarded(_call)
 
     async def _seed_from_file(self):
         """Load graph from seed JSON file if graph is empty."""

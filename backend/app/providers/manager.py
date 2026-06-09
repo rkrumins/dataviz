@@ -683,12 +683,18 @@ class ProviderManager:
             # Passing username/password through means the driver issues
             # AUTH on every new connection and the breaker only fires for
             # real downstream failures.
+            # Connection topology (standalone / sentinel / cluster) rides
+            # extra_config["falkordbConnection"]. None / absent → the
+            # legacy single-host path. Previously extra_config was dropped
+            # on the FalkorDB branch (only Neo4j/Spanner consumed it).
+            _falkor_conn = (extra_config or {}).get("falkordbConnection")
             return FalkorDBProvider(
                 host=host or "localhost",
                 port=port or 6379,
                 graph_name=graph_name or "nexus_lineage",
                 username=creds.get("username"),
                 password=creds.get("password"),
+                connection_config=_falkor_conn,
             )
 
         elif ptype == "neo4j":
