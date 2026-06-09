@@ -71,6 +71,15 @@ describe('ContextViewHeader', () => {
     expect(screen.queryByRole('button', { name: /^Edit$/ })).not.toBeInTheDocument()
   })
 
+  it('keeps the visibility controls available in BOTH modes', () => {
+    const { rerender } = render(<ContextViewHeader {...baseProps({ isEditing: false })} />)
+    expect(screen.getByRole('button', { name: 'Lineage' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'View' })).toBeInTheDocument()
+    rerender(<ContextViewHeader {...baseProps({ isEditing: true })} />)
+    expect(screen.getByRole('button', { name: 'Lineage' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'View' })).toBeInTheDocument()
+  })
+
   it('entering Edit calls onEnterEdit', () => {
     const onEnterEdit = vi.fn()
     render(<ContextViewHeader {...baseProps({ onEnterEdit })} />)

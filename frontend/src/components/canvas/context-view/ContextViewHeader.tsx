@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import type { HierarchyNode } from './types'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { ToolbarSearch } from './ToolbarSearch'
+import { ViewControls } from './ViewControls'
 import { ExploreActions } from './ExploreActions'
 import { EditActions } from './EditActions'
 
@@ -195,8 +196,30 @@ export function ContextViewHeader({
           onOpenAdvancedSearch={onOpenAdvancedSearch}
         />
 
-        {/* Zone 3 — mode-partitioned actions */}
-        <div className="justify-self-end">
+        {/* Zone 3 — always-visible view controls + mode-partitioned actions */}
+        <div className="justify-self-end flex items-center gap-3">
+          {/* Visibility cluster — shown in both Explore and Edit so users can
+              adjust what's on the canvas without leaving their current mode. */}
+          <ViewControls
+            showLineageFlow={showLineageFlow}
+            onToggleLineageFlow={onToggleLineageFlow}
+            showEdgeDirection={showEdgeDirection}
+            onToggleEdgeDirection={onToggleEdgeDirection}
+            lineageRenderMode={lineageRenderMode}
+            onSetLineageRenderMode={onSetLineageRenderMode}
+            canvasZoom={canvasZoom}
+            onSetCanvasZoom={onSetCanvasZoom}
+            canvasDensity={canvasDensity}
+            onSetCanvasDensity={onSetCanvasDensity}
+            showCanvasTypeBadge={showCanvasTypeBadge}
+            onToggleCanvasTypeBadge={onToggleCanvasTypeBadge}
+            subtleCanvasTreeLines={subtleCanvasTreeLines}
+            onToggleSubtleCanvasTreeLines={onToggleSubtleCanvasTreeLines}
+            onResetCanvasDisplaySettings={onResetCanvasDisplaySettings}
+          />
+
+          <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
+
           <AnimatePresence mode="wait" initial={false}>
             {isEditing ? (
               <motion.div
@@ -231,21 +254,6 @@ export function ContextViewHeader({
                 transition={{ duration: 0.18, ease: 'easeOut' }}
               >
                 <ExploreActions
-                  showLineageFlow={showLineageFlow}
-                  onToggleLineageFlow={onToggleLineageFlow}
-                  showEdgeDirection={showEdgeDirection}
-                  onToggleEdgeDirection={onToggleEdgeDirection}
-                  lineageRenderMode={lineageRenderMode}
-                  onSetLineageRenderMode={onSetLineageRenderMode}
-                  canvasZoom={canvasZoom}
-                  onSetCanvasZoom={onSetCanvasZoom}
-                  canvasDensity={canvasDensity}
-                  onSetCanvasDensity={onSetCanvasDensity}
-                  showCanvasTypeBadge={showCanvasTypeBadge}
-                  onToggleCanvasTypeBadge={onToggleCanvasTypeBadge}
-                  subtleCanvasTreeLines={subtleCanvasTreeLines}
-                  onToggleSubtleCanvasTreeLines={onToggleSubtleCanvasTreeLines}
-                  onResetCanvasDisplaySettings={onResetCanvasDisplaySettings}
                   traceActive={traceActive}
                   canTrace={canTrace}
                   onStartTrace={onStartTrace}
