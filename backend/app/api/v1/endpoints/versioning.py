@@ -113,6 +113,21 @@ async def pr_in_workspace(
     return pr
 
 
+async def view_in_workspace(
+    ws_id: str,
+    view_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Resolve a view (management DB) and assert it lives in ``ws_id`` — 404 on a cross-tenant
+    miss. Views live in the management store, not the versioning store, so this is a separate
+    lookup (no cross-store join); it returns the view's ``data_source_id`` for PR scoping."""
+    from backend.app.db.models import ViewORM
+    v = await session.get(ViewORM, view_id)
+    if v is None or v.workspace_id != ws_id:
+        raise HTTPException(status_code=404, detail="view not found in workspace")
+    return {"view_id": v.id, "data_source_id": v.data_source_id, "workspace_id": v.workspace_id}
+
+
 @contextmanager
 def _domain_errors():
     """Translate service domain exceptions into HTTP responses."""
@@ -149,6 +164,13 @@ async def _live_containment_types(
     except Exception:
         logger.exception("containment-type resolution failed (ws=%s ds=%s)", workspace_id, data_source_id)
         return []
+
+
+async def _pr_containment_types(svc, session, ws_id, pr) -> List[str]:
+    """Containment edge types for a PR's hierarchical diff, resolved from the **base** graph's
+    data source (the side the merge lands on)."""
+    base = await svc.get_graph(str(pr["target_graph_id"]))
+    return await _live_containment_types(session, ws_id, base.get("data_source_id") if base else None)
 
 
 # --------------------------------------------------------------------------- #
@@ -346,6 +368,44 @@ class DiffVsMainResponse(_ApiModel):
     added: List[DiffEntry]
     removed: List[DiffEntry]
     modified: List[DiffEntry]
+
+
+class DiffTreeNode(_ApiModel):
+    """One row in the hierarchical diff — a ``container`` (expandable, nests changed
+    descendants), a ``bucket`` (a type/edgeType grouping of parent-less changes), or a
+    ``leaf`` (a single changed entity with whole-payload before/after). ``childTotal`` > 0
+    marks an expandable row (load via the children endpoint); ``counts`` is the rolled-up
+    add/modify/remove tally for a group, or the single op for a leaf."""
+    key: str                                              # entityId (container/leaf) or bucket key
+    kind: str                                             # container | bucket | leaf
+    label: str
+    entity_type: Optional[str] = Field(default=None, alias="entityType")
+    status: Optional[str] = None                          # added | modified | removed | unchanged
+    counts: Dict[str, int]
+    child_total: int = Field(alias="childTotal")
+    deleted: bool = False
+    before: Optional[dict] = None
+    after: Optional[dict] = None
+
+
+class DiffSummaryResponse(_ApiModel):
+    """Top of the hierarchical diff: the capped top-level groups, the total group count, the
+    global add/modify/remove counts (equal to the flat diff's), and an entityType impact
+    rollup (``{"Table": 17, "Column": 40, ...}``) for the summary header."""
+    groups: List[DiffTreeNode]
+    group_total: int = Field(alias="groupTotal")
+    counts: Dict[str, int]
+    impact: Dict[str, int]
+
+
+class DiffChildrenResponse(_ApiModel):
+    entries: List[DiffTreeNode]
+    total: int
+
+
+class ViewPrCountResponse(_ApiModel):
+    from_view: int = Field(alias="fromView")
+    on_data_source: int = Field(alias="onDataSource")
 
 
 class ForkResponse(_ApiModel):
@@ -679,13 +739,18 @@ async def get_entity_history(
 async def get_commit_log(
     ws_id: str, graph_id: str,
     branch_id: Optional[str] = Query(None, alias="branchId"),
+    originating_view_id: Optional[str] = Query(None, alias="originatingViewId"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    return {"commits": await svc.commit_log(graph_id=graph_id, branch_id=branch_id, limit=limit, offset=offset)}
+    """Commit log for a branch (default ``main``), or — with ``originatingViewId`` — the
+    change history attributed to one view across branches."""
+    return {"commits": await svc.commit_log(
+        graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
+        limit=limit, offset=offset)}
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff", response_model=DiffResponse)
@@ -712,6 +777,44 @@ async def get_diff_vs_main(
     and Changes panel consume directly, without client-side state joins."""
     with _domain_errors():
         return await svc.diff_branch_vs_base(graph_id=graph_id, branch_id=branch_id)
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/summary",
+            response_model=DiffSummaryResponse)
+async def get_diff_vs_main_summary(
+    ws_id: str, graph_id: str, branch_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Hierarchical (containment-tree) summary of a draft's changes for the canvas Changes
+    panel — top-level groups + global counts + entityType impact rollup."""
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.diff_branch_summary(
+            graph_id=graph_id, branch_id=branch_id, containment_edge_types=cset, limit=limit)
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/children",
+            response_model=DiffChildrenResponse)
+async def get_diff_vs_main_children(
+    ws_id: str, graph_id: str, branch_id: str,
+    container_key: str = Query(..., alias="containerKey"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One group's direct children in a draft's hierarchical diff (lazy-load)."""
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.diff_branch_children(
+            graph_id=graph_id, branch_id=branch_id, container_key=container_key,
+            containment_edge_types=cset, limit=limit, offset=offset)
 
 
 @router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)
@@ -986,6 +1089,40 @@ async def diff_pull_request(
         return await svc.diff_pr(pr_id=pr_id)
 
 
+@router.get("/pulls/{pr_id}/diff/summary", response_model=DiffSummaryResponse)
+async def diff_pull_request_summary(
+    ws_id: str, pr_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Hierarchical Files Changed for a PR (containment-tree summary)."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.diff_pr_summary(pr_id=pr_id, containment_edge_types=cset, limit=limit)
+
+
+@router.get("/pulls/{pr_id}/diff/children", response_model=DiffChildrenResponse)
+async def diff_pull_request_children(
+    ws_id: str, pr_id: str,
+    container_key: str = Query(..., alias="containerKey"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One group's direct children in a PR's hierarchical diff (lazy-load)."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.diff_pr_children(
+            pr_id=pr_id, container_key=container_key,
+            containment_edge_types=cset, limit=limit, offset=offset)
+
+
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
@@ -1060,6 +1197,59 @@ async def list_merge_requests(
     return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset)
 
 
+# --------------------------------------------------------------------------- #
+# View- and data-source-scoped PR access (the canvas review layer)             #
+# --------------------------------------------------------------------------- #
+@router.get("/views/{view_id}/pull-requests", response_model=List[PrResponse])
+async def list_view_pull_requests(
+    ws_id: str, view_id: str,
+    pr_status: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _view: dict = Depends(view_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """PRs raised from this view (matched via the source branch's ``originating_view_id``)."""
+    return await svc.list_pulls(
+        originating_view_id=view_id, status=pr_status, limit=limit, offset=offset)
+
+
+@router.get("/views/{view_id}/pull-requests/count", response_model=ViewPrCountResponse)
+async def count_view_pull_requests(
+    ws_id: str, view_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    view: dict = Depends(view_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Active-PR counts for the view's indicator: ``fromView`` (raised from this view) and
+    ``onDataSource`` (against the view's whole data source) — both excluding merged/closed."""
+    from_view = await svc.count_pulls(originating_view_id=view_id, active_only=True)
+    on_ds = 0
+    ds = view.get("data_source_id")
+    if ds:
+        on_ds = await svc.count_pulls(data_source_id=ds, active_only=True)
+    return {"fromView": from_view, "onDataSource": on_ds}
+
+
+@router.get("/data-sources/{data_source_id}/pull-requests", response_model=List[PrResponse])
+async def list_data_source_pull_requests(
+    ws_id: str, data_source_id: str,
+    pr_status: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """All PRs against a data source (every view on it). Tenant-isolated: the data source's
+    graph must live in ``ws_id``."""
+    g = await svc.get_graph_by_data_source(data_source_id)
+    if g is None or g["workspace_id"] != ws_id:
+        raise HTTPException(status_code=404, detail="data source not found in workspace")
+    return await svc.list_pulls(
+        data_source_id=data_source_id, status=pr_status, limit=limit, offset=offset)
+
+
 @router.get("/merge-requests/{pr_id}", response_model=PrResponse)
 async def get_merge_request(
     ws_id: str, pr_id: str,
@@ -1102,6 +1292,41 @@ async def diff_merge_request(
     """Itemised Files Changed for a merge request (same computation as ``/preview``)."""
     with _domain_errors():
         return await svc.diff_pr(pr_id=pr_id)
+
+
+@router.get("/merge-requests/{pr_id}/diff/summary", response_model=DiffSummaryResponse)
+async def diff_merge_request_summary(
+    ws_id: str, pr_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Hierarchical Files Changed for a merge request — containment-tree summary (top-level
+    groups + global counts + entityType impact). Children load via ``/diff/children``."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.diff_pr_summary(pr_id=pr_id, containment_edge_types=cset, limit=limit)
+
+
+@router.get("/merge-requests/{pr_id}/diff/children", response_model=DiffChildrenResponse)
+async def diff_merge_request_children(
+    ws_id: str, pr_id: str,
+    container_key: str = Query(..., alias="containerKey"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One group's direct children in a merge request's hierarchical diff (lazy-load)."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.diff_pr_children(
+            pr_id=pr_id, container_key=container_key,
+            containment_edge_types=cset, limit=limit, offset=offset)
 
 
 @router.post("/merge-requests/{pr_id}/approve", response_model=PrResponse)

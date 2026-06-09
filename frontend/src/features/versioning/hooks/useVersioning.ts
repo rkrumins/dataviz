@@ -28,6 +28,18 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'prDiff', ws, prId] as const,
   prPreview: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'prPreview', ws, prId] as const,
+  prDiffSummary: (ws?: string, prId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'prDiffSummary', ws, prId] as const,
+  branchDiffSummary: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchDiffSummary', ws, gid, bid] as const,
+  viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
+    [...VERSIONING_KEYS.all, 'viewPrs', ws, viewId, status ?? 'all'] as const,
+  dataSourcePrs: (ws?: string, dsId?: string | null, status?: string | null) =>
+    [...VERSIONING_KEYS.all, 'dataSourcePrs', ws, dsId, status ?? 'all'] as const,
+  viewPrCounts: (ws?: string, viewId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
+  viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -128,6 +140,77 @@ export function usePreviewMergeRequest(wsId?: string, prId?: string | null) {
   })
 }
 
+// ── Hierarchical diff + view review layer ────────────────────────────────────
+
+/** Top-level groups of a PR's hierarchical Files Changed (children load lazily). */
+export function usePrDiffSummary(wsId?: string, prId?: string | null, limit?: number) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId),
+    queryFn: () => api.getMergeRequestDiffSummary(wsId!, prId!, limit),
+    enabled: !!wsId && !!prId,
+    staleTime: 15_000,
+  })
+}
+
+/** Top-level groups of a draft's hierarchical diff (the canvas Changes panel). */
+export function useBranchDiffSummary(
+  wsId?: string, graphId?: string | null, branchId?: string | null, limit?: number,
+) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchDiffSummary(wsId, graphId, branchId),
+    queryFn: () => api.getBranchDiffSummary(wsId!, graphId!, branchId!, limit),
+    enabled: !!wsId && !!graphId && !!branchId,
+    staleTime: 10_000,
+  })
+}
+
+/** PRs raised from a view. */
+export function useViewPullRequests(wsId?: string, viewId?: string | null, status?: string) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.viewPrs(wsId, viewId, status),
+    queryFn: () => api.listViewPullRequests(wsId!, viewId!, status ? { status } : {}),
+    enabled: !!wsId && !!viewId,
+    staleTime: 15_000,
+  })
+}
+
+/** All PRs against a data source (gated — only fetched when the user opts into the wider view). */
+export function useDataSourcePullRequests(
+  wsId?: string, dataSourceId?: string | null, status?: string, enabled = true,
+) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.dataSourcePrs(wsId, dataSourceId, status),
+    queryFn: () => api.listDataSourcePullRequests(wsId!, dataSourceId!, status ? { status } : {}),
+    enabled: !!wsId && !!dataSourceId && enabled,
+    staleTime: 15_000,
+  })
+}
+
+/** Active-PR counts for a view's canvas indicator. */
+export function useViewPrCounts(wsId?: string, viewId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.viewPrCounts(wsId, viewId),
+    queryFn: () => api.getViewPrCounts(wsId!, viewId!),
+    enabled: !!wsId && !!viewId,
+    staleTime: 20_000,
+  })
+}
+
+/** A view's change history — view-scoped (across branches) or graph-wide (`main`). */
+export function useViewCommitLog(
+  wsId?: string, graphId?: string | null,
+  opts: { viewId?: string | null; graphWide?: boolean; limit?: number } = {},
+) {
+  const { viewId, graphWide, limit } = opts
+  return useQuery({
+    queryKey: VERSIONING_KEYS.viewCommitLog(wsId, graphId, viewId, graphWide, limit),
+    queryFn: () =>
+      api.getCommitLog(wsId!, graphId!, graphWide || !viewId ? { limit } : { originatingViewId: viewId, limit }),
+    enabled: !!wsId && !!graphId && (graphWide || !!viewId),
+    staleTime: 15_000,
+  })
+}
+
 // ── Mutations ────────────────────────────────────────────────────────────────
 
 /** Enable version control for a data source (create-or-seed its versioned graph). */
@@ -202,6 +285,9 @@ export function useOpenMergeRequest(wsId: string, graphId: string) {
       api.openMergeRequest(wsId, graphId, v.branchId, { title: v.title, description: v.description, reviewers: v.reviewers }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
     },
   })
 }
@@ -213,6 +299,11 @@ function useInvalidatePr(wsId: string) {
   return (prId: string, graphId: string) => {
     qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequests(wsId, graphId) })
     qc.invalidateQueries({ queryKey: VERSIONING_KEYS.mergeRequest(wsId, prId) })
+    // The view/data-source lists + indicator counts are keyed by view/ds (unknown here),
+    // so refresh them by prefix — a status change moves a PR in/out of the active set.
+    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
+    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
+    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
   }
 }
 

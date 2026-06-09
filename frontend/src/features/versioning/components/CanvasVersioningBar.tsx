@@ -8,10 +8,11 @@
  * the committed change counts (+ unsaved-edit hint), and Review / Publish / Discard.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, PanelRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
+import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useAbandonDraft, useBootstrapGraph, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
@@ -20,6 +21,8 @@ import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { BranchSwitcher } from './BranchSwitcher'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
+import { ViewPrIndicator } from './ViewPrIndicator'
+import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
 interface CanvasVersioningBarProps {
   workspaceId: string
@@ -41,6 +44,10 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   const switchToMain = useBranchStore((s) => s.switchToMain)
 
   const [showPublish, setShowPublish] = useState(false)
+  const [panelTab, setPanelTab] = useState<ViewPanelTab | null>(null)
+  const activeView = useActiveView()
+  const viewId = activeView?.id ?? null
+  const viewName = activeView?.name ?? null
   const uncommitted = useStagedChangeCount()
 
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null)
@@ -119,24 +126,37 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
         <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />
 
         {isDraft && branchId && (
+          <div className="flex items-center gap-2 text-ink-muted">
+            {diffQ.isLoading ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : changeSet.changes.length > 0 ? (
+              <ChangeCountChips changeSet={changeSet} />
+            ) : (
+              <span className="text-xs">No committed changes yet</span>
+            )}
+            {uncommitted > 0 && (
+              <span className="text-xs text-amber-500" title="Edits not yet committed to the draft">
+                · {uncommitted} unsaved
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {/* Review layer — shown on both main and draft strips. */}
+        <ViewPrIndicator wsId={workspaceId} viewId={viewId} onOpen={() => setPanelTab('prs')} />
+        <button
+          onClick={() => setPanelTab(isDraft ? 'changes' : 'history')}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-ink-muted hover:bg-canvas-overlay transition-colors"
+          title="Changes, pull requests & history for this view"
+        >
+          <PanelRight className="w-3.5 h-3.5" />
+          Reviews
+        </button>
+
+        {isDraft && branchId && (
           <>
-            <div className="flex items-center gap-2 text-ink-muted">
-              {diffQ.isLoading ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : changeSet.changes.length > 0 ? (
-                <ChangeCountChips changeSet={changeSet} />
-              ) : (
-                <span className="text-xs">No committed changes yet</span>
-              )}
-              {uncommitted > 0 && (
-                <span className="text-xs text-amber-500" title="Edits not yet committed to the draft">
-                  · {uncommitted} unsaved
-                </span>
-              )}
-            </div>
-
-            <div className="flex-1" />
-
             <button
               onClick={() => setShowDiff(!showDiff, { source: 'branch', branchId })}
               className={cn(
@@ -175,6 +195,19 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
           branchId={branchId}
           changeSet={changeSet}
           onClose={() => setShowPublish(false)}
+        />
+      )}
+
+      {panelTab && graphId && (
+        <ViewVersioningPanel
+          wsId={workspaceId}
+          graphId={graphId}
+          viewId={viewId}
+          dataSourceId={dataSourceId}
+          branchId={isDraft ? branchId : null}
+          viewName={viewName}
+          initialTab={panelTab}
+          onClose={() => setPanelTab(null)}
         />
       )}
     </>
