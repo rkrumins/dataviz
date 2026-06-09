@@ -119,7 +119,9 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
     <>
       <div
         className={cn(
-          'flex items-center gap-3 px-3 py-1.5 border-b text-sm shrink-0',
+          // flex-wrap + min-w-0: on a narrow canvas the controls wrap to a second line
+          // instead of overflowing — the indicator/Reviews/Publish actions stay reachable.
+          'flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 border-b text-sm shrink-0 min-w-0',
           isDraft ? 'bg-amber-500/10 border-amber-500/20' : 'bg-canvas-elevated/40 border-glass-border',
         )}
       >

@@ -183,7 +183,7 @@ export function ContextViewHeader({
       {/* Subtle gradient overlay — dark-mode decoration */}
       <div className="absolute inset-0 hidden dark:block bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
 
-      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 relative">
+      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 relative min-w-0">
         {/* Title */}
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-lineage/20 to-purple-500/20 flex items-center justify-center shadow-lg shadow-accent-lineage/10">
@@ -217,7 +217,7 @@ export function ContextViewHeader({
               · Focus state lifts shadow + accent ring (not just border)
               · Eye-pill scope indicator AND a kbd hint when idle
               · Subtle inner ring on hover for "this is interactive" */}
-        <div className="justify-self-center w-full max-w-md">
+        <div className="justify-self-center w-full max-w-md min-w-0">
           <div className="relative group">
             {/* Accent halo on focus — soft glow behind the input that
                 lifts it off the header gradient. Pure decoration; sits
@@ -367,8 +367,10 @@ export function ContextViewHeader({
           )}
         </div>
 
-        {/* Zone 3 — Actions */}
-        <div className="flex items-center gap-3">
+        {/* Zone 3 — Actions. Wraps (never clips) when space is tight: the search collapses
+            first (min-w-0 above), then these wrap to a second line, right-aligned, so the
+            Save / Pending buttons are always visible and clickable. */}
+        <div className="flex flex-wrap items-center justify-end gap-2 min-w-0">
           {/* Lineage Flow Toggle — single stable label. State is conveyed
               through the colored dot + active gradient. Trace state lives
               on its own button below; this label no longer encodes it. */}
@@ -551,7 +553,7 @@ export function ContextViewHeader({
 
           {/* Undo/Redo */}
           {(canUndo || canRedo) && (
-            <div className="flex items-stretch rounded-xl overflow-hidden bg-black/[0.03] dark:bg-gradient-to-b dark:from-white/[0.06] dark:to-white/[0.02] border border-black/[0.10] dark:border-white/[0.08]">
+            <div className="flex items-stretch rounded-xl overflow-hidden shrink-0 bg-black/[0.03] dark:bg-gradient-to-b dark:from-white/[0.06] dark:to-white/[0.02] border border-black/[0.10] dark:border-white/[0.08]">
               <button
                 onClick={onUndo}
                 disabled={!canUndo}
@@ -591,7 +593,7 @@ export function ContextViewHeader({
             <button
               onClick={onOpenStagedChanges}
               title="Review pending changes"
-              className="relative flex items-center gap-2 pl-2.5 pr-3 py-2 rounded-xl bg-gradient-to-br from-amber-300/25 via-amber-400/20 to-orange-500/15 border border-amber-400/60 text-amber-800 hover:from-amber-300/35 hover:to-orange-500/25 hover:border-amber-400/80 transition-all shadow-sm shadow-amber-500/15 hover:shadow-md hover:shadow-amber-500/20 dark:text-amber-100 dark:border-amber-300/50 dark:hover:border-amber-200/70 dark:hover:shadow-lg dark:hover:shadow-amber-500/25"
+              className="relative flex items-center gap-2 pl-2.5 pr-3 py-2 rounded-xl shrink-0 whitespace-nowrap bg-gradient-to-br from-amber-300/25 via-amber-400/20 to-orange-500/15 border border-amber-400/60 text-amber-800 hover:from-amber-300/35 hover:to-orange-500/25 hover:border-amber-400/80 transition-all shadow-sm shadow-amber-500/15 hover:shadow-md hover:shadow-amber-500/20 dark:text-amber-100 dark:border-amber-300/50 dark:hover:border-amber-200/70 dark:hover:shadow-lg dark:hover:shadow-amber-500/25"
             >
               <span className="absolute -top-1 -right-1 flex h-3 w-3">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-500 dark:bg-amber-300 opacity-75" />
@@ -610,7 +612,7 @@ export function ContextViewHeader({
             onClick={onSave}
             disabled={(syncStatus !== 'dirty' && syncStatus !== 'error' && pendingChangeCount === 0) || !activeWorkspaceId}
             className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 shrink-0 whitespace-nowrap",
               (syncStatus === 'dirty' || pendingChangeCount > 0)
                 ? "bg-gradient-to-r from-blue-500/15 to-cyan-500/[0.08] text-blue-700 border border-blue-500/40 hover:from-blue-500/25 hover:to-cyan-500/15 hover:border-blue-500/60 dark:from-blue-500/20 dark:to-cyan-500/10 dark:text-blue-400 dark:border-blue-500/30 dark:hover:shadow-lg dark:hover:shadow-blue-500/20"
                 : syncStatus === 'error'

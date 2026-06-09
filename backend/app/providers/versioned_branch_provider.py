@@ -68,14 +68,19 @@ class VersionedBranchProvider:
     # ---- reads: bounded Postgres over base + overlay -------------------- #
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         d = await self._svc.get_node_from_state(
-            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of, urn=urn)
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of, urn=urn,
+            containment_edge_types=self._containment_types)
         return GraphNode(**d) if d else None
 
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
+        # Pass the (engine-resolved) containment types so the draft read computes childCount,
+        # exactly as FalkorDB does for main — without it, draft nodes lose their expand chevron.
         rows = await self._svc.get_nodes_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             urns=query.urns, entity_types=query.entity_types, search_query=query.search_query,
-            limit=query.limit or 100, offset=query.offset or 0)
+            limit=query.limit or 100, offset=query.offset or 0,
+            containment_edge_types=self._containment_types,
+            include_child_count=getattr(query, "include_child_count", True))
         return [GraphNode(**d) for d in rows]
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:

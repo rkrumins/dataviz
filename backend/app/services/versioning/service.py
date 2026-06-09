@@ -1343,10 +1343,12 @@ class GraphVersioningService:
 
     async def get_node_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
-        as_of_seq: Optional[int] = None,
+        as_of_seq: Optional[int] = None, containment_edge_types: Optional[Sequence[str]] = None,
     ) -> Optional[dict]:
         """A single node by urn on a branch (default ``main``), branch/as-of composed — the
-        draft/as-of counterpart of the provider's ``get_node``. Reader-shaped or ``None``."""
+        draft/as-of counterpart of the provider's ``get_node``. Reader-shaped or ``None``;
+        carries ``childCount`` (parity with FalkorDB) when containment types are supplied."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
         async with self._session() as s:
             if branch_id is None:
                 branch_id = await self._main_branch_id(s, graph_id)
@@ -1354,15 +1356,39 @@ class GraphVersioningService:
             if eid is None:
                 return None
             p = (await self._current_values(s, graph_id, branch_id, [eid], as_of_seq)).get(eid)
-        if p is None or _is_edge_payload(p):
-            return None
-        return _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
+            if p is None or _is_edge_payload(p):
+                return None
+            nd = _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
+            await self._attach_child_counts(s, graph_id, branch_id, [nd], cset, as_of_seq)
+        return nd
+
+    async def _attach_child_counts(self, s, graph_id, branch_id, node_dicts, cset, as_of_seq):
+        """Attach each node's OUT-containment child count to its reader dict — the single
+        count-shaping path shared by every branch/as-of node read (``get_nodes_from_state``,
+        ``get_children_with_edges_from_state``, ``top_level_from_state``), so the Postgres
+        reader can't drift from FalkorDB (which counts children in every read). One bounded
+        ``_incident_live_edges`` scan over the page's ids; ``childCount`` is always set (0 when
+        there are no containment children), matching FalkorDB's ``0 as childCount``."""
+        ids = {nd["entityId"] for nd in node_dicts}
+        counts: Dict[str, int] = {}
+        if cset and ids:
+            inc = await self._incident_live_edges(s, graph_id, branch_id, ids, as_of_seq)
+            for _eid, p in inc.items():
+                if (p.get("edgeType") or "").upper() not in cset:
+                    continue
+                a, _b = _edge_src_tgt(p)
+                if a in ids:
+                    counts[a] = counts.get(a, 0) + 1
+        for nd in node_dicts:
+            _set_child_count(nd, counts.get(nd["entityId"], 0))
 
     async def get_nodes_from_state(
         self, *, graph_id: str, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, urns: Optional[Sequence[str]] = None,
         entity_types: Optional[Sequence[str]] = None,
         search_query: Optional[str] = None, limit: int = 100, offset: int = 0,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        include_child_count: bool = True,
     ) -> List[dict]:
         """Branch- and as-of-aware node filter read, served from Postgres — the draft/as-of
         counterpart of the provider's ``get_nodes``, so a user working in a draft sees their
@@ -1424,14 +1450,17 @@ class GraphVersioningService:
                 s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
             cand.update(overlay_ids)
             vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
-
-        rows = [
-            _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
-            for eid, p in vals.items()
-            if p is not None and not _is_edge_payload(p) and matches(p)
-        ]
-        rows.sort(key=lambda r: ((r.get("displayName") or ""), r["entityId"]))
-        return rows[offset: offset + limit]
+            rows = [
+                _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
+                for eid, p in vals.items()
+                if p is not None and not _is_edge_payload(p) and matches(p)
+            ]
+            rows.sort(key=lambda r: ((r.get("displayName") or ""), r["entityId"]))
+            page = rows[offset: offset + limit]
+            if include_child_count:
+                cset = {t.upper() for t in (containment_edge_types or [])}
+                await self._attach_child_counts(s, graph_id, branch_id, page, cset, as_of_seq)
+        return page
 
     async def search_from_state(
         self, *, graph_id: str, query: str, branch_id: Optional[str] = None,
@@ -1531,7 +1560,7 @@ class GraphVersioningService:
         self, *, graph_id: str, parent_urn: str, containment_edge_types: Sequence[str],
         lineage_edge_types: Optional[Sequence[str]] = None, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, include_lineage_edges: bool = True,
-        limit: int = 100, offset: int = 0,
+        include_child_count: bool = True, limit: int = 100, offset: int = 0,
     ) -> Dict[str, object]:
         """Branch/as-of-aware children-with-edges — the draft/as-of counterpart of the
         provider's ``get_children_with_edges``. One bounded round trip: the parent's OUT
@@ -1567,14 +1596,19 @@ class GraphVersioningService:
             page_ids = {eid for eid, _ in page}
 
             lineage: List[Tuple[str, dict]] = []
-            if include_lineage_edges and page_ids:
+            child_cc: Dict[str, int] = {}
+            if page_ids and (include_lineage_edges or include_child_count):
                 scope = page_ids | {parent}
+                # One incident scan over the page serves both the lineage edges and each child's
+                # OUT-containment count (so an expanded child shows its own chevron) — no extra query.
                 for eid, p in (await self._incident_live_edges(s, graph_id, branch_id, page_ids, as_of_seq)).items():
                     et = (p.get("edgeType") or "").upper()
-                    if et in cset or (lset is not None and et not in lset):
-                        continue
                     a, b = _edge_src_tgt(p)
-                    if a in scope and b in scope:
+                    if et in cset:
+                        if include_child_count and a in page_ids:
+                            child_cc[a] = child_cc.get(a, 0) + 1
+                        continue
+                    if include_lineage_edges and (lset is None or et in lset) and a in scope and b in scope:
                         lineage.append((eid, p))
 
             need = page_ids | {parent}
@@ -1588,6 +1622,9 @@ class GraphVersioningService:
             for eid, p in node_vals.items()
         }
         children_out = [_graphnode_dict(eid, urn_of.get(eid, f"gv:{eid}"), p) for eid, p in page]
+        if include_child_count:
+            for nd in children_out:
+                _set_child_count(nd, child_cc.get(nd["entityId"], 0))
         cont_out = [_graphedge_dict(cont_edge[eid][0], cont_edge[eid][1], urn_of) for eid, _ in page]
         lin_out = [_graphedge_dict(eid, p, urn_of) for eid, p in lineage]
         has_more = offset + len(page) < total
@@ -1687,9 +1724,7 @@ class GraphVersioningService:
         for eid, p in page:
             nd = _graphnode_dict(eid, p.get("urn") or f"gv:{eid}", p)
             if include_child_count:
-                cc = child_count.get(eid, 0)
-                nd["childCount"] = cc
-                nd["properties"] = {**nd["properties"], "childCount": cc}
+                _set_child_count(nd, child_count.get(eid, 0))
             out_nodes.append(nd)
             if rset and p.get("entityType") in rset:
                 root_count += 1
@@ -3460,6 +3495,14 @@ def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
         "properties": payload.get("properties") or {},
         "tags": payload.get("tags") or [],
     }
+
+
+def _set_child_count(nd: dict, cc: int) -> None:
+    """Stamp a reader node dict with its containment ``childCount`` (top-level field + mirrored
+    into ``properties`` — the canvas reads either). The one attach shape every branch/as-of node
+    read shares, so drafts stay at parity with FalkorDB's per-read child counts."""
+    nd["childCount"] = cc
+    nd["properties"] = {**(nd.get("properties") or {}), "childCount": cc}
 
 
 def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
