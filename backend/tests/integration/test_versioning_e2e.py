@@ -18,6 +18,7 @@ from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import (
     GraphVersioningService,
     MergeConflict,
+    NotUpToDate,
 )
 
 
@@ -67,7 +68,7 @@ async def _run_flow() -> None:
     diff = await svc.diff_commits(graph_id=gid, branch_id=main, from_seq=1, to_seq=2)
     assert set(diff["added"]) == {"A", "B", "C", "E1"}
 
-    # stale draft auto-rebases onto an advanced main (non-overlapping → no conflict)
+    # a behind draft is blocked from publishing until it pulls latest; the pull is clean here (non-overlapping)
     g2 = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
     gid2 = g2["graph_id"]
     da = await svc.open_draft(graph_id=gid2, owner="alice")
@@ -77,6 +78,9 @@ async def _run_flow() -> None:
     await svc.publish(graph_id=gid2, branch_id=da, actor="alice", message="A adds X")   # main -> 2
     await svc.stage_changes(graph_id=gid2, branch_id=dbob, actor="bob", ops=[{"op": "create", "entity_kind": "node", "entity_id": "Y", "payload": {"displayName": "Y"}}])
     await svc.checkpoint(graph_id=gid2, branch_id=dbob, actor="bob")
+    with pytest.raises(NotUpToDate):                                        # behind main → must pull latest first
+        await svc.publish(graph_id=gid2, branch_id=dbob, actor="bob", message="B adds Y")
+    assert (await svc.rebase_draft(graph_id=gid2, branch_id=dbob, actor="bob"))["clean"] is True
     await svc.publish(graph_id=gid2, branch_id=dbob, actor="bob", message="B rebases, adds Y")
     rebased = await svc.materialize_state(graph_id=gid2, branch_id=await svc.main_branch_id(gid2))
     assert set(rebased["nodes"]) == {"X", "Y"}, rebased
@@ -117,7 +121,10 @@ async def _run_flow() -> None:
     await svc.stage_changes(graph_id=gid4, branch_id=d2, actor="bob", ops=[
         {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f1": 1, "f2": 9}}])
     await svc.checkpoint(graph_id=gid4, branch_id=d2, actor="bob")
-    assert (await svc.preview_merge(graph_id=gid4, branch_id=d2))["clean"] is True
+    assert (await svc.preview_merge(graph_id=gid4, branch_id=d2))["clean"] is True   # would merge cleanly, but
+    with pytest.raises(NotUpToDate):                                                  # hard gate: behind → pull first
+        await svc.publish(graph_id=gid4, branch_id=d2, actor="bob", message="d2 sets f2")
+    assert (await svc.rebase_draft(graph_id=gid4, branch_id=d2, actor="bob"))["clean"] is True
     await svc.publish(graph_id=gid4, branch_id=d2, actor="bob", message="d2 sets f2 (rebased)")  # main 4
     A = (await svc.materialize_state(graph_id=gid4, branch_id=main4))["nodes"]["A"]
     assert A["f1"] == 2 and A["f2"] == 9, A           # both non-overlapping edits survived
@@ -134,10 +141,13 @@ async def _run_flow() -> None:
     await svc.checkpoint(graph_id=gid4, branch_id=e2, actor="bob")
     prev = await svc.preview_merge(graph_id=gid4, branch_id=e2)
     assert prev["clean"] is False and prev["conflicts"][0]["path"] == ["f1"], prev
-    with pytest.raises(MergeConflict):
+    with pytest.raises(NotUpToDate):                                       # behind → pull latest before publish
         await svc.publish(graph_id=gid4, branch_id=e2, actor="bob", message="e2 f1=20")
-    await svc.publish(graph_id=gid4, branch_id=e2, actor="bob", message="resolved",
-                      resolutions={"A": {"displayName": "A", "f1": 99, "f2": 9}})          # main 6
+    rc = await svc.rebase_draft(graph_id=gid4, branch_id=e2, actor="bob")  # same-field clash surfaces at the pull
+    assert rc["clean"] is False and rc["conflicts"][0]["path"] == ["f1"], rc
+    assert (await svc.rebase_draft(graph_id=gid4, branch_id=e2, actor="bob",
+            resolutions={"A": {"displayName": "A", "f1": 99, "f2": 9}}))["clean"] is True
+    await svc.publish(graph_id=gid4, branch_id=e2, actor="bob", message="resolved")        # main 6
     A2 = (await svc.materialize_state(graph_id=gid4, branch_id=main4))["nodes"]["A"]
     assert A2["f1"] == 99, A2
 

@@ -44,6 +44,7 @@ from backend.app.services.versioning.service import (
     ConcurrencyError,
     GraphVersioningService,
     MergeConflict,
+    NotUpToDate,
     OntologyViolation,
 )
 
@@ -177,6 +178,10 @@ def _domain_errors():
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ApprovalRequired as exc:
         raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending})
+    except NotUpToDate as exc:
+        raise HTTPException(status_code=409, detail={
+            "type": "not_up_to_date", "branchId": exc.branch_id, "behindBy": exc.behind_by,
+            "message": str(exc)})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
@@ -270,6 +275,10 @@ class PublishRequest(_ApiModel):
 
 class RevertRequest(_ApiModel):
     message: Optional[str] = None
+
+
+class RebaseRequest(_ApiModel):
+    resolutions: Optional[Dict[str, Optional[dict]]] = None
 
 
 class ForkRequest(_ApiModel):
@@ -711,6 +720,22 @@ async def abandon_draft(
 ):
     with _domain_errors():
         return await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/rebase")
+async def rebase_draft(
+    ws_id: str, graph_id: str, branch_id: str, body: RebaseRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Pull the latest ``main`` into a draft ("update branch"). Returns ``{clean, conflicts, changes,
+    baseCommitSeq}``; on ``clean: false`` the client resolves the conflicts and resubmits with
+    ``resolutions``."""
+    with _domain_errors():
+        return await svc.rebase_draft(
+            graph_id=graph_id, branch_id=branch_id, actor=user.id, resolutions=body.resolutions,
+        )
 
 
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)

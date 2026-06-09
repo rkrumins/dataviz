@@ -102,6 +102,21 @@ class ApprovalRequired(RuntimeError):
         self.pending = list(pending)
 
 
+class NotUpToDate(RuntimeError):
+    """A draft is behind ``main`` and must pull the latest changes (rebase) before it can be
+    merged — the 'require up to date before merging' gate. ``.behind_by`` is how many commits it
+    lags so the UI can prompt a one-click 'Pull latest'."""
+
+    def __init__(self, branch_id: str, base_seq: int, head_seq: int):
+        super().__init__(
+            f"draft {branch_id} is out of date (base {base_seq} < main {head_seq}); "
+            f"pull the latest changes before merging")
+        self.branch_id = branch_id
+        self.base_seq = base_seq
+        self.head_seq = head_seq
+        self.behind_by = head_seq - base_seq
+
+
 #: editor and maintainer may edit; only maintainer (and the owner) may manage/publish.
 ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 
@@ -487,6 +502,8 @@ class GraphVersioningService:
             if draft.is_shared:                           # publishing a shared draft → maintainer
                 await self._require_manage(s, draft, actor, actor_groups)
             main_id = await self._main_branch_id(s, graph_id)
+            if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
+                raise NotUpToDate(branch_id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
 
             merged_state, conflicts, theirs = await self._compute_merge(
                 s, graph_id, graph, draft, main_id, dict(resolutions or {})
@@ -563,6 +580,64 @@ class GraphVersioningService:
         if ps is not None:
             ps.target_commit_seq = new_seq
         return squash.id
+
+    async def rebase_draft(
+        self, *, graph_id: str, branch_id: str, actor: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        message: str = "pull latest from main",
+    ) -> Dict[str, object]:
+        """Pull the latest ``main`` into a draft ("update branch"): re-base the draft's edits onto
+        current main with the same field-level 3-way merge as publish, but writing the result back
+        into the DRAFT (the mirror of :meth:`_apply_draft_squash`). Same-field conflicts are returned
+        (``{clean: False, conflicts}``) for resolution — resubmit with ``resolutions={entity_id:
+        payload|None}``. On a clean rebase the draft's own edits are rewritten to the merged result
+        and ``base_commit_seq`` advances to the current main head, so the draft is up-to-date and
+        mergeable. Returns ``{clean, conflicts, changes, base_commit_seq}``."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            draft = await s.get(BranchORM, branch_id)
+            if graph is None or draft is None or draft.graph_id != graph_id:
+                raise ValueError("unknown graph/branch")
+            self._require_open(draft)
+            if draft.kind == "main":
+                raise ValueError("main has no base to rebase")
+            main_id = await self._main_branch_id(s, graph_id)
+            if (draft.base_commit_seq or 0) >= graph.main_head_commit_seq:
+                return {"clean": True, "conflicts": [], "changes": _delta_stats([]),
+                        "base_commit_seq": draft.base_commit_seq, "already_up_to_date": True}
+
+            merged_state, conflicts, _theirs = await self._compute_merge(
+                s, graph_id, graph, draft, main_id, dict(resolutions or {})
+            )
+            if conflicts:
+                return {"clean": False, "conflicts": conflicts}
+
+            # Rewrite ONLY the draft's own edits to the merged result, then re-base onto the new main
+            # head — entities the draft never touched come from the advanced base automatically.
+            self._cascade_incident_edges(merged_state)
+            self._assert_referential_integrity(merged_state)
+            own = await self._branch_own_payloads(s, graph_id, draft.id)
+            deltas = net_delta(own, {eid: merged_state.get(eid) for eid in own})
+            if deltas:
+                kind_by_entity = await self._kind_map_multi(
+                    s, [(graph_id, draft.id), (graph_id, main_id)]
+                )
+                commit = CommitORM(
+                    graph_id=graph_id, branch_id=draft.id,
+                    commit_seq=await self._next_seq(s, graph_id, draft.id),
+                    parent_commit_id=draft.head_commit_id, kind="checkpoint",
+                    message=message, actor=actor,
+                )
+                s.add(commit)
+                await s.flush()
+                await self._write_deltas(s, graph_id, draft.id, commit, deltas, kind_by_entity, actor)
+                commit.merkle_root = await self._merkle_root(s, graph_id, draft.id)
+                commit.stats = _delta_stats(deltas)
+                draft.head_commit_id = commit.id
+            draft.base_commit_seq = graph.main_head_commit_seq
+            draft.updated_at = _now()
+            return {"clean": True, "conflicts": [], "changes": _delta_stats(deltas),
+                    "base_commit_seq": draft.base_commit_seq}
 
     async def abandon_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
@@ -1114,6 +1189,8 @@ class GraphVersioningService:
                 raise ValueError("merge request endpoints missing")
             self._require_open(draft)
             main_id = await self._main_branch_id(s, graph.id)
+            if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
+                raise NotUpToDate(draft.id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
             merged_state, conflicts, theirs = await self._compute_merge(
                 s, graph.id, graph, draft, main_id, dict(resolutions or {})
             )
