@@ -3971,6 +3971,7 @@ def _build_diff_hierarchy(
         return {
             "key": eid,
             "kind": "container" if child else "leaf",
+            "entityKind": "edge" if is_edge(eid) else "node",
             "label": label,
             "entityType": entity_type,
             "status": _OP_STATUS[d.op] if d else "unchanged",
@@ -3990,7 +3991,8 @@ def _build_diff_hierarchy(
                 c[_OP_STATUS[d.op]] += 1
         kind, _, name = key.partition(":")
         return {
-            "key": key, "kind": "bucket", "label": name,
+            "key": key, "kind": "bucket", "entityKind": "edge" if kind == "edge" else "node",
+            "label": name,
             "entityType": name if kind == "type" else None,
             "status": None, "counts": c, "childTotal": len(members),
             "deleted": False, "before": None, "after": None,
@@ -4002,23 +4004,30 @@ def _build_diff_hierarchy(
     )
     bucket_views = sorted((bucket_view(k) for k in buckets), key=lambda g: g["label"].lower())
 
+    # Split the change tally into entities (nodes) vs relationships (non-containment edges) so the
+    # UI can show both dimensions clearly. Containment edges are structural (suppressed in the tree)
+    # and counted only in the grand total. ``impact`` stays an entityType rollup for the entity line.
     counts = {"added": 0, "modified": 0, "removed": 0}
+    entity_counts = {"added": 0, "modified": 0, "removed": 0}
+    edge_counts = {"added": 0, "modified": 0, "removed": 0}
     for d in deltas:
-        counts[_OP_STATUS[d.op]] += 1
+        st = _OP_STATUS[d.op]
+        counts[st] += 1
+        if is_edge(d.entity_id):
+            if (payload_of(d.entity_id).get("edgeType") or "").upper() not in cset:
+                edge_counts[st] += 1                       # relationship (non-containment) edge
+        else:
+            entity_counts[st] += 1
     impact: Dict[str, int] = {}
     for eid in relevant:
         et = payload_of(eid).get("entityType") or "Other"
-        impact[et] = impact.get(et, 0) + 1
-    for eid in changed_edges:                              # surface relationship changes too
-        p = payload_of(eid)
-        if (p.get("edgeType") or "").upper() in cset:
-            continue                                       # structural containment edge — not surfaced
-        et = p.get("edgeType") or "Relationship"
         impact[et] = impact.get(et, 0) + 1
 
     return {
         "top": root_views + bucket_views,
         "counts": counts,
+        "entity_counts": entity_counts,
+        "edge_counts": edge_counts,
         "impact": impact,
         "children_of": children_of,
         "buckets": buckets,
@@ -4027,12 +4036,14 @@ def _build_diff_hierarchy(
 
 
 def _hierarchy_summary_view(index: dict, limit: int) -> dict:
-    """Top-level groups (capped) + global counts + the entityType impact rollup."""
+    """Top-level groups (capped) + global counts + entity/relationship split + entityType impact."""
     top = index["top"]
     return {
         "groups": top[: max(0, limit)],
         "groupTotal": len(top),
         "counts": index["counts"],
+        "entityCounts": index["entity_counts"],
+        "edgeCounts": index["edge_counts"],
         "impact": index["impact"],
     }
 

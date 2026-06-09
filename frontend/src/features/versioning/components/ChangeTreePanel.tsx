@@ -7,7 +7,7 @@
  * same `EntityDiff` the flat ChangesPanel uses.
  */
 import { useMemo, useState } from 'react'
-import { ChevronRight, Loader2, AlertCircle, Folder } from 'lucide-react'
+import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
 import type { DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
@@ -29,13 +29,21 @@ function CountBadges({ counts }: { counts: { added: number; modified: number; re
   )
 }
 
-/** "2 datasets · 17 tables · 40 columns affected" — the at-a-glance scope of the change. */
+const sumCounts = (c?: { added: number; modified: number; removed: number }) =>
+  c ? c.added + c.modified + c.removed : 0
+
+/** At-a-glance scope of the change, split into the two dimensions the user cares about: ENTITIES
+ *  (nodes — with the per-type rollup "17 tables · 40 columns") and RELATIONSHIPS (edges). Each line
+ *  carries its own add/modify/remove badges so it's immediately clear what changed and how. */
 function ImpactHeader({ summary }: { summary: DiffSummaryResponse }) {
   const items = useMemo(
     () => Object.entries(summary.impact).sort((a, b) => b[1] - a[1]),
     [summary.impact],
   )
   const total = summary.counts.added + summary.counts.modified + summary.counts.removed
+  const entityTotal = sumCounts(summary.entityCounts)
+  const edgeTotal = sumCounts(summary.edgeCounts)
+  const hasSplit = entityTotal > 0 || edgeTotal > 0
   return (
     <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 px-3.5 py-3 space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -44,7 +52,36 @@ function ImpactHeader({ summary }: { summary: DiffSummaryResponse }) {
         </span>
         <CountBadges counts={summary.counts} />
       </div>
-      {items.length > 0 && (
+
+      {entityTotal > 0 && (
+        <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-[12px] text-ink-muted">
+          <span className="inline-flex items-center gap-1 font-medium text-ink">
+            <Boxes className="w-3.5 h-3.5 text-ink-muted" />
+            <span className="tabular-nums">{entityTotal}</span> {entityTotal === 1 ? 'entity' : 'entities'}
+          </span>
+          <CountBadges counts={summary.entityCounts!} />
+          {items.map(([type, n]) => (
+            <span key={type} className="inline-flex items-center gap-1.5">
+              <span className="text-ink-muted/40">·</span>
+              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(type).ring }} />
+              <span className="tabular-nums text-ink">{n}</span> {pluralize(type, n)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {edgeTotal > 0 && (
+        <div className="flex items-center gap-x-2 gap-y-1 flex-wrap text-[12px] text-ink-muted">
+          <span className="inline-flex items-center gap-1 font-medium text-ink">
+            <Spline className="w-3.5 h-3.5 text-ink-muted" />
+            <span className="tabular-nums">{edgeTotal}</span> {edgeTotal === 1 ? 'relationship' : 'relationships'}
+          </span>
+          <CountBadges counts={summary.edgeCounts!} />
+        </div>
+      )}
+
+      {/* Back-compat: an older payload without the entity/edge split → legacy entityType line. */}
+      {!hasSplit && items.length > 0 && (
         <div className="flex items-center gap-x-2.5 gap-y-1 flex-wrap text-[12px] text-ink-muted">
           {items.map(([type, n], i) => (
             <span key={type} className="inline-flex items-center gap-1.5">
@@ -75,9 +112,11 @@ function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; o
         <Indent depth={depth} />
         <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
         <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
-        {node.entityType && (
+        {node.entityKind === 'edge' ? (
+          <Spline className="w-3.5 h-3.5 shrink-0 text-ink-muted/70" />
+        ) : node.entityType ? (
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(node.entityType).ring }} />
-        )}
+        ) : null}
         <span className="text-sm text-ink truncate flex-1" title={node.label}>{node.label}</span>
       </button>
       {open && (
@@ -116,7 +155,11 @@ function GroupRow({
       <button onClick={() => exp.toggle(node.key)} className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left group">
         <Indent depth={depth} />
         <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
-        <Folder className={cn('w-3.5 h-3.5 shrink-0', node.deleted ? 'text-rose-500' : 'text-ink-muted/70')} />
+        {node.entityKind === 'edge' ? (
+          <Spline className="w-3.5 h-3.5 shrink-0 text-ink-muted/70" />
+        ) : (
+          <Folder className={cn('w-3.5 h-3.5 shrink-0', node.deleted ? 'text-rose-500' : 'text-ink-muted/70')} />
+        )}
         {node.entityType && node.kind === 'container' && (
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(node.entityType).ring }} />
         )}

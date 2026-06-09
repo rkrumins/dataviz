@@ -126,6 +126,7 @@ export interface DiffVsMainResponse {
 export interface DiffTreeNode {
   key: string
   kind: 'container' | 'bucket' | 'leaf'
+  entityKind?: 'node' | 'edge'   // 'edge' = a relationship change (source → target); else an entity
   label: string
   entityType?: string | null
   status?: 'added' | 'modified' | 'removed' | 'unchanged' | null
@@ -142,6 +143,9 @@ export interface DiffSummaryResponse {
   groups: DiffTreeNode[]
   groupTotal: number
   counts: { added: number; modified: number; removed: number }
+  /** Split of `counts`: entities (nodes) vs relationships (non-containment edges). */
+  entityCounts?: { added: number; modified: number; removed: number }
+  edgeCounts?: { added: number; modified: number; removed: number }
   impact: Record<string, number>
 }
 

@@ -445,6 +445,7 @@ class DiffTreeNode(_ApiModel):
     add/modify/remove tally for a group, or the single op for a leaf."""
     key: str                                              # entityId (container/leaf) or bucket key
     kind: str                                             # container | bucket | leaf
+    entity_kind: str = Field(default="node", alias="entityKind")  # node | edge (relationship)
     label: str
     entity_type: Optional[str] = Field(default=None, alias="entityType")
     status: Optional[str] = None                          # added | modified | removed | unchanged
@@ -462,6 +463,10 @@ class DiffSummaryResponse(_ApiModel):
     groups: List[DiffTreeNode]
     group_total: int = Field(alias="groupTotal")
     counts: Dict[str, int]
+    # Split of the global tally so the UI shows both dimensions: entities (nodes) vs relationships
+    # (non-containment edges). ``impact`` is the entityType rollup for the entity summary line.
+    entity_counts: Dict[str, int] = Field(default_factory=dict, alias="entityCounts")
+    edge_counts: Dict[str, int] = Field(default_factory=dict, alias="edgeCounts")
     impact: Dict[str, int]
 
 

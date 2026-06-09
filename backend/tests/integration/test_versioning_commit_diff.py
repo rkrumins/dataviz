@@ -97,6 +97,21 @@ async def _run() -> None:
         graph_id=gid, commit_id=c_del, container_key="T1", containment_edge_types=CONT))["entries"]}
     assert d_t1["C2"]["status"] == "removed" and d_t1["C2"]["deleted"] is True
 
+    # ---- node vs EDGE split: a relationship (non-containment) edge change is surfaced as its own
+    # group, tagged entityKind="edge", labeled "source → target", and counted under edgeCounts (not
+    # entityCounts). Containment edges stay structural/suppressed. ----
+    c_lin = await svc.apply_ops(graph_id=gid, actor="u", message="link T1->T2", containment_edge_types=CONT,
+                                ops=[{"op": "create", "entity_kind": "edge", "entity_id": "lin1",
+                                      "payload": {"edgeType": "LINEAGE", "sourceEntityId": "T1", "targetEntityId": "T2"}}])
+    lin = await svc.diff_commit_summary(graph_id=gid, commit_id=c_lin, containment_edge_types=CONT)
+    assert lin["edgeCounts"]["added"] == 1, lin["edgeCounts"]                 # relationship counted as an edge
+    assert sum(lin["entityCounts"].values()) == 0, lin["entityCounts"]        # …not as an entity
+    lgrp = _grp(lin)
+    assert "edge:LINEAGE" in lgrp and lgrp["edge:LINEAGE"]["entityKind"] == "edge", lgrp
+    lkids = {e["key"]: e for e in (await svc.diff_commit_children(
+        graph_id=gid, commit_id=c_lin, container_key="edge:LINEAGE", containment_edge_types=CONT))["entries"]}
+    assert lkids["lin1"]["entityKind"] == "edge" and "→" in lkids["lin1"]["label"], lkids
+
     # ---- a DRAFT commit: the invariant holds for drafts too, and the head skeleton nests the
     # change under its base-resident container. An EDIT of a base-inherited entity reads as
     # "modified" against its true base value (the per-commit/flat diff resolve 'before' from
