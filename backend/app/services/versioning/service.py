@@ -3484,7 +3484,9 @@ def _edge_src_tgt(p: Mapping) -> Tuple[str, str]:
 
 
 def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
-    """Reader-compatible GraphNode shape (by alias) from a version payload."""
+    """Reader-compatible GraphNode shape (by alias) from a version payload. Surfaces the same
+    top-level denormalised fields FalkorDB returns (``_node_from_props``) so a draft node is
+    shaped identically to main; ``childCount`` is stamped separately by ``_attach_child_counts``."""
     return {
         "urn": urn,
         "entityId": entity_id,
@@ -3494,6 +3496,9 @@ def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
         "description": payload.get("description"),
         "properties": payload.get("properties") or {},
         "tags": payload.get("tags") or [],
+        "layerAssignment": payload.get("layerAssignment"),
+        "sourceSystem": payload.get("sourceSystem"),
+        "lastSyncedAt": payload.get("lastSyncedAt"),
     }
 
 
