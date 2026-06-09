@@ -738,6 +738,18 @@ async def rebase_draft(
         )
 
 
+@router.get("/graphs/{graph_id}/watermark", response_model=WatermarkModel)
+async def get_watermark(
+    ws_id: str, graph_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
+    wm = await svc.projection_watermark(graph_id)
+    return {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
+
+
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)
 async def revert_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,

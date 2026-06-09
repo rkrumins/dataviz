@@ -170,6 +170,16 @@ export interface MergePreviewResponse {
   changes: Record<string, number>
 }
 
+/** Result of pulling latest main into a draft (`POST .../rebase`). `clean: false` ⇒
+ *  `conflicts` need resolving, then resubmit with `resolutions`. */
+export interface RebaseResponse {
+  clean: boolean
+  conflicts: Array<Record<string, unknown>>
+  changes?: Record<string, number>
+  baseCommitSeq?: number | null
+  alreadyUpToDate?: boolean
+}
+
 export interface PullRequest {
   prId: string
   graphId: string
@@ -220,6 +230,18 @@ export class OntologyViolationError extends Error {
   }
 }
 
+/** A draft is behind main and must pull the latest changes before it can be merged. */
+export class NotUpToDateError extends Error {
+  branchId?: string
+  behindBy?: number
+  constructor(detail: { branchId?: string; behindBy?: number; message?: string }) {
+    super(detail.message || 'This draft is out of date — pull the latest changes before merging.')
+    this.name = 'NotUpToDateError'
+    this.branchId = detail.branchId
+    this.behindBy = detail.behindBy
+  }
+}
+
 // ============================================
 // Fetch helper — JSON + structured domain errors
 // ============================================
@@ -246,6 +268,9 @@ async function vfetch<T>(url: string, init?: RequestInit): Promise<T> {
     }
     if (res.status === 422 && detail?.type === 'ontology_violation') {
       throw new OntologyViolationError(detail.violations ?? [])
+    }
+    if (res.status === 409 && detail?.type === 'not_up_to_date') {
+      throw new NotUpToDateError(detail)
     }
     if (res.status === 401) throw new Error('Session expired')
     const msg =
@@ -319,6 +344,25 @@ export function openDraft(
   data: { name?: string; originatingViewId?: string; shared?: boolean } = {},
 ): Promise<{ branchId: string }> {
   return vfetch<{ branchId: string }>(`${base(wsId)}/graphs/${graphId}/branches`, jsonBody(data))
+}
+
+/** Pull the latest main into a draft ("update branch"). Returns `{clean, conflicts, ...}`; on
+ *  `clean: false` resolve the conflicts and resubmit with `resolutions`. */
+export function rebaseDraft(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  data: { resolutions?: ResolutionMap } = {},
+): Promise<RebaseResponse> {
+  return vfetch<RebaseResponse>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/rebase`,
+    jsonBody(data),
+  )
+}
+
+/** Projection freshness for `main` — cheap (no state materialised); drives the "refreshing…" badge. */
+export function getWatermark(wsId: string, graphId: string): Promise<Watermark> {
+  return vfetch<Watermark>(`${base(wsId)}/graphs/${graphId}/watermark`)
 }
 
 export function abandonDraft(wsId: string, graphId: string, branchId: string): Promise<Branch> {

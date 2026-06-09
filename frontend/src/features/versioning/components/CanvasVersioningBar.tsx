@@ -19,6 +19,7 @@ import { useAbandonDraft, useBootstrapGraph, useDiffVsMain, useResolveGraph } fr
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { BranchSwitcher } from './BranchSwitcher'
+import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
 import { ViewPrIndicator } from './ViewPrIndicator'
@@ -126,6 +127,7 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
         )}
       >
         <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />
+        <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
 
         {isDraft && branchId && (
           <div className="flex items-center gap-2 text-ink-muted">

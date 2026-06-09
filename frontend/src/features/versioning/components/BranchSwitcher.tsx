@@ -2,17 +2,18 @@
  * BranchSwitcher — the canvas-toolbar control for "which branch am I on".
  *
  * Resolves the active data source to its versioned graph (syncing the result into
- * `branchStore`), lists main + open drafts, and lets the user switch or open a new
- * draft. Shared across all three canvases via the toolbars. Renders nothing when the
- * data source has no versioned graph (the common case until a graph is created).
+ * `branchStore`), lists main + open drafts with a per-draft up-to-date status, and lets the
+ * user create a NAMED draft, switch between them, or pull the latest main into a behind draft.
+ * Shared across all three canvases via the toolbars. Renders nothing when the data source has
+ * no versioned graph (the common case until a graph is created).
  */
 import { useEffect, useRef, useState } from 'react'
-import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal } from 'lucide-react'
+import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal, ArrowDownToLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
-import { useBranches, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useOpenDraft, usePullLatestDraft, useResolveGraph } from '../hooks/useVersioning'
 import type { Branch } from '@/services/versioningApiService'
 
 interface BranchSwitcherProps {
@@ -23,14 +24,18 @@ interface BranchSwitcherProps {
 
 export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchSwitcherProps) {
   const [open, setOpen] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
 
   const resolve = useResolveGraph(workspaceId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
+  const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
   const branchesQ = useBranches(workspaceId, graphId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
+  const pullLatest = usePullLatestDraft(workspaceId, graphId ?? '')
 
   const currentBranchId = useBranchStore((s) => s.currentBranchId)
   const setResolved = useBranchStore((s) => s.setResolved)
@@ -62,15 +67,34 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const drafts = (branchesQ.data ?? []).filter((b) => b.kind !== 'main' && b.status === 'open')
   const onMain = !currentBranchId
   const activeDraft = drafts.find((b) => b.branchId === currentBranchId)
+  const isBehind = (b: Branch) => (b.baseCommitSeq ?? 0) < mainHead
 
-  const handleOpenDraft = () => {
+  const handleCreate = () => {
     openDraft.mutate(
-      {},
+      { name: newName.trim() || undefined },
       {
         onSuccess: (r) => {
           switchToDraft(r.branchId)
           setOpen(false)
-          showToast('success', 'Draft created — your edits stay isolated until you publish.')
+          showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — edits stay isolated until merged.`)
+          setNewName('')
+          setCreating(false)
+        },
+        onError: (e) => showToast('error', (e as Error).message),
+      },
+    )
+  }
+
+  const handlePull = (branchId: string) => {
+    pullLatest.mutate(
+      { branchId },
+      {
+        onSuccess: (res) => {
+          if (res.clean) {
+            showToast('success', res.alreadyUpToDate ? 'Already up to date with main.' : 'Pulled the latest changes from main.')
+          } else {
+            showToast('error', 'This draft conflicts with main — open its merge review to resolve before merging.')
+          }
         },
         onError: (e) => showToast('error', (e as Error).message),
       },
@@ -92,11 +116,14 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
       >
         <GitBranch className={cn('w-4 h-4', onMain ? 'text-ink-muted' : 'text-amber-500')} />
         <span className="max-w-[10rem] truncate">{label}</span>
+        {!onMain && activeDraft && isBehind(activeDraft) && (
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" title="Behind main — pull latest before merging" />
+        )}
         <ChevronDown className="w-3.5 h-3.5 text-ink-muted" />
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1.5 w-72 z-50 rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden animate-fade-in">
+        <div className="absolute left-0 top-full mt-1.5 w-80 z-50 rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden animate-fade-in">
           <div className="px-3 py-2 border-b border-glass-border">
             <p className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Branch</p>
           </div>
@@ -111,19 +138,25 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                 setOpen(false)
               }}
             />
-            {drafts.map((b) => (
-              <BranchRow
-                key={b.branchId}
-                icon={<GitBranch className="w-4 h-4 text-amber-500" />}
-                title={b.name || 'Untitled draft'}
-                subtitle={draftSubtitle(b)}
-                active={b.branchId === currentBranchId}
-                onClick={() => {
-                  switchToDraft(b.branchId, b.originatingViewId ?? null)
-                  setOpen(false)
-                }}
-              />
-            ))}
+            {drafts.map((b) => {
+              const behind = isBehind(b)
+              return (
+                <BranchRow
+                  key={b.branchId}
+                  icon={<GitBranch className="w-4 h-4 text-amber-500" />}
+                  title={b.name || 'Untitled draft'}
+                  subtitle={draftSubtitle(b)}
+                  active={b.branchId === currentBranchId}
+                  status={behind ? 'behind' : 'up-to-date'}
+                  onPull={canManage && behind ? () => handlePull(b.branchId) : undefined}
+                  pulling={pullLatest.isPending && pullLatest.variables?.branchId === b.branchId}
+                  onClick={() => {
+                    switchToDraft(b.branchId, b.originatingViewId ?? null)
+                    setOpen(false)
+                  }}
+                />
+              )
+            })}
             {branchesQ.isLoading && (
               <div className="px-3 py-2 flex items-center gap-2 text-xs text-ink-muted">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading branches…
@@ -131,18 +164,36 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
             )}
           </div>
           {canManage && (
-            <button
-              onClick={handleOpenDraft}
-              disabled={openDraft.isPending}
-              className="w-full flex items-center gap-2 px-3 py-2.5 border-t border-glass-border text-sm font-medium text-accent-lineage hover:bg-canvas-overlay transition-colors disabled:opacity-50"
-            >
-              {openDraft.isPending ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
+            creating ? (
+              <div className="flex items-center gap-2 px-3 py-2.5 border-t border-glass-border">
+                <input
+                  autoFocus
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCreate()
+                    if (e.key === 'Escape') { setCreating(false); setNewName('') }
+                  }}
+                  placeholder="Draft name (optional)"
+                  className="flex-1 min-w-0 px-2 py-1 rounded-md bg-canvas-overlay border border-glass-border text-sm text-ink outline-none focus:border-accent-lineage"
+                />
+                <button
+                  onClick={handleCreate}
+                  disabled={openDraft.isPending}
+                  className="shrink-0 px-2.5 py-1 rounded-md text-sm font-medium text-accent-lineage hover:bg-canvas-overlay disabled:opacity-50"
+                >
+                  {openDraft.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create'}
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setCreating(true)}
+                className="w-full flex items-center gap-2 px-3 py-2.5 border-t border-glass-border text-sm font-medium text-accent-lineage hover:bg-canvas-overlay transition-colors"
+              >
                 <Plus className="w-4 h-4" />
-              )}
-              New draft
-            </button>
+                New draft
+              </button>
+            )
           )}
         </div>
       )}
@@ -160,25 +211,44 @@ function BranchRow({
   title,
   subtitle,
   active,
+  status,
+  onPull,
+  pulling,
   onClick,
 }: {
   icon: React.ReactNode
   title: string
   subtitle: string
   active: boolean
+  status?: 'behind' | 'up-to-date'
+  onPull?: () => void
+  pulling?: boolean
   onClick: () => void
 }) {
   return (
-    <button
-      onClick={onClick}
-      className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-canvas-overlay transition-colors"
-    >
-      <span className="shrink-0">{icon}</span>
-      <span className="flex-1 min-w-0">
-        <span className="block text-sm text-ink truncate">{title}</span>
-        <span className="block text-[11px] text-ink-muted truncate">{subtitle}</span>
-      </span>
-      {active && <Check className="w-4 h-4 text-accent-lineage shrink-0" />}
-    </button>
+    <div className="w-full flex items-center gap-1 pr-2 hover:bg-canvas-overlay transition-colors">
+      <button onClick={onClick} className="flex-1 min-w-0 flex items-center gap-2.5 px-3 py-2 text-left">
+        <span className="shrink-0">{icon}</span>
+        <span className="flex-1 min-w-0">
+          <span className="block text-sm text-ink truncate">{title}</span>
+          <span className="block text-[11px] text-ink-muted truncate">{subtitle}</span>
+        </span>
+        {status === 'behind' && (
+          <span className="shrink-0 text-[10px] font-medium text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded">Behind</span>
+        )}
+        {active && <Check className="w-4 h-4 text-accent-lineage shrink-0" />}
+      </button>
+      {onPull && (
+        <button
+          onClick={onPull}
+          disabled={pulling}
+          title="Pull the latest changes from main into this draft"
+          className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage hover:bg-canvas-base disabled:opacity-50"
+        >
+          {pulling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowDownToLine className="w-3.5 h-3.5" />}
+          Pull
+        </button>
+      )}
+    </div>
   )
 }

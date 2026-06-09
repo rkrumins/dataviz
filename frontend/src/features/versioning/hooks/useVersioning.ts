@@ -42,6 +42,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
+  projectionWatermark: (ws?: string, gid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'watermark', ws, gid] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -73,6 +75,19 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
     queryFn: () => api.getBranchState(wsId!, graphId!, branchId!),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+  })
+}
+
+/** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s while the
+ *  FalkorDB cache lags the committed head (`!fresh`) and stops once it has caught up. */
+export function useProjectionWatermark(wsId?: string, graphId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
+    queryFn: () => api.getWatermark(wsId!, graphId!),
+    enabled: !!wsId && !!graphId,
+    refetchInterval: (q) => (q.state.data && q.state.data.fresh === false ? 3_000 : false),
+    staleTime: 2_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -255,6 +270,23 @@ export function useAbandonDraft(wsId: string, graphId: string) {
     mutationFn: (branchId: string) => api.abandonDraft(wsId, graphId, branchId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+    },
+  })
+}
+
+/** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can
+ *  open the conflict resolver when `clean === false`; on a clean pull it refreshes the draft views. */
+export function usePullLatestDraft(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { branchId: string; resolutions?: ResolutionMap }) =>
+      api.rebaseDraft(wsId, graphId, v.branchId, { resolutions: v.resolutions }),
+    onSuccess: (res, v) => {
+      if (!res.clean) return
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(wsId, graphId, v.branchId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, v.branchId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
     },
   })

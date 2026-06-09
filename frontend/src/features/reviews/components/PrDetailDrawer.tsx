@@ -11,13 +11,13 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
-  GitPullRequestArrow, Pencil, Check,
+  GitPullRequestArrow, Pencil, Check, ArrowDownToLine, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { MergeConflictError, type ResolutionMap } from '@/services/versioningApiService'
+import { MergeConflictError, NotUpToDateError, type ResolutionMap } from '@/services/versioningApiService'
 import {
-  useMergeRequest, usePullRequestDiff,
+  useMergeRequest, usePullRequestDiff, usePullLatestDraft,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
 } from '../../versioning/hooks/useVersioning'
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
@@ -58,6 +58,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const closePr = useCloseMergeRequest(wsId)
   const merge = useMergeMergeRequest(wsId)
   const update = useUpdateMergeRequest(wsId)
+  const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
 
@@ -91,13 +92,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
   const [resolverError, setResolverError] = useState<string | null>(null)
+  const [needsPull, setNeedsPull] = useState(false)
+  const [resolveMode, setResolveMode] = useState<'merge' | 'pull'>('merge')
 
   const terminal = pr?.status === 'merged' || pr?.status === 'closed'
   const isAuthor = !!user && pr?.actor === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
   const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && hasReviewers
-  const busy = approve.isPending || closePr.isPending || merge.isPending
+  const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   const runMerge = async (resolutions?: ResolutionMap) => {
     if (!pr) return
@@ -111,6 +114,11 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       switchToMain()
       onClose()
     } catch (e) {
+      if (e instanceof NotUpToDateError) {
+        setNeedsPull(true)
+        showToast('error', 'This draft is out of date — pull the latest changes before merging.')
+        return
+      }
       if (e instanceof MergeConflictError) {
         setConflicts(e.conflicts)
         setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
@@ -123,6 +131,25 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       if (resolutions) setResolverError(friendly)
       else showToast('error', friendly)
     }
+  }
+
+  const runPull = (resolutions?: ResolutionMap) => {
+    if (!pr) return
+    pullLatest.mutate(
+      { branchId: pr.sourceBranchId, resolutions },
+      {
+        onSuccess: (res) => {
+          if (res.clean) {
+            setConflicts(null); setResolverError(null); setResolveMode('merge'); setNeedsPull(false)
+            showToast('success', 'Pulled the latest changes — you can merge now.')
+          } else {
+            setResolveMode('pull'); setConflicts(res.conflicts)
+            setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
+          }
+        },
+        onError: (e) => showToast('error', (e as Error).message),
+      },
+    )
   }
 
   const events = useMemo(() => {
@@ -284,6 +311,13 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           )}
         </div>
 
+        {pr && !terminal && needsPull && (
+          <div className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>This draft is behind <strong>main</strong>. Pull the latest changes (resolving any conflicts) before it can be merged.</span>
+          </div>
+        )}
+
         {/* Action bar */}
         {pr && !terminal && canManage && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
@@ -299,14 +333,25 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                 <CheckCircle2 className="w-4 h-4" /> Approve
               </button>
             )}
-            <button
-              onClick={() => runMerge()}
-              disabled={busy}
-              className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
-            >
-              {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
-              Merge
-            </button>
+            {needsPull ? (
+              <button
+                onClick={() => runPull()}
+                disabled={busy}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-sm disabled:opacity-60"
+              >
+                {pullLatest.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
+                Pull latest
+              </button>
+            ) : (
+              <button
+                onClick={() => runMerge()}
+                disabled={busy}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+              >
+                {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
+                Merge
+              </button>
+            )}
             <button
               onClick={() => closePr.mutate({ prId, graphId: pr.graphId }, {
                 onSuccess: () => { showToast('success', 'Closed.'); onClose() },
@@ -324,10 +369,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           <ConflictResolver
             conflicts={conflicts}
             seeds={seeds}
-            busy={merge.isPending}
+            busy={merge.isPending || pullLatest.isPending}
             error={resolverError}
-            onCancel={() => { setConflicts(null); setResolverError(null) }}
-            onResolve={(resolutions) => runMerge(resolutions)}
+            onCancel={() => { setConflicts(null); setResolverError(null); setResolveMode('merge') }}
+            onResolve={(resolutions) => (resolveMode === 'pull' ? runPull(resolutions) : runMerge(resolutions))}
           />
         )}
       </motion.aside>
