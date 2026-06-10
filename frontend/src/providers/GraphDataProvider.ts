@@ -295,6 +295,44 @@ export interface CreateNodeResult {
     error?: string
 }
 
+export interface CreateEdgeRequest {
+    sourceUrn: string
+    targetUrn: string
+    edgeType: string
+    properties?: Record<string, unknown>
+    /** When set, a matching existing edge is returned unchanged instead of duplicated. */
+    idempotencyKey?: string
+}
+
+export interface EdgeMutationResult {
+    edge: GraphEdge | null
+    success: boolean
+    error?: string
+    warnings?: string[]
+}
+
+export type EdgeDirection = 'outgoing' | 'incoming' | 'both'
+
+/** One ontology entity type with whether it may be created under a given parent. */
+export interface AllowedChildOption {
+    entityType: string
+    label: string
+    description?: string
+    allowed: boolean
+    /** Non-null when allowed=false — explains the containment rule that blocks it. */
+    reason?: string
+}
+
+/** One ontology relationship type with whether it may originate from a given node. */
+export interface AllowedEdgeOption {
+    edgeType: string
+    label: string
+    description?: string
+    allowed: boolean
+    /** Non-null when allowed=false — explains the source/target rule that blocks it. */
+    reason?: string
+}
+
 export interface GraphSchemaStats {
     totalNodes: number
     totalEdges: number
@@ -832,6 +870,28 @@ export interface GraphDataProvider {
      * Validates against ontology rules before creation
      */
     createNode(request: CreateNodeRequest): Promise<CreateNodeResult>
+
+    /**
+     * Create a directed RAW edge between two existing nodes.
+     * Validates source/target entity types against the active ontology.
+     */
+    createEdge(request: CreateEdgeRequest): Promise<EdgeMutationResult>
+
+    // ==========================================
+    // Ontology preflight (guided create/connect)
+    // ==========================================
+
+    /**
+     * Every ontology entity type annotated with whether it may be created as a
+     * child of this node — drives (and disables) the guided create panel.
+     */
+    getAllowedChildren(parentUrn: URN): Promise<AllowedChildOption[]>
+
+    /**
+     * Every ontology relationship type annotated with whether it may be created
+     * from (or to) this node — drives (and disables) the edge-type picker.
+     */
+    getAllowedEdges(sourceUrn: URN, direction?: EdgeDirection): Promise<AllowedEdgeOption[]>
 }
 
 // ============================================
