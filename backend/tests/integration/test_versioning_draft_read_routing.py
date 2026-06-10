@@ -1,14 +1,16 @@
 """Branch-aware provider selection in ContextEngine.for_workspace (journey Phase G) — Postgres.
 
 The graph endpoints gained an optional branchId; this asserts the selection rule that backs it.
-A resolved draft on a versioned graph swaps in the VersionedBranchProvider. For 'main' (and
-omission, and the opaque main id) the rule is read-your-writes: the live provider when the FalkorDB
-projection is fresh (the hot path), but the Postgres reader when the projection lags the committed
-head (e.g. just after a merge) so the change is visible immediately. An unknown branch on a
-versioned graph is a KeyError (which the dependency maps to HTTP 404); and a branchId against a
-NON-versioned data source is ignored (lenient). No FalkorDB — the live provider is a stub since only
-the *selection* is under test; ontology resolution and the projection watermark are stubbed so the
-test is independent of DB ontology and any running projector.
+A resolved draft on a versioned graph is served by the DraftOverlayProvider — main ⊕ the draft's
+sparse delta — wrapping WHATEVER serves main (the live provider when the FalkorDB projection is fresh,
+else the Postgres main reader), so a no-change draft reads identically to main. For 'main' (and
+omission, and the opaque main id) the rule is read-your-writes: the live provider when the projection
+is fresh (the hot path), but the Postgres reader when the projection lags the committed head (e.g.
+just after a merge) so the change is visible immediately. An unknown branch on a versioned graph is a
+KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-versioned data source
+is ignored (lenient). No FalkorDB — the live provider is a stub since only the *selection* is under
+test; ontology resolution and the projection watermark are stubbed so the test is independent of DB
+ontology and any running projector.
 """
 import asyncio
 import os
@@ -19,6 +21,7 @@ from backend.app.services.versioning import db, models
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
+from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
 from backend.app.services.context_engine import ContextEngine
 
 
@@ -59,10 +62,13 @@ async def _run() -> None:
         return None
     ContextEngine._resolve_ontology = _noop
     try:
-        # resolved draft on a versioned graph → the branch provider, bound to that branch
+        # resolved draft on a versioned graph → the overlay provider, bound to that branch. The
+        # real watermark here is NOT fresh (no projector ran), so the overlay's base is the Postgres
+        # main reader — a draft still reads main ⊕ its delta, just with a Postgres base.
         eng = await _for_workspace(ds, draft)
-        assert isinstance(eng.provider, VersionedBranchProvider)
+        assert isinstance(eng.provider, DraftOverlayProvider)
         assert eng.provider._branch == draft and eng._branch_id == draft
+        assert isinstance(eng.provider._base, VersionedBranchProvider) and eng.provider._base._branch == main
 
         # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live provider
         async def _fresh(self, graph_id):
@@ -71,6 +77,12 @@ async def _run() -> None:
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
             assert isinstance(e.provider, _StubProvider)
+
+        # a draft while main is FRESH → overlay wraps the LIVE main provider (reusing its
+        # materialized aggregated lineage), not a Postgres reader. This is the scalable hot path.
+        e_draft_fresh = await _for_workspace(ds, draft)
+        assert isinstance(e_draft_fresh.provider, DraftOverlayProvider)
+        assert isinstance(e_draft_fresh.provider._base, _StubProvider)
 
         # same reads, but the projection LAGS the committed head → read-your-writes serves main
         # from the Postgres reader so a just-merged change is visible before the projector catches up

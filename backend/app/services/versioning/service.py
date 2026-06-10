@@ -2224,6 +2224,95 @@ class GraphVersioningService:
                 modified.append({"entityId": eid, "kind": kind, "before": b, "after": a})
         return {"added": added, "removed": removed, "modified": modified}
 
+    async def branch_overlay_delta(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+        """The draft's patch set vs its ``main`` base, **reader-shaped** for a read-overlay
+        (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert and the
+        before-values of those it removed. Bounded by draft size (the entities the draft wrote
+        rows for); **empty for a no-change draft** — which is what makes the overlay a pure
+        pass-through (a draft then reads exactly like ``main``). Edge endpoints are urns
+        (node ``entity_id`` == urn), so no extra resolution is needed by the caller."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            base_seq = branch.base_commit_seq or 0
+            changed: set = set()
+            for model in (NodeVersionORM, EdgeVersionORM):
+                rows = (await s.execute(
+                    select(model.entity_id).where(
+                        model.graph_id == graph_id, model.branch_id == branch_id,
+                    ).distinct()
+                )).scalars().all()
+                changed.update(rows)
+            empty = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": []}
+            if not changed:
+                return empty
+            before = await self._values_at(s, graph_id, main_id, changed, base_seq)
+            after = await self._current_values(s, graph_id, branch_id, list(changed))
+        nodes_upsert: List[dict] = []
+        nodes_remove: List[dict] = []
+        edges_upsert: List[dict] = []
+        edges_remove: List[dict] = []
+        for eid in changed:
+            b, a = before.get(eid), after.get(eid)
+            if b is None and a is None:
+                continue
+            eff = a if a is not None else b
+            is_edge = _is_edge_payload(eff or {})
+            if a is None:                                  # removed on the draft → carry its before value
+                if is_edge:
+                    src, tgt = _edge_src_tgt(b)
+                    edges_remove.append(_graphedge_dict(eid, b, {src: src, tgt: tgt}))
+                else:
+                    nodes_remove.append(_graphnode_dict(eid, (b or {}).get("urn") or f"gv:{eid}", b))
+            else:                                          # added/modified → the draft's effective value
+                if is_edge:
+                    src, tgt = _edge_src_tgt(a)
+                    edges_upsert.append(_graphedge_dict(eid, a, {src: src, tgt: tgt}))
+                else:
+                    nodes_upsert.append(_graphnode_dict(eid, a.get("urn") or f"gv:{eid}", a))
+        return {"nodesUpsert": nodes_upsert, "nodesRemove": nodes_remove,
+                "edgesUpsert": edges_upsert, "edgesRemove": edges_remove}
+
+    async def aggregated_overlay_adjust(
+        self, *, graph_id: str, branch_id: str, source_urns: Sequence[str],
+        target_urns: Optional[Sequence[str]], lineage_delta: Sequence[Tuple[str, str, Optional[str], int]],
+        containment_edge_types: Sequence[str],
+    ) -> Dict[Tuple[str, str], Dict[str, object]]:
+        """Rollup adjustments for a draft's LINEAGE-edge delta, so a read-overlay can patch main's
+        materialized aggregated edges instead of recomputing them. ``lineage_delta`` is a list of
+        ``(sourceUrn, targetUrn, edgeType, sign)`` with ``sign`` +1 (draft added) / -1 (draft removed).
+        Each maps to rollup ``(Sx, Tx)`` for every requested **visible** source ``Sx`` that is an
+        ancestor-or-self of ``sourceUrn`` and target ``Tx`` ancestor-or-self of ``targetUrn`` (``Sx`` ≠
+        ``Tx``) — the same ancestor-pair semantics the FalkorDB materialiser bakes in, evaluated on the
+        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+        src_set = set(source_urns or [])
+        tgt_set = set(target_urns or source_urns or [])
+        out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        async with self._session() as s:
+            async def _visible_ancestors(urn: str, visible: set) -> set:
+                if not visible:
+                    return set()
+                eid = await self._eid_for_urn(s, graph_id, branch_id, urn)
+                hit = {urn} & visible                      # the node itself, if it is a visible container
+                if eid is not None and cset:
+                    anc_eids, _ = await self._containment_ancestors(s, graph_id, branch_id, {eid}, cset, None)
+                    vals = await self._current_values(s, graph_id, branch_id, anc_eids)
+                    hit |= {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids} & visible
+                return hit
+            for su, tu, et, sign in lineage_delta:
+                sxs = await _visible_ancestors(su, src_set)
+                txs = await _visible_ancestors(tu, tgt_set)
+                for sx in sxs:
+                    for tx in txs:
+                        if sx == tx:
+                            continue
+                        slot = out.setdefault((sx, tx), {"weight": 0, "types": set()})
+                        slot["weight"] = int(slot["weight"]) + sign
+                        if et:
+                            slot["types"].add(et)            # type: ignore[union-attr]
+        return out
+
     async def diff_branch_summary(
         self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
         viewer: Optional[Viewer] = None,
