@@ -46,7 +46,7 @@ import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
-import { EntityCreationPanel } from '../../panels/EntityCreationPanel'
+import { UnifiedCreatePanel } from '../create/UnifiedCreatePanel'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -56,7 +56,6 @@ import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 // UX-first interaction components
 import { CanvasContextMenu } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
-import { QuickCreateNode } from '../QuickCreateNode'
 import { CommandPalette } from '../CommandPalette'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
@@ -437,10 +436,24 @@ export function ContextViewCanvas({
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Entity creation state
+  // Entity creation state. Two entry points feed one panel: the toolbar /
+  // layer "add" buttons open it in Detailed mode (isCreatingEntity); the
+  // 'N' key, context-menu "Create entity/child", and palette open it in
+  // Quick mode (interactions.quickCreate). UnifiedCreatePanel reconciles them.
   const [isCreatingEntity, setIsCreatingEntity] = useState(false)
   const [creationParentId, setCreationParentId] = useState<string | null>(null)
   const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
+
+  const quickCreateState = interactions.state.quickCreate
+  const isCreatePanelOpen = isCreatingEntity || quickCreateState.isOpen
+  const createPanelMode: 'quick' | 'detailed' = isCreatingEntity ? 'detailed' : 'quick'
+  const createPanelParentUrn = creationParentId ?? quickCreateState.parentUrn ?? null
+  const closeCreatePanel = useCallback(() => {
+    setIsCreatingEntity(false)
+    setCreationParentId(null)
+    setCreationLayerId(null)
+    interactions.closeQuickCreate()
+  }, [interactions])
 
   // Assignment warning state (shown when user tries to assign child to different layer)
   const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
@@ -2226,7 +2239,24 @@ export function ContextViewCanvas({
           a node and opens the entity drawer without losing the
           results list. */}
       <AnimatePresence>
-        {drawerNodeId && (
+        {/* Creation takes the rail when active (it's an explicit action), so it
+            is never hidden behind a drawer the user happened to leave open. */}
+        {isCreatePanelOpen && (
+          <UnifiedCreatePanel
+            key="unified-create-panel"
+            isOpen={isCreatePanelOpen}
+            onClose={closeCreatePanel}
+            parentUrn={createPanelParentUrn}
+            layerId={creationLayerId}
+            defaultMode={createPanelMode}
+            onEntityCreated={(_tempUrn, parentUrn) => {
+              if (parentUrn) {
+                setExpandedNodes(prev => new Set([...prev, parentUrn]))
+              }
+            }}
+          />
+        )}
+        {!isCreatePanelOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
@@ -2236,31 +2266,13 @@ export function ContextViewCanvas({
             onLocateMany={locateManyOnCanvas}
           />
         )}
-        {!drawerNodeId && isEdgePanelOpen && (
+        {!isCreatePanelOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
             edgeFilters={dynamicEdgeFilters}
             onToggleFilter={toggleEdgeFilter}
-          />
-        )}
-        {!drawerNodeId && !isEdgePanelOpen && isCreatingEntity && (
-          <EntityCreationPanel
-            key="entity-creation-panel"
-            isOpen={isCreatingEntity}
-            onClose={() => {
-              setIsCreatingEntity(false)
-              setCreationParentId(null)
-              setCreationLayerId(null)
-            }}
-            parentId={creationParentId}
-            layerId={creationLayerId}
-            onEntityCreated={(_nodeId, parentUrn) => {
-              if (parentUrn) {
-                setExpandedNodes(prev => new Set([...prev, parentUrn]))
-              }
-            }}
           />
         )}
         {/* Property Manager — independent right-rail panel. Unlike the
@@ -2314,15 +2326,8 @@ export function ContextViewCanvas({
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Quick Create - Press 'N' or use context menu */}
-      <QuickCreateNode
-        isOpen={interactions.state.quickCreate.isOpen}
-        position={interactions.state.quickCreate.position}
-        parentUrn={interactions.state.quickCreate.parentUrn}
-        onClose={interactions.closeQuickCreate}
-        onCreated={(nodeId) => selectNode(nodeId)}
-        variant="centered"
-      />
+      {/* Quick create now lives in the UnifiedCreatePanel right rail
+          (driven by interactions.state.quickCreate). */}
 
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette

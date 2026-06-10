@@ -13,6 +13,8 @@ export interface LineageNode extends Node {
     classifications?: string[]
     confidence?: number
     metadata?: Record<string, unknown>
+    /** Editable property bag (the canvas convention; see toCanvasNode). */
+    properties?: Record<string, unknown>
     // Hierarchy
     childIds?: string[]
     parentId?: string

@@ -313,16 +313,6 @@ export interface EdgeMutationResult {
 
 export type EdgeDirection = 'outgoing' | 'incoming' | 'both'
 
-/** One ontology entity type with whether it may be created under a given parent. */
-export interface AllowedChildOption {
-    entityType: string
-    label: string
-    description?: string
-    allowed: boolean
-    /** Non-null when allowed=false — explains the containment rule that blocks it. */
-    reason?: string
-}
-
 /** One ontology relationship type with whether it may originate from a given node. */
 export interface AllowedEdgeOption {
     edgeType: string
@@ -876,22 +866,6 @@ export interface GraphDataProvider {
      * Validates source/target entity types against the active ontology.
      */
     createEdge(request: CreateEdgeRequest): Promise<EdgeMutationResult>
-
-    // ==========================================
-    // Ontology preflight (guided create/connect)
-    // ==========================================
-
-    /**
-     * Every ontology entity type annotated with whether it may be created as a
-     * child of this node — drives (and disables) the guided create panel.
-     */
-    getAllowedChildren(parentUrn: URN): Promise<AllowedChildOption[]>
-
-    /**
-     * Every ontology relationship type annotated with whether it may be created
-     * from (or to) this node — drives (and disables) the edge-type picker.
-     */
-    getAllowedEdges(sourceUrn: URN, direction?: EdgeDirection): Promise<AllowedEdgeOption[]>
 }
 
 // ============================================

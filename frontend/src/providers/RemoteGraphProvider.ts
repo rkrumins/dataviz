@@ -31,9 +31,6 @@ import type {
     CreateNodeResult,
     CreateEdgeRequest,
     EdgeMutationResult,
-    EdgeDirection,
-    AllowedChildOption,
-    AllowedEdgeOption,
     TopLevelNodesQuery,
     TopLevelNodesResult,
 } from './GraphDataProvider'
@@ -775,22 +772,5 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify(request),
         })
-    }
-
-    // ==========================================
-    // Ontology preflight (guided create/connect)
-    // ==========================================
-
-    async getAllowedChildren(parentUrn: URN): Promise<AllowedChildOption[]> {
-        return await this.fetch<AllowedChildOption[]>(
-            `/nodes/${encodeURIComponent(parentUrn)}/allowed-children`,
-        )
-    }
-
-    async getAllowedEdges(sourceUrn: URN, direction: EdgeDirection = 'outgoing'): Promise<AllowedEdgeOption[]> {
-        return await this.fetch<AllowedEdgeOption[]>(
-            `/nodes/${encodeURIComponent(sourceUrn)}/allowed-edges`,
-            { extraParams: { direction } },
-        )
     }
 }
