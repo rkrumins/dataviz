@@ -10,7 +10,7 @@
  * client-side is authoritative (same resolved ontology), instant, and works
  * for staged nodes.
  */
-import type { AllowedEdgeOption, EdgeDirection } from '@/providers/GraphDataProvider'
+import type { AllowedEdgeOption } from '@/providers/GraphDataProvider'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
 export type { AllowedEdgeOption, EdgeDirection } from '@/providers/GraphDataProvider'
@@ -49,71 +49,52 @@ export function allowedChildTypeIds(
 }
 
 /**
- * Narrow a set of edge options to the drawable raw lineage types: those in the
- * view's lineage edge types, minus the synthetic/non-drawable ones. Disallowed
- * options are KEPT (the picker shows them disabled with a reason).
+ * Whether a relationship type is a RAW lineage edge a user may draw by hand.
+ * Mirrors GraphCanvas.getValidEdgeTypes' classification rather than relying on
+ * the schema store's `lineageEdgeTypes` list (which is frequently empty when the
+ * backend omits it — the cause of the "No lineage edge types defined" bug):
+ * exclude the synthetic AGGREGATED type and any containment type, then treat the
+ * rest as lineage (`rt.isLineage ?? !isContainment`). Containment is the explicit
+ * `rt.isContainment` flag, or membership in `containmentEdgeTypes` as a fallback.
  */
-export function selectDrawableLineageEdges(
-  options: AllowedEdgeOption[],
-  lineageEdgeTypes: string[],
-): AllowedEdgeOption[] {
-  const lineage = new Set(lineageEdgeTypes)
-  return options.filter(
-    (o) => lineage.has(o.edgeType) && !NON_DRAWABLE_EDGE_TYPES.has(o.edgeType),
-  )
+export function isDrawableLineageType(
+  rt: RelationshipTypeSchema,
+  containmentEdgeTypes: string[],
+): boolean {
+  if (NON_DRAWABLE_EDGE_TYPES.has(rt.id)) return false
+  const containmentSet = new Set(containmentEdgeTypes.map((t) => t.toUpperCase()))
+  const isContainment = rt.isContainment ?? containmentSet.has(rt.id.toUpperCase())
+  if (isContainment) return false
+  return rt.isLineage ?? true
 }
 
-/**
- * The raw lineage edge types a user may draw FROM (or TO) a node of
- * `sourceType`, each annotated with whether the ontology allows it and why not.
- * Drawable lineage only (AGGREGATED and non-lineage types are dropped); a
- * disallowed type is kept with `allowed:false` + a `reason` so the picker can
- * show it disabled. An empty source/target list means "unrestricted".
- */
-export function deriveAllowedEdges(
-  sourceType: string | null,
-  relationshipTypes: RelationshipTypeSchema[],
-  lineageEdgeTypes: string[],
-  direction: EdgeDirection = 'outgoing',
-): AllowedEdgeOption[] {
-  const options: AllowedEdgeOption[] = relationshipTypes.map((rt) => {
-    const constrained = direction === 'incoming' ? rt.targetTypes : rt.sourceTypes
-    const allowed = !sourceType || constrained.length === 0 || constrained.includes(sourceType)
-    const role = direction === 'incoming' ? 'target' : 'source'
-    return {
-      edgeType: rt.id,
-      label: rt.name ?? rt.id,
-      description: rt.description,
-      allowed,
-      reason: allowed
-        ? undefined
-        : `'${sourceType}' is not a valid ${role} for '${rt.id}'. Allowed: ${[...constrained].sort().join(', ') || '(none)'}`,
-    }
-  })
-  return selectDrawableLineageEdges(options, lineageEdgeTypes)
+/** True when `type` satisfies an endpoint constraint (empty / '*' = wildcard). */
+function endpointOk(type: string | null, allowedTypes: string[] | undefined): boolean {
+  return !type || !allowedTypes?.length || allowedTypes.includes('*') || allowedTypes.includes(type)
 }
 
 /**
  * The raw lineage edge types that may connect `sourceType` → `targetType`,
  * checking BOTH endpoints against the ontology (the connect flow knows both
  * ends). Drawable lineage only; a type that fails either end is kept with
- * `allowed:false` + a `reason` naming the offending end. Empty source/target
- * lists mean "unrestricted".
+ * `allowed:false` + a `reason` naming the offending end. Empty / '*' source or
+ * target lists mean "unrestricted".
  */
 export function deriveConnectableEdges(
   sourceType: string | null,
   targetType: string | null,
   relationshipTypes: RelationshipTypeSchema[],
-  lineageEdgeTypes: string[],
+  containmentEdgeTypes: string[],
 ): AllowedEdgeOption[] {
-  const options: AllowedEdgeOption[] = relationshipTypes.map((rt) => {
-    const srcOk = !sourceType || rt.sourceTypes.length === 0 || rt.sourceTypes.includes(sourceType)
-    const tgtOk = !targetType || rt.targetTypes.length === 0 || rt.targetTypes.includes(targetType)
-    const allowed = srcOk && tgtOk
-    let reason: string | undefined
-    if (!srcOk) reason = `'${sourceType}' is not a valid source for '${rt.id}'. Allowed: ${[...rt.sourceTypes].sort().join(', ') || '(none)'}`
-    else if (!tgtOk) reason = `'${targetType}' is not a valid target for '${rt.id}'. Allowed: ${[...rt.targetTypes].sort().join(', ') || '(none)'}`
-    return { edgeType: rt.id, label: rt.name ?? rt.id, description: rt.description, allowed, reason }
-  })
-  return selectDrawableLineageEdges(options, lineageEdgeTypes)
+  return relationshipTypes
+    .filter((rt) => isDrawableLineageType(rt, containmentEdgeTypes))
+    .map((rt) => {
+      const srcOk = endpointOk(sourceType, rt.sourceTypes)
+      const tgtOk = endpointOk(targetType, rt.targetTypes)
+      const allowed = srcOk && tgtOk
+      let reason: string | undefined
+      if (!srcOk) reason = `'${sourceType}' is not a valid source for '${rt.id}'. Allowed: ${[...(rt.sourceTypes ?? [])].sort().join(', ') || '(any)'}`
+      else if (!tgtOk) reason = `'${targetType}' is not a valid target for '${rt.id}'. Allowed: ${[...(rt.targetTypes ?? [])].sort().join(', ') || '(any)'}`
+      return { edgeType: rt.id, label: rt.name ?? rt.id, description: rt.description, allowed, reason }
+    })
 }

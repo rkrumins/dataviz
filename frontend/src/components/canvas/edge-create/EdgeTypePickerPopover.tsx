@@ -10,7 +10,7 @@ import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
-import { useRelationshipTypes, useLineageEdgeTypes } from '@/store/schema'
+import { useRelationshipTypes, useContainmentEdgeTypes } from '@/store/schema'
 import { deriveConnectableEdges } from '@/services/ontologyPreflightService'
 
 export interface EdgeTypePickerPopoverProps {
@@ -25,7 +25,7 @@ export interface EdgeTypePickerPopoverProps {
 export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, onCancel }: EdgeTypePickerPopoverProps) {
   const nodes = useCanvasStore((s) => s.nodes)
   const relationshipTypes = useRelationshipTypes()
-  const lineageEdgeTypes = useLineageEdgeTypes()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
   const ref = useRef<HTMLDivElement>(null)
 
   const nodeType = (id: string) => {
@@ -42,9 +42,9 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
   }, [nodes, targetId])
 
   const options = useMemo(
-    () => deriveConnectableEdges(nodeType(sourceId), nodeType(targetId), relationshipTypes, lineageEdgeTypes),
+    () => deriveConnectableEdges(nodeType(sourceId), nodeType(targetId), relationshipTypes, containmentEdgeTypes),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodes, sourceId, targetId, relationshipTypes, lineageEdgeTypes],
+    [nodes, sourceId, targetId, relationshipTypes, containmentEdgeTypes],
   )
 
   useEffect(() => {

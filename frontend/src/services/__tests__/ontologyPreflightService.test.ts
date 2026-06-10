@@ -1,92 +1,82 @@
 import { describe, it, expect } from 'vitest'
 import {
-  selectDrawableLineageEdges,
-  deriveAllowedEdges,
+  isDrawableLineageType,
   deriveConnectableEdges,
   allowedChildTypeIds,
   NON_DRAWABLE_EDGE_TYPES,
 } from '../ontologyPreflightService'
-import type { AllowedEdgeOption } from '@/providers/GraphDataProvider'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
-
-const opt = (edgeType: string, allowed = true): AllowedEdgeOption => ({
-  edgeType, label: edgeType, allowed, reason: allowed ? undefined : 'nope',
-})
 
 const et = (id: string, canContain: string[], canBeContainedBy: string[] = []): EntityTypeSchema => ({
   id, name: id, pluralName: id, visual: {} as never, fields: [], behavior: {} as never,
   hierarchy: { level: 0, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
 })
 
-const rt = (id: string, sourceTypes: string[], targetTypes: string[]): RelationshipTypeSchema => ({
-  id, name: id, sourceTypes, targetTypes,
-} as RelationshipTypeSchema)
+const rt = (
+  id: string,
+  sourceTypes: string[],
+  targetTypes: string[],
+  extra: Partial<RelationshipTypeSchema> = {},
+): RelationshipTypeSchema => ({ id, name: id, sourceTypes, targetTypes, ...extra } as RelationshipTypeSchema)
 
-describe('selectDrawableLineageEdges', () => {
-  const lineage = ['FLOWS_TO', 'CONSUMES', 'PRODUCES', 'AGGREGATED']
-
-  it('keeps raw lineage types and drops the synthetic AGGREGATED type', () => {
-    const out = selectDrawableLineageEdges([opt('FLOWS_TO'), opt('CONSUMES'), opt('AGGREGATED')], lineage)
-    expect(out.map((o) => o.edgeType)).toEqual(['FLOWS_TO', 'CONSUMES'])
-  })
-
-  it('drops non-lineage types (containment / metadata) entirely', () => {
-    const out = selectDrawableLineageEdges([opt('FLOWS_TO'), opt('CONTAINS'), opt('TAGGED_WITH')], lineage)
-    expect(out.map((o) => o.edgeType)).toEqual(['FLOWS_TO'])
-  })
-
-  it('treats AGGREGATED as non-drawable', () => {
+describe('isDrawableLineageType', () => {
+  it('excludes the synthetic AGGREGATED type', () => {
+    expect(isDrawableLineageType(rt('AGGREGATED', [], [], { isLineage: true }), [])).toBe(false)
     expect(NON_DRAWABLE_EDGE_TYPES.has('AGGREGATED')).toBe(true)
   })
-})
 
-describe('deriveAllowedEdges', () => {
-  const rels = [
-    rt('FLOWS_TO', ['dataset', 'dataJob'], ['dataset', 'dataJob']),
-    rt('PRODUCES', ['dataJob'], ['dataset']),
-    rt('AGGREGATED', [], []),
-    rt('CONTAINS', ['system'], ['dataset']),
-  ]
-  const lineage = ['FLOWS_TO', 'PRODUCES', 'AGGREGATED']
-
-  it('marks a valid source as allowed and an invalid one as disallowed with a reason', () => {
-    const out = deriveAllowedEdges('dataset', rels, lineage, 'outgoing')
-    const flows = out.find((o) => o.edgeType === 'FLOWS_TO')
-    const produces = out.find((o) => o.edgeType === 'PRODUCES')
-    expect(flows?.allowed).toBe(true)
-    expect(produces?.allowed).toBe(false)
-    expect(produces?.reason).toContain('dataJob')
+  it('excludes containment types — by flag or by containmentEdgeTypes membership', () => {
+    expect(isDrawableLineageType(rt('CONTAINS', [], [], { isContainment: true }), [])).toBe(false)
+    expect(isDrawableLineageType(rt('BELONGS_TO', [], []), ['BELONGS_TO'])).toBe(false)
   })
 
-  it('excludes AGGREGATED and non-lineage CONTAINS', () => {
-    const out = deriveAllowedEdges('dataset', rels, lineage, 'outgoing')
-    expect(out.map((o) => o.edgeType).sort()).toEqual(['FLOWS_TO', 'PRODUCES'])
+  it('excludes explicitly non-lineage metadata types', () => {
+    expect(isDrawableLineageType(rt('TAGGED_WITH', [], [], { isLineage: false }), [])).toBe(false)
+  })
+
+  it('includes lineage types and defaults unknown non-containment types to drawable', () => {
+    expect(isDrawableLineageType(rt('FLOWS_TO', [], [], { isLineage: true }), [])).toBe(true)
+    expect(isDrawableLineageType(rt('CUSTOM_REL', [], []), [])).toBe(true)
   })
 })
 
 describe('deriveConnectableEdges', () => {
   const rels = [
-    rt('PRODUCES', ['dataJob'], ['dataset']),
-    rt('FLOWS_TO', ['dataset'], ['dataset']),
-    rt('AGGREGATED', [], []),
+    rt('PRODUCES', ['dataJob'], ['dataset'], { isLineage: true }),
+    rt('FLOWS_TO', ['dataset'], ['dataset'], { isLineage: true }),
+    rt('AGGREGATED', [], [], { isLineage: true }),
+    rt('CONTAINS', ['system'], ['dataset'], { isContainment: true }),
   ]
-  const lineage = ['PRODUCES', 'FLOWS_TO', 'AGGREGATED']
+
+  it('returns lineage edges even when containmentEdgeTypes/lineageEdgeTypes are empty (regression)', () => {
+    // The old bug required membership in lineageEdgeTypes (often empty) → nothing.
+    const out = deriveConnectableEdges('dataset', 'dataset', rels, [])
+    expect(out.map((o) => o.edgeType).sort()).toEqual(['FLOWS_TO', 'PRODUCES'])
+  })
 
   it('allows an edge only when BOTH endpoints satisfy the ontology', () => {
-    const out = deriveConnectableEdges('dataJob', 'dataset', rels, lineage)
+    const out = deriveConnectableEdges('dataJob', 'dataset', rels, [])
     expect(out.find((o) => o.edgeType === 'PRODUCES')?.allowed).toBe(true)
   })
 
   it('disallows with a target reason when the source is valid but the target is not', () => {
-    const out = deriveConnectableEdges('dataJob', 'dataJob', rels, lineage)
+    const out = deriveConnectableEdges('dataJob', 'dataJob', rels, [])
     const produces = out.find((o) => o.edgeType === 'PRODUCES')
     expect(produces?.allowed).toBe(false)
     expect(produces?.reason).toContain('not a valid target')
   })
 
-  it('never offers AGGREGATED', () => {
-    const out = deriveConnectableEdges('dataset', 'dataset', rels, lineage)
+  it('never offers AGGREGATED or containment types', () => {
+    const out = deriveConnectableEdges('dataset', 'dataset', rels, [])
     expect(out.find((o) => o.edgeType === 'AGGREGATED')).toBeUndefined()
+    expect(out.find((o) => o.edgeType === 'CONTAINS')).toBeUndefined()
+  })
+
+  it('treats empty / wildcard endpoint lists as unrestricted', () => {
+    const wild = [rt('LINKS', [], [], { isLineage: true }), rt('STAR', ['*'], ['*'], { isLineage: true })]
+    const out = deriveConnectableEdges('anything', 'whatever', wild, [])
+    expect(out.every((o) => o.allowed)).toBe(true)
+    expect(out.map((o) => o.edgeType).sort()).toEqual(['LINKS', 'STAR'])
   })
 })
 
