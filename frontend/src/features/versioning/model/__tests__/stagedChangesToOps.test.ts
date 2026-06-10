@@ -48,4 +48,34 @@ describe('stagedChangesToOps', () => {
     ])
     expect(ops).toEqual([])
   })
+
+  it('maps create_edge to a create edge op (endpoints as sourceEntityId/targetEntityId)', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'create_edge', targetId: 'staged-edge-1', after: { edgeType: 'FLOWS_TO', source: 'urn:a', target: 'urn:b' } }),
+    ])
+    expect(ops).toEqual([
+      { op: 'create', kind: 'edge', ref: 'staged-edge-1', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:a', targetEntityId: 'urn:b' } },
+    ])
+  })
+
+  it('resolves create_edge endpoints through the temp-id resolver (edge between two new nodes)', () => {
+    const resolve = (id: string) => ({ 'urn:staged:a': 'urn:real:a', 'urn:staged:b': 'urn:real:b' }[id] ?? id)
+    const ops = stagedChangesToOps(
+      [sc({ type: 'create_edge', targetId: 'staged-edge-2', after: { edgeType: 'PRODUCES', source: 'urn:staged:a', target: 'urn:staged:b' } })],
+      resolve,
+    )
+    expect(ops[0].payload).toEqual({ edgeType: 'PRODUCES', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:real:b' })
+  })
+
+  it('resolves reverse_edge endpoints through the temp-id resolver too', () => {
+    const resolve = (id: string) => (id === 'urn:staged:a' ? 'urn:real:a' : id)
+    const ops = stagedChangesToOps(
+      [sc({ type: 'reverse_edge', targetId: 'staged-edge-3', before: { edge: { id: 'e9' } }, after: { edge: { edgeType: 'FLOWS_TO', source: 'urn:staged:a', target: 'urn:b' } } })],
+      resolve,
+    )
+    expect(ops).toEqual([
+      { op: 'delete', kind: 'edge', id: 'e9' },
+      { op: 'create', kind: 'edge', id: 'staged-edge-3', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:b' } },
+    ])
+  })
 })

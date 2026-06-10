@@ -42,8 +42,15 @@ export async function saveStagedChangesToDraft(
     }
   }
 
-  // Phase 2 — mutations of existing entities as one atomic, server-merged commit.
-  const ops: GraphChangeOp[] = stagedChangesToOps(changes.filter((c) => c.type !== 'create_entity'))
+  // Phase 2 — mutations + user-drawn edges as one atomic, server-merged commit.
+  // Resolve edge endpoints through Phase 1's temp-id map: an edge between two
+  // freshly-created nodes references their temp urns until the creates above
+  // register the real ones.
+  const resolve = (id: string) => tempIdMap.get(id) ?? id
+  const ops: GraphChangeOp[] = stagedChangesToOps(
+    changes.filter((c) => c.type !== 'create_entity'),
+    resolve,
+  )
   if (ops.length === 0) return { commitId: null }
   const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
   return { commitId: res.commitId }

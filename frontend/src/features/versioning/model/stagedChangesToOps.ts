@@ -1,7 +1,8 @@
 /**
  * stagedChangesToOps — translate the canvas's staged edits into atomic `/graph/changes`
- * ops for a draft save. Handles the *mutation* of existing entities (rename/update/delete
- * a node, edit/delete/reverse an edge); `create_entity` is intentionally excluded — it
+ * ops for a draft save. Handles entity mutations (rename/update/delete a node,
+ * edit/delete/reverse an edge) plus user-drawn raw edges (`create_edge`);
+ * `create_entity` is intentionally excluded — it
  * keeps going through the proven `provider.createNode` path (which constructs the urn and
  * the containment edge), and is run first by `saveStagedChangesToDraft`.
  *
@@ -35,7 +36,14 @@ function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unkno
   return out
 }
 
-export function stagedChangesToOps(changes: StagedChange[]): GraphChangeOp[] {
+export function stagedChangesToOps(
+  changes: StagedChange[],
+  // Rewrites a staged endpoint id to its real id. After Phase 1 creates the new
+  // nodes, an edge drawn between two brand-new nodes still references their temp
+  // urns — resolve them here so the backend sees live endpoints (entity_id == urn
+  // in the versioned graph), otherwise the edge would dangle on apply.
+  resolveId: (id: string) => string = (id) => id,
+): GraphChangeOp[] {
   const ops: GraphChangeOp[] = []
   for (const c of changes) {
     switch (c.type) {
@@ -62,6 +70,25 @@ export function stagedChangesToOps(changes: StagedChange[]): GraphChangeOp[] {
       case 'delete_edge':
         ops.push({ op: 'delete', kind: 'edge', id: c.targetId })
         break
+      case 'create_edge': {
+        // A user-drawn RAW edge. Endpoints are canvas node ids (== urns == backend
+        // entity_ids); resolve any temp endpoints to their created-node ids.
+        const after = asObj(c.after)
+        const data = asObj(after.data)
+        const src = after.source ?? after.sourceEntityId
+        const tgt = after.target ?? after.targetEntityId
+        ops.push({
+          op: 'create',
+          kind: 'edge',
+          ref: c.targetId,
+          payload: {
+            edgeType: after.edgeType ?? data.edgeType,
+            sourceEntityId: src != null ? resolveId(String(src)) : src,
+            targetEntityId: tgt != null ? resolveId(String(tgt)) : tgt,
+          },
+        })
+        break
+      }
       case 'reverse_edge': {
         // Endpoints aren't mutable in place — drop the original and recreate it flipped.
         const before = asObj(asObj(c.before).edge)
@@ -73,8 +100,8 @@ export function stagedChangesToOps(changes: StagedChange[]): GraphChangeOp[] {
           id: c.targetId,
           payload: {
             edgeType: after.edgeType ?? asObj(after.data).edgeType,
-            sourceEntityId: after.source,
-            targetEntityId: after.target,
+            sourceEntityId: after.source != null ? resolveId(String(after.source)) : after.source,
+            targetEntityId: after.target != null ? resolveId(String(after.target)) : after.target,
           },
         })
         break
