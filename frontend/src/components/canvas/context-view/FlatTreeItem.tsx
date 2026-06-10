@@ -15,6 +15,7 @@ import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { NodeConnectionHandle } from './NodeConnectionHandle'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -42,6 +43,8 @@ interface FlatTreeItemProps {
   onFocus: (node: HierarchyNode) => void
   onToggleSearch?: (id: string) => void
   isSearchVisible?: boolean
+  /** When set (draft/authoring mode), show the hover connection handle. */
+  onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -70,6 +73,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onFocus,
   onToggleSearch,
   isSearchVisible = false,
+  onBeginConnect,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -317,6 +321,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
+      {/* Edge authoring: hover-reveal handle on the card's right edge. */}
+      {onBeginConnect && (
+        <NodeConnectionHandle
+          visible={isHovered}
+          onBeginConnect={(start) => onBeginConnect(node.id, start)}
+        />
+      )}
+
       {/* Modern Tree Lines with gradient effect.
           Subtle mode dims connectors + dot for a calmer look without
           removing them — orientation cues survive at lower contrast. */}

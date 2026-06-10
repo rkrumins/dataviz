@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   selectDrawableLineageEdges,
   deriveAllowedEdges,
+  deriveConnectableEdges,
   allowedChildTypeIds,
   NON_DRAWABLE_EDGE_TYPES,
 } from '../ontologyPreflightService'
@@ -60,6 +61,32 @@ describe('deriveAllowedEdges', () => {
   it('excludes AGGREGATED and non-lineage CONTAINS', () => {
     const out = deriveAllowedEdges('dataset', rels, lineage, 'outgoing')
     expect(out.map((o) => o.edgeType).sort()).toEqual(['FLOWS_TO', 'PRODUCES'])
+  })
+})
+
+describe('deriveConnectableEdges', () => {
+  const rels = [
+    rt('PRODUCES', ['dataJob'], ['dataset']),
+    rt('FLOWS_TO', ['dataset'], ['dataset']),
+    rt('AGGREGATED', [], []),
+  ]
+  const lineage = ['PRODUCES', 'FLOWS_TO', 'AGGREGATED']
+
+  it('allows an edge only when BOTH endpoints satisfy the ontology', () => {
+    const out = deriveConnectableEdges('dataJob', 'dataset', rels, lineage)
+    expect(out.find((o) => o.edgeType === 'PRODUCES')?.allowed).toBe(true)
+  })
+
+  it('disallows with a target reason when the source is valid but the target is not', () => {
+    const out = deriveConnectableEdges('dataJob', 'dataJob', rels, lineage)
+    const produces = out.find((o) => o.edgeType === 'PRODUCES')
+    expect(produces?.allowed).toBe(false)
+    expect(produces?.reason).toContain('not a valid target')
+  })
+
+  it('never offers AGGREGATED', () => {
+    const out = deriveConnectableEdges('dataset', 'dataset', rels, lineage)
+    expect(out.find((o) => o.edgeType === 'AGGREGATED')).toBeUndefined()
   })
 })
 

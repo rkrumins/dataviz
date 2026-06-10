@@ -11,6 +11,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
 import { getDeleteImpact } from '@/services/versioningApiService'
+import { generateId } from '@/lib/utils'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
 
 // ============================================
@@ -70,6 +71,8 @@ export interface UseCanvasInteractionsOptions {
     onCloseEntityDrawer?: () => boolean
     /** Callback to exit an active trace (ESC cascade). Should return true if it handled the exit. */
     onExitTrace?: () => boolean
+    /** Arm edge connect-mode from the currently selected node (e.g. 'C' key). */
+    onConnectMode?: (sourceNodeId: string) => void
 }
 
 export interface UseCanvasInteractionsResult {
@@ -104,6 +107,8 @@ export interface UseCanvasInteractionsResult {
     editEdge: (edgeId: string) => void
     deleteEdge: (edgeId: string) => void
     reverseEdge: (edgeId: string) => void
+    /** Stage a new RAW edge between two nodes (optimistic + create_edge change). */
+    stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string
     
     // Canvas Actions
     selectAll: () => void
@@ -121,6 +126,7 @@ export interface UseCanvasInteractionsResult {
         onCancel: () => void
         onTrace: () => void
         onCreate: () => void
+        onConnectMode: () => void
         onCommandPalette: () => void
     }
 }
@@ -142,6 +148,7 @@ export function useCanvasInteractions(
         onCloseEdgePanel,
         onCloseEntityDrawer,
         onExitTrace,
+        onConnectMode,
     } = options
     
     const provider = useGraphProvider()
@@ -473,7 +480,31 @@ export function useCanvasInteractions(
             },
         })
     }, [])
-    
+
+    const stageEdgeCreate = useCallback((sourceUrn: string, targetUrn: string, edgeType: string) => {
+        const tempId = generateId('staged-edge')
+        const optimistic = {
+            id: tempId,
+            source: sourceUrn,
+            target: targetUrn,
+            type: 'lineage' as const,
+            data: { edgeType, relationship: edgeType.toLowerCase() },
+        }
+        useCanvasStore.getState().addEdges([optimistic])
+        useStagedChangesStore.getState().stage({
+            type: 'create_edge',
+            targetId: tempId,
+            // `source`/`target` are canvas node ids (== urns == backend entity_ids);
+            // stagedChangesToOps resolves any temp endpoints on save. No apply hook —
+            // the draft save picks create_edge up via /graph/changes (main-mode apply
+            // parity is added separately).
+            after: { edgeType, source: sourceUrn, target: targetUrn },
+            summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
+            discard: () => useCanvasStore.getState().removeEdge(tempId),
+        })
+        return tempId
+    }, [])
+
     // ===================
     // Canvas Actions
     // ===================
@@ -548,6 +579,9 @@ export function useCanvasInteractions(
         onCreate: () => {
             openQuickCreate(lastMousePosition.current)
         },
+        onConnectMode: () => {
+            if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
+        },
         onCommandPalette: openCommandPalette,
     }
     
@@ -595,6 +629,7 @@ export function useCanvasInteractions(
         
         // Edge CRUD
         editEdge,
+        stageEdgeCreate,
         deleteEdge,
         reverseEdge,
         

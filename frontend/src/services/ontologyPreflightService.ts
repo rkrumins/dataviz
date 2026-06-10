@@ -92,3 +92,28 @@ export function deriveAllowedEdges(
   })
   return selectDrawableLineageEdges(options, lineageEdgeTypes)
 }
+
+/**
+ * The raw lineage edge types that may connect `sourceType` → `targetType`,
+ * checking BOTH endpoints against the ontology (the connect flow knows both
+ * ends). Drawable lineage only; a type that fails either end is kept with
+ * `allowed:false` + a `reason` naming the offending end. Empty source/target
+ * lists mean "unrestricted".
+ */
+export function deriveConnectableEdges(
+  sourceType: string | null,
+  targetType: string | null,
+  relationshipTypes: RelationshipTypeSchema[],
+  lineageEdgeTypes: string[],
+): AllowedEdgeOption[] {
+  const options: AllowedEdgeOption[] = relationshipTypes.map((rt) => {
+    const srcOk = !sourceType || rt.sourceTypes.length === 0 || rt.sourceTypes.includes(sourceType)
+    const tgtOk = !targetType || rt.targetTypes.length === 0 || rt.targetTypes.includes(targetType)
+    const allowed = srcOk && tgtOk
+    let reason: string | undefined
+    if (!srcOk) reason = `'${sourceType}' is not a valid source for '${rt.id}'. Allowed: ${[...rt.sourceTypes].sort().join(', ') || '(none)'}`
+    else if (!tgtOk) reason = `'${targetType}' is not a valid target for '${rt.id}'. Allowed: ${[...rt.targetTypes].sort().join(', ') || '(none)'}`
+    return { edgeType: rt.id, label: rt.name ?? rt.id, description: rt.description, allowed, reason }
+  })
+  return selectDrawableLineageEdges(options, lineageEdgeTypes)
+}

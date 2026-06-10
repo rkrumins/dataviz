@@ -49,6 +49,8 @@ export interface CanvasContextMenuProps {
     onCreateChild?: (parentId: string) => void
     onTraceNode?: (id: string) => void
     onCopyUrn?: (id: string) => void
+    /** Arm edge connect-mode from this node */
+    onConnect?: (sourceId: string) => void
     /** Edge actions */
     onEditEdge?: (id: string) => void
     onDeleteEdge?: (id: string) => void
@@ -79,6 +81,7 @@ export function CanvasContextMenu({
     onCreateChild,
     onTraceNode,
     onCopyUrn,
+    onConnect,
     onEditEdge,
     onDeleteEdge,
     onReverseEdge,
@@ -170,6 +173,16 @@ export function CanvasContextMenu({
                     label: 'Add Child Entity',
                     icon: 'Plus',
                     onClick: () => { onCreateChild(target.id); onClose() }
+                })
+            }
+
+            if (onConnect) {
+                result.push({
+                    id: 'connect',
+                    label: 'Connect To…',
+                    icon: 'Spline',
+                    shortcut: 'C',
+                    onClick: () => { onConnect(target.id); onClose() }
                 })
             }
 
@@ -272,7 +285,7 @@ export function CanvasContextMenu({
 
         return result
     }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode,
-        onCopyUrn, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
+        onCopyUrn, onConnect, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, layers, onMoveToLayer, onClose])
 
     // Get icon component

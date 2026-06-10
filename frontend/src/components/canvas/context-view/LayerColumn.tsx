@@ -43,6 +43,8 @@ interface LayerColumnProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onAddToLayer?: (layerId: string) => void
+  /** When set (draft/authoring mode), enables the hover connection handle on cards. */
+  onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
@@ -91,6 +93,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDoubleClick,
   onAddChild,
   onAddToLayer,
+  onBeginConnect,
   traceFocusId,
   traceNodes: _traceNodes,
   traceContextSet,
@@ -1170,6 +1173,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onFocus={handleFocus}
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}
+                        onBeginConnect={onBeginConnect}
                       />
                     </div>
                   </div>

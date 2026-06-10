@@ -34,7 +34,7 @@ import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenc
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useQueryClient } from '@tanstack/react-query'
-import { useBranchStore } from '@/store/branchStore'
+import { useBranchStore, useIsDraftMode } from '@/store/branchStore'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
@@ -57,6 +57,9 @@ import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { CanvasContextMenu } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette } from '../CommandPalette'
+import { useEdgeConnect } from '../edge-create/useEdgeConnect'
+import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
+import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
@@ -334,9 +337,14 @@ export function ContextViewCanvas({
   }, [trace, removeStoreEdges])
 
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
+  // before useEdgeConnect exists) can arm connect-mode on the selected node.
+  const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
+    onConnectMode: (nodeId) => edgeConnectRef.current?.armConnect(nodeId),
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
       // Implementation handled by the existing moveToLayer function
@@ -360,6 +368,15 @@ export function ContextViewCanvas({
     enabled: true,
     handlers: interactions.keyboardHandlers,
   })
+
+  // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
+  // stage a RAW create_edge. Only offered in draft (authoring) mode.
+  const isDraftMode = useIsDraftMode()
+  const edgeConnect = useEdgeConnect({
+    onConnect: (sourceUrn, targetUrn, edgeType) =>
+      interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
+  })
+  edgeConnectRef.current = edgeConnect
 
   // Aggregated lineage for progressive edge disclosure
   const {
@@ -2130,6 +2147,13 @@ export function ContextViewCanvas({
             />
           )}
 
+          {/* In-progress edge while dragging a connection (shares the overlay
+              coordinate space — absolute sibling inside the scroll container). */}
+          <ConnectionDragLayer
+            sourceId={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceId : null}
+            pointer={edgeConnect.state.pointer}
+          />
+
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
               cards in adjacent layers during initial hydration. Anchored
               to the actual ghost-card DOM rects (via [data-canvas-ghost]),
@@ -2205,6 +2229,7 @@ export function ContextViewCanvas({
                   setCreationParentId(null)
                   setIsCreatingEntity(true)
                 }}
+                onBeginConnect={isDraftMode ? edgeConnect.beginDrag : undefined}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
@@ -2306,6 +2331,7 @@ export function ContextViewCanvas({
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
+        onConnect={isDraftMode ? (id) => edgeConnect.armConnect(id) : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
@@ -2339,6 +2365,22 @@ export function ContextViewCanvas({
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
+
+      {/* Edge-type picker — appears at the drop point once a connection
+          resolves a (source, target). Offers only ontology-allowed raw
+          lineage types (never AGGREGATED). */}
+      {edgeConnect.state.mode === 'picking'
+        && edgeConnect.state.sourceId
+        && edgeConnect.state.targetId
+        && edgeConnect.state.pickerPos && (
+        <EdgeTypePickerPopover
+          sourceId={edgeConnect.state.sourceId}
+          targetId={edgeConnect.state.targetId}
+          position={edgeConnect.state.pickerPos}
+          onPick={edgeConnect.confirm}
+          onCancel={edgeConnect.cancel}
+        />
+      )}
     </div>
   )
 }
