@@ -123,22 +123,35 @@ class ContextEngine:
             if graph is not None:
                 gid = graph["graph_id"]
                 main_id = await svc.main_branch_id(gid)
+                is_draft = norm not in ("", "main", main_id)
+                main_fresh = (await svc.projection_watermark(gid))["fresh"]
+                read_provider = None
                 read_branch: Optional[str] = None
-                if norm not in ("", "main", main_id):
+                if is_draft:
                     async with svc._session() as gv_s:
                         try:
                             await svc._get_branch(gv_s, gid, norm)
                         except ValueError as exc:
                             raise KeyError(f"branch_not_found: {norm}") from exc
-                    read_branch = norm
-                elif not (await svc.projection_watermark(gid))["fresh"]:
-                    read_branch = main_id
-                if read_branch is not None:
+                    # Draft = main ⊕ sparse delta: overlay the draft's bounded patch set on WHATEVER
+                    # serves main — the live FalkorDB provider when fresh (so the materialized
+                    # aggregated lineage is reused, not re-derived), else the Postgres main reader.
+                    # A no-change draft has an empty delta → pure pass-through → identical to main.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
-                    engine = cls(
-                        provider=VersionedBranchProvider(svc, graph_id=gid, branch_id=read_branch, actor=actor),
-                        ontology_service=ontology_service,
-                    )
+                    from ..providers.draft_overlay_provider import DraftOverlayProvider
+                    base = provider if main_fresh else VersionedBranchProvider(
+                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_provider = DraftOverlayProvider(
+                        base, svc=svc, graph_id=gid, branch_id=norm, actor=actor)
+                    read_branch = norm
+                elif not main_fresh:
+                    # Stale main (e.g. right after a merge): serve from Postgres so the change shows
+                    # immediately; once the projection catches up, the fresh-FalkorDB hot path is used.
+                    from ..providers.versioned_branch_provider import VersionedBranchProvider
+                    read_provider = VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_branch = main_id
+                if read_provider is not None:
+                    engine = cls(provider=read_provider, ontology_service=ontology_service)
                     engine._workspace_id = workspace_id
                     engine._data_source_id = data_source_id
                     engine._db_session = session
@@ -160,9 +173,24 @@ class ContextEngine:
         from .versioning import config as vconfig
         if vconfig.VERSIONED_WRITES_ENABLED and data_source_id:
             from ..providers.versioned_write_provider import VersionedWriteProvider
+            # Resolve the data source's real FalkorDB graph so a lazily-created versioned graph
+            # projects merged main state into the SAME graph the canvas reads (not an orphan gv_<id>).
+            # The graphver store may be a separate DB, so this app-layer lookup is the only place
+            # that knows the name. (projection_mode/_proj is the provider's aggregated-edge graph, a
+            # separate concern — base node/edge reads always hit ds.graph_name.)
+            from ..db.repositories import data_source_repo
+            falkor_graph_name: Optional[str] = None
+            try:
+                ds_row = await data_source_repo.get_data_source_orm(session, data_source_id)
+                if ds_row is not None and ds_row.graph_name:
+                    falkor_graph_name = ds_row.graph_name
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve graph_name for ds=%s (versioned graph will use the "
+                    "synthetic fallback until repaired): %s", data_source_id, exc)
             provider = VersionedWriteProvider(
                 provider, workspace_id=workspace_id, data_source_id=data_source_id,
-                actor=actor or "system",
+                actor=actor or "system", falkor_graph_name=falkor_graph_name,
             )
 
         engine = cls(provider=provider, ontology_service=ontology_service)

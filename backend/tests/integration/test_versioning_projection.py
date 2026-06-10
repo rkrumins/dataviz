@@ -53,6 +53,11 @@ class FakeGraph:
             raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
         return None
 
+    async def delete(self):
+        """GRAPH.DELETE — drops the whole graph key (used by the clean-rebuild seed)."""
+        self.nodes.clear()
+        self.edges.clear()
+
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}
 
@@ -173,6 +178,26 @@ async def _run() -> None:
     fg = await _assert_matches_main(svc, fake, F["graph_id"])
     assert fg.entity_ids() == {"A", "C"} and set(fg.edges) == {"E2"}   # inherited base, nothing copied
     assert "__fork_" in await _graph_name(F["graph_id"])               # fork has its own graph name
+
+    # ── self-healing re-point: a graph auto-created without its real FalkorDB name is pinned to the
+    # orphan gv_<id>. ensure_projection_target re-points it to the data source's real graph and resets
+    # the watermark; the next projection REBUILDS that graph clean — a stale row main no longer has
+    # must be gone (the additive seed alone would leave it: the reported "deletes still show on Main").
+    real_name = "real_ds_graph"
+    fake(real_name).nodes["gv:STALE"] = {"urn": "gv:STALE", "entityId": "STALE", "displayName": "stale"}
+    old = await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=real_name)
+    assert old == f"gv_{gid}", old                                     # returns the now-orphaned name to drop
+    assert await _graph_name(gid) == real_name                         # re-pointed to the real graph
+    assert await _watermark(gid) == 0                                  # reset → next projection is a full reseed
+    assert (await proj.project_graph(gid))["projected"] == 4
+    rg = fake.graphs[real_name]
+    assert "STALE" not in rg.entity_ids(), rg.entity_ids()             # clean rebuild dropped the stale node
+    assert rg.entity_ids() == {"A", "C"} and set(rg.edges) == {"E2"}   # == materialized main
+    assert (await proj.project_graph(gid))["noop"] is True             # caught up; no churn on the next call
+
+    # a fork is left untouched — it legitimately owns its __fork_ graph (no re-point, returns None).
+    assert await svc.ensure_projection_target(graph_id=F["graph_id"], falkor_graph_name=real_name) is None
+    assert "__fork_" in await _graph_name(F["graph_id"])
 
     await db.dispose_engine()
 

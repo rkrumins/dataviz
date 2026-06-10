@@ -32,9 +32,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_async_session, get_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.auth_service.interface import User
+from backend.app.services.graph_cache import CacheScope, get_graph_cache
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
@@ -116,6 +117,31 @@ def _get_projector():
     return _projector
 
 
+async def _repair_projection_target(graph_id: str) -> Optional[str]:
+    """Ensure a graph projects into the data source's REAL FalkorDB graph (the one the canvas reads),
+    not an orphan ``gv_<id>``. This lives at the app layer because only here can we read the data
+    source's ``graph_name`` (the graphver store may be a separate DB). Self-heals graphs created
+    before the name was injected. Returns a now-orphaned ``gv_*`` name to drop (else ``None``).
+    Never raises — projection proceeds regardless."""
+    try:
+        svc = get_versioning_service()
+        meta = await svc.get_graph(graph_id)
+        ds_id = meta.get("data_source_id") if meta else None
+        if not ds_id:
+            return None
+        async with get_async_session() as s:
+            ds_row = await data_source_repo.get_data_source_orm(s, str(ds_id))
+        if ds_row is None or not ds_row.graph_name:
+            return None
+        old = await svc.ensure_projection_target(graph_id=graph_id, falkor_graph_name=ds_row.graph_name)
+        # Only the synthetic orphan is safe to drop — never a real ds.graph_name or a fork's graph.
+        if old and old != ds_row.graph_name and old.startswith("gv_"):
+            return old
+    except Exception as exc:
+        logger.warning("projection-target repair for %s skipped: %s", graph_id, exc)
+    return None
+
+
 async def project_now(graph_id: str) -> None:
     """Refresh a graph's FalkorDB cache up to its committed head, run IN-PROCESS as a FastAPI
     background task right after a main-advancing write — so the cache catches up promptly without
@@ -123,15 +149,42 @@ async def project_now(graph_id: str) -> None:
     raises (the Postgres commit already landed). On any failure (FalkorDB down/slow/apply error) or
     when FalkorDB is unconfigured, defer to the async worker via ``nudge_projection``; the
     watermark-gated Postgres read fallback (and the "refreshing" badge) cover the brief window."""
+    orphan = await _repair_projection_target(graph_id)   # pin projection to the real graph (self-heal)
     proj = _get_projector()
     if proj is None:
         await nudge_projection(graph_id)
         return
     try:
         await asyncio.wait_for(proj.project_graph(graph_id), _SYNC_PROJECTION_TIMEOUT_SECS)
+        if orphan:                                       # the old gv_* copy is now unused — reclaim its RAM
+            try:
+                await proj.drop_graph(orphan)
+            except Exception as exc:
+                logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
     except Exception as exc:
         logger.warning("synchronous projection for %s failed; deferring to async worker: %s", graph_id, exc)
         await nudge_projection(graph_id)
+
+
+async def _bump_main_cache(graph_id: str) -> None:
+    """Invalidate the canvas read-cache for a graph's MAIN after a main-advancing write, so a merged
+    change (a delete included) shows immediately instead of being served stale from Redis for the
+    cache TTL. Main reads are cached under branch="" (fresh hot path) and branch=main_id (stale
+    Postgres fallback), so we bump both. Awaited (not backgrounded) so the client's next read can't
+    race ahead of the invalidation. Never raises — invalidation must not fail the user's write."""
+    try:
+        svc = get_versioning_service()
+        meta = await svc.get_graph(graph_id)
+        ws = str(meta.get("workspace_id") or "") if meta else ""
+        if not ws:
+            return
+        ds = str(meta.get("data_source_id") or "")
+        main_id = await svc.main_branch_id(graph_id)
+        cache = get_graph_cache()
+        await cache.bump_generation(CacheScope(ws, ds, ""))
+        await cache.bump_generation(CacheScope(ws, ds, main_id))
+    except Exception as exc:
+        logger.warning("read-cache invalidation for %s skipped: %s", graph_id, exc)
 
 
 async def graph_in_workspace(
@@ -742,6 +795,7 @@ async def publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
         )
+    await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
@@ -798,6 +852,7 @@ async def revert_commit(
         new_commit_id = await svc.revert_commit(
             graph_id=graph_id, commit_id=commit_id, actor=user.id, message=body.message,
         )
+    await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": new_commit_id}
 
@@ -1319,6 +1374,7 @@ async def merge_pull_request(
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
+    await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     background.add_task(project_now, str(_pr["target_graph_id"]))   # base graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}
 
@@ -1529,5 +1585,6 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
+    await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}

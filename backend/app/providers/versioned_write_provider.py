@@ -43,12 +43,17 @@ class VersionedWriteProvider:
     transparently via ``__getattr__``."""
 
     def __init__(self, inner, *, workspace_id: str, data_source_id: str,
-                 actor: str, svc: Optional[GraphVersioningService] = None):
+                 actor: str, svc: Optional[GraphVersioningService] = None,
+                 falkor_graph_name: Optional[str] = None):
         self._inner = inner
         self._ws = workspace_id
         self._ds = data_source_id
         self._actor = actor or "system"
         self._svc = svc or GraphVersioningService()
+        # The data source's real FalkorDB graph (the one the canvas reads) — so projection of merged
+        # main state lands where reads look, instead of an orphan gv_<id>. Resolved by the caller
+        # (app layer); None falls back to the synthetic name (tests / non-FalkorDB providers).
+        self._falkor_graph_name = falkor_graph_name
         self._gid: Optional[str] = None
         self._lock = asyncio.Lock()
 
@@ -71,7 +76,8 @@ class VersionedWriteProvider:
                     else:
                         self._gid = (await self._svc.create_graph(
                             data_source_id=self._ds, workspace_id=self._ws,
-                            actor=self._actor))["graph_id"]
+                            actor=self._actor,
+                            falkor_graph_name=self._falkor_graph_name))["graph_id"]
                         await self._maybe_bootstrap(self._gid)
         return self._gid
 

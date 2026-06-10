@@ -52,6 +52,8 @@ export function CommitRow({
   // On a squash (publish/merge) actor is the publisher; contributors are everyone who actually edited.
   const contributors = Array.isArray(commit.contributors) ? (commit.contributors as string[]) : []
   const others = contributors.filter((c) => c && c !== commit.actor)
+  // How many draft checkpoints this merge/publish squashed — so Main reads as a merge history.
+  const squashed = num(commit.source_commit_count)
   // Only fetch the diff once the row is opened (immutable commit → long staleTime).
   const summaryQ = useCommitDiffSummary(wsId, graphId, expanded ? commitId : null)
   const fetchChildren = useCallback(
@@ -82,6 +84,11 @@ export function CommitRow({
           )}
           <span>·</span>
           <span>{timeAgo(commit.created_at as string)}</span>
+          {squashed > 1 && (
+            <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Draft checkpoints squashed into this merge">
+              merged {squashed} commits
+            </span>
+          )}
           {originatingViewLabel && (
             <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Originating view">
               view {originatingViewLabel}

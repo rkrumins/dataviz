@@ -326,7 +326,10 @@ export function usePublishBranch(wsId: string, graphId: string) {
       api.publishBranch(wsId, graphId, v.branchId, { message: v.message, resolutions: v.resolutions }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
-      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, graphId) })
+      // Refresh ALL commit-log scopes by prefix — the new squash commit must show in History's
+      // "This view" / "Whole graph" (viewCommits) and per-branch (commits) lists without a reload.
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show while
       // the FalkorDB cache catches up, and force live graph reads to refetch.
@@ -403,7 +406,10 @@ export function useMergeMergeRequest(wsId: string) {
     onSuccess: (_r, v) => {
       invalidate(v.prId, v.graphId)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiff(wsId, v.prId) })
-      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, v.graphId) })
+      // Refresh ALL commit-log scopes by prefix — the merged squash commit must show in History's
+      // "This view" / "Whole graph" (viewCommits) and per-branch (commits) lists without a reload.
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, v.graphId) })
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })

@@ -171,6 +171,16 @@ class FalkorProjector:
 
         client = self._client(name)
         try:
+            if from_seq <= 0:
+                # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
+                # committed main exactly. The seed only MERGEs the live state, so without this an entity
+                # a merged draft DELETED (or stale rows on a just-re-pointed graph) would survive — the
+                # reported "deletes still show on Main". FalkorDB is a rebuildable cache and reads fall
+                # back to Postgres while projected < committed, so the brief empty window is never served.
+                try:
+                    await client.delete()
+                except Exception:
+                    pass                               # nonexistent graph (fresh) → MERGE will create it
             await self._apply(client, *changes)
         except Exception as exc:                       # pragma: no cover - infra
             logger.exception("projection apply failed for %s: %s", graph_id, exc)
