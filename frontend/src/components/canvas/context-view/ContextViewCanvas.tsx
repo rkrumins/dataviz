@@ -2235,6 +2235,11 @@ export function ContextViewCanvas({
                   setIsCreatingEntity(true)
                 }}
                 onBeginConnect={isDraftMode ? edgeConnect.beginDrag : undefined}
+                onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
+                  type: 'canvas',
+                  position: { x: e.clientX, y: e.clientY },
+                  layerId,
+                })}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
@@ -2279,7 +2284,15 @@ export function ContextViewCanvas({
             parentUrn={createPanelParentUrn}
             layerId={creationLayerId}
             defaultMode={createPanelMode}
-            onEntityCreated={(_tempUrn, parentUrn) => {
+            onEntityCreated={(tempUrn, parentUrn) => {
+              // The layered view only renders nodes that resolve to a layer, so
+              // a freshly-staged node is invisible until assigned. Assign it to
+              // the creation layer → else the parent's layer → else the first
+              // layer (an instanceAssignment wins even in closed-scope views).
+              const layer = creationLayerId
+                ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
+                ?? sortedLayers[0]?.id
+              if (layer) assignEntityToLayer(tempUrn, layer)
               if (parentUrn) {
                 setExpandedNodes(prev => new Set([...prev, parentUrn]))
               }
@@ -2342,7 +2355,13 @@ export function ContextViewCanvas({
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
         onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos) => { void ensureDraftOpen(); interactions.openQuickCreate(pos) }}
+        onCreateNode={(pos, layerId) => {
+          void ensureDraftOpen()
+          // Right-clicked an empty layer column → scope the new node to that
+          // layer so it lands there (and is assigned on create, see onEntityCreated).
+          if (layerId) setCreationLayerId(layerId)
+          interactions.openQuickCreate(pos)
+        }}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}

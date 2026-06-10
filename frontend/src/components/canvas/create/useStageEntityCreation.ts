@@ -43,7 +43,19 @@ export function useStageEntityCreation() {
     (input: StageEntityInput): string => {
       const tags = input.tags ?? []
       const properties = input.properties ?? {}
-      const parentUrn = input.parentUrn || undefined
+      // Only treat the parent as a CONTAINMENT parent when it's a real node on
+      // the canvas (a just-staged node counts — it's in the store). A layer id
+      // or a not-yet-loaded container would otherwise produce a dangling
+      // containment edge (a parent with no node), which orphans the new node in
+      // the hierarchy. When the parent isn't a node, create at the root and let
+      // layer assignment place it.
+      const parentUrnRaw = input.parentUrn || undefined
+      const parentIsNode = parentUrnRaw
+        ? useCanvasStore.getState().nodes.some(
+            (n) => n.id === parentUrnRaw || (n.data?.urn as string) === parentUrnRaw,
+          )
+        : false
+      const parentUrn = parentIsNode ? parentUrnRaw : undefined
 
       const tempUrn = `urn:staged:${input.entityType}:${generateId('new')}`
       const containmentEdgeId = parentUrn ? `contains-${parentUrn}-${tempUrn}` : null

@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils'
 export type ContextMenuTarget =
     | { type: 'node'; id: string; data?: Record<string, unknown> }
     | { type: 'edge'; id: string; source: string; target: string }
-    | { type: 'canvas'; position: { x: number; y: number } }
+    | { type: 'canvas'; position: { x: number; y: number }; layerId?: string }
 
 export interface ContextMenuAction {
     id: string
@@ -56,7 +56,7 @@ export interface CanvasContextMenuProps {
     onDeleteEdge?: (id: string) => void
     onReverseEdge?: (id: string) => void
     /** Canvas actions */
-    onCreateNode?: (position: { x: number; y: number }) => void
+    onCreateNode?: (position: { x: number; y: number }, layerId?: string) => void
     onPaste?: (position: { x: number; y: number }) => void
     onSelectAll?: () => void
     /** Additional custom actions */
@@ -254,7 +254,7 @@ export function CanvasContextMenu({
                     label: 'Create Entity Here',
                     icon: 'Plus',
                     shortcut: 'N',
-                    onClick: () => { onCreateNode(target.position); onClose() }
+                    onClick: () => { onCreateNode(target.position, target.layerId); onClose() }
                 })
             }
 

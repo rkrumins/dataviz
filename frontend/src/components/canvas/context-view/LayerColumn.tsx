@@ -45,6 +45,8 @@ interface LayerColumnProps {
   onAddToLayer?: (layerId: string) => void
   /** When set (draft/authoring mode), enables the hover connection handle on cards. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+  /** Right-click on empty space in this layer column (draft/authoring mode). */
+  onLayerContextMenu?: (e: React.MouseEvent, layerId: string) => void
   traceFocusId: string | null
   traceNodes: Set<string>
   traceContextSet: Set<string>
@@ -94,6 +96,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onAddChild,
   onAddToLayer,
   onBeginConnect,
+  onLayerContextMenu,
   traceFocusId,
   traceNodes: _traceNodes,
   traceContextSet,
@@ -927,6 +930,16 @@ export const LayerColumn = React.memo(function LayerColumn({
             ref={scrollContainerRef}
             onScroll={handleScroll}
             onKeyDown={handleKeyDown}
+            onContextMenu={(e) => {
+              // Right-click on EMPTY layer space → create-in-this-layer menu.
+              // Clicks landing on a node card are handled by the card's own
+              // context menu, so bail out for those.
+              if (!onLayerContextMenu) return
+              if ((e.target as HTMLElement).closest('[data-canvas-interactive]')) return
+              e.preventDefault()
+              e.stopPropagation()
+              onLayerContextMenu(e, layer.id)
+            }}
             tabIndex={0}
             className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative outline-none focus-visible:ring-1 focus-visible:ring-accent-lineage/30 focus-visible:ring-inset"
           >
