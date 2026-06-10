@@ -106,6 +106,32 @@ export function stagedChangesToOps(
         })
         break
       }
+      case 'retype_edge': {
+        // Edge type isn't mutable in place — drop the original and recreate it
+        // with the new type (under a NEW canvas id, so the delete and create in
+        // this commit never target the same entity id). Mutable data (e.g.
+        // confidence) is carried into the new edge.
+        const before = asObj(asObj(c.before).edge)
+        const after = asObj(asObj(c.after).edge)
+        const data = asObj(after.data)
+        const carried: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(data)) {
+          if (!IMMUTABLE_EDGE_KEYS.has(k)) carried[k] = v
+        }
+        if (before.id) ops.push({ op: 'delete', kind: 'edge', id: String(before.id) })
+        ops.push({
+          op: 'create',
+          kind: 'edge',
+          id: c.targetId,
+          payload: {
+            edgeType: after.edgeType ?? data.edgeType,
+            sourceEntityId: after.source != null ? resolveId(String(after.source)) : after.source,
+            targetEntityId: after.target != null ? resolveId(String(after.target)) : after.target,
+            ...carried,
+          },
+        })
+        break
+      }
       // create_entity → provider.createNode (handled in saveStagedChangesToDraft);
       // assign_layer / move_to_layer → view/blueprint config (referenceModelStore), not graph entities.
       default:

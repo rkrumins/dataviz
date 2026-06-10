@@ -23,6 +23,39 @@ export interface DraftSaveTarget {
   message?: string
 }
 
+/**
+ * The `create_entity` changes in parent-before-child order. Phase 1 applies
+ * creates sequentially and a child's apply hook resolves its parent's temp urn
+ * through the resolutions registered by earlier creates — so a parent MUST run
+ * first. Staging order usually guarantees that, but undo/redo can reorder the
+ * array (redo pushes to the END), and the hierarchy composer stages whole
+ * subtrees whose order shouldn't be load-bearing. Dependencies are temp-urn
+ * `after.parentUrn` references to another staged create; unknown parents (real
+ * nodes) and cycles fall back to chronological order without dropping changes.
+ */
+export function orderCreatesTopologically(changes: StagedChange[]): StagedChange[] {
+  const creates = changes.filter((c) => c.type === 'create_entity')
+  const byTempUrn = new Map<string, StagedChange>()
+  for (const c of creates) {
+    byTempUrn.set(c.targetId, c)
+    if (c.targetUrn) byTempUrn.set(c.targetUrn, c)
+  }
+  const out: StagedChange[] = []
+  const state = new Map<string, 'visiting' | 'done'>()
+  const visit = (c: StagedChange) => {
+    const st = state.get(c.id)
+    if (st === 'done' || st === 'visiting') return // visiting = cycle → keep current order
+    state.set(c.id, 'visiting')
+    const after = c.after as { parentUrn?: unknown } | null | undefined
+    const parent = after?.parentUrn ? byTempUrn.get(String(after.parentUrn)) : undefined
+    if (parent && parent.id !== c.id) visit(parent)
+    state.set(c.id, 'done')
+    out.push(c)
+  }
+  creates.forEach(visit)
+  return out
+}
+
 export async function saveStagedChangesToDraft(
   changes: StagedChange[],
   target: DraftSaveTarget,
@@ -35,11 +68,10 @@ export async function saveStagedChangesToDraft(
     registerTempIdResolution: (t, r) => tempIdMap.set(t, r),
   }
 
-  // Phase 1 — creates via the proven branch-scoped provider path.
-  for (const c of changes) {
-    if (c.type === 'create_entity' && c.apply) {
-      await c.apply(ctx)
-    }
+  // Phase 1 — creates via the proven branch-scoped provider path, parents
+  // before children so temp-urn parent references resolve.
+  for (const c of orderCreatesTopologically(changes)) {
+    if (c.apply) await c.apply(ctx)
   }
 
   // Phase 2 — mutations + user-drawn edges as one atomic, server-merged commit.
