@@ -60,6 +60,7 @@ import { CommandPalette } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
+import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
@@ -344,7 +345,7 @@ export function ContextViewCanvas({
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
-    onConnectMode: (nodeId) => edgeConnectRef.current?.armConnect(nodeId),
+    onConnectMode: (nodeId) => { void ensureDraftOpen(); edgeConnectRef.current?.armConnect(nodeId) },
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
       // Implementation handled by the existing moveToLayer function
@@ -1154,6 +1155,9 @@ export function ContextViewCanvas({
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
+    // Open a draft before authoring (no-op if already in one) so the edit is
+    // staged into the versioning system rather than landing on main.
+    void ensureDraftOpen()
     setCreationParentId(parentId)
     setIsCreatingEntity(true)
   }, [])
@@ -1955,7 +1959,7 @@ export function ContextViewCanvas({
           trace.setConfig(dir === 'upstream' ? { upstreamDepth: value } : { downstreamDepth: value })
           if (trace.isTracing) void trace.retrace()
         }}
-        onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
+        onAddEntity={() => { void ensureDraftOpen(); setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
@@ -2225,6 +2229,7 @@ export function ContextViewCanvas({
                 onDoubleClick={handleDoubleClick}
                 onAddChild={handleAddChildEntity}
                 onAddToLayer={(layerId) => {
+                  void ensureDraftOpen()
                   setCreationLayerId(layerId)
                   setCreationParentId(null)
                   setIsCreatingEntity(true)
@@ -2337,7 +2342,7 @@ export function ContextViewCanvas({
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
         onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onCreateNode={(pos) => { void ensureDraftOpen(); interactions.openQuickCreate(pos) }}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
@@ -2360,6 +2365,7 @@ export function ContextViewCanvas({
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
         onCreateEntity={(_typeId) => {
+          void ensureDraftOpen()
           interactions.closeCommandPalette()
           interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
         }}

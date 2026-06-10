@@ -494,12 +494,20 @@ export function useCanvasInteractions(
         useStagedChangesStore.getState().stage({
             type: 'create_edge',
             targetId: tempId,
-            // `source`/`target` are canvas node ids (== urns == backend entity_ids);
-            // stagedChangesToOps resolves any temp endpoints on save. No apply hook —
-            // the draft save picks create_edge up via /graph/changes (main-mode apply
-            // parity is added separately).
+            // `source`/`target` are canvas node ids (== urns == backend entity_ids).
             after: { edgeType, source: sourceUrn, target: targetUrn },
             summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
+            // Main-mode parity: applyAll runs this to persist the edge via the
+            // provider. In DRAFT mode this hook is never called — saveStagedChangesToDraft
+            // routes create_edge through /graph/changes (stagedChangesToOps). Either way
+            // a temp endpoint (edge between two new nodes) resolves to its real id.
+            apply: async ({ provider, resolveTempId }) => {
+                if (!provider) return // local-only (no backend) — accept optimistically
+                const src = resolveTempId(sourceUrn) ?? sourceUrn
+                const tgt = resolveTempId(targetUrn) ?? targetUrn
+                const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType })
+                if (!res.success) throw new Error(res.error || 'Failed to create edge')
+            },
             discard: () => useCanvasStore.getState().removeEdge(tempId),
         })
         return tempId
