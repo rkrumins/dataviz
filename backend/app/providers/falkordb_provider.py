@@ -309,6 +309,7 @@ class FalkorDBProvider(GraphDataProvider):
         username: Optional[str] = None,
         password: Optional[str] = None,
         connection_config: Optional[dict] = None,
+        cache_redis_url: Optional[str] = None,
     ):
         self._host = host
         self._port = port
@@ -320,6 +321,10 @@ class FalkorDBProvider(GraphDataProvider):
         # None / absent / "standalone" → legacy single-host behavior.
         # Resolved lazily in _ensure_connected via the connection factory.
         self._connection_config = connection_config
+        # Per-provider dedicated cache Redis URL (carries a possible password,
+        # so it travels via the encrypted credentials blob, not extra_config).
+        # Overrides the process-wide CACHE_REDIS_URL env when set.
+        self._cache_redis_url = cache_redis_url
         self._conn_cfg = None  # populated by _ensure_connected (FalkorDBConnConfig)
         # Failover state: a monotonic generation bumped on each client
         # rebuild, plus a lock so concurrent MOVED/connection errors
@@ -544,8 +549,14 @@ class FalkorDBProvider(GraphDataProvider):
             # default 10s is generous for reads but necessary for batch
             # MERGE in the aggregation worker. Host/port are supplied by
             # the factory per mode, so they're omitted from pool_kwargs.
-            graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
-            socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
+            # Per-provider overrides (from extra_config.falkordbConnection)
+            # take precedence over the process-wide env defaults.
+            graph_pool_size = self._conn_cfg.graph_pool_size or int(
+                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
+            )
+            socket_timeout = self._conn_cfg.socket_timeout or float(
+                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
+            )
             _graph_pool_kwargs: dict = {
                 "max_connections": graph_pool_size,
                 "socket_connect_timeout": 2.0,
@@ -570,12 +581,15 @@ class FalkorDBProvider(GraphDataProvider):
                 pool_kwargs=_graph_pool_kwargs,
             )
             # Redis for non-graph ops (caching, materialization tracking,
-            # ancestor chains, stats). When CACHE_REDIS_URL is set, these
+            # ancestor chains, stats). When a cache Redis URL is set, these
             # go to a DEDICATED Redis instance — fully decoupled from
             # FalkorDB so a graph outage doesn't take out caching/state.
             # When unset, falls back to the FalkorDB instance (dev compat).
+            # The per-provider URL (encrypted credential) wins over the
+            # process-wide CACHE_REDIS_URL env — important in cluster mode,
+            # where each provider needs its own dedicated cache.
             from backend.common.adapters import TimeoutRedis
-            cache_redis_url = os.getenv("CACHE_REDIS_URL")
+            cache_redis_url = self._cache_redis_url or os.getenv("CACHE_REDIS_URL")
             redis_pool_size = int(os.getenv("FALKORDB_REDIS_POOL_SIZE", "16"))
             redis_op_timeout = float(os.getenv("FALKORDB_REDIS_OP_TIMEOUT", "3"))
             # P2.3 — cache Redis is a BEST-EFFORT dependency. Wrapped in
@@ -766,8 +780,12 @@ class FalkorDBProvider(GraphDataProvider):
                 return  # someone else already rebuilt for this failure
             from backend.app.providers.falkordb_connection import build_graph_client
 
-            socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
-            graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
+            socket_timeout = self._conn_cfg.socket_timeout or float(
+                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
+            )
+            graph_pool_size = self._conn_cfg.graph_pool_size or int(
+                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
+            )
             pool_kwargs: dict = {
                 "max_connections": graph_pool_size,
                 "socket_connect_timeout": 2.0,

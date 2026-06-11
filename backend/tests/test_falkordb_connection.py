@@ -59,6 +59,25 @@ def test_explicit_config_wins_over_env(monkeypatch):
     assert cfg.mode == "standalone"
 
 
+def test_load_config_parses_advanced_knobs():
+    cfg = load_connection_config(
+        {"mode": "cluster", "cluster": {"startupNodes": [["n", 7000]]},
+         "socketTimeout": "30", "graphPoolSize": 48},
+        host="h", port=1, username=None, password=None,
+    )
+    assert cfg.socket_timeout == 30.0
+    assert cfg.graph_pool_size == 48
+
+
+def test_load_config_ignores_bad_knobs():
+    cfg = load_connection_config(
+        {"socketTimeout": "abc", "graphPoolSize": "xyz"},
+        host="h", port=1, username=None, password=None,
+    )
+    assert cfg.socket_timeout is None
+    assert cfg.graph_pool_size is None
+
+
 # ── graph client construction (mocked) ──────────────────────────────
 
 @pytest.fixture

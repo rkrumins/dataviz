@@ -48,6 +48,11 @@ class FalkorDBConnConfig:
     sentinel_master: Optional[str] = None
     sentinel_nodes: List[Tuple[str, int]] = field(default_factory=list)
     cluster_nodes: List[Tuple[str, int]] = field(default_factory=list)
+    # Per-provider advanced knobs (None → fall back to env defaults at the
+    # call site). socket_timeout bounds a single Cypher query; graph_pool_size
+    # is the max graph-query connection pool size.
+    socket_timeout: Optional[float] = None
+    graph_pool_size: Optional[int] = None
 
     def describe(self) -> str:
         if self.mode == "sentinel":
@@ -137,7 +142,29 @@ def load_connection_config(
         cluster_nodes=_parse_nodes(
             cluster.get("startupNodes") or os.getenv("FALKORDB_CLUSTER_NODES")
         ),
+        socket_timeout=_coerce_float(cfg.get("socketTimeout")),
+        graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
     )
+
+
+def _coerce_float(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        logger.warning("falkordb_connection: ignoring non-numeric socketTimeout %r", v)
+        return None
+
+
+def _coerce_int(v: Any) -> Optional[int]:
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        logger.warning("falkordb_connection: ignoring non-integer graphPoolSize %r", v)
+        return None
 
 
 def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:

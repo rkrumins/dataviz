@@ -695,6 +695,8 @@ class ProviderManager:
                 username=creds.get("username"),
                 password=creds.get("password"),
                 connection_config=_falkor_conn,
+                # Per-provider dedicated cache Redis (encrypted credential).
+                cache_redis_url=creds.get("cache_redis_url"),
             )
 
         elif ptype == "neo4j":
