@@ -64,6 +64,48 @@ def _is_cluster_redirect(exc: BaseException) -> bool:
     return False
 
 
+def _is_missing_graph_error(exc: BaseException) -> bool:
+    """True when *exc* indicates the FalkorDB graph KEY does not exist yet.
+
+    ``GRAPH.RO_QUERY`` on a never-created (empty) graph returns
+    ``ResponseError: Invalid graph operation on empty key``. That is a
+    VALID "empty graph" state (0 nodes / 0 edges) — NOT a provider outage —
+    so introspection reads (get_stats / get_schema_stats / ontology
+    metadata) treat it as empty rather than failing the whole call and
+    tripping a false "provider down". Matched by message because FalkorDB
+    surfaces it as a generic ``ResponseError``, not a distinct class.
+    """
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        msg = str(seen).lower()
+        if "empty key" in msg and "graph" in msg:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+class _EmptyResult:
+    """Stand-in for a FalkorDB query result with no rows — returned by the
+    tolerant read path when the graph key doesn't exist yet."""
+    result_set: list = []
+
+
+def _normalize_falkordb_host(host: Optional[str]) -> str:
+    """Pin the literal ``localhost`` to ``127.0.0.1`` to avoid IPv6 ``::1``
+    dual-stack connect failures against IPv4-only Docker port publishing.
+    Other hostnames are left untouched (real IPv6 deployments don't use the
+    literal ``localhost``). Opt out with ``FALKORDB_DISABLE_IPV4_NORMALIZE``.
+    """
+    h = host or "localhost"
+    if h == "localhost" and os.getenv(
+        "FALKORDB_DISABLE_IPV4_NORMALIZE", ""
+    ).strip().lower() not in ("1", "true", "yes"):
+        return "127.0.0.1"
+    return h
+
+
 def _redact_redis_url(url: str) -> str:
     """Strip embedded credentials from a Redis URL for safe logging.
 
@@ -318,7 +360,14 @@ class FalkorDBProvider(GraphDataProvider):
         connection_config: Optional[dict] = None,
         cache_redis_url: Optional[str] = None,
     ):
-        self._host = host
+        # IPv6 dual-stack guard: "localhost" resolves to BOTH ::1 and
+        # 127.0.0.1, and Docker commonly publishes IPv4 only, so the redis
+        # ConnectionPool's ::1 attempt fails ("Connect call failed
+        # ('::1', 6379)") and surfaces as a false "provider down". Pin
+        # localhost to IPv4 (opt-out via FALKORDB_DISABLE_IPV4_NORMALIZE).
+        # Setting self._host here covers both the connection factory pool
+        # and preflight(), which read self._host.
+        self._host = _normalize_falkordb_host(host)
         self._port = port
         self._graph_name = graph_name
         self._seed_file = seed_file
@@ -718,9 +767,18 @@ class FalkorDBProvider(GraphDataProvider):
             # treat the connect as failed and the caller's circuit breaker
             # records it. Bounded so a half-open socket cannot stall the
             # connect path.
+            #
+            # Use a connection-level Redis PING, NOT a GRAPH.RO_QUERY: a
+            # read-only graph query raises "Invalid graph operation on empty
+            # key" when the graph key doesn't exist yet (empty/never-created
+            # graph), which would make connecting fail for any empty graph
+            # and surface as a false "provider down". PING verifies the pool
+            # without touching any graph. We must also NOT probe with a
+            # read-write GRAPH.QUERY — that would lazily create an empty
+            # graph key for every asset name discovery probes.
             _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
             await asyncio.wait_for(
-                self._graph.ro_query("RETURN 1", params={}),
+                Redis(connection_pool=self._pool).ping(),
                 timeout=_init_timeout,
             )
 
@@ -894,6 +952,17 @@ class FalkorDBProvider(GraphDataProvider):
 
         async with self._query_semaphore:
             return await self._run_guarded(_call)
+
+    async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None):
+        """Like :meth:`_ro_query`, but a missing/empty graph yields an empty
+        result set instead of raising. For introspection reads where an empty
+        graph is a valid 0-result state (the graph key may not exist yet)."""
+        try:
+            return await self._ro_query(cypher, params=params, timeout=timeout)
+        except Exception as exc:
+            if _is_missing_graph_error(exc):
+                return _EmptyResult()
+            raise
 
     async def _query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded write query on the source graph."""
@@ -6782,29 +6851,43 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass
 
-        # Optimize: Combine node counting with type aggregation
-        type_res = await self._ro_query(
-            "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
-        )
-        entity_type_counts = {}
+        # Empty / never-created graphs raise "Invalid graph operation on
+        # empty key" on GRAPH.RO_QUERY — a valid 0-node / 0-edge state, not
+        # an outage. Tolerate it so discovery reports the asset as empty
+        # rather than the whole provider as down.
+        entity_type_counts: Dict[str, Any] = {}
         node_count = 0
-        for row in (type_res.result_set or []):
-            lbl = row[0] or "unknown"
-            cnt = row[1]
-            entity_type_counts[lbl] = cnt
-            node_count += cnt
-
-        # Optimize: Combine edge counting with type aggregation
-        edge_type_res = await self._ro_query(
-            "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
-        )
-        edge_type_counts = {}
+        edge_type_counts: Dict[str, Any] = {}
         edge_count = 0
-        for row in (edge_type_res.result_set or []):
-            t = row[0] or "UNKNOWN"
-            cnt = row[1]
-            edge_type_counts[t] = cnt
-            edge_count += cnt
+        try:
+            # Optimize: Combine node counting with type aggregation
+            type_res = await self._ro_query(
+                "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
+            )
+            for row in (type_res.result_set or []):
+                lbl = row[0] or "unknown"
+                cnt = row[1]
+                entity_type_counts[lbl] = cnt
+                node_count += cnt
+
+            # Optimize: Combine edge counting with type aggregation
+            edge_type_res = await self._ro_query(
+                "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
+            )
+            for row in (edge_type_res.result_set or []):
+                t = row[0] or "UNKNOWN"
+                cnt = row[1]
+                edge_type_counts[t] = cnt
+                edge_count += cnt
+        except Exception as exc:
+            if not _is_missing_graph_error(exc):
+                raise
+            logger.info(
+                "get_stats on %s: graph key does not exist yet (empty graph) "
+                "— returning zero stats.", self._graph_name,
+            )
+            entity_type_counts, node_count = {}, 0
+            edge_type_counts, edge_count = {}, 0
 
         result = {
             "nodeCount": node_count,
@@ -6824,35 +6907,45 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_schema_stats(self) -> GraphSchemaStats:
         await self._ensure_connected()
         
-        # Single query: counts + samples per label using collect() with slicing
-        type_res = await self._ro_query(
-            "MATCH (n) "
-            "WITH labels(n)[0] AS lbl, n.displayName AS name "
-            "WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
-            "RETURN lbl, c, samples"
-        )
-
         entity_stats = []
         total_nodes = 0
-
-        for row in (type_res.result_set or []):
-            lbl = row[0] or "unknown"
-            cnt = row[1]
-            samples = [s for s in (row[2] or []) if s]
-            total_nodes += cnt
-            entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
-
-        edge_type_res = await self._ro_query(
-            "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
-        )
         edge_stats = []
         total_edges = 0
-        
-        for row in (edge_type_res.result_set or []):
-            t = row[0] or "UNKNOWN"
-            cnt = row[1]
-            edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
-            total_edges += cnt
+        # Empty / never-created graph → valid empty schema, not an outage.
+        try:
+            # Single query: counts + samples per label using collect() with slicing
+            type_res = await self._ro_query(
+                "MATCH (n) "
+                "WITH labels(n)[0] AS lbl, n.displayName AS name "
+                "WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
+                "RETURN lbl, c, samples"
+            )
+            for row in (type_res.result_set or []):
+                lbl = row[0] or "unknown"
+                cnt = row[1]
+                samples = [s for s in (row[2] or []) if s]
+                total_nodes += cnt
+                entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
+
+            edge_type_res = await self._ro_query(
+                "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
+            )
+            for row in (edge_type_res.result_set or []):
+                t = row[0] or "UNKNOWN"
+                cnt = row[1]
+                edge_stats.append(EdgeTypeSummary(id=t, name=t, count=cnt))
+                total_edges += cnt
+        except Exception as exc:
+            if not _is_missing_graph_error(exc):
+                raise
+            logger.info(
+                "get_schema_stats on %s: graph key does not exist yet "
+                "(empty graph) — returning empty schema.", self._graph_name,
+            )
+            return GraphSchemaStats(
+                totalNodes=0, totalEdges=0,
+                entityTypeStats=[], edgeTypeStats=[], tagStats=[],
+            )
 
         # Tag stats - kept as is for now, but ensured safe execution
         try:
@@ -6906,8 +6999,9 @@ class FalkorDBProvider(GraphDataProvider):
         containment_upper = {t.upper() for t in containment}
         
         # 1. Determine Lineage Types
-        # Instead of fetching all edges, we query distinct types
-        type_res = await self._ro_query("MATCH ()-[r]->() RETURN DISTINCT type(r)")
+        # Instead of fetching all edges, we query distinct types. Tolerant:
+        # an empty/never-created graph has no edge types (not an outage).
+        type_res = await self._ro_query_tolerant("MATCH ()-[r]->() RETURN DISTINCT type(r)")
         all_types = [row[0] for row in (type_res.result_set or [])]
         
         # Use ontology-resolved edge metadata if available, otherwise fall back to heuristics
@@ -6969,8 +7063,8 @@ class FalkorDBProvider(GraphDataProvider):
             "WHERE type(r) IN $containment "
             "RETURN DISTINCT labels(p)[0], labels(c)[0], type(r)"
         )
-        hierarchy_res = await self._ro_query(
-            hierarchy_cypher, 
+        hierarchy_res = await self._ro_query_tolerant(
+            hierarchy_cypher,
             params={"containment": containment}
         )
         
