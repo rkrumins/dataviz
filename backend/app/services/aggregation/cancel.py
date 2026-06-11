@@ -166,6 +166,22 @@ async def publish_cancel(redis_client: Any, job_id: str) -> None:
     are the secondary path. Logged at warning so a Redis blip
     doesn't silently strand cancels.
     """
+    # Durable cancel flag FIRST: pub/sub is fire-and-forget, so a worker that
+    # picks the job up LATER (XAUTOCLAIM reclaim / reconciler re-dispatch /
+    # restart) would miss the broadcast. The flag is checked at the worker's
+    # pre-run guard, so a cancelled job never resumes regardless of timing.
+    try:
+        from .redis_client import cancel_flag_key, CANCEL_FLAG_TTL_SECS
+
+        await redis_client.set(
+            cancel_flag_key(job_id), "1", ex=CANCEL_FLAG_TTL_SECS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to set durable cancel flag for job %s "
+            "(pub/sub + DB write are the fallback): %s", job_id, exc,
+        )
+
     payload = json.dumps({"action": "cancel", "job_id": job_id})
     try:
         await redis_client.publish(CANCEL_CONTROL_CHANNEL, payload)

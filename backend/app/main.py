@@ -690,16 +690,23 @@ async def lifespan(_app: FastAPI):
                 logger.info("Aggregation scheduler started")
 
             # Stuck-job reconciler — runs wherever the aggregation worker
-            # lives. Detects rows whose worker died without writing a
-            # terminal status (deploy mid-job, OOM, segfault) and marks
-            # them ``failed`` with a clear reason so operators get a
-            # working Resume button instead of a perpetual "running"
-            # state. Sweep-only; auto-redispatch is Phase 2 work when
-            # the dispatch substrate is XAUTOCLAIM-safe.
+            # lives. Lock-aware: the per-job exec lock is the liveness
+            # signal, so a job whose executor died (lock expired) is
+            # AUTO-RESUMED by re-dispatch (single-active is guaranteed by
+            # the lock), capped to avoid poison loops; a cancelled job is
+            # marked cancelled. Falls back to staleness→failed if Redis is
+            # unavailable.
             from .services.aggregation.reconciler import run_reconciler
+            from .services.aggregation.redis_client import get_redis as _get_redis_for_recon
+            try:
+                _recon_redis = _get_redis_for_recon()
+            except Exception:
+                _recon_redis = None
             _app.state._reconciler_shutdown = asyncio.Event()
             _app.state._reconciler_task = asyncio.create_task(
-                run_reconciler(get_jobs_session, _app.state._reconciler_shutdown),
+                run_reconciler(
+                    get_jobs_session, _app.state._reconciler_shutdown, _recon_redis,
+                ),
                 name="aggregation-stuck-job-reconciler",
             )
             logger.info("Stuck-job reconciler started")

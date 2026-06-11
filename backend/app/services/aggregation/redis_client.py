@@ -44,6 +44,29 @@ MAX_DELIVERY_ATTEMPTS = 5
 """After this many failed delivery attempts (tracked by Redis PEL),
 the message is moved to the DLQ."""
 
+# ── Single-active execution lock + durable cancel flag ──────────────
+
+EXEC_LOCK_TTL_MS = int(os.getenv("AGG_EXEC_LOCK_TTL_MS", "90000"))
+"""Per-job execution lock TTL (ms). The holder renews it every ~TTL/3 while
+running; if the holder dies, the lock expires after at most this long and the
+reconciler re-dispatches the job to resume from its last checkpoint. This is
+the single source of truth for "is a runner alive for this job?" — it makes
+XAUTOCLAIM reclaims, duplicate dispatch, restarts and replicas all safe."""
+
+CANCEL_FLAG_TTL_SECS = int(os.getenv("AGG_CANCEL_FLAG_TTL_SECS", "3600"))
+"""Durable cancel flag TTL (s). Set by the cancel endpoint so a job that is
+reclaimed/redispatched AFTER a cancel never resumes."""
+
+
+def exec_lock_key(job_id: str) -> str:
+    """Redis key for the per-job single-active execution lock."""
+    return f"agg:exec:{job_id}"
+
+
+def cancel_flag_key(job_id: str) -> str:
+    """Redis key for the durable cancel flag."""
+    return f"agg:cancel:{job_id}"
+
 # ── Singleton client ────────────────────────────────────────────────
 
 _client: Optional[aioredis.Redis] = None
