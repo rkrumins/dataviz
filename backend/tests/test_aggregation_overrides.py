@@ -57,10 +57,19 @@ class _FakeSession:
     - ``commit()``: count for sanity.
     """
 
-    def __init__(self, seeded_job: Optional[AggregationJobORM] = None) -> None:
+    def __init__(self, seeded_job: Optional[AggregationJobORM] = None, *, in_tx: bool = False) -> None:
         self.added: list[Any] = []
         self.commits = 0
+        self.rollbacks = 0
         self._seeded_job = seeded_job
+        self._in_tx = in_tx
+
+    def in_transaction(self) -> bool:
+        return self._in_tx
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+        self._in_tx = False  # a rollback clears the autobegun read transaction
 
     def begin(self):
         session = self
@@ -231,6 +240,36 @@ async def test_trigger_with_timeout_secs_and_max_retries_lands_on_orm(
     # Worker selector parity — proves the per-job override would beat
     # the global default at runtime.
     assert (job.timeout_secs or 7200) == 300
+
+
+async def test_trigger_rolls_back_preexisting_read_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the permission dependency (and the optional idempotency
+    lookup) autobegin a transaction on the shared WEB session via a read.
+    ``trigger`` opens ``session.begin()`` for its atomic claim, which would
+    raise ``InvalidRequestError: A transaction is already begun`` — so it
+    must roll the empty read transaction back first."""
+    _patch_resolution_and_claim(monkeypatch)
+
+    service = _make_service()
+    # Simulate the autobegun read transaction left by the permission dep.
+    session = _FakeSession(in_tx=True)
+
+    request = AggregationTriggerRequest(batch_size=5000, projection_mode="in_source")
+
+    def _capture_response(job: AggregationJobORM):
+        _seed_required_orm_defaults(job)
+        return AggregationService._to_response(job)
+
+    monkeypatch.setattr(service, "_to_response", _capture_response)
+
+    # Must not raise; the pre-existing transaction is rolled back first.
+    response = await service.trigger("ds_tx", request, "manual", session)
+
+    assert response.id.startswith("agg_")
+    assert session.rollbacks == 1, "trigger must roll back the autobegun read tx"
+    assert len([o for o in session.added if isinstance(o, AggregationJobORM)]) == 1
 
 
 async def test_trigger_without_overrides_preserves_default_behaviour(

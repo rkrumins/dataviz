@@ -43,11 +43,12 @@ logger = logging.getLogger(__name__)
 
 
 _RECONCILE_INTERVAL_SECS: float = float(
-    os.getenv("STUCK_JOB_RECONCILE_INTERVAL_SECS", "60")
+    os.getenv("STUCK_JOB_RECONCILE_INTERVAL_SECS", "30")
 )
 _HEARTBEAT_THRESHOLD_SECS: float = float(
     os.getenv("STUCK_JOB_HEARTBEAT_THRESHOLD_SECS", "300")
 )
+_MAX_AUTO_RESUMES: int = int(os.getenv("STUCK_JOB_MAX_AUTO_RESUMES", "5"))
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -65,13 +66,20 @@ def _parse_iso(ts: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-async def _reconcile_once(session_factory: Any) -> int:
+async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int:
     """Single sweep. Returns the count of rows reconciled.
 
-    Pulled out so unit tests can drive a deterministic sweep without
-    spinning the loop. The session is opened *inside* the function so
-    a long-running reconciler doesn't hold a connection while it
-    sleeps between sweeps.
+    Lock-aware (preferred): the per-job execution lock ``agg:exec:{job_id}``
+    is the authoritative "a runner is alive" signal. For each ``running``
+    job:
+      - lock PRESENT  → a live single-active executor is heartbeating → skip.
+      - lock ABSENT   → the executor died → AUTO-RESUME by re-dispatching so a
+                        worker picks it up and continues from ``last_cursor``
+                        (capped by ``STUCK_JOB_MAX_AUTO_RESUMES`` → then failed).
+                        A cancelled job (durable flag) is marked cancelled, not
+                        resumed.
+    When ``redis_client`` is None (or the lock check errors), fall back to the
+    legacy checkpoint-staleness sweep → mark ``failed`` for manual Resume.
     """
     threshold = datetime.now(timezone.utc) - timedelta(
         seconds=_HEARTBEAT_THRESHOLD_SECS
@@ -89,16 +97,79 @@ async def _reconcile_once(session_factory: Any) -> int:
         ).scalars().all()
 
         for job in running:
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # ── Lock-aware path (the exec lock is the liveness signal) ──
+            if redis_client is not None:
+                try:
+                    from .redis_client import (
+                        exec_lock_key, cancel_flag_key, JOBS_STREAM,
+                    )
+
+                    if await redis_client.exists(exec_lock_key(job.id)):
+                        continue  # a live executor holds the lock
+
+                    # Lock gone → executor died. If cancelled, don't resume.
+                    if await redis_client.get(cancel_flag_key(job.id)):
+                        job.status = "cancelled"
+                        job.error_message = "Cancelled; executor stopped."
+                        job.completed_at = now_iso
+                        job.updated_at = now_iso
+                        reconciled += 1
+                        continue
+
+                    # Auto-resume, capped to avoid a poison job looping forever.
+                    cnt_key = f"agg:redispatch:{job.id}"
+                    attempts = int(await redis_client.incr(cnt_key))
+                    await redis_client.expire(
+                        cnt_key, int(_HEARTBEAT_THRESHOLD_SECS) * 4,
+                    )
+                    if attempts > _MAX_AUTO_RESUMES:
+                        job.status = "failed"
+                        job.error_message = (
+                            f"Auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
+                            f"without completing; resume from cursor={job.last_cursor} "
+                            f"is still possible."
+                        )
+                        job.completed_at = now_iso
+                        job.updated_at = now_iso
+                        metrics_increment(
+                            "stuck_jobs_redispatched_total",
+                            kind="aggregation", outcome="auto_resume_exhausted",
+                        )
+                        reconciled += 1
+                        continue
+
+                    await redis_client.xadd(
+                        JOBS_STREAM,
+                        {"job_id": job.id, "dispatched_at": now_iso},
+                        maxlen=50000,
+                    )
+                    logger.warning(
+                        "reconciler: job %s exec lock absent (executor died) — "
+                        "auto-resume #%d from cursor=%s",
+                        job.id, attempts, job.last_cursor,
+                    )
+                    metrics_increment(
+                        "stuck_jobs_redispatched_total",
+                        kind="aggregation", outcome="auto_resumed",
+                    )
+                    reconciled += 1
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "reconciler: lock-aware check failed for %s (%s) — "
+                        "falling back to staleness sweep", job.id, exc,
+                    )
+                    # fall through to the staleness path below
+
+            # ── Fallback: legacy checkpoint-staleness → mark failed ──
             ref_ts = _parse_iso(job.last_checkpoint_at) or _parse_iso(job.started_at)
             if ref_ts is None or ref_ts >= threshold:
-                # No timestamp at all (data integrity issue, leave for
-                # ops to investigate) — or recent enough — either way,
-                # not stuck.
                 continue
 
-            # If the cancel registry knows about this job, an in-process
-            # worker is still alive (just slow). Don't reconcile;
-            # cooperative cancel is the operator's tool for that.
             if job.id in cancel_registry.active_jobs():
                 logger.warning(
                     "reconciler: job %s last_checkpoint_at=%s is stale but "
@@ -108,9 +179,7 @@ async def _reconcile_once(session_factory: Any) -> int:
                 )
                 continue
 
-            stale_for = (
-                datetime.now(timezone.utc) - ref_ts
-            ).total_seconds()
+            stale_for = (datetime.now(timezone.utc) - ref_ts).total_seconds()
             logger.error(
                 "reconciler: job %s ds=%s stuck for %.0fs (last_checkpoint_at=%s) "
                 "— marking failed; operator can Resume to restart from cursor=%s",
@@ -123,7 +192,6 @@ async def _reconcile_once(session_factory: Any) -> int:
                 f"(threshold={int(_HEARTBEAT_THRESHOLD_SECS)}s). "
                 f"Worker likely died; resume from last_cursor is possible."
             )
-            now_iso = datetime.now(timezone.utc).isoformat()
             job.completed_at = now_iso
             job.updated_at = now_iso
             metrics_increment(
@@ -139,20 +207,28 @@ async def _reconcile_once(session_factory: Any) -> int:
     return reconciled
 
 
-async def run_reconciler(session_factory: Any, shutdown: asyncio.Event) -> None:
+async def run_reconciler(
+    session_factory: Any,
+    shutdown: asyncio.Event,
+    redis_client: Any = None,
+) -> None:
     """Long-running reconciler loop.
 
     Spawned as a background task during application startup. Sleeps
     on the shutdown event between sweeps so process termination
-    doesn't have to wait the full interval.
+    doesn't have to wait the full interval. When ``redis_client`` is
+    provided the sweep is lock-aware (auto-resume on executor death);
+    otherwise it falls back to the staleness sweep.
     """
     logger.info(
-        "Stuck-job reconciler starting (interval=%ds, threshold=%ds)",
+        "Stuck-job reconciler starting (interval=%ds, threshold=%ds, "
+        "lock_aware=%s)",
         int(_RECONCILE_INTERVAL_SECS), int(_HEARTBEAT_THRESHOLD_SECS),
+        redis_client is not None,
     )
     while not shutdown.is_set():
         try:
-            count = await _reconcile_once(session_factory)
+            count = await _reconcile_once(session_factory, redis_client)
             if count:
                 logger.info("reconciler: reconciled %d stuck job(s)", count)
         except asyncio.CancelledError:

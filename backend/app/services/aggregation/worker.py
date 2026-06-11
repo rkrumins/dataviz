@@ -156,6 +156,13 @@ class AggregationWorker:
                 # Read frozen edge types from job record
                 containment_types = json.loads(job.containment_edge_types or "[]")
                 lineage_types = json.loads(job.lineage_edge_types or "[]")
+                # Entity-type → level map frozen at trigger time (may be
+                # absent on legacy rows). Used to inject levels into the
+                # provider and to drive per-label index creation without
+                # an ontology-module dependency in this executor.
+                entity_type_levels = json.loads(
+                    getattr(job, "entity_type_levels", None) or "{}"
+                )
 
                 if not lineage_types:
                     raise ValueError("No lineage edge types configured — cannot aggregate")
@@ -217,6 +224,36 @@ class AggregationWorker:
                 # types, so a change in classification automatically routes reads to
                 # a fresh cache namespace — no manual invalidation needed.
                 provider.set_containment_edge_types(containment_types)
+
+                # Inject the frozen entity-type level map so ancestor-chain
+                # depth adapts to deep ontologies (max_depth derives from
+                # the level count) and AGGREGATED edges carry correct
+                # source/target level + levelDigest stamps. Best-effort:
+                # legacy jobs without a frozen map degrade to max_depth=10
+                # and the label-scan trace fallback (both correct).
+                if entity_type_levels and hasattr(provider, "set_entity_type_levels"):
+                    try:
+                        provider.set_entity_type_levels(entity_type_levels)
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: set_entity_type_levels failed "
+                            "(continuing with default depth): %s", job.id, exc,
+                        )
+
+                # Ensure per-label URN indexes for the ontology's entity
+                # types BEFORE the scan/flush so every MATCH/MERGE on
+                # (label {urn}) is an index seek. Driven by the frozen
+                # level-map keys (ontology entity types) — schema-agnostic,
+                # not the provider's hardcoded defaults. Best-effort.
+                if entity_type_levels and hasattr(provider, "ensure_indices"):
+                    try:
+                        await provider.ensure_indices(list(entity_type_levels.keys()))
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: ensure_indices failed "
+                            "(continuing; first query will surface a missing "
+                            "index if any): %s", job.id, exc,
+                        )
 
                 # Compute fingerprint before aggregation
                 job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
@@ -488,10 +525,14 @@ class AggregationWorker:
         """Retry wrapper around _materialize_with_checkpoints.
 
         On transient failures (provider timeout, connection error,
-        AggregationBatchAbort), retries up to ``job.max_retries`` times
-        with exponential backoff + jitter.  Each retry resumes from
-        ``job.last_cursor`` (set by the checkpoint callback), so no
-        work is repeated beyond the ≤2s coalescing window.
+        AggregationBatchAbort), retries up to ``job.max_retries``
+        CONSECUTIVE times with exponential backoff + jitter.  Each retry
+        resumes from ``job.last_cursor`` (set by the checkpoint callback),
+        so no work is repeated beyond the ≤2s coalescing window. The
+        budget counts only failures *without* forward progress: whenever
+        ``processed_edges`` advances, the counter resets, so a large job
+        making steady progress survives arbitrarily many transient
+        FalkorDB connection resets — only a truly stuck job exhausts it.
 
         The retry count and error message are persisted to the job
         record on each attempt so the frontend can display progress.
@@ -510,7 +551,17 @@ class AggregationWorker:
         max_quiesce_events = int(os.getenv("AGGREGATION_MAX_QUIESCE_EVENTS", "20"))
         quiesce_event_count = 0
 
-        for attempt in range(max_attempts):
+        # Progress-aware retry budget: a job that keeps moving forward past
+        # transient FalkorDB connection resets must survive arbitrarily many
+        # of them. ``attempt`` counts CONSECUTIVE failures since the last
+        # forward progress; it resets to 0 whenever ``processed_edges``
+        # advances (the streaming rebuild resumes from ``last_cursor`` on
+        # every retry). Only ``max_attempts`` failures WITHOUT any progress
+        # exhaust the budget — a steadily-progressing large job never fails
+        # on transient resets alone.
+        attempt = 0
+        last_progress = job.processed_edges or 0
+        while True:
             try:
                 return await self._materialize_with_checkpoints(
                     session=session,
@@ -612,6 +663,13 @@ class AggregationWorker:
                     # apply their retry-budget logic.
             except ProviderUnavailable as e:
                 last_error = e
+                if (job.processed_edges or 0) > last_progress:
+                    # Resumed past the failure point — this is a fresh
+                    # failure, not a consecutive one. Reset the budget so
+                    # steady forward progress never exhausts retries.
+                    attempt = 0
+                    provider_unavailable_count = 0
+                    last_progress = job.processed_edges or 0
                 provider_unavailable_count += 1
                 job.retry_count = attempt + 1
 
@@ -653,11 +711,19 @@ class AggregationWorker:
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
                     await asyncio.sleep(delay)
+                    attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
                     raise
             except Exception as e:
                 last_error = e
+                if (job.processed_edges or 0) > last_progress:
+                    # Resumed past the failure point — fresh failure; reset
+                    # the budget so steady forward progress survives transient
+                    # resets indefinitely.
+                    attempt = 0
+                    provider_unavailable_count = 0
+                    last_progress = job.processed_edges or 0
                 job.retry_count = attempt + 1
 
                 if attempt < max_attempts - 1:
@@ -672,6 +738,7 @@ class AggregationWorker:
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
                     await asyncio.sleep(delay)
+                    attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
                     raise
@@ -732,7 +799,10 @@ class AggregationWorker:
             # generic UI label keeps working.
             if phase is not None:
                 job.current_phase = phase
-            job.progress = int((processed / total) * 100) if total > 0 else 0
+            # Clamp to [0, 100]: the streaming path drives ``total`` off a
+            # cheap (possibly stale) estimate, so ``processed`` can exceed
+            # it late in a run. Without the clamp the bar would read >100%.
+            job.progress = min(100, int((processed / total) * 100)) if total > 0 else 0
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
             batches_since_commit += 1

@@ -41,6 +41,30 @@ from .state import ProbeOutcome, ProviderState
 
 logger = logging.getLogger(__name__)
 
+
+def apply_local_dev_falkordb_override(host, port):
+    """Host-dev opt-in: the provider row stores the Docker hostname
+    (``falkordb``) when seeded in-container, which a process running on the
+    host cannot resolve. When ``LOCAL_DEV_FALKORDB_OVERRIDE`` is set,
+    ``FALKORDB_HOST`` / ``FALKORDB_PORT`` win over the stored value. Not
+    injected into compose service env, so containers keep the stored host
+    and production multi-host providers are unaffected.
+
+    Shared by BOTH provider-instantiation paths (ProviderManager and the
+    deprecated ProviderRegistry used by the insights stats collector) so
+    they cannot drift — the missing override on the registry path was why
+    the laptop stats service couldn't reach a ``falkordb``-hosted provider.
+    """
+    if os.getenv("LOCAL_DEV_FALKORDB_OVERRIDE", "").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        host = os.getenv("FALKORDB_HOST") or host
+        _port_override = os.getenv("FALKORDB_PORT")
+        if _port_override:
+            port = int(_port_override)
+    return host, port
+
+
 # Tuneable via env vars. See backend/app/config/resilience.py for full reference.
 _BREAKER_FAIL_MAX = int(os.getenv("PROVIDER_BREAKER_FAIL_MAX", "3"))
 _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "30"))
@@ -664,31 +688,27 @@ class ProviderManager:
 
         if ptype == "falkordb":
             from backend.app.providers.falkordb_provider import FalkorDBProvider
-            # Host-dev opt-in: the provider row stores the Docker hostname
-            # (`falkordb`) when seeded in-container, which a process running
-            # on the host cannot resolve. When LOCAL_DEV_FALKORDB_OVERRIDE
-            # is set, FALKORDB_HOST/FALKORDB_PORT win over the stored value.
-            # Not injected into compose service env, so containers keep the
-            # stored host and production multi-host providers are unaffected.
-            if os.getenv("LOCAL_DEV_FALKORDB_OVERRIDE", "").strip().lower() in (
-                "1", "true", "yes",
-            ):
-                host = os.getenv("FALKORDB_HOST") or host
-                _port_override = os.getenv("FALKORDB_PORT")
-                if _port_override:
-                    port = int(_port_override)
+            host, port = apply_local_dev_falkordb_override(host, port)
             # P1.6 — credentials previously dropped here, causing NOAUTH
             # errors to be mis-classified as network failures and tripping
             # the breaker for what is actually a configuration problem.
             # Passing username/password through means the driver issues
             # AUTH on every new connection and the breaker only fires for
             # real downstream failures.
+            # Connection topology (standalone / sentinel / cluster) rides
+            # extra_config["falkordbConnection"]. None / absent → the
+            # legacy single-host path. Previously extra_config was dropped
+            # on the FalkorDB branch (only Neo4j/Spanner consumed it).
+            _falkor_conn = (extra_config or {}).get("falkordbConnection")
             return FalkorDBProvider(
                 host=host or "localhost",
                 port=port or 6379,
                 graph_name=graph_name or "nexus_lineage",
                 username=creds.get("username"),
                 password=creds.get("password"),
+                connection_config=_falkor_conn,
+                # Per-provider dedicated cache Redis (encrypted credential).
+                cache_redis_url=creds.get("cache_redis_url"),
             )
 
         elif ptype == "neo4j":

@@ -3,6 +3,7 @@ Admin Provider endpoints — CRUD for physical database server registrations.
 Providers are pure infrastructure: host/port/credentials, no graph or ontology.
 """
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from typing import List, Tuple
@@ -104,6 +105,7 @@ async def _run_connectivity_probe(
     port: int | None,
     tls_enabled: bool,
     creds: dict | None,
+    extra_config: dict | None = None,
 ) -> ConnectionTestResult:
     """Bounded reachability probe used by the ``/test`` endpoint.
 
@@ -120,6 +122,9 @@ async def _run_connectivity_probe(
     """
     PREFLIGHT_DEADLINE_S = 2.0
     PROBE_WALL_CLOCK_S = 2.5  # PREFLIGHT_DEADLINE_S + small slack
+    # Sentinel/Cluster resolution (discover master / slot map) needs more
+    # than the fast single-host preflight budget.
+    PROBE_FULL_CONNECT_S = 8.0
 
     instance = provider_registry._create_provider_instance(
         _provider_type_value(provider_type),
@@ -128,11 +133,29 @@ async def _run_connectivity_probe(
         None,
         tls_enabled,
         creds,
+        extra_config=extra_config,
     )
-    preflight = getattr(instance, "preflight", None)
+
+    # For FalkorDB Sentinel/Cluster topologies, a single host/port preflight
+    # is not representative (host/port may be unset; routing is driven by the
+    # node lists). Exercise the real connection path instead — it resolves
+    # the master / owning node and runs RETURN 1.
+    fmode = ((extra_config or {}).get("falkordbConnection") or {}).get("mode")
+    use_full_connect = (
+        str(_provider_type_value(provider_type)).lower() == "falkordb"
+        and fmode in ("sentinel", "cluster")
+    )
+    preflight = None if use_full_connect else getattr(instance, "preflight", None)
 
     t0 = time.monotonic()
     try:
+        if use_full_connect:
+            await asyncio.wait_for(
+                instance._ensure_connected(), timeout=PROBE_FULL_CONNECT_S,
+            )
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            return ConnectionTestResult(success=True, latencyMs=round(elapsed_ms, 1))
+
         if callable(preflight):
             # Outer wait_for is a backstop — preflight is contractually
             # bounded by deadline_s, but cap the wall clock anyway.
@@ -151,9 +174,10 @@ async def _run_connectivity_probe(
         latency = (time.monotonic() - t0) * 1000
         return ConnectionTestResult(success=True, latencyMs=round(latency, 1))
     except asyncio.TimeoutError:
+        _budget = PROBE_FULL_CONNECT_S if use_full_connect else PROBE_WALL_CLOCK_S
         return ConnectionTestResult(
             success=False,
-            error=f"Connection timed out after {PROBE_WALL_CLOCK_S:.1f}s",
+            error=f"Connection timed out after {_budget:.1f}s",
         )
     except Exception as exc:
         return ConnectionTestResult(success=False, error=str(exc))
@@ -342,6 +366,7 @@ async def test_unsaved_provider_connection(
         port=req.port,
         tls_enabled=req.tls_enabled,
         creds=creds,
+        extra_config=req.extra_config,
     )
 
 
@@ -466,6 +491,12 @@ async def test_provider(
         host = prov_row.host
         port = prov_row.port
         tls = prov_row.tls_enabled
+        # extra_config carries falkordbConnection (topology); pass it so the
+        # probe tests Sentinel/Cluster routing, not just a single host/port.
+        try:
+            extra_config = json.loads(prov_row.extra_config) if prov_row.extra_config else None
+        except (ValueError, TypeError):
+            extra_config = None
         creds = await provider_repo.get_credentials(session, provider_id)
     # 2. Cache + in-flight dedup — pure in-memory, no DB. Explicit user
     #    clicks (fresh=True) bypass entirely and also invalidate the
@@ -495,6 +526,7 @@ async def test_provider(
             port=port,
             tls_enabled=tls,
             creds=creds,
+            extra_config=extra_config,
         )
 
         # Always write the freshest result so any in-flight callers and

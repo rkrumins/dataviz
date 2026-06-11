@@ -89,6 +89,11 @@ async def init_aggregation_db() -> None:
                 # Phase 1.7 (2026-05-12) — phase visibility for UI
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS current_phase TEXT NULL",
+                # Streaming rebuild — entity-type level map frozen at
+                # trigger time so the worker can inject levels + drive
+                # per-label indexing without an ontology-module dependency.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS entity_type_levels TEXT NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

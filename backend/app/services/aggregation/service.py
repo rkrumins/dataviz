@@ -141,6 +141,16 @@ class AggregationService:
         # SELECT ... FOR UPDATE SKIP LOCKED so concurrent triggers across
         # uvicorn workers / replicas serialize cleanly: at most one caller
         # ever observes "no active job" for a given data_source_id.
+        #
+        # A read earlier in this request — the permission dependency loading
+        # the data source, or the idempotency lookup above — autobegins a
+        # transaction on this shared WEB session (``_session_scope`` commits
+        # on success but does not open the transaction itself). ``session.
+        # begin()`` requires that none be active, so roll back the empty
+        # read transaction first. Safe: nothing has been written before this
+        # point — the block below performs the first writes.
+        if session.in_transaction():
+            await session.rollback()
         async with session.begin():
             if not await claim_exclusive(session, ds_id):
                 if idem_key:
@@ -211,6 +221,9 @@ class AggregationService:
                 projection_mode=request.projection_mode,
                 containment_edge_types=json.dumps(containment_types),
                 lineage_edge_types=json.dumps(lineage_types),
+                entity_type_levels=json.dumps(
+                    ontology_data.get("entity_type_levels") or {}
+                ),
                 status="pending",
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
@@ -1061,6 +1074,17 @@ class AggregationService:
         )
         flat = derive_flat_lists(entity_defs, rel_defs)
 
+        # Entity-type → hierarchy level map. Frozen onto the job so the
+        # worker can inject it into the provider (set_entity_type_levels)
+        # and drive per-label indexing (ensure_indices) without importing
+        # the ontology module. ``derive_level_map`` reads ``.entity_type_
+        # definitions``; we pass a thin shim exposing the parsed defs.
+        from types import SimpleNamespace
+        from backend.app.services.ontology_levels import derive_level_map
+        entity_type_levels = derive_level_map(
+            SimpleNamespace(entity_type_definitions=entity_defs)
+        )
+
         return {
             "ontology_id": ds.ontology_id,
             "ontology_fingerprint": report.fingerprint,
@@ -1070,6 +1094,7 @@ class AggregationService:
             "data_source_label": getattr(ds, "label", None),
             "containment_edge_types": flat.containment_edge_types,
             "lineage_edge_types": flat.lineage_edge_types,
+            "entity_type_levels": entity_type_levels,
         }
 
     async def _replay_fingerprint_matches(
