@@ -30,10 +30,12 @@ Environment variables:
     LOG_LEVEL                  Logging level (default: INFO)
 """
 import asyncio
+import contextlib
 import logging
 import os
 import platform
 import signal
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -253,26 +255,201 @@ class _JobConsumer:
             await self._execute_job(job_id)
 
     async def _execute_job(self, job_id: str) -> None:
-        """Execute a job and ACK/NACK based on outcome."""
+        """Execute a job under a per-job SINGLE-ACTIVE execution lock.
+
+        This is the guarantee that one job_id is run by exactly one executor
+        at a time, no matter how it was (re)delivered — XAUTOCLAIM reclaim,
+        duplicate XADD, a restarted worker, or extra replicas. Losers ACK +
+        skip. If the holder dies, the lock TTL expires and the reconciler
+        re-dispatches it to resume from the last checkpoint.
+        """
         msg_id = self._message_ids.get(job_id)
+
+        # Durable cancel: a job cancelled before this (re)delivery never runs.
+        if await self._is_cancelled(job_id):
+            logger.info("Job %s is cancelled — marking cancelled, skipping", job_id)
+            await self._mark_job_cancelled(job_id)
+            if msg_id:
+                await self._ack(msg_id)
+            return
+
+        token = await self._acquire_exec_lock(job_id)
+        if token is None:
+            logger.info(
+                "Job %s already has a live executor (exec lock held) — "
+                "ACK + skip duplicate delivery", job_id,
+            )
+            if msg_id:
+                await self._ack(msg_id)
+            return
+
+        # We own the lock. A reclaim of an ALREADY-finished job must not re-run.
+        status = await self._get_job_status(job_id)
+        if status in ("completed", "cancelled"):
+            logger.info("Job %s already %s — release lock + skip", job_id, status)
+            await self._release_exec_lock(job_id, token)
+            if msg_id:
+                await self._ack(msg_id)
+            return
+
+        # ACK the stream message now: liveness is tracked by the lock heartbeat
+        # from here on, so the PEL doesn't linger and repeated reclaims of a
+        # healthy job can't push it to the DLQ. Crash recovery is the
+        # reconciler's lock-aware re-dispatch, not stream redelivery.
+        if msg_id:
+            await self._ack(msg_id)
+
+        # Run the job as a cancellable task so the heartbeat can ABORT it if we
+        # ever lose the lock (a long Redis blip could let the TTL expire while
+        # we're still running — without aborting, a second worker would acquire
+        # the lock and double-execute). Losing the lock => stop running.
+        run_task = asyncio.create_task(
+            self._worker.run(job_id), name=f"agg-run-{job_id}",
+        )
+        heartbeat = asyncio.create_task(
+            self._renew_exec_lock(job_id, token, run_task),
+            name=f"agg-lock-{job_id}",
+        )
         try:
-            await self._worker.run(job_id)
-            # Success — ACK the message
-            if msg_id:
-                await self._ack(msg_id)
-            logger.info("Job %s completed and ACKed", job_id)
+            await run_task
+            logger.info("Job %s completed", job_id)
+        except asyncio.CancelledError:
+            logger.warning(
+                "Job %s aborted — lost the exec lock; the reconciler will "
+                "resume it under a fresh single-active holder", job_id,
+            )
         except Exception as e:
+            # worker.run() already persisted status + last_cursor for resume.
             logger.error("Job %s failed with unhandled error: %s", job_id, e)
-            # Don't ACK — the message stays in PEL for redelivery.
-            # The worker.run() already marks the job as 'failed' in the DB
-            # and preserves last_cursor for resume. The PEL recovery will
-            # pick it up on next startup or via XAUTOCLAIM.
-            if msg_id:
-                await self._ack(msg_id)
-                # We ACK even on failure because the job-level retry logic
-                # (resume from checkpoint) is handled by the Control Plane,
-                # not by redelivering the stream message. The job record in
-                # Postgres IS the retry state.
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            await self._release_exec_lock(job_id, token)
+
+    # ── Single-active execution lock helpers ────────────────────────
+
+    async def _acquire_exec_lock(self, job_id: str) -> str | None:
+        """SET agg:exec:{job_id} <token> NX PX ttl. Returns the token on
+        success, or None when another live executor already holds it."""
+        from .redis_client import exec_lock_key, EXEC_LOCK_TTL_MS
+
+        token = f"{self._consumer_name}-{uuid.uuid4().hex}"
+        try:
+            ok = await self._redis.set(
+                exec_lock_key(job_id), token, nx=True, px=EXEC_LOCK_TTL_MS,
+            )
+        except Exception as e:
+            logger.warning("exec-lock acquire failed for %s: %s", job_id, e)
+            return None
+        return token if ok else None
+
+    async def _renew_exec_lock(
+        self, job_id: str, token: str, run_task: asyncio.Task,
+    ) -> None:
+        """Heartbeat: re-extend the lock TTL every ~TTL/3 while we still own
+        it. If we LOSE the lock — another holder took over (renew returns 0),
+        or Redis was unreachable long enough that the TTL surely expired —
+        ABORT ``run_task`` so we never run without the lock (single-active)."""
+        from .redis_client import exec_lock_key, EXEC_LOCK_TTL_MS
+
+        ttl_s = EXEC_LOCK_TTL_MS / 1000.0
+        interval = max(1.0, ttl_s / 3.0)
+        key = exec_lock_key(job_id)
+        renew_lua = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end"
+        )
+        import time as _time
+        last_ok = _time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    res = await self._redis.eval(
+                        renew_lua, 1, key, token, EXEC_LOCK_TTL_MS,
+                    )
+                except asyncio.CancelledError:
+                    return
+                except Exception as e:
+                    # Transient Redis error: keep trying, but if we can't
+                    # confirm ownership for longer than the TTL the lock has
+                    # surely expired and someone else may hold it → abort.
+                    if (_time.monotonic() - last_ok) >= ttl_s:
+                        logger.error(
+                            "exec-lock for %s un-renewable for >%.0fs (%s) — "
+                            "aborting run to preserve single-active", job_id, ttl_s, e,
+                        )
+                        run_task.cancel()
+                        return
+                    continue
+                if not res:
+                    logger.warning(
+                        "exec-lock for %s lost (taken over / expired) — "
+                        "aborting run", job_id,
+                    )
+                    run_task.cancel()
+                    return
+                last_ok = _time.monotonic()
+        except asyncio.CancelledError:
+            return
+
+    async def _release_exec_lock(self, job_id: str, token: str) -> None:
+        """Compare-and-DEL: release only if we still own the lock."""
+        from .redis_client import exec_lock_key
+
+        del_lua = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        try:
+            await self._redis.eval(del_lua, 1, exec_lock_key(job_id), token)
+        except Exception as e:
+            logger.warning("exec-lock release error for %s: %s", job_id, e)
+
+    async def _is_cancelled(self, job_id: str) -> bool:
+        from .redis_client import cancel_flag_key
+
+        try:
+            return bool(await self._redis.get(cancel_flag_key(job_id)))
+        except Exception:
+            return False
+
+    async def _get_job_status(self, job_id: str) -> str | None:
+        from sqlalchemy import text as sa_text
+
+        try:
+            async with self._session_factory() as session:
+                res = await session.execute(
+                    sa_text(
+                        "SELECT status FROM aggregation.aggregation_jobs "
+                        "WHERE id = :j"
+                    ),
+                    {"j": job_id},
+                )
+                row = res.first()
+                return row[0] if row else None
+        except Exception:
+            return None
+
+    async def _mark_job_cancelled(self, job_id: str) -> None:
+        from datetime import datetime, timezone
+        from sqlalchemy import text as sa_text
+
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            async with self._session_factory() as session:
+                await session.execute(
+                    sa_text(
+                        "UPDATE aggregation.aggregation_jobs "
+                        "SET status='cancelled', completed_at=:n, updated_at=:n "
+                        "WHERE id=:j AND status NOT IN ('completed','cancelled')"
+                    ),
+                    {"n": now, "j": job_id},
+                )
+                await session.commit()
+        except Exception as e:
+            logger.warning("Failed to mark job %s cancelled: %s", job_id, e)
 
     async def _get_graph_key(self, job_id: str) -> str | None:
         """Look up the actual graph key (provider_id:graph_name) for a job.
