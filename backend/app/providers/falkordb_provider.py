@@ -41,6 +41,29 @@ def _sanitize_label(s: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
 
 
+# Exception class names that indicate a Redis Cluster routing change (the
+# slot moved to another node) or a transient connection drop where a
+# single client rebuild + retry is the right response. Matched by name so
+# we don't hard-import redis cluster exceptions at module load.
+_CLUSTER_REDIRECT_EXC_NAMES = frozenset({
+    "MovedError", "AskError", "ClusterDownError", "TryAgainError",
+    "ConnectionError", "TimeoutError",
+})
+
+
+def _is_cluster_redirect(exc: BaseException) -> bool:
+    """True when *exc* (or its cause) looks like a cluster redirect /
+    transient connection error worth one transparent rebuild + retry."""
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        if type(seen).__name__ in _CLUSTER_REDIRECT_EXC_NAMES:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 def _redact_redis_url(url: str) -> str:
     """Strip embedded credentials from a Redis URL for safe logging.
 
@@ -292,12 +315,31 @@ class FalkorDBProvider(GraphDataProvider):
         projection_mode: str = "in_source",
         username: Optional[str] = None,
         password: Optional[str] = None,
+        connection_config: Optional[dict] = None,
+        cache_redis_url: Optional[str] = None,
     ):
         self._host = host
         self._port = port
         self._graph_name = graph_name
         self._seed_file = seed_file
         self._projection_mode = projection_mode  # "in_source" or "dedicated"
+        # Connection topology config (standalone / sentinel / cluster).
+        # Rides the provider record's extra_config["falkordbConnection"].
+        # None / absent / "standalone" → legacy single-host behavior.
+        # Resolved lazily in _ensure_connected via the connection factory.
+        self._connection_config = connection_config
+        # Per-provider dedicated cache Redis URL (carries a possible password,
+        # so it travels via the encrypted credentials blob, not extra_config).
+        # Overrides the process-wide CACHE_REDIS_URL env when set.
+        self._cache_redis_url = cache_redis_url
+        self._conn_cfg = None  # populated by _ensure_connected (FalkorDBConnConfig)
+        # Failover state: a monotonic generation bumped on each client
+        # rebuild, plus a lock so concurrent MOVED/connection errors
+        # coalesce into a single rebuild instead of a thundering herd.
+        self._conn_generation = 0
+        self._failover_lock = asyncio.Lock()
+        self._proj_db = None   # separate client for {graph}_proj on cluster
+        self._proj_pool = None
         # P1.6 — credentials previously dropped silently in
         # ProviderManager._create_provider_instance, causing NOAUTH errors
         # to be mis-classified as network failures and triggering false
@@ -516,45 +558,69 @@ class FalkorDBProvider(GraphDataProvider):
             # on a semaphore inside the loop itself). The circuit-breaker
             # proxy around this provider translates the failure into
             # ProviderUnavailable before it reaches the web tier.
-            from redis.asyncio import ConnectionPool, Redis
-            from falkordb.asyncio import FalkorDB
+            from redis.asyncio import Redis
+            from backend.app.providers.falkordb_connection import (
+                load_connection_config,
+                build_graph_client,
+                build_cache_redis_fallback,
+            )
 
-            # Pool for graph (Cypher) queries — used by FalkorDB client.
-            # FALKORDB_SOCKET_TIMEOUT controls how long a single Cypher
-            # query can run before the socket times out.  The default 10s
-            # is generous for normal reads but necessary for batch MERGE
-            # operations in the aggregation worker.  The old 3s default
-            # caused "Timeout reading from localhost:6379" on any
-            # moderately-sized UNWIND+MERGE, tripping the circuit breaker
-            # and killing the entire provider (including API traffic).
-            graph_pool_size = int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
-            socket_timeout = float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
-            # P1.6 — auth credentials propagated to the driver. When the
-            # operator has configured a password on the FalkorDB instance,
-            # the ConnectionPool issues AUTH transparently on every new
-            # connection. Without this, queries return NOAUTH, the breaker
-            # mis-classifies as a network failure, and we trip a false
-            # outage.
-            _pool_kwargs: dict = {
-                "host": self._host,
-                "port": self._port,
+            # Resolve the connection topology (standalone / sentinel /
+            # cluster). Default mode is standalone → byte-for-byte the
+            # legacy single-host path. Sentinel/Cluster route via the
+            # connection factory's adapter (the FalkorDB client only
+            # accepts ``connection_pool=``). A single FalkorDB graph key
+            # lives on one node, so cluster mode routes to the owning node.
+            self._conn_cfg = load_connection_config(
+                self._connection_config,
+                host=self._host, port=self._port,
+                username=self._username, password=self._password,
+            )
+            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. The
+            # default 10s is generous for reads but necessary for batch
+            # MERGE in the aggregation worker. Host/port are supplied by
+            # the factory per mode, so they're omitted from pool_kwargs.
+            # Per-provider overrides (from extra_config.falkordbConnection)
+            # take precedence over the process-wide env defaults.
+            graph_pool_size = self._conn_cfg.graph_pool_size or int(
+                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
+            )
+            socket_timeout = self._conn_cfg.socket_timeout or float(
+                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
+            )
+            _graph_pool_kwargs: dict = {
                 "max_connections": graph_pool_size,
                 "socket_connect_timeout": 2.0,
                 "socket_timeout": socket_timeout,
                 "decode_responses": True,
             }
+            # P1.6 — auth credentials propagated to the driver so the pool
+            # issues AUTH transparently (else NOAUTH is mis-classified as a
+            # network failure and trips a false breaker outage).
             if self._username:
-                _pool_kwargs["username"] = self._username
+                _graph_pool_kwargs["username"] = self._username
             if self._password:
-                _pool_kwargs["password"] = self._password
-            self._pool = ConnectionPool(**_pool_kwargs)
+                _graph_pool_kwargs["password"] = self._password
+            if self._conn_cfg.mode != "standalone":
+                logger.info(
+                    "FalkorDB provider connecting graph %r via %s",
+                    self._graph_name, self._conn_cfg.describe(),
+                )
+            self._db, self._pool = await build_graph_client(
+                self._conn_cfg,
+                graph_name=self._graph_name,
+                pool_kwargs=_graph_pool_kwargs,
+            )
             # Redis for non-graph ops (caching, materialization tracking,
-            # ancestor chains, stats). When CACHE_REDIS_URL is set, these
+            # ancestor chains, stats). When a cache Redis URL is set, these
             # go to a DEDICATED Redis instance — fully decoupled from
             # FalkorDB so a graph outage doesn't take out caching/state.
             # When unset, falls back to the FalkorDB instance (dev compat).
+            # The per-provider URL (encrypted credential) wins over the
+            # process-wide CACHE_REDIS_URL env — important in cluster mode,
+            # where each provider needs its own dedicated cache.
             from backend.common.adapters import TimeoutRedis
-            cache_redis_url = os.getenv("CACHE_REDIS_URL")
+            cache_redis_url = self._cache_redis_url or os.getenv("CACHE_REDIS_URL")
             redis_pool_size = int(os.getenv("FALKORDB_REDIS_POOL_SIZE", "16"))
             redis_op_timeout = float(os.getenv("FALKORDB_REDIS_OP_TIMEOUT", "3"))
             # P2.3 — cache Redis is a BEST-EFFORT dependency. Wrapped in
@@ -586,35 +652,39 @@ class FalkorDBProvider(GraphDataProvider):
                     self._redis_pool = None  # managed by from_url
                 else:
                     # Cache Redis falls back to the FalkorDB instance — same
-                    # host, same auth (P1.6). This is dev-compat only: in
+                    # topology, same auth (P1.6). Dev-compat only: in
                     # production CACHE_REDIS_URL MUST be set to a separate
-                    # Redis so a FalkorDB outage doesn't take caching with
-                    # it. Warn loudly so ops can spot the misconfiguration.
+                    # Redis. Mode-aware via the connection factory:
+                    # standalone/sentinel build a fallback client; cluster
+                    # returns None (cache needs cross-slot SCAN/pipelines a
+                    # single node can't serve), and the provider degrades to
+                    # cache-disabled rather than misbehaving.
                     logger.warning(
                         "CACHE_REDIS_URL is not set; FalkorDB provider's "
                         "ancestor/URN caches will share the FalkorDB instance "
-                        "(host=%s:%s). A FalkorDB outage will also disable "
-                        "caching. Set CACHE_REDIS_URL to a dedicated Redis "
-                        "in production.", self._host, self._port,
+                        "(%s). A FalkorDB outage will also disable caching. "
+                        "Set CACHE_REDIS_URL to a dedicated Redis in "
+                        "production.", self._conn_cfg.describe(),
                     )
                     _redis_pool_kwargs: dict = {
-                        "host": self._host,
-                        "port": self._port,
                         "max_connections": redis_pool_size,
                         "socket_connect_timeout": 2.0,
                         "socket_timeout": socket_timeout,
                         "decode_responses": True,
                     }
-                    if self._username:
-                        _redis_pool_kwargs["username"] = self._username
-                    if self._password:
-                        _redis_pool_kwargs["password"] = self._password
-                    self._redis_pool = ConnectionPool(**_redis_pool_kwargs)
-                    _raw_redis = Redis(connection_pool=self._redis_pool)
+                    _raw_redis = build_cache_redis_fallback(
+                        self._conn_cfg, pool_kwargs=_redis_pool_kwargs,
+                    )
+                    self._redis_pool = None
                 # Wrap in TimeoutRedis — every async call and pipeline.execute()
                 # automatically gets an asyncio.wait_for() deadline. No call-site
                 # wrapping needed. See backend/common/adapters/timeout_redis.py.
-                self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
+                if _raw_redis is None:
+                    # Cluster mode without a dedicated cache Redis → degrade.
+                    self._redis = None
+                    self._redis_available = False
+                else:
+                    self._redis = TimeoutRedis(_raw_redis, timeout=redis_op_timeout)
             except Exception as exc:
                 # Cache Redis construction failed. Provider continues
                 # without cache; queries are slower but available.
@@ -624,12 +694,25 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 self._redis = None
                 self._redis_available = False
-            self._db = FalkorDB(connection_pool=self._pool)
+            # self._db was built by the connection factory above.
             self._graph = self._db.select_graph(self._graph_name)
 
-            # Set up projection graph if using dedicated mode
+            # Set up projection graph if using dedicated mode. On a Redis
+            # Cluster, {graph}_proj may hash to a DIFFERENT shard than
+            # {graph}, so route it through its own owning-node client; in
+            # standalone/sentinel it shares the same client.
             if self._projection_mode == "dedicated":
-                self._proj_graph = self._db.select_graph(f"{self._graph_name}_proj")
+                proj_name = f"{self._graph_name}_proj"
+                if self._conn_cfg.mode == "cluster":
+                    self._proj_db, self._proj_pool = await build_graph_client(
+                        self._conn_cfg,
+                        graph_name=proj_name,
+                        pool_kwargs=_graph_pool_kwargs,
+                    )
+                    self._proj_graph = self._proj_db.select_graph(proj_name)
+                else:
+                    self._proj_db = self._db
+                    self._proj_graph = self._db.select_graph(proj_name)
 
             # Verify the pool with one cheap round-trip — if this fails, we
             # treat the connect as failed and the caller's circuit breaker
@@ -714,32 +797,129 @@ class FalkorDBProvider(GraphDataProvider):
     def _db_timeout_ms(seconds: float) -> int:
         return max(500, int(seconds * 1000) - 500)
 
+    async def _rebuild_graph_client_for_failover(self, seen_generation: int) -> None:
+        """Re-resolve and rebuild the FalkorDB client(s) after a cluster
+        MOVED / connection drop. Coalesced: if another task already
+        rebuilt past ``seen_generation`` we no-op. In cluster mode this
+        re-discovers the node owning the graph key; in sentinel/standalone
+        it reconnects against the (possibly newly-promoted) master/host.
+        """
+        if self._conn_cfg is None:
+            return
+        async with self._failover_lock:
+            if seen_generation != self._conn_generation:
+                return  # someone else already rebuilt for this failure
+            from backend.app.providers.falkordb_connection import build_graph_client
+
+            socket_timeout = self._conn_cfg.socket_timeout or float(
+                os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
+            )
+            graph_pool_size = self._conn_cfg.graph_pool_size or int(
+                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
+            )
+            pool_kwargs: dict = {
+                "max_connections": graph_pool_size,
+                "socket_connect_timeout": 2.0,
+                "socket_timeout": socket_timeout,
+                "decode_responses": True,
+            }
+            if self._username:
+                pool_kwargs["username"] = self._username
+            if self._password:
+                pool_kwargs["password"] = self._password
+
+            old_pool, old_proj_pool = self._pool, self._proj_pool
+            self._db, self._pool = await build_graph_client(
+                self._conn_cfg, graph_name=self._graph_name, pool_kwargs=pool_kwargs,
+            )
+            self._graph = self._db.select_graph(self._graph_name)
+            if self._projection_mode == "dedicated":
+                proj_name = f"{self._graph_name}_proj"
+                if self._conn_cfg.mode == "cluster":
+                    self._proj_db, self._proj_pool = await build_graph_client(
+                        self._conn_cfg, graph_name=proj_name, pool_kwargs=pool_kwargs,
+                    )
+                    self._proj_graph = self._proj_db.select_graph(proj_name)
+                else:
+                    self._proj_db = self._db
+                    self._proj_graph = self._db.select_graph(proj_name)
+            self._conn_generation += 1
+            logger.warning(
+                "FalkorDB %s: rebuilt client after failover (generation %d, %s).",
+                self._graph_name, self._conn_generation, self._conn_cfg.describe(),
+            )
+            # Best-effort close of superseded pools. In-flight ops on them
+            # either complete or fail and are retried by _run_guarded.
+            for p in (old_pool, old_proj_pool):
+                if p is not None and p is not self._pool and p is not self._proj_pool:
+                    try:
+                        await p.aclose()
+                    except Exception:
+                        pass
+
+    async def _run_guarded(self, call: Callable[[], Awaitable[Any]]) -> Any:
+        """Execute a graph call with one transparent failover retry in
+        cluster mode. ``call`` must reference ``self._graph`` / ``self._proj``
+        lazily so the retry picks up the rebuilt client. Standalone/sentinel
+        modes call through unchanged (the master pool self-heals on
+        failover, and the circuit breaker + worker resume handle the rest).
+        """
+        try:
+            return await call()
+        except Exception as exc:
+            if (
+                self._conn_cfg is None
+                or self._conn_cfg.mode != "cluster"
+                or not _is_cluster_redirect(exc)
+            ):
+                raise
+            gen = self._conn_generation
+            logger.warning(
+                "FalkorDB %s: cluster redirect/connection error (%s) — "
+                "rebuilding client and retrying once.",
+                self._graph_name, type(exc).__name__,
+            )
+            await self._rebuild_graph_client_for_failover(gen)
+            return await call()
+
     async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the source graph."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
-        async with self._query_semaphore:
+
+        async def _call():
             return await asyncio.wait_for(
                 self._graph.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
 
+        async with self._query_semaphore:
+            return await self._run_guarded(_call)
+
     async def _query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded write query on the source graph."""
         t = timeout if timeout is not None else self._WRITE_TIMEOUT
-        async with self._query_semaphore:
+
+        async def _call():
             return await asyncio.wait_for(
                 self._graph.query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
 
+        async with self._query_semaphore:
+            return await self._run_guarded(_call)
+
     async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the projection graph."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
-        async with self._query_semaphore:
+
+        async def _call():
             return await asyncio.wait_for(
                 self._proj.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
+
+        async with self._query_semaphore:
+            return await self._run_guarded(_call)
 
     def _quiesce_p95(self) -> float:
         """p95 of the rolling write-latency window (seconds). 0 if window empty."""
@@ -819,24 +999,26 @@ class FalkorDBProvider(GraphDataProvider):
         self._check_quiesce_gate()
 
         t = timeout if timeout is not None else self._WRITE_TIMEOUT
+
+        async def _call():
+            t_start = time.monotonic()
+            try:
+                return await asyncio.wait_for(
+                    self._proj.query(
+                        cypher, params=params or {},
+                        timeout=self._db_timeout_ms(t),
+                    ),
+                    timeout=t,
+                )
+            finally:
+                # Record latency regardless of success/failure so quiesce
+                # trips even when slow writes are also erroring out (the
+                # symptom we'd want to back off from).
+                self._record_write_latency(time.monotonic() - t_start)
+
         async with self._write_semaphore:
             async with self._query_semaphore:
-                t_start = time.monotonic()
-                try:
-                    result = await asyncio.wait_for(
-                        self._proj.query(
-                            cypher, params=params or {},
-                            timeout=self._db_timeout_ms(t),
-                        ),
-                        timeout=t,
-                    )
-                finally:
-                    # Record latency regardless of success/failure so
-                    # quiesce trips even when slow writes are also
-                    # erroring out (the symptom we'd want to back off
-                    # from).
-                    self._record_write_latency(time.monotonic() - t_start)
-                return result
+                return await self._run_guarded(_call)
 
     async def _seed_from_file(self):
         """Load graph from seed JSON file if graph is empty."""
@@ -3336,7 +3518,29 @@ class FalkorDBProvider(GraphDataProvider):
         well within worker pod memory budgets. If a future graph
         produces enough pairs to exhaust memory, Phase 1.5 stages
         ``pair_data`` to Redis or Postgres.
+
+        Phase 2 of aggregation hardening: when
+        ``AGGREGATION_STREAMING_REBUILD_ENABLED`` is set, delegate to the
+        constant-memory streaming rebuild — an indexed ``ID(r)`` cursor
+        paged per lineage type, per-page flush via MERGE-on-aggKey, and
+        epoch tagging with an end-of-run stale-generation sweep instead
+        of the destructive wipe-first. The streaming path is crash-
+        resumable from ``last_cursor`` and does not hold the whole pair
+        set in memory. The accumulate-in-memory body below is preserved
+        as the rollback escape hatch (flag off).
         """
+        _streaming_flag = os.getenv("AGGREGATION_STREAMING_REBUILD_ENABLED", "false")
+        if str(_streaming_flag).strip().lower() in ("1", "true", "yes", "on"):
+            return await self._materialize_aggregated_edges_streaming_rebuild(
+                batch_size=batch_size,
+                containment_edge_types=containment_edge_types,
+                lineage_edge_types=lineage_edge_types,
+                progress_callback=progress_callback,
+                intra_batch_callback=intra_batch_callback,
+                should_cancel=should_cancel,
+                last_cursor=last_cursor,
+            )
+
         containment = containment_edge_types or list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
 
@@ -3691,6 +3895,514 @@ class FalkorDBProvider(GraphDataProvider):
             "input_edges_processed": processed,
             "errors": 0,
         }
+
+    # ================================================================== #
+    # Streaming bulk rebuild (Phase 2 hardening)                         #
+    #                                                                    #
+    # Constant-memory, crash-resumable alternative to the accumulate-    #
+    # all-in-memory rebuild above. Pages leaf edges per lineage type on  #
+    # an indexed internal-ID cursor, expands + flushes one page at a     #
+    # time via MERGE-on-aggKey, and tags every edge with a per-run       #
+    # ``aggEpoch`` so a single end-of-run sweep retires the previous     #
+    # generation — no destructive wipe-first that breaks resume.         #
+    # ================================================================== #
+
+    _STREAM_CURSOR_PREFIX = "v2"
+
+    def _parse_stream_cursor(
+        self, last_cursor: Optional[str],
+    ) -> Optional[Tuple[int, int, int]]:
+        """Parse a streaming resume cursor ``v2:<epoch>:<type_index>:<rid>``.
+
+        Returns ``(epoch, type_index, rid)`` or ``None`` when the cursor is
+        absent or not a streaming cursor (fresh start, or a legacy cursor
+        left by the accumulate-in-memory path — which we ignore and start a
+        fresh generation).
+        """
+        if not last_cursor:
+            return None
+        parts = str(last_cursor).split(":")
+        if len(parts) != 4 or parts[0] != self._STREAM_CURSOR_PREFIX:
+            return None
+        try:
+            return int(parts[1]), int(parts[2]), int(parts[3])
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def _make_stream_cursor(cls, epoch: int, type_index: int, rid: int) -> str:
+        return f"{cls._STREAM_CURSOR_PREFIX}:{epoch}:{type_index}:{rid}"
+
+    async def _estimate_lineage_edge_count(
+        self, lineage_types: List[str],
+    ) -> int:
+        """Best-effort lineage-edge total WITHOUT a full-graph scan.
+
+        Reads the graph stats the stats service already maintains
+        (``{graph}:stats_cache``, written by ``get_stats``) and sums the
+        counts for the resolved lineage types. Returns 0 when no cache is
+        available — the caller treats 0 as "unknown" and drives progress
+        off the processed-edge count instead of a percentage.
+        """
+        if not lineage_types or self._redis is None:
+            return 0
+        try:
+            cached = await self._redis.get(f"{self._graph_name}:stats_cache")
+            if not cached:
+                return 0
+            data = json.loads(cached)
+            counts = data.get("edgeTypeCounts") or {}
+            wanted = {str(t).upper() for t in lineage_types}
+            total = 0
+            for t, c in counts.items():
+                if str(t).upper() in wanted:
+                    try:
+                        total += int(c)
+                    except (ValueError, TypeError):
+                        continue
+            return total
+        except Exception:
+            return 0
+
+    async def _derive_lineage_types_from_cache(
+        self, containment: List[str],
+    ) -> List[str]:
+        """Derive lineage edge types from cached graph stats (no scan).
+
+        Only used when the caller supplied no explicit lineage whitelist —
+        in practice the ontology always freezes lineage types onto the job,
+        so this is a defensive fallback.
+        """
+        if self._redis is None:
+            return []
+        exclude = {str(c).upper() for c in (containment or [])} | {"AGGREGATED"}
+        try:
+            cached = await self._redis.get(f"{self._graph_name}:stats_cache")
+            if not cached:
+                return []
+            data = json.loads(cached)
+            counts = data.get("edgeTypeCounts") or {}
+            return [t for t in counts if str(t).upper() not in exclude]
+        except Exception:
+            return []
+
+    async def _ensure_aggregation_streaming_indexes(self) -> None:
+        """Create the ``:AGGREGATED(aggKey)`` edge index used by
+        MERGE-on-aggKey so each MERGE is an index seek rather than an
+        O(out_degree) scan. Best-effort + idempotent — older FalkorDB
+        releases without edge-property indexes still MERGE correctly,
+        just slower.
+        """
+        _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
+        try:
+            await asyncio.wait_for(
+                self._proj.query(
+                    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)"
+                ),
+                timeout=_init_timeout,
+            )
+        except Exception:
+            pass  # already exists or unsupported
+
+    async def _materialize_aggregated_edges_streaming_rebuild(
+        self,
+        *,
+        batch_size: int,
+        containment_edge_types: Optional[List[str]],
+        lineage_edge_types: Optional[List[str]],
+        progress_callback: Optional[Any],
+        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
+        should_cancel: Optional[Callable[[], bool]],
+        last_cursor: Optional[str],
+    ) -> Dict[str, Any]:
+        """Constant-memory, crash-resumable bulk rebuild.
+
+        Pages leaf lineage edges one type at a time on an indexed
+        ``ID(r)`` cursor (the engine's physical iteration order — no
+        property index needed and no full-graph re-scan per page). For
+        each page: compute ancestor chains, expand the Cartesian product
+        in a *page-local* dict, then flush via MERGE-on-aggKey and
+        discard. Memory is bounded by ``page_size × max_chain_depth²``,
+        independent of graph size.
+
+        Every edge is stamped ``aggEpoch = <run epoch>``; MERGE-on-aggKey
+        accumulates weight for the same ancestor pair across pages within
+        a generation and resets it when reusing an edge from a prior
+        generation. A single end-of-run sweep deletes edges not stamped
+        with the current epoch — the previous generation. A crash before
+        the sweep leaves the old generation intact and queryable; resume
+        continues from ``last_cursor`` and only swaps generations once the
+        full scan completes.
+        """
+        from backend.app.services.aggregation.cancel import JobCancelled
+        from datetime import datetime, timezone
+
+        containment = containment_edge_types or list(self._get_containment_edge_types())
+        if lineage_edge_types:
+            effective = [t for t in lineage_edge_types if t and t != "AGGREGATED"]
+        else:
+            effective = await self._derive_lineage_types_from_cache(containment)
+        # Stable, sorted, de-duplicated order so the cursor's type_index
+        # component is deterministic across restarts.
+        effective = sorted({str(t) for t in effective if t})
+        if not effective:
+            logger.warning(
+                "streaming_rebuild on %s: no effective lineage types; nothing "
+                "to materialize.", self._graph_name,
+            )
+            return {
+                "processed": 0,
+                "aggregated_edges_affected": 0,
+                "input_edges_processed": 0,
+                "errors": 0,
+            }
+
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        level_digest = getattr(self, "_level_digest", None) or ""
+
+        resume = self._parse_stream_cursor(last_cursor)
+        if resume is not None:
+            epoch, start_type_index, start_rid = resume
+            logger.info(
+                "streaming_rebuild on %s: resuming epoch=%d type_index=%d rid=%d",
+                self._graph_name, epoch, start_type_index, start_rid,
+            )
+        else:
+            epoch = int(time.time() * 1000)
+            start_type_index, start_rid = 0, -1
+            if last_cursor:
+                logger.info(
+                    "streaming_rebuild on %s: ignoring non-streaming cursor %r "
+                    "— starting fresh generation epoch=%d",
+                    self._graph_name, last_cursor, epoch,
+                )
+
+        # One-time setup: cheap estimate (no scan), indexes, label warmup.
+        total_estimate = await self._estimate_lineage_edge_count(effective)
+        await self._ensure_aggregation_streaming_indexes()
+        await self._warmup_urn_label_cache_for_aggregation()
+
+        max_pairs_per_page = int(os.getenv("AGGREGATION_MAX_PAIRS_PER_PAGE", "200000"))
+
+        processed = 0
+        running_created = 0
+        total = max(total_estimate, 0)
+
+        if progress_callback is not None:
+            try:
+                await progress_callback(
+                    processed, max(total, processed),
+                    last_cursor if resume else None, running_created, "scanning",
+                )
+            except Exception:
+                pass
+
+        for type_index in range(start_type_index, len(effective)):
+            etype = effective[type_index]
+            safe_type = _sanitize_label(etype)
+            rid_cursor = start_rid if type_index == start_type_index else -1
+
+            while True:
+                if should_cancel is not None and should_cancel():
+                    raise JobCancelled(
+                        job_id=self._make_stream_cursor(epoch, type_index, rid_cursor),
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+
+                # Indexed cursor: typed pattern iterated in internal-ID order.
+                page_cypher = (
+                    f"MATCH (s)-[r:`{safe_type}`]->(t) WHERE ID(r) > $rid "
+                    f"RETURN ID(r) AS rid, s.urn AS s, t.urn AS t "
+                    f"ORDER BY ID(r) LIMIT $limit"
+                )
+                res = await self._ro_query(
+                    page_cypher, params={"rid": rid_cursor, "limit": batch_size},
+                )
+                rows = res.result_set or []
+                if not rows:
+                    break
+
+                page_urns: Set[str] = set()
+                for row in rows:
+                    if row[1]:
+                        page_urns.add(row[1])
+                    if row[2]:
+                        page_urns.add(row[2])
+                ancestors_cache = await self._compute_and_store_ancestors_bulk(
+                    list(page_urns),
+                )
+
+                # Expand (s_chain × t_chain) for THIS PAGE only.
+                page_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+                for _rid, s_urn, t_urn in rows:
+                    if not s_urn or not t_urn:
+                        continue
+                    s_chain = [s_urn] + (ancestors_cache.get(s_urn, []) or [])
+                    t_chain = [t_urn] + (ancestors_cache.get(t_urn, []) or [])
+                    for sa in s_chain:
+                        for ta in t_chain:
+                            if sa == ta:
+                                continue
+                            meta = page_pairs.get((sa, ta))
+                            if meta is None:
+                                meta = {"weight": 0, "edge_types": set()}
+                                page_pairs[(sa, ta)] = meta
+                            meta["weight"] += 1
+                            meta["edge_types"].add(etype)
+                    # Safety valve: a single high-fan-in hub page must not
+                    # expand without bound. Flush + reset when the budget is
+                    # hit; MERGE accumulates across flushes so correctness
+                    # holds.
+                    if len(page_pairs) >= max_pairs_per_page:
+                        running_created += await self._flush_streaming_pairs(
+                            page_pairs=page_pairs, entity_levels=entity_levels,
+                            level_digest=level_digest, epoch=epoch,
+                            running_created=running_created,
+                            intra_batch_callback=intra_batch_callback,
+                            should_cancel=should_cancel,
+                        )
+                        page_pairs = {}
+
+                if page_pairs:
+                    running_created += await self._flush_streaming_pairs(
+                        page_pairs=page_pairs, entity_levels=entity_levels,
+                        level_digest=level_digest, epoch=epoch,
+                        running_created=running_created,
+                        intra_batch_callback=intra_batch_callback,
+                        should_cancel=should_cancel,
+                    )
+
+                processed += len(rows)
+                rid_cursor = int(rows[-1][0])
+                if total < processed:
+                    total = processed  # keep % monotonic when estimate is low
+                cursor = self._make_stream_cursor(epoch, type_index, rid_cursor)
+
+                # Checkpoint at the page boundary. The page's edges are fully
+                # MERGE'd at this point, so resume from this cursor is sound.
+                if progress_callback is not None:
+                    try:
+                        await progress_callback(
+                            processed, max(total, processed), cursor,
+                            running_created, "creating",
+                        )
+                    except Exception as cb_exc:
+                        logger.error(
+                            "streaming_rebuild checkpoint callback failed "
+                            "(continuing): %s", cb_exc, exc_info=True,
+                        )
+
+                if len(rows) < batch_size:
+                    break
+
+        # End-of-run generation swap. Only a fully-scanned run reaches here.
+        final_cursor = self._make_stream_cursor(epoch, len(effective), -1)
+        if progress_callback is not None:
+            try:
+                await progress_callback(
+                    processed, max(total, processed), final_cursor,
+                    running_created, "finalizing",
+                )
+            except Exception:
+                pass
+        swept = await self._sweep_stale_aggregated_generation(
+            epoch, should_cancel=should_cancel,
+        )
+        final_count = await self._count_aggregated_for_epoch(epoch)
+        logger.info(
+            "streaming_rebuild on %s complete: processed=%d new_created>=%d "
+            "final_aggregated=%d swept_stale=%d (epoch=%d)",
+            self._graph_name, processed, running_created, final_count, swept, epoch,
+        )
+
+        try:
+            if self._redis is not None:
+                await self._redis.set(
+                    self._agg_last_materialized_key(),
+                    datetime.now(timezone.utc).isoformat(),
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to stamp aggregated materialization timestamp: %s", e,
+            )
+
+        return {
+            "processed": processed,
+            "aggregated_edges_affected": final_count,
+            "input_edges_processed": processed,
+            "errors": 0,
+        }
+
+    async def _flush_streaming_pairs(
+        self,
+        *,
+        page_pairs: Dict[Tuple[str, str], Dict[str, Any]],
+        entity_levels: Dict[str, int],
+        level_digest: str,
+        epoch: int,
+        running_created: int,
+        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """MERGE one page's pairs into AGGREGATED edges.
+
+        Keyed on a deterministic ``aggKey = src_urn|tgt_urn`` so the same
+        ancestor pair re-expanded on a later page accumulates weight on the
+        single existing edge (within the current generation). Edges reused
+        from a prior generation are reset (weight, edge-types, epoch).
+        Returns the number of NEW edges created in this flush (the running
+        live counter; the authoritative final count is taken once at the
+        end of the run).
+
+        Crash-resume note: MERGE-on-aggKey keeps the AGGREGATED *topology*
+        exact (one edge per ancestor pair, never duplicated). The ``weight``
+        counter, however, accumulates via ON MATCH within a generation, so a
+        crash between a page's flush and its checkpoint can re-add at most
+        one page's contributions on resume — a bounded over-count on a soft
+        ranking signal that fully self-heals on the next clean rebuild (a
+        fresh epoch resets weights via the ON MATCH ``ELSE`` branch).
+        """
+        from backend.app.services.aggregation.cancel import JobCancelled
+        from datetime import datetime, timezone
+
+        if not page_pairs:
+            return 0
+
+        urns: Set[str] = set()
+        for s, t in page_pairs:
+            urns.add(s)
+            urns.add(t)
+        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
+
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        dropped = 0
+        for (s, t), meta in page_pairs.items():
+            sl = urn_label_map.get(s)
+            tl = urn_label_map.get(t)
+            if not (sl and tl):
+                dropped += 1
+                continue
+            grouped[(sl, tl)].append({
+                "s": s,
+                "t": t,
+                "k": f"{s}|{t}",
+                "w": int(meta.get("weight", 1)),
+                "et": list(meta.get("edge_types") or []),
+                "sl": entity_levels.get(sl) if entity_levels else None,
+                "tl": entity_levels.get(tl) if entity_levels else None,
+            })
+
+        if dropped:
+            logger.debug(
+                "streaming flush on %s: dropped %d pairs with unresolved "
+                "endpoint labels (label-less or missing nodes).",
+                self._graph_name, dropped,
+            )
+
+        digest_val = level_digest or ""
+        created = 0
+        for (sl_label, tl_label), items in grouped.items():
+            cypher = (
+                f"UNWIND $batch AS item "
+                f"MATCH (a:{sl_label} {{urn: item.s}}) "
+                f"MATCH (b:{tl_label} {{urn: item.t}}) "
+                f"MERGE (a)-[r:AGGREGATED {{aggKey: item.k}}]->(b) "
+                f"ON CREATE SET r.weight = item.w, r.aggEpoch = $epoch, "
+                f"r.sourceEdgeTypes = item.et, r.sourceLevel = item.sl, "
+                f"r.targetLevel = item.tl, r.levelDigest = $digest, "
+                f"r.latestUpdate = timestamp() "
+                f"ON MATCH SET r.weight = CASE WHEN r.aggEpoch = $epoch "
+                f"THEN r.weight + item.w ELSE item.w END, "
+                f"r.sourceEdgeTypes = item.et, r.sourceLevel = item.sl, "
+                f"r.targetLevel = item.tl, r.aggEpoch = $epoch, "
+                f"r.levelDigest = $digest, r.latestUpdate = timestamp()"
+            )
+            for i in range(0, len(items), self._bulk_create_batch_size):
+                if should_cancel is not None and should_cancel():
+                    raise JobCancelled(
+                        job_id="<streaming-flush-cancel>",
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                chunk = items[i : i + self._bulk_create_batch_size]
+                result = await self._proj_query(
+                    cypher,
+                    params={"batch": chunk, "epoch": epoch, "digest": digest_val},
+                    timeout=self._bulk_create_timeout_s,
+                )
+                created += int(getattr(result, "relationships_created", 0) or 0)
+                if intra_batch_callback is not None:
+                    try:
+                        await intra_batch_callback(running_created + created)
+                    except Exception as cb_exc:
+                        logger.error(
+                            "streaming flush intra_batch_callback failed "
+                            "(continuing): %s", cb_exc, exc_info=True,
+                        )
+        return created
+
+    async def _sweep_stale_aggregated_generation(
+        self,
+        epoch: int,
+        *,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """Delete AGGREGATED edges not written by the current generation, in
+        cursored chunks bounded by ``_BULK_WIPE_BATCH_SIZE`` so a single
+        DELETE can't bust the write timeout. Replaces the destructive
+        wipe-first ordering.
+        """
+        from backend.app.services.aggregation.cancel import JobCancelled
+        from datetime import datetime, timezone
+
+        total_deleted = 0
+        while True:
+            if should_cancel is not None and should_cancel():
+                raise JobCancelled(
+                    job_id="<streaming-sweep-cancel>",
+                    observed_at=datetime.now(timezone.utc).isoformat(),
+                )
+            res = await self._proj_query(
+                "MATCH ()-[r:AGGREGATED]->() "
+                "WHERE r.aggEpoch IS NULL OR r.aggEpoch <> $epoch "
+                f"WITH r LIMIT {self._BULK_WIPE_BATCH_SIZE} "
+                "DELETE r RETURN count(r) AS n",
+                params={"epoch": epoch},
+            )
+            n = 0
+            if res.result_set:
+                first = res.result_set[0]
+                n = (first[0] if first else 0) or 0
+            total_deleted += int(n)
+            if n == 0:
+                break
+            logger.info(
+                "streaming sweep on %s: chunk deleted %d stale AGGREGATED "
+                "edges (running total %d)",
+                self._graph_name, n, total_deleted,
+            )
+        return total_deleted
+
+    async def _count_aggregated_for_epoch(self, epoch: int) -> int:
+        """Authoritative count of AGGREGATED edges written by this run. One
+        scan at the very end (the result set, not the full graph) — far
+        cheaper than the per-page full-graph scans this rewrite eliminates.
+        """
+        try:
+            res = await self._proj_ro_query(
+                "MATCH ()-[r:AGGREGATED]->() WHERE r.aggEpoch = $epoch "
+                "RETURN count(r) AS n",
+                params={"epoch": epoch},
+                timeout=self._bulk_create_timeout_s,
+            )
+            if res.result_set:
+                first = res.result_set[0]
+                return int((first[0] if first else 0) or 0)
+        except Exception as exc:
+            logger.warning(
+                "streaming_rebuild epoch count failed on %s: %s",
+                self._graph_name, exc,
+            )
+        return 0
 
     async def on_lineage_edge_written(
         self,

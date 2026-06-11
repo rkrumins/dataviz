@@ -94,4 +94,71 @@ In the event of a total GCP Region loss (e.g., `us-central1` goes completely off
 2. **Multi-Region Bucket:** Export snapshots automatically to a GCP Cloud Storage Bucket configured with **Multi-Region Replication** (e.g., replicating to `europe-west1`).
 3. **Cold Standby / Active-Passive:** Maintain a scaled-down GKE cluster in the secondary region. 
 4. **Recovery Protocol:** In a disaster, scale up the secondary GKE cluster, deploy the FalkorDB operator, and initialize the cluster using the latest RDB file from the replicated storage bucket.
+
+---
+
+## 7. Application Client Configuration
+
+The application's FalkorDB provider is topology-aware and selects how to
+connect from configuration — **standalone**, **Sentinel**, or **Cluster**.
+Because a single FalkorDB graph key lives entirely on one node, Cluster
+mode does not split a single graph; it routes the client to the node that
+**owns** the graph key (§4) and provides HA + spreads *different* graphs
+across shards.
+
+### 7.1 Where config lives
+
+Two layers, most-specific wins:
+
+1. **Per-provider** — the provider record's
+   `extra_config.falkordbConnection` (preferred when different providers
+   use different topologies; flows through the existing provider API and
+   into `FalkorDBProvider(connection_config=...)`):
+
+   ```jsonc
+   "falkordbConnection": {
+     "mode": "standalone | sentinel | cluster",
+     "sentinel": { "masterName": "mymaster", "nodes": [["s1", 26379], ["s2", 26379]] },
+     "cluster":  { "startupNodes": [["n1", 6379], ["n2", 6379], ["n3", 6379]] }
+   }
+   ```
+
+2. **Process-wide env fallback** (when the JSON is absent):
+   `FALKORDB_MODE`, `FALKORDB_SENTINEL_MASTER`, `FALKORDB_SENTINEL_NODES`,
+   `FALKORDB_CLUSTER_NODES` (the `*_NODES` vars accept `host:port,host:port`).
+
+Default/absent mode = `standalone` — identical to the legacy single-host
+path, so existing deployments are unaffected.
+
+### 7.2 Behavior per mode
+
+| Mode | Graph client | Failover |
+|------|--------------|----------|
+| standalone | direct pool to `FALKORDB_HOST:PORT` | breaker + worker resume |
+| sentinel | rides the Sentinel master pool (auto-reresolves the promoted master) | transparent |
+| cluster | routes to the node owning the graph key; on `MOVED`/connection drop the client is rebuilt against the new owner and the op retried once | transparent (`_run_guarded`) |
+
+A *sustained* routing/connection failure trips the per-provider circuit
+breaker (cluster/sentinel error classes are recognized); a single
+transient `MOVED` is retried below the breaker and never surfaces.
+
+### 7.3 Cache Redis in Cluster mode
+
+The provider's ancestor/idempotency cache uses cross-slot SCAN and
+multi-key pipelines, which a single node cannot serve. In Cluster mode
+set **`CACHE_REDIS_URL`** to a dedicated Redis; without it the provider
+runs cache-disabled (correct, slower) and logs a loud warning. In
+`dedicated` projection mode on a cluster, `{graph}_proj` may live on a
+different shard than `{graph}` and is routed through its own owning-node
+client automatically.
+
+### 7.4 Aggregation at scale
+
+For graphs with millions of nodes/edges, enable the constant-memory
+streaming rebuild: `AGGREGATION_STREAMING_REBUILD_ENABLED=true`. It pages
+leaf lineage edges on an indexed `ID(r)` cursor, flushes per page via
+MERGE-on-`aggKey`, and is crash-resumable from `last_cursor` — eliminating
+the full-graph count, the non-indexable cursor, and the in-memory pair
+accumulation that previously timed out. `AGGREGATION_MAX_PAIRS_PER_PAGE`
+bounds high-fan-in hub pages.
 5. **DNS Cutover:** Update Multi-Cluster Ingress (MCI) or global load balancer to route application traffic to the secondary region.

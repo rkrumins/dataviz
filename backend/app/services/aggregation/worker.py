@@ -156,6 +156,13 @@ class AggregationWorker:
                 # Read frozen edge types from job record
                 containment_types = json.loads(job.containment_edge_types or "[]")
                 lineage_types = json.loads(job.lineage_edge_types or "[]")
+                # Entity-type → level map frozen at trigger time (may be
+                # absent on legacy rows). Used to inject levels into the
+                # provider and to drive per-label index creation without
+                # an ontology-module dependency in this executor.
+                entity_type_levels = json.loads(
+                    getattr(job, "entity_type_levels", None) or "{}"
+                )
 
                 if not lineage_types:
                     raise ValueError("No lineage edge types configured — cannot aggregate")
@@ -217,6 +224,36 @@ class AggregationWorker:
                 # types, so a change in classification automatically routes reads to
                 # a fresh cache namespace — no manual invalidation needed.
                 provider.set_containment_edge_types(containment_types)
+
+                # Inject the frozen entity-type level map so ancestor-chain
+                # depth adapts to deep ontologies (max_depth derives from
+                # the level count) and AGGREGATED edges carry correct
+                # source/target level + levelDigest stamps. Best-effort:
+                # legacy jobs without a frozen map degrade to max_depth=10
+                # and the label-scan trace fallback (both correct).
+                if entity_type_levels and hasattr(provider, "set_entity_type_levels"):
+                    try:
+                        provider.set_entity_type_levels(entity_type_levels)
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: set_entity_type_levels failed "
+                            "(continuing with default depth): %s", job.id, exc,
+                        )
+
+                # Ensure per-label URN indexes for the ontology's entity
+                # types BEFORE the scan/flush so every MATCH/MERGE on
+                # (label {urn}) is an index seek. Driven by the frozen
+                # level-map keys (ontology entity types) — schema-agnostic,
+                # not the provider's hardcoded defaults. Best-effort.
+                if entity_type_levels and hasattr(provider, "ensure_indices"):
+                    try:
+                        await provider.ensure_indices(list(entity_type_levels.keys()))
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: ensure_indices failed "
+                            "(continuing; first query will surface a missing "
+                            "index if any): %s", job.id, exc,
+                        )
 
                 # Compute fingerprint before aggregation
                 job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
@@ -732,7 +769,10 @@ class AggregationWorker:
             # generic UI label keeps working.
             if phase is not None:
                 job.current_phase = phase
-            job.progress = int((processed / total) * 100) if total > 0 else 0
+            # Clamp to [0, 100]: the streaming path drives ``total`` off a
+            # cheap (possibly stale) estimate, so ``processed`` can exceed
+            # it late in a run. Without the clamp the bar would read >100%.
+            job.progress = min(100, int((processed / total) * 100)) if total > 0 else 0
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
             batches_since_commit += 1

@@ -34,6 +34,11 @@ class ConnectionCredentials(BaseModel):
     # Spanner-specific. Both are snake_case to match the FE wizard payload.
     project_id: Optional[str] = None
     service_account_json: Optional[str] = None
+    # FalkorDB per-provider dedicated cache Redis URL. Carried as a
+    # credential (Fernet-encrypted, never returned) because the URL may
+    # embed a password — unlike the non-secret topology config which rides
+    # extra_config. Overrides the process-wide CACHE_REDIS_URL env.
+    cache_redis_url: Optional[str] = None
 
     class Config:
         populate_by_name = True
@@ -158,6 +163,75 @@ class ManagementDbConfig(BaseModel):
 # Provider Models (workspace-centric)
 # ============================================
 
+_FALKORDB_MODES = {"standalone", "sentinel", "cluster"}
+
+
+def _validate_node_list(nodes: Any, label: str) -> None:
+    """Validate a list of host:port nodes (accepts [host, port] pairs,
+    {host, port} objects, or "host:port" strings — matching the backend's
+    falkordb_connection._parse_nodes)."""
+    if not isinstance(nodes, list) or len(nodes) == 0:
+        raise ValueError(
+            f"falkordbConnection.{label} must be a non-empty list of host:port nodes."
+        )
+    for n in nodes:
+        host = port = None
+        if isinstance(n, str):
+            host, _, port = n.rpartition(":")
+        elif isinstance(n, dict):
+            host, port = n.get("host"), n.get("port")
+        elif isinstance(n, (list, tuple)) and len(n) == 2:
+            host, port = n[0], n[1]
+        if not host or not str(host).strip():
+            raise ValueError(
+                f"falkordbConnection.{label}: each node needs a non-empty host (got {n!r})."
+            )
+        try:
+            int(port)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"falkordbConnection.{label}: each node needs an integer port (got {n!r})."
+            )
+
+
+def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> None:
+    """Validate extra_config.falkordbConnection shape (no-op when absent →
+    standalone). Mirrors the server-side gate pattern used for Spanner so the
+    wizard gets a clear 422 before anything is persisted."""
+    fc = (extra_config or {}).get("falkordbConnection")
+    if fc is None:
+        return
+    if not isinstance(fc, dict):
+        raise ValueError("extra_config.falkordbConnection must be an object.")
+    mode = fc.get("mode") or "standalone"
+    if mode not in _FALKORDB_MODES:
+        raise ValueError(
+            f"falkordbConnection.mode must be one of {sorted(_FALKORDB_MODES)} (got {mode!r})."
+        )
+    if mode == "sentinel":
+        sent = fc.get("sentinel") or {}
+        if not str(sent.get("masterName") or "").strip():
+            raise ValueError(
+                "falkordbConnection.sentinel.masterName is required in sentinel mode."
+            )
+        _validate_node_list(sent.get("nodes"), "sentinel.nodes")
+    elif mode == "cluster":
+        clus = fc.get("cluster") or {}
+        _validate_node_list(clus.get("startupNodes"), "cluster.startupNodes")
+    for key, caster, label in (
+        ("socketTimeout", float, "a positive number"),
+        ("graphPoolSize", int, "a positive integer"),
+    ):
+        val = fc.get(key)
+        if val is None:
+            continue
+        try:
+            if caster(val) <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError(f"falkordbConnection.{key} must be {label}.")
+
+
 class ProviderCreateRequest(BaseModel):
     name: str
     provider_type: ProviderType = Field(alias="providerType")
@@ -170,6 +244,11 @@ class ProviderCreateRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @model_validator(mode="after")
+    def _validate_falkordb_connection_cfg(self) -> "ProviderCreateRequest":
+        _validate_falkordb_connection(self.extra_config)
+        return self
 
     @model_validator(mode="after")
     def _validate_spanner_credentials(self) -> "ProviderCreateRequest":
@@ -222,6 +301,11 @@ class ProviderUpdateRequest(BaseModel):
 
     class Config:
         populate_by_name = True
+
+    @model_validator(mode="after")
+    def _validate_falkordb_connection_cfg(self) -> "ProviderUpdateRequest":
+        _validate_falkordb_connection(self.extra_config)
+        return self
 
 
 class ProviderResponse(BaseModel):

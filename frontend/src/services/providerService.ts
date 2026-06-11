@@ -29,6 +29,9 @@ export interface ProviderCreateRequest {
         // is optional when extraConfig.useEmulator is true.
         project_id?: string
         service_account_json?: string
+        // FalkorDB: dedicated cache Redis URL (may embed a password, so it
+        // travels as an encrypted credential rather than in extraConfig).
+        cache_redis_url?: string
     }
     tlsEnabled?: boolean
     extraConfig?: Record<string, any>
@@ -45,6 +48,7 @@ export interface ProviderUpdateRequest {
         token?: string
         project_id?: string
         service_account_json?: string
+        cache_redis_url?: string
     }
     tlsEnabled?: boolean
     isActive?: boolean

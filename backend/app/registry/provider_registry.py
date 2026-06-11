@@ -291,10 +291,21 @@ class ProviderRegistry:
 
         if ptype == "falkordb":
             from backend.app.providers.falkordb_provider import FalkorDBProvider
+            # Mirror ProviderManager._create_provider_instance: this path
+            # (used by ContextEngine / the stats collector / the viz read +
+            # trace path) previously dropped credentials AND extra_config,
+            # so FalkorDB auth and Sentinel/Cluster topology never reached
+            # the provider on the read side. Plumb them through.
+            creds = credentials or {}
+            _falkor_conn = (extra_config or {}).get("falkordbConnection")
             return FalkorDBProvider(
                 host=host or "localhost",
                 port=port or 6379,
                 graph_name=graph_name or "nexus_lineage",
+                username=creds.get("username"),
+                password=creds.get("password"),
+                connection_config=_falkor_conn,
+                cache_redis_url=creds.get("cache_redis_url"),
             )
 
         elif ptype == "neo4j":

@@ -51,6 +51,17 @@ class AggregationJobORM(Base):
     containment_edge_types = Column(Text, nullable=True)  # JSON: ["CONTAINS", "HAS_SCHEMA"]
     lineage_edge_types = Column(Text, nullable=True)  # JSON: ["FLOWS_TO", "TRANSFORMS"]
 
+    # Entity-type → hierarchy level map, frozen at trigger time. JSON
+    # object: {"dataset": 3, "container": 2, ...}. The worker injects this
+    # into the provider (set_entity_type_levels) so ancestor-chain depth
+    # adapts to deep ontologies and AGGREGATED edges get correct
+    # source/target level stamps — without the worker importing the
+    # ontology module. Its keys also drive per-label index creation
+    # (ensure_indices). NULL on rows created before this column existed
+    # and on the legacy/non-streaming path (degrades to max_depth=10 +
+    # label-scan trace fallback, both correct).
+    entity_type_levels = Column(Text, nullable=True)  # JSON: {"<entity_type>": <level int>}
+
     # ── Progress tracking (cursor-based checkpoint) ──────────────────
     progress = Column(Integer, nullable=False, default=0)  # 0-100
     total_edges = Column(Integer, nullable=False, default=0)

@@ -102,6 +102,30 @@ def _default_network_exceptions() -> tuple[type[BaseException], ...]:
         errors.extend([_RedisConnectionError, _RedisTimeoutError])
     except ImportError:  # pragma: no cover
         pass
+    # Redis Cluster / Sentinel topology errors. A *sustained* routing
+    # failure (a single MOVED/ASK is retried transparently below the
+    # proxy by the FalkorDB provider and never reaches here) means the
+    # downstream is genuinely unreachable — trip the breaker. Each name
+    # is added only if present, so this stays compatible across redis-py
+    # versions that may not define every class.
+    try:
+        import redis.exceptions as _re
+
+        for _name in (
+            "ClusterError",
+            "ClusterDownError",
+            "MasterDownError",
+            "MovedError",
+            "AskError",
+            "TryAgainError",
+            "MasterNotFoundError",
+            "SlaveNotFoundError",
+        ):
+            _cls = getattr(_re, _name, None)
+            if isinstance(_cls, type) and issubclass(_cls, BaseException):
+                errors.append(_cls)
+    except ImportError:  # pragma: no cover
+        pass
     try:
         import httpx
 
