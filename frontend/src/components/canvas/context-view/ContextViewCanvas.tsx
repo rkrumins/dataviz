@@ -46,8 +46,7 @@ import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
-import { CreateEntityPanel } from '@/features/graph-authoring/components/CreateEntityPanel'
-import { HierarchyComposer } from '@/features/graph-authoring/components/HierarchyComposer'
+import { UnifiedCreatePanel } from '../create/UnifiedCreatePanel'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -55,12 +54,14 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
+import { CanvasContextMenu } from '../CanvasContextMenu'
+import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette } from '../CommandPalette'
-import { useGraphAuthoring } from '@/features/graph-authoring/hooks/useGraphAuthoring'
-import { useConnectGesture } from '@/features/graph-authoring/hooks/useConnectGesture'
-import { ConnectOverlay } from '@/features/graph-authoring/components/ConnectOverlay'
-import { EdgeTypePicker } from '@/features/graph-authoring/components/EdgeTypePicker'
-import { AuthoringContextMenu, type AuthoringMenuTarget } from '@/features/graph-authoring/components/AuthoringContextMenu'
+import { useEdgeConnect } from '../edge-create/useEdgeConnect'
+import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
+import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
+import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
+import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 // Editor components (shared across canvases)
@@ -114,7 +115,6 @@ export function ContextViewCanvas({
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
-  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
@@ -320,8 +320,8 @@ export function ContextViewCanvas({
 
   // Forward-declared ref to the smart-level trace handler — defined further
   // down where granularityOptions is in scope. Used by hooks that fire
-  // before that declaration (keyboard handlers) so the closure
-  // dereferences lazily.
+  // before that declaration (useCanvasInteractions options) so the
+  // closure dereferences lazily.
   const startTraceRef = useRef<(nodeId: string) => void>(() => {})
   const toggleTraceRef = useRef<(nodeId: string) => void>(() => {})
 
@@ -337,85 +337,47 @@ export function ContextViewCanvas({
     return true
   }, [trace, removeStoreEdges])
 
-  // Graph authoring controller — owns the create/connect/compose/edit-panel
-  // modes and all node/edge staging (the rebuilt authoring UX). The connect
-  // flow is driven entirely from here; useConnectGesture binds its pointer
-  // listeners.
-  const isDraftMode = useIsDraftMode()
-  const authoring = useGraphAuthoring({
-    onExpandParent: (parentId) => setExpandedNodes((prev) => new Set(prev).add(parentId)),
-    onEntityStaged: (tempUrn, ctx) => {
-      // The layered view only renders nodes that resolve to a layer, so a
-      // freshly-staged node is invisible until assigned. Assign it to the
-      // creation layer → else the parent's layer → else the first layer.
-      const layer = ctx.layerId
-        ?? (ctx.parentUrn ? nodeLayerMap.get(ctx.parentUrn) : undefined)
-        ?? sortedLayers[0]?.id
-      if (layer) assignEntityToLayer(tempUrn, layer)
+  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
+  // before useEdgeConnect exists) can arm connect-mode on the selected node.
+  const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+
+  const interactions = useCanvasInteractions({
+    onTraceNode: (nodeId) => startTraceRef.current(nodeId),
+    onNodeCreated: (nodeId) => selectNode(nodeId),
+    onConnectMode: (nodeId) => { void ensureDraftOpen(); edgeConnectRef.current?.armConnect(nodeId) },
+    layers: layers,
+    onMoveToLayer: (_nodeId, _layerId) => {
+      // Implementation handled by the existing moveToLayer function
     },
-    notify: (message, kind) =>
-      useToastStore.getState().addToast({ type: kind === 'error' ? 'error' : 'info', message }),
+    onCloseEdgePanel: () => {
+      if (isEdgePanelOpen) { closeEdgePanel(); return true }
+      return false
+    },
+    onCloseEntityDrawer: () => {
+      if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
+      if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return true }
+      return false
+    },
+    // ESC exits an active trace before any other panel close — gives the
+    // user a single, predictable escape from a busy trace view.
+    onExitTrace: exitTrace,
   })
-  useConnectGesture(authoring)
 
-  // Right-click context menu (ontology-aware AuthoringContextMenu) + the Cmd+K
-  // command palette — local state, replacing the legacy useCanvasInteractions.
-  const [ctxMenu, setCtxMenu] = useState<{ position: { x: number; y: number }; target: AuthoringMenuTarget } | null>(null)
-  const closeCtxMenu = useCallback(() => setCtxMenu(null), [])
-  const [isCommandPaletteOpen, setCommandPaletteOpen] = useState(false)
-
-  // Small local action helpers (formerly on useCanvasInteractions).
-  const copyUrn = useCallback((nodeId: string) => {
-    const n = useCanvasStore.getState().nodes.find((x) => x.id === nodeId)
-    if (n?.data?.urn) void navigator.clipboard.writeText(String(n.data.urn))
-  }, [])
-  const selectAllNodes = useCallback(() => {
-    const s = useCanvasStore.getState()
-    s.nodes.forEach((n) => s.selectNode(n.id, true))
-  }, [])
-  const copySelectedUrns = useCallback(() => {
-    const s = useCanvasStore.getState()
-    const urns = s.selectedNodeIds.map((id) => s.nodes.find((n) => n.id === id)?.data?.urn).filter(Boolean).join('\n')
-    if (urns) void navigator.clipboard.writeText(urns)
-  }, [])
-  // Delete the current selection through the authoring staging path.
-  const deleteSelection = useCallback(() => {
-    const s = useCanvasStore.getState()
-    s.selectedNodeIds.forEach((id) => authoring.stageNodeDelete(id))
-    s.selectedEdgeIds.forEach((id) => authoring.stageEdgeDelete(id))
-    s.clearSelection()
-  }, [authoring])
-
-  // Keyboard shortcuts. The ESC cascade and create/connect entry points are
-  // wired to the authoring controller + local panel state. useCanvasKeyboard
-  // reads handlers through a ref, so this fresh object each render is fine and
-  // lets the closures reference later-declared panel state lazily.
+  // Keyboard shortcuts
   useCanvasKeyboard({
     enabled: true,
-    handlers: {
-      onDelete: deleteSelection,
-      onDuplicate: () => {},
-      onSelectAll: selectAllNodes,
-      onCopy: copySelectedUrns,
-      onEdit: () => { const id = useCanvasStore.getState().selectedNodeIds[0]; if (id) openNodeDrawer(id) },
-      onTrace: () => { const id = useCanvasStore.getState().selectedNodeIds[0]; if (id) startTraceRef.current(id) },
-      onCreate: () => void authoring.beginCreatePanel({}),
-      onConnectMode: () => { const id = useCanvasStore.getState().selectedNodeIds[0]; if (id) void authoring.beginConnect(id, 'armed') },
-      onCommandPalette: () => setCommandPaletteOpen(true),
-      onCancel: () => {
-        // ESC cascade: active authoring gesture → menu → palette → trace →
-        // edge panel → staged-changes panel → drawer → clear selection.
-        if (authoring.handleEscape()) return
-        if (ctxMenu) { setCtxMenu(null); return }
-        if (isCommandPaletteOpen) { setCommandPaletteOpen(false); return }
-        if (exitTrace()) return
-        if (isEdgePanelOpen) { closeEdgePanel(); return }
-        if (isStagedPanelOpen) { closeStagedChangesPanel(); return }
-        if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return }
-        clearSelection()
-      },
-    },
+    handlers: interactions.keyboardHandlers,
   })
+
+  // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
+  // stage a RAW create_edge. Only offered in draft (authoring) mode.
+  const isDraftMode = useIsDraftMode()
+  const edgeConnect = useEdgeConnect({
+    onConnect: (sourceUrn, targetUrn, edgeType) =>
+      interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
+  })
+  edgeConnectRef.current = edgeConnect
 
   // Aggregated lineage for progressive edge disclosure
   const {
@@ -492,17 +454,24 @@ export function ContextViewCanvas({
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Entity creation is driven by the authoring controller: the layer "+" and
-  // right-click "create here" open an inline DraftNodeCard (quick), while the
-  // toolbar / "add child" / "Details…" escalation open the CreateEntityPanel
-  // (detailed). Both stage through authoring.commitCreate.
-  const isDetailedCreateOpen = authoring.mode.kind === 'create-panel'
-  const isComposeOpen = authoring.mode.kind === 'compose'
-  // In-card rename: which node row is currently editing its name inline.
-  const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
-  // The right rail is owned by an authoring panel whenever one is active, so it
-  // is never hidden behind a drawer the user happened to leave open.
-  const isAuthoringRailOpen = isDetailedCreateOpen || isComposeOpen
+  // Entity creation state. Two entry points feed one panel: the toolbar /
+  // layer "add" buttons open it in Detailed mode (isCreatingEntity); the
+  // 'N' key, context-menu "Create entity/child", and palette open it in
+  // Quick mode (interactions.quickCreate). UnifiedCreatePanel reconciles them.
+  const [isCreatingEntity, setIsCreatingEntity] = useState(false)
+  const [creationParentId, setCreationParentId] = useState<string | null>(null)
+  const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
+
+  const quickCreateState = interactions.state.quickCreate
+  const isCreatePanelOpen = isCreatingEntity || quickCreateState.isOpen
+  const createPanelMode: 'quick' | 'detailed' = isCreatingEntity ? 'detailed' : 'quick'
+  const createPanelParentUrn = creationParentId ?? quickCreateState.parentUrn ?? null
+  const closeCreatePanel = useCallback(() => {
+    setIsCreatingEntity(false)
+    setCreationParentId(null)
+    setCreationLayerId(null)
+    interactions.closeQuickCreate()
+  }, [interactions])
 
   // Assignment warning state (shown when user tries to assign child to different layer)
   const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
@@ -629,12 +598,17 @@ export function ContextViewCanvas({
     }
   }, [nodes, edges])
 
-  // Right-click a node row → ontology-aware AuthoringContextMenu.
+  // Handle right click - now uses unified CanvasContextMenu
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault()
     e.stopPropagation()
-    setCtxMenu({ position: { x: e.clientX, y: e.clientY }, target: { type: 'node', id: nodeId } })
-  }, [])
+    const node = nodes.find(n => n.id === nodeId)
+    interactions.openContextMenu(e, {
+      type: 'node',
+      id: nodeId,
+      data: node?.data as Record<string, unknown> || {},
+    })
+  }, [nodes, interactions])
 
 
 
@@ -668,22 +642,26 @@ export function ContextViewCanvas({
 
   // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
-    // UX-first: Double-click = in-card rename. Shift+Double-click = trace.
+    // UX-first: Double-click = inline edit (modern approach)
+    // Use Shift+Double-click for trace (power user feature)
     if (event && !event.shiftKey) {
-      setEditingNodeId(nodeId)
-      return
+      // Find the node element to get its position
+      const element = document.getElementById(`layer-node-${nodeId}`)
+      if (element) {
+        const rect = element.getBoundingClientRect()
+        const targetNode = nodes.find(n => n.id === nodeId)
+        interactions.startInlineEdit(
+          nodeId,
+          (targetNode?.data?.label as string) || nodeId,
+          { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        )
+        return
+      }
     }
+
     // TRACE MODE: Toggle trace using unified trace hook + smart level
     toggleTraceRef.current(nodeId)
-  }, [])
-
-  // Commit an in-card rename through the authoring controller so it merges with
-  // any other staged edit on the same node into a single change.
-  const commitRename = useCallback((nodeId: string, label: string) => {
-    const trimmed = label.trim()
-    if (trimmed) authoring.stageNodeUpdate(nodeId, { label: trimmed })
-    setEditingNodeId(null)
-  }, [authoring])
+  }, [nodes, interactions])
 
 
   // Lineage flow toggle
@@ -1172,16 +1150,17 @@ export function ContextViewCanvas({
       },
     })
 
-    closeCtxMenu()
-  }, [activeView, displayMap, closeCtxMenu])
+    interactions.closeContextMenu()
+  }, [activeView, displayMap, interactions])
 
-  // Handler for adding child entities — inline create under the parent, seeded
-  // to the parent's layer so the new child lands beside its siblings.
+  // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
-    const layer = nodeLayerMap.get(parentId) ?? sortedLayers[0]?.id
-    if (layer) void authoring.beginInlineCreate(layer, parentId)
-    else void authoring.beginCreatePanel({ parentId })
-  }, [authoring, nodeLayerMap, sortedLayers])
+    // Open a draft before authoring (no-op if already in one) so the edit is
+    // staged into the versioning system rather than landing on main.
+    void ensureDraftOpen()
+    setCreationParentId(parentId)
+    setIsCreatingEntity(true)
+  }, [])
 
   // Toggle node expansion with Lazy Loading
   const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes } = useGraphHydration()
@@ -1980,8 +1959,7 @@ export function ContextViewCanvas({
           trace.setConfig(dir === 'upstream' ? { upstreamDepth: value } : { downstreamDepth: value })
           if (trace.isTracing) void trace.retrace()
         }}
-        onAddEntity={() => void authoring.beginCreatePanel({})}
-        onComposeHierarchy={() => void authoring.beginCompose()}
+        onAddEntity={() => { void ensureDraftOpen(); setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
@@ -2136,14 +2114,6 @@ export function ContextViewCanvas({
           }}
         >
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
-          {/* Drafts render raw edges only — aggregated rollups are materialized
-              on the published main projection. Tell the user where they went. */}
-          {isDraftMode && (
-            <div className="mt-1.5 flex items-center gap-1.5 px-2 py-1 rounded-md bg-purple-500/[0.06] border border-purple-500/15 text-[10px] text-purple-600 dark:text-purple-400 max-w-[220px]">
-              <span className="font-semibold flex-shrink-0">Σ</span>
-              <span>Aggregated edges appear after publish.</span>
-            </div>
-          )}
         </div>
 
 
@@ -2182,15 +2152,10 @@ export function ContextViewCanvas({
           )}
 
           {/* In-progress edge while dragging a connection (shares the overlay
-              coordinate space — absolute sibling inside the scroll container).
-              Stroke turns valid/invalid as the hovered target enters/leaves the
-              source's legal target types. */}
-          <ConnectOverlay
-            sourceId={authoring.mode.kind === 'connect' && authoring.mode.via === 'drag' ? authoring.mode.sourceId : null}
-            pointer={authoring.mode.kind === 'connect' ? authoring.mode.pointer : null}
-            hoverTargetId={authoring.mode.kind === 'connect' ? authoring.mode.hoverTargetId : null}
-            validTypeIds={authoring.connectContext?.validTypeIds ?? null}
-            typeOf={(id) => (nodes.find((n) => n.id === id)?.data.type as string) ?? null}
+              coordinate space — absolute sibling inside the scroll container). */}
+          <ConnectionDragLayer
+            sourceId={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceId : null}
+            pointer={edgeConnect.state.pointer}
           />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
@@ -2262,24 +2227,18 @@ export function ContextViewCanvas({
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
-                editingNodeId={editingNodeId}
-                onRenameCommit={commitRename}
-                onRenameCancel={() => setEditingNodeId(null)}
                 onAddChild={handleAddChildEntity}
-                onAddToLayer={(layerId) => void authoring.beginInlineCreate(layerId, null)}
-                onBeginConnect={isDraftMode ? (id, start) => void authoring.beginConnect(id, 'drag', start) : undefined}
-                connectContext={authoring.connectContext}
-                draftCreate={
-                  authoring.mode.kind === 'inline-create' && authoring.mode.layerId === layer.id
-                    ? { layerId: authoring.mode.layerId, parentId: authoring.mode.parentId }
-                    : null
-                }
-                onDraftCommit={(input, opts) => authoring.commitCreate(input, opts)}
-                onDraftEscalate={(seed) => void authoring.beginCreatePanel(seed)}
-                onDraftCancel={authoring.cancel}
-                onLayerContextMenu={(e, layerId) => setCtxMenu({
+                onAddToLayer={(layerId) => {
+                  void ensureDraftOpen()
+                  setCreationLayerId(layerId)
+                  setCreationParentId(null)
+                  setIsCreatingEntity(true)
+                }}
+                onBeginConnect={isDraftMode ? edgeConnect.beginDrag : undefined}
+                onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
+                  type: 'canvas',
                   position: { x: e.clientX, y: e.clientY },
-                  target: { type: 'canvas', position: { x: e.clientX, y: e.clientY }, layerId },
+                  layerId,
                 })}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
@@ -2317,27 +2276,30 @@ export function ContextViewCanvas({
       <AnimatePresence>
         {/* Creation takes the rail when active (it's an explicit action), so it
             is never hidden behind a drawer the user happened to leave open. */}
-        {authoring.mode.kind === 'create-panel' && (
-          <CreateEntityPanel
-            key="create-entity-panel"
-            parentId={authoring.mode.parentId}
-            layerId={authoring.mode.layerId}
-            seedEntityType={authoring.mode.seedEntityType}
-            seedDisplayName={authoring.mode.seedDisplayName}
-            onCommit={(input, opts) => authoring.commitCreate(input, opts)}
-            onClose={authoring.cancel}
+        {isCreatePanelOpen && (
+          <UnifiedCreatePanel
+            key="unified-create-panel"
+            isOpen={isCreatePanelOpen}
+            onClose={closeCreatePanel}
+            parentUrn={createPanelParentUrn}
+            layerId={creationLayerId}
+            defaultMode={createPanelMode}
+            onEntityCreated={(tempUrn, parentUrn) => {
+              // The layered view only renders nodes that resolve to a layer, so
+              // a freshly-staged node is invisible until assigned. Assign it to
+              // the creation layer → else the parent's layer → else the first
+              // layer (an instanceAssignment wins even in closed-scope views).
+              const layer = creationLayerId
+                ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
+                ?? sortedLayers[0]?.id
+              if (layer) assignEntityToLayer(tempUrn, layer)
+              if (parentUrn) {
+                setExpandedNodes(prev => new Set([...prev, parentUrn]))
+              }
+            }}
           />
         )}
-        {authoring.mode.kind === 'compose' && (
-          <HierarchyComposer
-            key="hierarchy-composer"
-            seedParentId={authoring.mode.seedParentId}
-            seedLayerId={authoring.mode.seedLayerId}
-            onStageNode={(input) => authoring.commitCreate(input, { keepOpen: true, layerId: authoring.mode.kind === 'compose' ? authoring.mode.seedLayerId : null })}
-            onClose={authoring.cancel}
-          />
-        )}
-        {!isAuthoringRailOpen && drawerNodeId && (
+        {!isCreatePanelOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
@@ -2347,7 +2309,7 @@ export function ContextViewCanvas({
             onLocateMany={locateManyOnCanvas}
           />
         )}
-        {!isAuthoringRailOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!isCreatePanelOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
@@ -2377,63 +2339,71 @@ export function ContextViewCanvas({
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
 
-      {/* Ontology-aware context menu — only valid actions are offered, and the
-          authoring CRUD routes through the controller. */}
-      <AuthoringContextMenu
-        isOpen={!!ctxMenu}
-        position={ctxMenu?.position ?? { x: 0, y: 0 }}
-        target={ctxMenu?.target ?? null}
-        isDraftMode={isDraftMode}
-        onClose={closeCtxMenu}
-        onEditNode={(id) => openNodeDrawer(id)}
-        onDeleteNode={(id) => authoring.stageNodeDelete(id)}
-        onCreateChild={handleAddChildEntity}
-        onConnect={(id) => void authoring.beginConnect(id, 'armed')}
+      {/* Modern Context Menu - Full CRUD operations */}
+      <CanvasContextMenu
+        isOpen={interactions.state.contextMenu.isOpen}
+        position={interactions.state.contextMenu.position}
+        target={interactions.state.contextMenu.target}
+        onClose={interactions.closeContextMenu}
+        onEditNode={interactions.editNode}
+        onDuplicateNode={interactions.duplicateNode}
+        onDeleteNode={interactions.deleteNode}
+        onCreateChild={interactions.createChild}
+        onConnect={isDraftMode ? (id) => edgeConnect.armConnect(id) : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
-        onCopyUrn={copyUrn}
-        onEditEdge={(id) => { selectEdge(id); if (!isEdgePanelOpen) toggleEdgePanel() }}
-        onDeleteEdge={(id) => authoring.stageEdgeDelete(id)}
-        onReverseEdge={(id) => authoring.stageEdgeReverse(id)}
-        onCreateNode={(_pos, layerId) => {
-          // Right-clicked an empty layer column → inline-create scoped to that
-          // layer; no layer (toolbar/global) → the detailed panel.
-          if (layerId) void authoring.beginInlineCreate(layerId, null)
-          else void authoring.beginCreatePanel({})
+        onCopyUrn={interactions.copyUrn}
+        onEditEdge={interactions.editEdge}
+        onDeleteEdge={interactions.deleteEdge}
+        onReverseEdge={interactions.reverseEdge}
+        onCreateNode={(pos, layerId) => {
+          void ensureDraftOpen()
+          // Right-clicked an empty layer column → scope the new node to that
+          // layer so it lands there (and is assigned on create, see onEntityCreated).
+          if (layerId) setCreationLayerId(layerId)
+          interactions.openQuickCreate(pos)
         }}
-        onComposeHierarchy={(layerId) => void authoring.beginCompose({ seedLayerId: layerId ?? null })}
-        onSelectAll={selectAllNodes}
+        onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
       />
 
-      {/* In-card rename replaces the floating inline editor — double-click a
-          node row to edit its name in place (see FlatTreeItem). */}
+      {/* Inline Node Editor - Double-click to edit names */}
+      <InlineNodeEditor
+        nodeId={interactions.state.inlineEdit.nodeId}
+        value={interactions.state.inlineEdit.value}
+        position={interactions.state.inlineEdit.position}
+        onSave={interactions.saveInlineEdit}
+        onCancel={interactions.cancelInlineEdit}
+      />
 
-      {/* Quick create is the inline DraftNodeCard in each layer column; the
-          detailed CreateEntityPanel takes the right rail (authoring.mode). */}
+      {/* Quick create now lives in the UnifiedCreatePanel right rail
+          (driven by interactions.state.quickCreate). */}
 
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
-        isOpen={isCommandPaletteOpen}
-        onClose={() => setCommandPaletteOpen(false)}
-        onCreateEntity={(typeId) => {
-          setCommandPaletteOpen(false)
-          void authoring.beginCreatePanel({ entityType: typeId })
+        isOpen={interactions.state.commandPalette.isOpen}
+        onClose={interactions.closeCommandPalette}
+        onCreateEntity={(_typeId) => {
+          void ensureDraftOpen()
+          interactions.closeCommandPalette()
+          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
 
       {/* Edge-type picker — appears at the drop point once a connection
-          resolves a valid (source, target). Offers only ontology-allowed raw
-          lineage types (never AGGREGATED); auto-confirms a single option. */}
-      {authoring.mode.kind === 'edge-type-pick' && (
-        <EdgeTypePicker
-          sourceId={authoring.mode.sourceId}
-          targetId={authoring.mode.targetId}
-          position={authoring.mode.position}
-          options={authoring.edgeTypeOptions}
-          onPick={authoring.confirmEdgeType}
-          onCancel={authoring.cancel}
+          resolves a (source, target). Offers only ontology-allowed raw
+          lineage types (never AGGREGATED). */}
+      {edgeConnect.state.mode === 'picking'
+        && edgeConnect.state.sourceId
+        && edgeConnect.state.targetId
+        && edgeConnect.state.pickerPos && (
+        <EdgeTypePickerPopover
+          sourceId={edgeConnect.state.sourceId}
+          targetId={edgeConnect.state.targetId}
+          position={edgeConnect.state.pickerPos}
+          onPick={edgeConnect.confirm}
+          onCancel={edgeConnect.cancel}
         />
       )}
     </div>

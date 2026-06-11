@@ -136,8 +136,6 @@ interface CanvasState {
 
   // Node/Edge CRUD (Manual)
   updateNode: (id: string, data: Partial<LineageNode['data']>) => void
-  /** Merge into an edge's `data` bag (mirror of updateNode for edges). */
-  updateEdge: (id: string, data: Partial<NonNullable<LineageEdge['data']>>) => void
   removeNode: (id: string) => void
   removeEdge: (id: string) => void
   removeNodes: (ids: string[]) => void
@@ -378,11 +376,6 @@ export const useCanvasStore = create<CanvasState>()(
       updateNode: (id, data) => set((state) => ({
         nodes: state.nodes.map((n) =>
           n.id === id ? { ...n, data: { ...n.data, ...data } } : n
-        )
-      })),
-      updateEdge: (id, data) => set((state) => ({
-        edges: state.edges.map((e) =>
-          e.id === id ? { ...e, data: { ...e.data, ...data } } : e
         )
       })),
       removeNode: (id) => set((state) => {

@@ -36,7 +36,6 @@ export type StagedChangeType =
   | 'edit_edge'
   | 'delete_edge'
   | 'reverse_edge'
-  | 'retype_edge'
 
 /** A single user-staged change awaiting Save. */
 export interface StagedChange {
@@ -113,7 +112,6 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   update_entity: 3,
   edit_edge: 3,
   reverse_edge: 3,
-  retype_edge: 3,
   assign_layer: 3,
   move_to_layer: 3,
   create_entity: 4,
@@ -291,7 +289,6 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       edit_edge: 0,
       delete_edge: 0,
       reverse_edge: 0,
-      retype_edge: 0,
     }
     get().changes.forEach((c) => {
       counts[c.type]++

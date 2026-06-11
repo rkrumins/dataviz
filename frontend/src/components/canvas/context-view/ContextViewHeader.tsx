@@ -66,8 +66,6 @@ export interface ContextViewHeaderProps {
 
   // Add entity
   onAddEntity: () => void
-  /** Open the hierarchy composer (build a whole subtree at once). Optional. */
-  onComposeHierarchy?: () => void
 
   // Advanced search panel (G2 production UX surface).
   //
@@ -141,7 +139,6 @@ export function ContextViewHeader({
   traceDownstreamDepth,
   onSetTraceDepth,
   onAddEntity,
-  onComposeHierarchy,
   onOpenAdvancedSearch,
   advancedSearchOpen = false,
   onTogglePropertyManager,
@@ -538,17 +535,6 @@ export function ContextViewHeader({
             <LucideIcons.Plus className="w-4 h-4" />
             <span>Add Entity</span>
           </button>
-
-          {onComposeHierarchy && (
-            <button
-              onClick={onComposeHierarchy}
-              title="Compose a hierarchy (build a whole subtree at once)"
-              className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium bg-accent-primary/10 text-accent-primary border border-accent-primary/30 hover:bg-accent-primary/20 transition-all duration-300"
-            >
-              <LucideIcons.ListTree className="w-4 h-4" />
-              <span>Compose</span>
-            </button>
-          )}
 
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
 

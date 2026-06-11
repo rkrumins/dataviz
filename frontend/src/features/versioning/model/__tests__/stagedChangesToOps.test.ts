@@ -78,21 +78,4 @@ describe('stagedChangesToOps', () => {
       { op: 'create', kind: 'edge', id: 'staged-edge-3', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:b' } },
     ])
   })
-
-  it('maps retype_edge to delete+create (new canvas id, new type, mutable data carried)', () => {
-    const resolve = (id: string) => (id === 'urn:staged:s' ? 'urn:real:s' : id)
-    const ops = stagedChangesToOps(
-      [sc({
-        type: 'retype_edge',
-        targetId: 'e5-retyped',
-        before: { edge: { id: 'e5', data: { edgeType: 'FLOWS_TO' } } },
-        after: { edge: { source: 'urn:staged:s', target: 'urn:b', data: { edgeType: 'DERIVED_FROM', confidence: 0.8, relationship: 'derived_from', isAggregated: false } } },
-      })],
-      resolve,
-    )
-    expect(ops).toEqual([
-      { op: 'delete', kind: 'edge', id: 'e5' },
-      { op: 'create', kind: 'edge', id: 'e5-retyped', payload: { edgeType: 'DERIVED_FROM', sourceEntityId: 'urn:real:s', targetEntityId: 'urn:b', confidence: 0.8 } },
-    ])
-  })
 })

@@ -34,7 +34,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore, useActiveView } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
-import { stageNodeUpdate } from '@/features/graph-authoring/model/stageNode'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
@@ -83,6 +83,7 @@ export function EntityDrawer({
   // its own node / actions change — NOT on every unrelated canvas store mutation
   // (selection, hover, node drags, layout ticks), which otherwise re-renders the
   // whole drawer continuously and makes everything in it feel laggy.
+  const updateNode = useCanvasStore((s) => s.updateNode)
   const clearSelection = useCanvasStore((s) => s.clearSelection)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const schema = useSchemaStore((s) => s.schema)
@@ -218,17 +219,80 @@ export function EntityDrawer({
     if (!selectedNode) return
     if (jsonError) return
 
+    const previousData = { ...(selectedNode.data as Record<string, any>) }
+    const previousLabel = (previousData.label as string) ?? ''
+    const newLabel = (formData.label as string) ?? previousLabel
+
+    updateNode(selectedNode.id, formData)
     setHasChanges(false)
     setShowSaved(true)
     setTimeout(() => setShowSaved(false), 2000)
     setRawJson(JSON.stringify(formData, null, 2))
 
-    // Route every node edit through the single authoring staging path so the
-    // drawer's edits merge with an in-card rename into ONE staged change per
-    // node (and fold into the create if the node is staged-as-create).
-    // stageNodeUpdate diffs against the live node and applies optimistically.
-    stageNodeUpdate(selectedNode.id, { ...formData })
-  }, [selectedNode, formData, jsonError])
+    // Compute changed keys via shallow JSON-equality (handles nested objects).
+    const allKeys = new Set([
+      ...Object.keys(previousData),
+      ...Object.keys(formData),
+    ])
+    const changedKeys: string[] = []
+    for (const k of allKeys) {
+      if (JSON.stringify(previousData[k]) !== JSON.stringify(formData[k])) {
+        changedKeys.push(k)
+      }
+    }
+
+    if (changedKeys.length === 0) return
+
+    const stagedChanges = useStagedChangesStore.getState()
+    const onlyLabel = changedKeys.length === 1 && changedKeys[0] === 'label'
+
+    if (onlyLabel) {
+      stagedChanges.stageOrReplace(
+        (c) => c.type === 'rename_entity' && c.targetId === selectedNode.id,
+        {
+          type: 'rename_entity',
+          targetId: selectedNode.id,
+          targetUrn: previousData.urn,
+          before: previousData,
+          after: { ...formData },
+          summary: `Rename '${previousLabel}' → '${newLabel}'`,
+          discard: () => {
+            useCanvasStore.getState().updateNode(selectedNode.id, previousData)
+          },
+        },
+      )
+      return
+    }
+
+    // Multi-field edit — stage as update_entity. Apply hook is a stub until
+    // the backend ships PATCH /api/v1/{wsId}/graph/nodes/{urn}; see the file
+    // header for the full backlog.
+    stagedChanges.stageOrReplace(
+      (c) => c.type === 'update_entity' && c.targetId === selectedNode.id,
+      {
+        type: 'update_entity',
+        targetId: selectedNode.id,
+        targetUrn: previousData.urn,
+        before: previousData,
+        after: { ...formData },
+        summary: `Edit ${changedKeys.length} field${changedKeys.length === 1 ? '' : 's'} on '${previousLabel || selectedNode.id}'`,
+        discard: () => {
+          useCanvasStore.getState().updateNode(selectedNode.id, previousData)
+        },
+        apply: async () => {
+          // TODO(backend): replace with
+          //   await authFetch(`/api/v1/${wsId}/graph/nodes/${urn}`, {
+          //     method: 'PATCH', body: JSON.stringify({ properties: after })
+          //   })
+          // once the endpoint and provider methods land.
+          console.warn(
+            '[update_entity] TODO: PATCH /api/v1/{wsId}/graph/nodes/{urn} not yet implemented',
+            { targetId: selectedNode.id, urn: previousData.urn, changedKeys },
+          )
+        },
+      },
+    )
+  }, [selectedNode, formData, jsonError, updateNode])
 
   // Cancel changes
   const handleCancel = useCallback(() => {

@@ -26,8 +26,6 @@ import {
 import type { ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode } from './types'
 import { FlatTreeItem } from './FlatTreeItem'
-import { DraftNodeCard } from '@/features/graph-authoring/components/DraftNodeCard'
-import type { StageEntityCreateInput } from '@/features/graph-authoring/model/stageNode'
 import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
@@ -43,21 +41,10 @@ interface LayerColumnProps {
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
-  /** Node row currently editing its name in place. */
-  editingNodeId?: string | null
-  onRenameCommit?: (id: string, label: string) => void
-  onRenameCancel?: () => void
   onAddChild?: (parentId: string) => void
   onAddToLayer?: (layerId: string) => void
   /** When set (draft/authoring mode), enables the hover connection handle on cards. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
-  /** Live connect drag context — drives valid-target ring / invalid-target dim on cards. */
-  connectContext?: { sourceId: string; validTypeIds: Set<string> } | null
-  /** Inline-create state when it targets THIS layer (renders the DraftNodeCard). */
-  draftCreate?: { layerId: string; parentId: string | null } | null
-  onDraftCommit?: (input: StageEntityCreateInput, opts: { keepOpen: boolean; layerId: string }) => void
-  onDraftEscalate?: (seed: { parentId: string | null; layerId: string; entityType?: string; displayName?: string }) => void
-  onDraftCancel?: () => void
   /** Right-click on empty space in this layer column (draft/authoring mode). */
   onLayerContextMenu?: (e: React.MouseEvent, layerId: string) => void
   traceFocusId: string | null
@@ -106,17 +93,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   onToggle,
   onContextMenu,
   onDoubleClick,
-  editingNodeId,
-  onRenameCommit,
-  onRenameCancel,
   onAddChild,
   onAddToLayer,
   onBeginConnect,
-  connectContext,
-  draftCreate,
-  onDraftCommit,
-  onDraftEscalate,
-  onDraftCancel,
   onLayerContextMenu,
   traceFocusId,
   traceNodes: _traceNodes,
@@ -968,21 +947,6 @@ export const LayerColumn = React.memo(function LayerColumn({
               floating chip handles the indicator role. */}
           <div className="absolute top-0 left-0 right-0 h-3 bg-gradient-to-b from-canvas/80 to-transparent pointer-events-none z-10" />
 
-          {/* Inline quick-create card, pinned at the top of the layer. Not
-              injected into the virtualized tree (so it never perturbs row
-              measurement) — the staged node appears in the tree once assigned. */}
-          {draftCreate && onDraftCommit && onDraftEscalate && onDraftCancel && (
-            <div className="pt-2 px-1">
-              <DraftNodeCard
-                layerId={draftCreate.layerId}
-                parentId={draftCreate.parentId}
-                onCommit={onDraftCommit}
-                onEscalate={onDraftEscalate}
-                onCancel={onDraftCancel}
-              />
-            </div>
-          )}
-
           {flatTree.length === 0 ? (
             <AnimatePresence mode="wait" initial={false}>
               {shouldShowGhosts ? (
@@ -1223,10 +1187,6 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}
                         onBeginConnect={onBeginConnect}
-                        connectContext={connectContext}
-                        isEditing={editingNodeId === node.id}
-                        onRenameCommit={onRenameCommit}
-                        onRenameCancel={onRenameCancel}
                       />
                     </div>
                   </div>
