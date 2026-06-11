@@ -37,7 +37,7 @@ describe('composer tree ops', () => {
   })
 
   it('updateNodeAt patches a nested node immutably', () => {
-    let roots = addChildAt([], null, makeComposerNode('domain', 'Sales'))
+    const roots = addChildAt([], null, makeComposerNode('domain', 'Sales'))
     const key = roots[0].tempKey
     const next = updateNodeAt(roots, key, { name: 'Sales v2', properties: { owner: 'x' } })
     expect(next[0].name).toBe('Sales v2')

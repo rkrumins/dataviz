@@ -710,7 +710,7 @@ function EdgeCard({
 
     // All node/edge edits route through the single authoring staging path, so
     // they merge into one staged change and respect raw-vs-aggregated rules.
-    const stageEdgeEdit = (newData: Record<string, any>) => { stageEdgePropertyEdit(edge.id, newData) }
+    const stageEdgeEdit = (newData: Record<string, unknown>) => { stageEdgePropertyEdit(edge.id, newData) }
     const stageEdgeDelete = () => { stageEdgeDeleteModel(edge.id) }
     const handleRetype = (newType: string) => { if (newType && newType !== edge.data?.edgeType) stageEdgeRetype(edge.id, newType) }
 
@@ -957,7 +957,7 @@ function EdgeCard({
                                             <div onClick={(e) => e.stopPropagation()}>
                                                 <PropertyEditor
                                                     value={editableData}
-                                                    onChange={(next) => stageEdgeEdit(next as Record<string, any>)}
+                                                    onChange={(next) => stageEdgeEdit(next as Record<string, unknown>)}
                                                     bare
                                                 />
                                             </div>
