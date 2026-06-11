@@ -47,6 +47,7 @@ import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
 import { CreateEntityPanel } from '@/features/graph-authoring/components/CreateEntityPanel'
+import { HierarchyComposer } from '@/features/graph-authoring/components/HierarchyComposer'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -1963,6 +1964,7 @@ export function ContextViewCanvas({
           if (trace.isTracing) void trace.retrace()
         }}
         onAddEntity={() => void authoring.beginCreatePanel({})}
+        onComposeHierarchy={() => void authoring.beginCompose()}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
@@ -2296,6 +2298,15 @@ export function ContextViewCanvas({
             seedEntityType={authoring.mode.seedEntityType}
             seedDisplayName={authoring.mode.seedDisplayName}
             onCommit={(input, opts) => authoring.commitCreate(input, opts)}
+            onClose={authoring.cancel}
+          />
+        )}
+        {authoring.mode.kind === 'compose' && (
+          <HierarchyComposer
+            key="hierarchy-composer"
+            seedParentId={authoring.mode.seedParentId}
+            seedLayerId={authoring.mode.seedLayerId}
+            onStageNode={(input) => authoring.commitCreate(input, { keepOpen: true, layerId: authoring.mode.kind === 'compose' ? authoring.mode.seedLayerId : null })}
             onClose={authoring.cancel}
           />
         )}
