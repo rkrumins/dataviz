@@ -43,6 +43,10 @@ interface LayerColumnProps {
   onToggle: (id: string) => void
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
+  /** Node row currently editing its name in place. */
+  editingNodeId?: string | null
+  onRenameCommit?: (id: string, label: string) => void
+  onRenameCancel?: () => void
   onAddChild?: (parentId: string) => void
   onAddToLayer?: (layerId: string) => void
   /** When set (draft/authoring mode), enables the hover connection handle on cards. */
@@ -102,6 +106,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   onToggle,
   onContextMenu,
   onDoubleClick,
+  editingNodeId,
+  onRenameCommit,
+  onRenameCancel,
   onAddChild,
   onAddToLayer,
   onBeginConnect,
@@ -1217,6 +1224,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                         isSearchVisible={activeSearchNodes.has(node.id)}
                         onBeginConnect={onBeginConnect}
                         connectContext={connectContext}
+                        isEditing={editingNodeId === node.id}
+                        onRenameCommit={onRenameCommit}
+                        onRenameCancel={onRenameCancel}
                       />
                     </div>
                   </div>

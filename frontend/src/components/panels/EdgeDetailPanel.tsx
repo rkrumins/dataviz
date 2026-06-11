@@ -48,9 +48,13 @@ import {
 import { useSchemaStore, useContainmentEdgeTypes, useEdgeTypeMetadataMap, useRelationshipTypes } from '@/store/schema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
-import { patchEdge, deleteEdge as apiDeleteEdge } from '@/services/edgeApi'
+import {
+    stageEdgePropertyEdit,
+    stageEdgeRetype,
+    stageEdgeDelete as stageEdgeDeleteModel,
+} from '@/features/graph-authoring/model/stageEdge'
+import { isEdgeAuthorable, retypeOptions } from '@/features/graph-authoring/model/ontologyGuard'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -685,63 +689,29 @@ function EdgeCard({
     // `edit_edge` change; the apply hook PATCHes the backend at Save Blueprint.
     // eslint-disable-next-line react-hooks/rules-of-hooks
     const [isEditing, setIsEditing] = useState(false)
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const relationshipTypes = useRelationshipTypes()
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const containmentEdgeTypes = useContainmentEdgeTypes()
 
-    // Server-rejected immutable keys — we hide them in the editor and never
-    // include them in the PATCH payload. The backend ignores edge type changes,
-    // and `isAggregated` / `sourceEdgeCount` / `sourceEdges` are client-only.
+    // Client-only / immutable edge keys hidden from the property editor (edge
+    // type is changed via Retype, not here; the rest are client-only).
     const IMMUTABLE_EDGE_KEYS = ['edgeType', 'relationship', 'isAggregated', 'sourceEdgeCount', 'sourceEdges', 'animated']
 
-    const stageEdgeEdit = (newData: Record<string, any>) => {
-        const previousData: Record<string, any> = { ...(edge.data ?? {}) }
-        // Optimistic visual update.
-        useCanvasStore.getState().updateEdge(edge.id, newData as any)
-        const stagedChanges = useStagedChangesStore.getState()
-        const sourceLabel = (sourceNode?.data.label as string) || edge.source
-        const targetLabel = (targetNode?.data.label as string) || edge.target
-        stagedChanges.stageOrReplace(
-            (c) => c.type === 'edit_edge' && c.targetId === edge.id,
-            {
-                type: 'edit_edge',
-                targetId: edge.id,
-                before: previousData,
-                after: { ...newData },
-                summary: `Edit edge '${sourceLabel}' → '${targetLabel}'`,
-                discard: () => {
-                    useCanvasStore.getState().updateEdge(edge.id, previousData as any)
-                },
-                apply: async (ctx) => {
-                    const propsToSend: Record<string, unknown> = {}
-                    for (const [k, v] of Object.entries(newData)) {
-                        if (IMMUTABLE_EDGE_KEYS.includes(k)) continue
-                        propsToSend[k] = v
-                    }
-                    await patchEdge(ctx.wsId, edge.id, propsToSend)
-                },
-            },
-        )
-    }
+    // Raw vs derived: aggregated/containment edges are read-only (the rollup job
+    // rebuilds aggregated edges from raw edges after publish; containment follows
+    // the hierarchy). The authoring stage* helpers enforce this too.
+    const authorable = isEdgeAuthorable(edge, containmentEdgeTypes)
+    const sourceType = (sourceNode?.data?.type as string) || null
+    const targetType = (targetNode?.data?.type as string) || null
+    // Ontology-valid types this edge may be retyped to, for the same endpoint pair.
+    const retypeOpts = retypeOptions(edge.data?.edgeType, sourceType, targetType, relationshipTypes, containmentEdgeTypes)
 
-    const stageEdgeDelete = () => {
-        // Capture the full edge for restore-on-discard, then drop it locally.
-        const snapshot = { ...edge }
-        useCanvasStore.getState().removeEdge(edge.id)
-        const stagedChanges = useStagedChangesStore.getState()
-        const sourceLabel = (sourceNode?.data.label as string) || edge.source
-        const targetLabel = (targetNode?.data.label as string) || edge.target
-        stagedChanges.stage({
-            type: 'delete_edge',
-            targetId: edge.id,
-            before: snapshot,
-            after: null,
-            summary: `Delete edge '${sourceLabel}' → '${targetLabel}'`,
-            discard: () => {
-                useCanvasStore.getState().addEdges([snapshot])
-            },
-            apply: async (ctx) => {
-                await apiDeleteEdge(ctx.wsId, edge.id)
-            },
-        })
-    }
+    // All node/edge edits route through the single authoring staging path, so
+    // they merge into one staged change and respect raw-vs-aggregated rules.
+    const stageEdgeEdit = (newData: Record<string, any>) => { stageEdgePropertyEdit(edge.id, newData) }
+    const stageEdgeDelete = () => { stageEdgeDeleteModel(edge.id) }
+    const handleRetype = (newType: string) => { if (newType && newType !== edge.data?.edgeType) stageEdgeRetype(edge.id, newType) }
 
     return (
         <motion.div
@@ -922,6 +892,31 @@ function EdgeCard({
                             {edge.data?.isAggregated && (
                                 <div className="text-2xs bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-1 rounded">
                                     Aggregated from {edge.data.sourceEdgeCount} edges
+                                </div>
+                            )}
+
+                            {/* Retype — change the lineage edge type within the
+                                ontology's options for this endpoint pair. Only for
+                                authorable (raw, non-containment) edges. */}
+                            {isEditing && authorable.ok && retypeOpts.length > 0 && (
+                                <div className="text-2xs" onClick={(e) => e.stopPropagation()}>
+                                    <div className="text-ink-muted mb-1">Edge type</div>
+                                    <select
+                                        value={edge.data?.edgeType ?? ''}
+                                        onChange={(e) => handleRetype(e.target.value)}
+                                        className="input h-7 text-2xs w-full"
+                                    >
+                                        {retypeOpts.map((o) => (
+                                            <option key={o.edgeType} value={o.edgeType} disabled={!o.allowed}>
+                                                {o.label}{o.allowed ? '' : ' — not valid for these endpoints'}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+                            {isEditing && !authorable.ok && (
+                                <div className="text-2xs bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-1.5 rounded">
+                                    {authorable.reason}
                                 </div>
                             )}
 

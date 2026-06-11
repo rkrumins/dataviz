@@ -56,7 +56,6 @@ import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
 import { CanvasContextMenu } from '../CanvasContextMenu'
-import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette } from '../CommandPalette'
 import { useGraphAuthoring } from '@/features/graph-authoring/hooks/useGraphAuthoring'
 import { useConnectGesture } from '@/features/graph-authoring/hooks/useConnectGesture'
@@ -474,6 +473,8 @@ export function ContextViewCanvas({
   // (detailed). Both stage through authoring.commitCreate.
   const isDetailedCreateOpen = authoring.mode.kind === 'create-panel'
   const isComposeOpen = authoring.mode.kind === 'compose'
+  // In-card rename: which node row is currently editing its name inline.
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
   // The right rail is owned by an authoring panel whenever one is active, so it
   // is never hidden behind a drawer the user happened to leave open.
   const isAuthoringRailOpen = isDetailedCreateOpen || isComposeOpen
@@ -647,26 +648,22 @@ export function ContextViewCanvas({
 
   // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
-    // UX-first: Double-click = inline edit (modern approach)
-    // Use Shift+Double-click for trace (power user feature)
+    // UX-first: Double-click = in-card rename. Shift+Double-click = trace.
     if (event && !event.shiftKey) {
-      // Find the node element to get its position
-      const element = document.getElementById(`layer-node-${nodeId}`)
-      if (element) {
-        const rect = element.getBoundingClientRect()
-        const targetNode = nodes.find(n => n.id === nodeId)
-        interactions.startInlineEdit(
-          nodeId,
-          (targetNode?.data?.label as string) || nodeId,
-          { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
-        )
-        return
-      }
+      setEditingNodeId(nodeId)
+      return
     }
-
     // TRACE MODE: Toggle trace using unified trace hook + smart level
     toggleTraceRef.current(nodeId)
-  }, [nodes, interactions])
+  }, [])
+
+  // Commit an in-card rename through the authoring controller so it merges with
+  // any other staged edit on the same node into a single change.
+  const commitRename = useCallback((nodeId: string, label: string) => {
+    const trimmed = label.trim()
+    if (trimmed) authoring.stageNodeUpdate(nodeId, { label: trimmed })
+    setEditingNodeId(null)
+  }, [authoring])
 
 
   // Lineage flow toggle
@@ -2237,6 +2234,9 @@ export function ContextViewCanvas({
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
+                editingNodeId={editingNodeId}
+                onRenameCommit={commitRename}
+                onRenameCancel={() => setEditingNodeId(null)}
                 onAddChild={handleAddChildEntity}
                 onAddToLayer={(layerId) => void authoring.beginInlineCreate(layerId, null)}
                 onBeginConnect={isDraftMode ? (id, start) => void authoring.beginConnect(id, 'drag', start) : undefined}
@@ -2377,14 +2377,8 @@ export function ContextViewCanvas({
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
       />
 
-      {/* Inline Node Editor - Double-click to edit names */}
-      <InlineNodeEditor
-        nodeId={interactions.state.inlineEdit.nodeId}
-        value={interactions.state.inlineEdit.value}
-        position={interactions.state.inlineEdit.position}
-        onSave={interactions.saveInlineEdit}
-        onCancel={interactions.cancelInlineEdit}
-      />
+      {/* In-card rename replaces the floating inline editor — double-click a
+          node row to edit its name in place (see FlatTreeItem). */}
 
       {/* Quick create is the inline DraftNodeCard in each layer column; the
           detailed CreateEntityPanel takes the right rail (authoring.mode). */}

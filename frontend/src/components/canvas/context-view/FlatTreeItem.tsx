@@ -47,6 +47,10 @@ interface FlatTreeItemProps {
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
   /** Live connect drag context — drives valid-target ring / invalid-target dim. */
   connectContext?: { sourceId: string; validTypeIds: Set<string> } | null
+  /** When true, this row edits its name inline (double-click rename). */
+  isEditing?: boolean
+  onRenameCommit?: (id: string, label: string) => void
+  onRenameCancel?: () => void
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -77,6 +81,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   isSearchVisible = false,
   onBeginConnect,
   connectContext,
+  isEditing = false,
+  onRenameCommit,
+  onRenameCancel,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -484,7 +491,25 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // their successors without scroll-jump.
           "line-clamp-3 break-words"
         )}>
-          {node.name}
+          {isEditing ? (
+            <input
+              data-canvas-interactive
+              autoFocus
+              defaultValue={node.name}
+              onFocus={(e) => e.currentTarget.select()}
+              onClick={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation()
+                if (e.key === 'Enter') { e.preventDefault(); onRenameCommit?.(node.id, e.currentTarget.value) }
+                else if (e.key === 'Escape') { e.preventDefault(); onRenameCancel?.() }
+              }}
+              onBlur={(e) => onRenameCommit?.(node.id, e.currentTarget.value)}
+              className="w-full bg-canvas border border-accent-primary/60 rounded px-1 py-0.5 text-sm text-ink outline-none focus:ring-1 focus:ring-accent-primary/50"
+            />
+          ) : (
+            node.name
+          )}
         </span>
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
             users can reclaim vertical space in dense canvases. */}
