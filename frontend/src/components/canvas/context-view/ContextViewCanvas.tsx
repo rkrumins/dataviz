@@ -55,13 +55,12 @@ import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
-import { CanvasContextMenu } from '../CanvasContextMenu'
 import { CommandPalette } from '../CommandPalette'
 import { useGraphAuthoring } from '@/features/graph-authoring/hooks/useGraphAuthoring'
 import { useConnectGesture } from '@/features/graph-authoring/hooks/useConnectGesture'
 import { ConnectOverlay } from '@/features/graph-authoring/components/ConnectOverlay'
 import { EdgeTypePicker } from '@/features/graph-authoring/components/EdgeTypePicker'
-import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
+import { AuthoringContextMenu, type AuthoringMenuTarget } from '@/features/graph-authoring/components/AuthoringContextMenu'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 // Editor components (shared across canvases)
@@ -115,6 +114,7 @@ export function ContextViewCanvas({
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
@@ -320,8 +320,8 @@ export function ContextViewCanvas({
 
   // Forward-declared ref to the smart-level trace handler — defined further
   // down where granularityOptions is in scope. Used by hooks that fire
-  // before that declaration (useCanvasInteractions options) so the
-  // closure dereferences lazily.
+  // before that declaration (keyboard handlers) so the closure
+  // dereferences lazily.
   const startTraceRef = useRef<(nodeId: string) => void>(() => {})
   const toggleTraceRef = useRef<(nodeId: string) => void>(() => {})
 
@@ -340,8 +340,7 @@ export function ContextViewCanvas({
   // Graph authoring controller — owns the create/connect/compose/edit-panel
   // modes and all node/edge staging (the rebuilt authoring UX). The connect
   // flow is driven entirely from here; useConnectGesture binds its pointer
-  // listeners. (Other CRUD entry points migrate off useCanvasInteractions in
-  // later steps.)
+  // listeners.
   const isDraftMode = useIsDraftMode()
   const authoring = useGraphAuthoring({
     onExpandParent: (parentId) => setExpandedNodes((prev) => new Set(prev).add(parentId)),
@@ -359,36 +358,62 @@ export function ContextViewCanvas({
   })
   useConnectGesture(authoring)
 
-  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
-  const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => startTraceRef.current(nodeId),
-    onNodeCreated: (nodeId) => selectNode(nodeId),
-    onConnectMode: (nodeId) => { void authoring.beginConnect(nodeId, 'armed') },
-    layers: layers,
-    onMoveToLayer: (_nodeId, _layerId) => {
-      // Implementation handled by the existing moveToLayer function
-    },
-    onCloseEdgePanel: () => {
-      if (isEdgePanelOpen) { closeEdgePanel(); return true }
-      return false
-    },
-    onCloseEntityDrawer: () => {
-      if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
-      if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return true }
-      return false
-    },
-    // ESC exits an active trace before any other panel close — gives the
-    // user a single, predictable escape from a busy trace view.
-    onExitTrace: exitTrace,
-  })
+  // Right-click context menu (ontology-aware AuthoringContextMenu) + the Cmd+K
+  // command palette — local state, replacing the legacy useCanvasInteractions.
+  const [ctxMenu, setCtxMenu] = useState<{ position: { x: number; y: number }; target: AuthoringMenuTarget } | null>(null)
+  const closeCtxMenu = useCallback(() => setCtxMenu(null), [])
+  const [isCommandPaletteOpen, setCommandPaletteOpen] = useState(false)
 
-  // Keyboard shortcuts. 'N' (create) routes to the authoring controller's
-  // detailed panel rather than the legacy quick-create state.
+  // Small local action helpers (formerly on useCanvasInteractions).
+  const copyUrn = useCallback((nodeId: string) => {
+    const n = useCanvasStore.getState().nodes.find((x) => x.id === nodeId)
+    if (n?.data?.urn) void navigator.clipboard.writeText(String(n.data.urn))
+  }, [])
+  const selectAllNodes = useCallback(() => {
+    const s = useCanvasStore.getState()
+    s.nodes.forEach((n) => s.selectNode(n.id, true))
+  }, [])
+  const copySelectedUrns = useCallback(() => {
+    const s = useCanvasStore.getState()
+    const urns = s.selectedNodeIds.map((id) => s.nodes.find((n) => n.id === id)?.data?.urn).filter(Boolean).join('\n')
+    if (urns) void navigator.clipboard.writeText(urns)
+  }, [])
+  // Delete the current selection through the authoring staging path.
+  const deleteSelection = useCallback(() => {
+    const s = useCanvasStore.getState()
+    s.selectedNodeIds.forEach((id) => authoring.stageNodeDelete(id))
+    s.selectedEdgeIds.forEach((id) => authoring.stageEdgeDelete(id))
+    s.clearSelection()
+  }, [authoring])
+
+  // Keyboard shortcuts. The ESC cascade and create/connect entry points are
+  // wired to the authoring controller + local panel state. useCanvasKeyboard
+  // reads handlers through a ref, so this fresh object each render is fine and
+  // lets the closures reference later-declared panel state lazily.
   useCanvasKeyboard({
     enabled: true,
     handlers: {
-      ...interactions.keyboardHandlers,
+      onDelete: deleteSelection,
+      onDuplicate: () => {},
+      onSelectAll: selectAllNodes,
+      onCopy: copySelectedUrns,
+      onEdit: () => { const id = useCanvasStore.getState().selectedNodeIds[0]; if (id) openNodeDrawer(id) },
+      onTrace: () => { const id = useCanvasStore.getState().selectedNodeIds[0]; if (id) startTraceRef.current(id) },
       onCreate: () => void authoring.beginCreatePanel({}),
+      onConnectMode: () => { const id = useCanvasStore.getState().selectedNodeIds[0]; if (id) void authoring.beginConnect(id, 'armed') },
+      onCommandPalette: () => setCommandPaletteOpen(true),
+      onCancel: () => {
+        // ESC cascade: active authoring gesture → menu → palette → trace →
+        // edge panel → staged-changes panel → drawer → clear selection.
+        if (authoring.handleEscape()) return
+        if (ctxMenu) { setCtxMenu(null); return }
+        if (isCommandPaletteOpen) { setCommandPaletteOpen(false); return }
+        if (exitTrace()) return
+        if (isEdgePanelOpen) { closeEdgePanel(); return }
+        if (isStagedPanelOpen) { closeStagedChangesPanel(); return }
+        if (drawerNodeId) { closeNodeDrawer(); clearSelection(); return }
+        clearSelection()
+      },
     },
   })
 
@@ -604,17 +629,12 @@ export function ContextViewCanvas({
     }
   }, [nodes, edges])
 
-  // Handle right click - now uses unified CanvasContextMenu
+  // Right-click a node row → ontology-aware AuthoringContextMenu.
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault()
     e.stopPropagation()
-    const node = nodes.find(n => n.id === nodeId)
-    interactions.openContextMenu(e, {
-      type: 'node',
-      id: nodeId,
-      data: node?.data as Record<string, unknown> || {},
-    })
-  }, [nodes, interactions])
+    setCtxMenu({ position: { x: e.clientX, y: e.clientY }, target: { type: 'node', id: nodeId } })
+  }, [])
 
 
 
@@ -1152,8 +1172,8 @@ export function ContextViewCanvas({
       },
     })
 
-    interactions.closeContextMenu()
-  }, [activeView, displayMap, interactions])
+    closeCtxMenu()
+  }, [activeView, displayMap, closeCtxMenu])
 
   // Handler for adding child entities — inline create under the parent, seeded
   // to the parent's layer so the new child lands beside its siblings.
@@ -2249,10 +2269,9 @@ export function ContextViewCanvas({
                 onDraftCommit={(input, opts) => authoring.commitCreate(input, opts)}
                 onDraftEscalate={(seed) => void authoring.beginCreatePanel(seed)}
                 onDraftCancel={authoring.cancel}
-                onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
-                  type: 'canvas',
+                onLayerContextMenu={(e, layerId) => setCtxMenu({
                   position: { x: e.clientX, y: e.clientY },
-                  layerId,
+                  target: { type: 'canvas', position: { x: e.clientX, y: e.clientY }, layerId },
                 })}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
@@ -2350,29 +2369,31 @@ export function ContextViewCanvas({
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
 
-      {/* Modern Context Menu - Full CRUD operations */}
-      <CanvasContextMenu
-        isOpen={interactions.state.contextMenu.isOpen}
-        position={interactions.state.contextMenu.position}
-        target={interactions.state.contextMenu.target}
-        onClose={interactions.closeContextMenu}
-        onEditNode={interactions.editNode}
-        onDuplicateNode={interactions.duplicateNode}
-        onDeleteNode={interactions.deleteNode}
+      {/* Ontology-aware context menu — only valid actions are offered, and the
+          authoring CRUD routes through the controller. */}
+      <AuthoringContextMenu
+        isOpen={!!ctxMenu}
+        position={ctxMenu?.position ?? { x: 0, y: 0 }}
+        target={ctxMenu?.target ?? null}
+        isDraftMode={isDraftMode}
+        onClose={closeCtxMenu}
+        onEditNode={(id) => openNodeDrawer(id)}
+        onDeleteNode={(id) => authoring.stageNodeDelete(id)}
         onCreateChild={handleAddChildEntity}
-        onConnect={isDraftMode ? (id) => void authoring.beginConnect(id, 'armed') : undefined}
+        onConnect={(id) => void authoring.beginConnect(id, 'armed')}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
-        onCopyUrn={interactions.copyUrn}
-        onEditEdge={interactions.editEdge}
-        onDeleteEdge={interactions.deleteEdge}
-        onReverseEdge={interactions.reverseEdge}
+        onCopyUrn={copyUrn}
+        onEditEdge={(id) => { selectEdge(id); if (!isEdgePanelOpen) toggleEdgePanel() }}
+        onDeleteEdge={(id) => authoring.stageEdgeDelete(id)}
+        onReverseEdge={(id) => authoring.stageEdgeReverse(id)}
         onCreateNode={(_pos, layerId) => {
           // Right-clicked an empty layer column → inline-create scoped to that
           // layer; no layer (toolbar/global) → the detailed panel.
           if (layerId) void authoring.beginInlineCreate(layerId, null)
           else void authoring.beginCreatePanel({})
         }}
-        onSelectAll={interactions.selectAll}
+        onComposeHierarchy={(layerId) => void authoring.beginCompose({ seedLayerId: layerId ?? null })}
+        onSelectAll={selectAllNodes}
         layers={sortedLayers}
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
       />
@@ -2385,10 +2406,10 @@ export function ContextViewCanvas({
 
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
-        isOpen={interactions.state.commandPalette.isOpen}
-        onClose={interactions.closeCommandPalette}
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
         onCreateEntity={(typeId) => {
-          interactions.closeCommandPalette()
+          setCommandPaletteOpen(false)
           void authoring.beginCreatePanel({ entityType: typeId })
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
