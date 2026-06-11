@@ -93,12 +93,27 @@ class _EmptyResult:
 
 
 def _normalize_falkordb_host(host: Optional[str]) -> str:
-    """Pin the literal ``localhost`` to ``127.0.0.1`` to avoid IPv6 ``::1``
-    dual-stack connect failures against IPv4-only Docker port publishing.
-    Other hostnames are left untouched (real IPv6 deployments don't use the
-    literal ``localhost``). Opt out with ``FALKORDB_DISABLE_IPV4_NORMALIZE``.
+    """Resolve a stored FalkorDB host to something actually reachable.
+
+    1. **Docker→host rewrite** (opt-in): when the backend runs inside a
+       container, a stored ``localhost`` / ``127.0.0.1`` points at the
+       *container itself*, not the operator's FalkorDB, so the provider is
+       falsely "down". Setting ``FALKORDB_DOCKER_LOCALHOST_REWRITE`` (e.g.
+       ``host.docker.internal`` on Docker Desktop) redirects it to a
+       reachable target. This is the Docker-direction sibling of
+       ``LOCAL_DEV_FALKORDB_OVERRIDE`` (which rewrites the Docker hostname →
+       localhost for host-run processes).
+    2. **IPv4 pin**: otherwise pin the literal ``localhost`` to ``127.0.0.1``
+       to dodge IPv6 ``::1`` dual-stack connect failures against IPv4-only
+       Docker port publishing (opt out with ``FALKORDB_DISABLE_IPV4_NORMALIZE``).
+
+    Other hostnames are left untouched.
     """
     h = host or "localhost"
+    if h in ("localhost", "127.0.0.1"):
+        rewrite = os.getenv("FALKORDB_DOCKER_LOCALHOST_REWRITE", "").strip()
+        if rewrite:
+            return rewrite
     if h == "localhost" and os.getenv(
         "FALKORDB_DISABLE_IPV4_NORMALIZE", ""
     ).strip().lower() not in ("1", "true", "yes"):

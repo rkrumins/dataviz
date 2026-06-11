@@ -157,13 +157,18 @@ def _require_ds_perm(permission: str):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Data source {ds_id!r} not found",
             )
-        if not has_permission(claims, permission, workspace_id=ds.workspaceId):
+        # DataSourceResponse exposes ``workspace_id`` (the camelCase
+        # ``workspaceId`` is only a serialization alias, not the attribute).
+        # Reading ``ds.workspaceId`` AttributeError'd here, 500-ing every
+        # aggregation route (this dep guards both read + manage) before the
+        # handler ran.
+        if not has_permission(claims, permission, workspace_id=ds.workspace_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "error": "missing_permission",
                     "permission": permission,
-                    "scope": {"type": "workspace", "id": ds.workspaceId},
+                    "scope": {"type": "workspace", "id": ds.workspace_id},
                     "message": f"Missing permission: {permission}",
                 },
             )

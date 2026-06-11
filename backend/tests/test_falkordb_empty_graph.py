@@ -64,6 +64,15 @@ def test_normalization_opt_out(monkeypatch):
     assert fp._normalize_falkordb_host("localhost") == "localhost"
 
 
+def test_docker_localhost_rewrite(monkeypatch):
+    monkeypatch.setenv("FALKORDB_DOCKER_LOCALHOST_REWRITE", "host.docker.internal")
+    # Rewrite wins over the IPv4 pin, for both localhost and 127.0.0.1.
+    assert fp._normalize_falkordb_host("localhost") == "host.docker.internal"
+    assert fp._normalize_falkordb_host("127.0.0.1") == "host.docker.internal"
+    # Non-loopback hosts are untouched.
+    assert fp._normalize_falkordb_host("falkordb") == "falkordb"
+
+
 # ── empty-graph tolerance in introspection reads ────────────────────
 
 @pytest.mark.asyncio
