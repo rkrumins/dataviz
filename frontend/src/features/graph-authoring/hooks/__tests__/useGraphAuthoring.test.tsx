@@ -107,6 +107,24 @@ describe('useGraphAuthoring', () => {
     expect(result.current.mode.kind).toBe('idle')
   })
 
+  it('commitCreate stages the entity, fires onEntityStaged + onExpandParent, and closes unless keepOpen', async () => {
+    const onEntityStaged = vi.fn()
+    const onExpandParent = vi.fn()
+    const { result } = renderHook(() => useGraphAuthoring({ onEntityStaged, onExpandParent }))
+    await act(async () => { await result.current.beginInlineCreate('layer-1', 'p') })
+
+    let temp = ''
+    act(() => { temp = result.current.commitCreate({ entityType: 'dataset', displayName: 'A', parentUrn: 'p' }, { keepOpen: true, layerId: 'layer-1' }) })
+    expect(temp).toContain('urn:staged:dataset')
+    expect(onEntityStaged).toHaveBeenCalledWith(temp, { parentUrn: 'p', layerId: 'layer-1' })
+    expect(onExpandParent).toHaveBeenCalledWith('p')
+    // keepOpen → still in inline-create for rapid sibling entry
+    expect(result.current.mode.kind).toBe('inline-create')
+
+    act(() => { result.current.commitCreate({ entityType: 'dataset', displayName: 'B' }) })
+    expect(result.current.mode.kind).toBe('idle')
+  })
+
   it('beginCreatePanel and beginCompose each open a draft first', async () => {
     const { result } = renderHook(() => useGraphAuthoring())
     await act(async () => { await result.current.beginCreatePanel({ parentId: 'p', layerId: 'L' }) })

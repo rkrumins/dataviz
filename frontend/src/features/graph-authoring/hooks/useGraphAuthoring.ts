@@ -49,6 +49,13 @@ import {
 export interface UseGraphAuthoringOptions {
   /** Expand a parent after a child is created so the new node is visible. */
   onExpandParent?: (parentId: string) => void
+  /**
+   * Fired after each entity is staged (inline card or detailed panel). The
+   * canvas uses this to assign the new node to a layer — the layered view only
+   * renders nodes that resolve to a layer, so a freshly-staged node is
+   * invisible until assigned.
+   */
+  onEntityStaged?: (tempUrn: string, ctx: { parentUrn?: string | null; layerId?: string | null }) => void
   /** Toast surface for explain-not-prevent messaging. */
   notify?: (message: string, kind?: 'info' | 'error') => void
 }
@@ -63,7 +70,7 @@ const nodeTypeOf = (id: string): string | null =>
   (useCanvasStore.getState().nodes.find((n) => n.id === id)?.data.type as string) ?? null
 
 export function useGraphAuthoring(options: UseGraphAuthoringOptions = {}) {
-  const { onExpandParent, notify } = options
+  const { onExpandParent, onEntityStaged, notify } = options
   const [mode, setMode] = useState<AuthoringMode>(IDLE)
   // Mirror for command callbacks so they read the latest mode without stale
   // closures and without running side effects inside a setState updater (which
@@ -94,9 +101,15 @@ export function useGraphAuthoring(options: UseGraphAuthoringOptions = {}) {
     setMode({ kind: 'inline-create', layerId, parentId })
   }, [])
 
-  const beginCreatePanel = useCallback(async (seed?: { parentId?: string | null; layerId?: string | null }) => {
+  const beginCreatePanel = useCallback(async (seed?: { parentId?: string | null; layerId?: string | null; entityType?: string; displayName?: string }) => {
     await ensureDraftOpen()
-    setMode({ kind: 'create-panel', parentId: seed?.parentId ?? null, layerId: seed?.layerId ?? null })
+    setMode({
+      kind: 'create-panel',
+      parentId: seed?.parentId ?? null,
+      layerId: seed?.layerId ?? null,
+      seedEntityType: seed?.entityType,
+      seedDisplayName: seed?.displayName,
+    })
   }, [])
 
   const beginCompose = useCallback(async (seed?: { seedParentId?: string | null; seedLayerId?: string | null }) => {
@@ -108,12 +121,13 @@ export function useGraphAuthoring(options: UseGraphAuthoringOptions = {}) {
    * Stage one entity from the inline card or detailed panel and (for inline)
    * stay in create mode for rapid sibling entry. Returns the new temp urn.
    */
-  const commitCreate = useCallback((input: StageEntityCreateInput, opts?: { keepOpen?: boolean }) => {
+  const commitCreate = useCallback((input: StageEntityCreateInput, opts?: { keepOpen?: boolean; layerId?: string | null }) => {
     const tempUrn = stageEntityCreate(input)
+    onEntityStaged?.(tempUrn, { parentUrn: input.parentUrn ?? null, layerId: opts?.layerId ?? null })
     if (input.parentUrn) onExpandParent?.(input.parentUrn)
     if (!opts?.keepOpen) setMode(IDLE)
     return tempUrn
-  }, [onExpandParent])
+  }, [onEntityStaged, onExpandParent])
 
   // ── connect ────────────────────────────────────────────────────────────────
   const beginConnect = useCallback(async (sourceId: string, via: 'drag' | 'armed', start?: { x: number; y: number }) => {

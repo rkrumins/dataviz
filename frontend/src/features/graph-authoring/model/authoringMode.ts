@@ -19,8 +19,9 @@ export type AuthoringMode =
   | { kind: 'edge-type-pick'; sourceId: string; targetId: string; position: { x: number; y: number } }
   /** The hierarchy composer is open (right rail), seeded under a node/layer. */
   | { kind: 'compose'; seedParentId: string | null; seedLayerId: string | null }
-  /** The detailed create panel is open (right rail). */
-  | { kind: 'create-panel'; parentId: string | null; layerId: string | null }
+  /** The detailed create panel is open (right rail), optionally seeded from the
+   *  inline card's "Details…" escalation. */
+  | { kind: 'create-panel'; parentId: string | null; layerId: string | null; seedEntityType?: string; seedDisplayName?: string }
 
 export const IDLE: AuthoringMode = { kind: 'idle' }
 
