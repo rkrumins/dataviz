@@ -148,6 +148,11 @@ services:
       # FalkorDB access for drift checks, readiness probes, and purge.
       # Short timeout — API responsiveness over completeness.
       FALKORDB_HOST: falkordb
+      # Docker reality: a provider stored with host localhost/127.0.0.1 points
+      # at THIS container, not FalkorDB. Redirect any loopback host to the
+      # reachable Docker service so every such provider works without
+      # per-provider edits. Override (or set empty) to disable.
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "5"
       FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
@@ -188,6 +193,11 @@ services:
       # Graph provider bootstrap (used if management DB is empty)
       GRAPH_PROVIDER: ${GRAPH_PROVIDER:-falkordb}
       FALKORDB_HOST: falkordb
+      # Docker reality: a provider stored with host localhost/127.0.0.1 points
+      # at THIS container, not FalkorDB. Redirect any loopback host to the
+      # reachable Docker service so every such provider works without
+      # per-provider edits. Override (or set empty) to disable.
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
@@ -261,6 +271,11 @@ services:
       # FalkorDB — worker-specific tuning: longer timeouts for heavy
       # MERGE ops, pool sizes auto-scaled from WORKER_CONCURRENCY.
       FALKORDB_HOST: falkordb
+      # Docker reality: a provider stored with host localhost/127.0.0.1 points
+      # at THIS container, not FalkorDB. Redirect any loopback host to the
+      # reachable Docker service so every such provider works without
+      # per-provider edits. Override (or set empty) to disable.
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "60"
 
@@ -318,6 +333,11 @@ services:
       # Provider bootstrap — only used when a data source's credentials
       # reference env vars (normal path: credentials come from Postgres).
       FALKORDB_HOST: falkordb
+      # Docker reality: a provider stored with host localhost/127.0.0.1 points
+      # at THIS container, not FalkorDB. Redirect any loopback host to the
+      # reachable Docker service so every such provider works without
+      # per-provider edits. Override (or set empty) to disable.
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
 
       # Must match viz-service or stored provider credentials won't decrypt.
@@ -372,6 +392,11 @@ services:
       - "${GRAPH_PORT:-8001}:8001"
     environment:
       FALKORDB_HOST: falkordb
+      # Docker reality: a provider stored with host localhost/127.0.0.1 points
+      # at THIS container, not FalkorDB. Redirect any loopback host to the
+      # reachable Docker service so every such provider works without
+      # per-provider edits. Override (or set empty) to disable.
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
     depends_on:
       falkordb:
@@ -414,6 +439,11 @@ services:
       dockerfile: backend/Dockerfile.seed
     environment:
       FALKORDB_HOST: falkordb
+      # Docker reality: a provider stored with host localhost/127.0.0.1 points
+      # at THIS container, not FalkorDB. Redirect any loopback host to the
+      # reachable Docker service so every such provider works without
+      # per-provider edits. Override (or set empty) to disable.
+      FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_GRAPH_NAME: nexus_lineage
       SEED_SCENARIOS: finance,ecommerce       # finance | hr | marketing | ecommerce | all
