@@ -141,6 +141,16 @@ class AggregationService:
         # SELECT ... FOR UPDATE SKIP LOCKED so concurrent triggers across
         # uvicorn workers / replicas serialize cleanly: at most one caller
         # ever observes "no active job" for a given data_source_id.
+        #
+        # A read earlier in this request — the permission dependency loading
+        # the data source, or the idempotency lookup above — autobegins a
+        # transaction on this shared WEB session (``_session_scope`` commits
+        # on success but does not open the transaction itself). ``session.
+        # begin()`` requires that none be active, so roll back the empty
+        # read transaction first. Safe: nothing has been written before this
+        # point — the block below performs the first writes.
+        if session.in_transaction():
+            await session.rollback()
         async with session.begin():
             if not await claim_exclusive(session, ds_id):
                 if idem_key:
