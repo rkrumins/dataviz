@@ -2136,6 +2136,14 @@ export function ContextViewCanvas({
           }}
         >
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
+          {/* Drafts render raw edges only — aggregated rollups are materialized
+              on the published main projection. Tell the user where they went. */}
+          {isDraftMode && (
+            <div className="mt-1.5 flex items-center gap-1.5 px-2 py-1 rounded-md bg-purple-500/[0.06] border border-purple-500/15 text-[10px] text-purple-600 dark:text-purple-400 max-w-[220px]">
+              <span className="font-semibold flex-shrink-0">Σ</span>
+              <span>Aggregated edges appear after publish.</span>
+            </div>
+          )}
         </div>
 
 

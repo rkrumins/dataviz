@@ -55,6 +55,7 @@ import {
     stageEdgeDelete as stageEdgeDeleteModel,
 } from '@/features/graph-authoring/model/stageEdge'
 import { isEdgeAuthorable, retypeOptions } from '@/features/graph-authoring/model/ontologyGuard'
+import { EdgeProvenanceBadge } from '@/features/graph-authoring/components/EdgeProvenanceBadge'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -783,35 +784,38 @@ function EdgeCard({
                     <Highlighter className="w-3 h-3" />
                 </button>
 
-                {/* Edit button — expands the card and switches to PropertyEditor */}
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation()
-                        if (!isExpanded) onToggleExpand()
-                        setIsEditing((v) => !v)
-                    }}
-                    className={cn(
-                        "w-6 h-6 flex items-center justify-center rounded transition-colors",
-                        isEditing
-                            ? "bg-accent-lineage/15 text-accent-lineage"
-                            : "text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5"
-                    )}
-                    title={isEditing ? "Done editing" : "Edit properties"}
-                >
-                    <Pencil className="w-3 h-3" />
-                </button>
-
-                {/* Delete button — stages delete_edge; restored on discard */}
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation()
-                        stageEdgeDelete()
-                    }}
-                    className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
-                    title="Delete edge"
-                >
-                    <Trash2 className="w-3 h-3" />
-                </button>
+                {/* Edit + Delete — only for authorable (raw, non-containment) edges.
+                    Aggregated/containment edges are read-only (see badge below). */}
+                {authorable.ok && (
+                    <>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                if (!isExpanded) onToggleExpand()
+                                setIsEditing((v) => !v)
+                            }}
+                            className={cn(
+                                "w-6 h-6 flex items-center justify-center rounded transition-colors",
+                                isEditing
+                                    ? "bg-accent-lineage/15 text-accent-lineage"
+                                    : "text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/5"
+                            )}
+                            title={isEditing ? "Done editing" : "Edit / retype edge"}
+                        >
+                            <Pencil className="w-3 h-3" />
+                        </button>
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation()
+                                stageEdgeDelete()
+                            }}
+                            className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                            title="Delete edge"
+                        >
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    </>
+                )}
 
                 {onDeselect && (
                     <button
@@ -835,6 +839,11 @@ function EdgeCard({
                 <span className="truncate flex-1 min-w-0 text-ink-secondary" title={targetNode?.data.label as string ?? edge.target}>
                     {targetNode?.data.label || edge.target}
                 </span>
+            </div>
+
+            {/* Raw vs Aggregated provenance — makes read-only derived edges obvious. */}
+            <div className="px-3 pb-2">
+                <EdgeProvenanceBadge edge={edge} />
             </div>
 
             {/* Expanded Details */}
