@@ -35,10 +35,14 @@ from .schemas import DiscoveryJobEnvelope
 logger = logging.getLogger(__name__)
 
 
-# Live-call timeout matches the legacy short-session endpoint behaviour
-# (10s in providers.py:406,422). Centralised here so it can be tuned.
+# Outer budget for a live discovery call. Must sit ABOVE the provider's
+# stats-query timeout (FALKORDB_STATS_QUERY_TIMEOUT_SECS, default 30s) so the
+# wrapper doesn't kill a large-graph count scan before it can finish and warm
+# the stats cache. Discovery fans out concurrently, so a higher per-asset
+# budget doesn't serialize the UI. A scan that still exceeds this is handled
+# as asset-level staleness (the provider stays reachable), not an outage.
 _DISCOVERY_LIVE_TIMEOUT_SECS = float(
-    __import__("os").getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "10")
+    __import__("os").getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "35")
 )
 
 
@@ -122,9 +126,35 @@ async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None
                 )
                 payload = {"assets": list(graphs)}
             else:
-                raw = await asyncio.wait_for(
-                    instance.get_stats(), timeout=_DISCOVERY_LIVE_TIMEOUT_SECS
-                )
+                try:
+                    raw = await asyncio.wait_for(
+                        instance.get_stats(), timeout=_DISCOVERY_LIVE_TIMEOUT_SECS
+                    )
+                except Exception as stats_exc:
+                    # Preflight already succeeded above → the provider IS
+                    # reachable. A slow/erroring stats scan on a large graph
+                    # (the two count scans are O(nodes)+O(edges) and blow the
+                    # budget on million-edge graphs) is an ASSET-level
+                    # staleness signal, NOT a provider outage. Stamp
+                    # ``last_error`` (keeps the prior counts) and return so the
+                    # admission gate records the provider as REACHABLE —
+                    # otherwise the whole provider falsely flips to
+                    # "unreachable" while every other view shows it healthy.
+                    is_to = isinstance(stats_exc, asyncio.TimeoutError)
+                    duration = asyncio.get_event_loop().time() - start_ts
+                    logger.warning(
+                        "discovery.stats_slow provider=%s asset=%s "
+                        "duration_secs=%.2f timeout=%s err=%s",
+                        provider_id, asset_name, duration, is_to, stats_exc,
+                    )
+                    note = (
+                        f"Stats refresh exceeded {_DISCOVERY_LIVE_TIMEOUT_SECS:.0f}s "
+                        "(large graph) — showing last known counts."
+                        if is_to
+                        else f"Stats refresh failed (provider reachable): {stats_exc}"
+                    )
+                    await record_failure(session, provider_id, asset_name, note)
+                    return
                 payload = {
                     "nodeCount": raw.get("node_count", raw.get("nodeCount", 0)),
                     "edgeCount": raw.get("edge_count", raw.get("edgeCount", 0)),
