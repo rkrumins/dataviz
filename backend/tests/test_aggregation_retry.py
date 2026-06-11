@@ -268,3 +268,85 @@ async def test_non_provider_unavailable_errors_use_exponential_backoff(
     assert 10.0 <= second_sleep < 12.0 + 1e-6, (
         f"second sleep {second_sleep} outside [10, 12]"
     )
+
+
+async def test_forward_progress_resets_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job that keeps advancing ``processed_edges`` survives MANY more
+    failures than ``max_retries`` — each forward step resets the consecutive
+    failure counter (the connection-reset resilience for large jobs)."""
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.worker.asyncio.sleep", sleep_mock
+    )
+
+    worker = _make_worker()
+    job = _FakeJob(max_retries=2)  # max_attempts = 3
+    session = _FakeSession()
+
+    call_count = {"n": 0}
+
+    async def fake_materialize(**_kwargs: Any) -> dict:
+        call_count["n"] += 1
+        # Each attempt makes forward progress before failing — until the
+        # 6th, which finally completes. 6 > max_attempts(3): without the
+        # progress-reset this would have failed at attempt 3.
+        job.processed_edges += 100
+        if call_count["n"] < 6:
+            raise RuntimeError("Connection reset by peer")
+        return {"aggregated_edges_affected": 5}
+
+    monkeypatch.setattr(worker, "_materialize_with_checkpoints", fake_materialize)
+
+    result = await worker._materialize_with_retries(
+        session=session,
+        job=job,
+        provider=object(),
+        containment_types=[],
+        lineage_types=["TRANSFORMS"],
+        **_retry_call_kwargs(),
+    )
+
+    assert result == {"aggregated_edges_affected": 5}
+    assert call_count["n"] == 6, (
+        "expected the budget to keep resetting on forward progress, "
+        f"got {call_count['n']} attempts"
+    )
+
+
+async def test_no_progress_exhausts_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely stuck job (no ``processed_edges`` advance) still fails
+    after exactly ``max_attempts`` consecutive failures — the budget reset
+    must NOT make a stuck job loop forever."""
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.worker.asyncio.sleep", sleep_mock
+    )
+
+    worker = _make_worker()
+    job = _FakeJob(max_retries=2)  # max_attempts = 3
+    session = _FakeSession()
+
+    call_count = {"n": 0}
+
+    async def fake_materialize(**_kwargs: Any) -> dict:
+        call_count["n"] += 1
+        raise RuntimeError("boom")  # never advances processed_edges
+
+    monkeypatch.setattr(worker, "_materialize_with_checkpoints", fake_materialize)
+
+    with pytest.raises(RuntimeError):
+        await worker._materialize_with_retries(
+            session=session,
+            job=job,
+            provider=object(),
+            containment_types=[],
+            lineage_types=["TRANSFORMS"],
+            **_retry_call_kwargs(),
+        )
+
+    assert call_count["n"] == 3  # max_attempts, then give up
+    assert sleep_mock.await_count == 2  # slept between the 3 attempts

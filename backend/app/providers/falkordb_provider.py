@@ -64,6 +64,62 @@ def _is_cluster_redirect(exc: BaseException) -> bool:
     return False
 
 
+# Names that indicate a Redis Cluster *routing* change (the slot moved) —
+# these require rebuilding the single-node client, not just a retry.
+_CLUSTER_ROUTING_EXC_NAMES = frozenset({
+    "MovedError", "AskError", "ClusterDownError", "TryAgainError",
+})
+
+# Short backoff schedule (seconds) for transparently retrying a transient
+# connection drop. Three attempts keeps the total well inside a single op's
+# budget while letting redis-py hand out a fresh pooled connection.
+_TRANSIENT_RETRY_BACKOFFS: tuple = (0.25, 0.5, 1.0)
+
+# Redis transient exception classes matched by *identity* (not by name) so a
+# redis socket ``TimeoutError`` is retried while the unrelated
+# ``asyncio.TimeoutError`` (the per-op deadline) is NOT — both share the name
+# "TimeoutError", so name-matching would wrongly multiply a real query timeout.
+try:  # pragma: no cover - redis is always installed in practice
+    from redis.exceptions import (
+        ConnectionError as _RedisConnectionError,
+        TimeoutError as _RedisTimeoutError,
+    )
+    _TRANSIENT_REDIS_EXC: tuple = (_RedisConnectionError, _RedisTimeoutError)
+except Exception:  # pragma: no cover
+    _TRANSIENT_REDIS_EXC = ()
+
+
+def _is_cluster_routing_error(exc: BaseException) -> bool:
+    """True when *exc* (or its cause) is a cluster slot-moved/ASK/down error
+    that needs a single-node client rebuild before retrying."""
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        if type(seen).__name__ in _CLUSTER_ROUTING_EXC_NAMES:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _is_transient_connection_error(exc: BaseException) -> bool:
+    """True when *exc* (or its cause) is a transient redis connection drop
+    (e.g. 'Connection reset by peer' under FalkorDB memory pressure) worth a
+    short backoff + retry. Matched by isinstance against the redis exception
+    classes so ``asyncio.TimeoutError`` (the per-op deadline, same class name)
+    is excluded and never inflates a genuine slow-query timeout."""
+    if not _TRANSIENT_REDIS_EXC:
+        return False
+    seen = exc
+    for _ in range(4):  # walk a short __cause__/__context__ chain
+        if seen is None:
+            break
+        if isinstance(seen, _TRANSIENT_REDIS_EXC):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 def _is_missing_graph_error(exc: BaseException) -> bool:
     """True when *exc* indicates the FalkorDB graph KEY does not exist yet.
 
@@ -900,29 +956,68 @@ class FalkorDBProvider(GraphDataProvider):
                         pass
 
     async def _run_guarded(self, call: Callable[[], Awaitable[Any]]) -> Any:
-        """Execute a graph call with one transparent failover retry in
-        cluster mode. ``call`` must reference ``self._graph`` / ``self._proj``
-        lazily so the retry picks up the rebuilt client. Standalone/sentinel
-        modes call through unchanged (the master pool self-heals on
-        failover, and the circuit breaker + worker resume handle the rest).
+        """Execute a graph call with transparent retries for transient
+        failures so the circuit breaker stays closed on blips.
+
+        Two failure classes are absorbed:
+
+        * **Transient connection drops** (redis ``ConnectionError`` /
+          ``TimeoutError``, e.g. 'Connection reset by peer' under FalkorDB
+          memory pressure) — retried with a short backoff in ALL modes.
+          redis-py hands out a fresh pooled connection on the next call, so
+          the retried op succeeds once FalkorDB recovers. Reads are
+          idempotent; a retried write/flush re-applies at most one chunk's
+          weight via MERGE ON MATCH (bounded, self-healing).
+        * **Cluster routing changes** (Moved/Ask/ClusterDown) — only in
+          cluster mode: rebuild the single-node client (re-resolve the key
+          owner) and retry.
+
+        ``call`` must reference ``self._graph`` / ``self._proj`` lazily so a
+        retry after a rebuild picks up the new client. A non-transient query
+        error propagates immediately. Retries run inside the caller's per-op
+        ``asyncio.wait_for`` budget and query semaphore, so they still count
+        against the concurrency cap; only ``asyncio.TimeoutError`` (the
+        per-op deadline) is never retried.
         """
-        try:
-            return await call()
-        except Exception as exc:
-            if (
-                self._conn_cfg is None
-                or self._conn_cfg.mode != "cluster"
-                or not _is_cluster_redirect(exc)
-            ):
+        attempt = 0
+        max_retries = len(_TRANSIENT_RETRY_BACKOFFS)
+        while True:
+            try:
+                return await call()
+            except asyncio.CancelledError:
                 raise
-            gen = self._conn_generation
-            logger.warning(
-                "FalkorDB %s: cluster redirect/connection error (%s) — "
-                "rebuilding client and retrying once.",
-                self._graph_name, type(exc).__name__,
-            )
-            await self._rebuild_graph_client_for_failover(gen)
-            return await call()
+            except Exception as exc:
+                cluster = (
+                    self._conn_cfg is not None
+                    and self._conn_cfg.mode == "cluster"
+                )
+                # Cluster slot moved → rebuild the single-node client, retry.
+                if cluster and _is_cluster_routing_error(exc):
+                    if attempt >= max_retries:
+                        raise
+                    gen = self._conn_generation
+                    attempt += 1
+                    logger.warning(
+                        "FalkorDB %s: cluster redirect (%s) — rebuilding "
+                        "client and retrying (%d/%d).",
+                        self._graph_name, type(exc).__name__,
+                        attempt, max_retries,
+                    )
+                    await self._rebuild_graph_client_for_failover(gen)
+                    continue
+                # Transient connection drop (any mode) → short backoff + retry.
+                if _is_transient_connection_error(exc) and attempt < max_retries:
+                    backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
+                    attempt += 1
+                    logger.warning(
+                        "FalkorDB %s: transient connection error (%s) — "
+                        "retry %d/%d after %.2fs.",
+                        self._graph_name, type(exc).__name__,
+                        attempt, max_retries, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
 
     async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the source graph."""
@@ -3593,17 +3688,19 @@ class FalkorDBProvider(GraphDataProvider):
         produces enough pairs to exhaust memory, Phase 1.5 stages
         ``pair_data`` to Redis or Postgres.
 
-        Phase 2 of aggregation hardening: when
-        ``AGGREGATION_STREAMING_REBUILD_ENABLED`` is set, delegate to the
-        constant-memory streaming rebuild — an indexed ``ID(r)`` cursor
-        paged per lineage type, per-page flush via MERGE-on-aggKey, and
-        epoch tagging with an end-of-run stale-generation sweep instead
-        of the destructive wipe-first. The streaming path is crash-
-        resumable from ``last_cursor`` and does not hold the whole pair
-        set in memory. The accumulate-in-memory body below is preserved
-        as the rollback escape hatch (flag off).
+        Phase 2 of aggregation hardening: by default (
+        ``AGGREGATION_STREAMING_REBUILD_ENABLED`` defaults to "true";
+        set it to "false" to roll back), delegate to the constant-memory
+        streaming rebuild — an indexed ``ID(r)`` cursor paged per lineage
+        type, per-page flush via MERGE-on-aggKey, and epoch tagging with
+        an end-of-run stale-generation sweep instead of the destructive
+        wipe-first. The streaming path is crash-resumable from
+        ``last_cursor``, does not hold the whole pair set in memory, and
+        resumes from cursor on every retry — so a transient connection
+        reset mid-run no longer restarts from 0%. The accumulate-in-memory
+        body below is preserved as the rollback escape hatch (flag off).
         """
-        _streaming_flag = os.getenv("AGGREGATION_STREAMING_REBUILD_ENABLED", "false")
+        _streaming_flag = os.getenv("AGGREGATION_STREAMING_REBUILD_ENABLED", "true")
         if str(_streaming_flag).strip().lower() in ("1", "true", "yes", "on"):
             return await self._materialize_aggregated_edges_streaming_rebuild(
                 batch_size=batch_size,
