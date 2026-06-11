@@ -121,6 +121,13 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "urn", "entityType", "displayName", "qualifiedName", "description",
     "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
     "level", "levelDigest",
+    # Denormalised internal fields the write paths SET directly on the node
+    # (provider save + FalkorDB projector). They are NOT user properties and
+    # not GraphNode fields, so without reserving them the read-path treats them
+    # as user `properties` — surfacing `entityId` (the raw urn) and
+    # `searchableText` ("<displayName> <qualifiedName> …") in the Properties
+    # panel. This leak hit every node a post-merge full re-seed rewrote.
+    "entityId", "searchableText",
     "properties",      # legacy blob — read path no longer hydrates from it
     "propertiesRaw",   # native escape hatch for non-scalar property values
 })
