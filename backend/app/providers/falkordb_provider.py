@@ -6874,10 +6874,16 @@ class FalkorDBProvider(GraphDataProvider):
         node_count = 0
         edge_type_counts: Dict[str, Any] = {}
         edge_count = 0
+        # The node/edge count scans are O(nodes)+O(edges) — on a million-edge
+        # graph they exceed the 5s read default and the stats refresh fails
+        # (then the asset shows stale). Give them a dedicated, generous
+        # timeout so a cache-miss scan can complete and warm {graph}:stats_cache.
+        _stats_q_timeout = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
         try:
             # Optimize: Combine node counting with type aggregation
             type_res = await self._ro_query(
-                "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c"
+                "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c",
+                timeout=_stats_q_timeout,
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
@@ -6887,7 +6893,8 @@ class FalkorDBProvider(GraphDataProvider):
 
             # Optimize: Combine edge counting with type aggregation
             edge_type_res = await self._ro_query(
-                "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
+                "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
+                timeout=_stats_q_timeout,
             )
             for row in (edge_type_res.result_set or []):
                 t = row[0] or "UNKNOWN"
@@ -6927,13 +6934,15 @@ class FalkorDBProvider(GraphDataProvider):
         edge_stats = []
         total_edges = 0
         # Empty / never-created graph → valid empty schema, not an outage.
+        _stats_q_timeout = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
         try:
             # Single query: counts + samples per label using collect() with slicing
             type_res = await self._ro_query(
                 "MATCH (n) "
                 "WITH labels(n)[0] AS lbl, n.displayName AS name "
                 "WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
-                "RETURN lbl, c, samples"
+                "RETURN lbl, c, samples",
+                timeout=_stats_q_timeout,
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
@@ -6943,7 +6952,8 @@ class FalkorDBProvider(GraphDataProvider):
                 entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
 
             edge_type_res = await self._ro_query(
-                "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"
+                "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
+                timeout=_stats_q_timeout,
             )
             for row in (edge_type_res.result_set or []):
                 t = row[0] or "UNKNOWN"

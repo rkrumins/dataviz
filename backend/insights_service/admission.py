@@ -37,7 +37,9 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import case
 from typing import AsyncIterator, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -192,6 +194,12 @@ async def _redis_acquire_token(
 # ── Controller ───────────────────────────────────────────────────────
 
 _FLUSH_INTERVAL_SECS = float(os.getenv("ADMISSION_FLUSH_INTERVAL_SECS", "5"))
+# Provider-health rolling window. The counters in provider_health_window
+# accumulate; without a roll, old failures keep a provider "down" forever.
+# When the existing window is older than this, the next flush RESETS the
+# counts (fresh window) so health reflects RECENT outcomes and a provider
+# recovers within one window after its failures stop.
+_HEALTH_WINDOW_SECS = float(os.getenv("PROVIDER_HEALTH_WINDOW_SECS", "3600"))
 
 
 @dataclass
@@ -327,18 +335,23 @@ class _AdmissionController:
         self,
         provider_id: str,
         *,
-        is_timeout: bool,  # noqa: ARG002  (preserved on signature for forward-compat)
+        is_timeout: bool,
         exc: Optional[BaseException] = None,  # noqa: ARG002
     ) -> None:
-        """Record a failed provider call. Increments the per-provider
-        consecutive-failure counter; the value lands in
-        ``provider_health_window`` on the next flush.
+        """Record a failed provider call.
 
-        ``is_timeout`` and ``exc`` are kept on the signature even
-        though the in-memory circuit is gone — callers (the gate)
-        already pass them; reusing the signature avoids a churn-y API
-        change if we later route timeouts to a metrics emitter.
+        A **timeout** means the provider accepted the request but was slow
+        (e.g. a count scan on a million-edge graph) — it is "reachable but
+        slow", NOT "unreachable". Counting it as a hard failure is what
+        falsely flipped reachable providers to "Provider unreachable" in the
+        Data Sources view. So a timeout is recorded as latency only: it does
+        NOT increment the consecutive-failure counter or the failure tally
+        that drives the health-window "down" classification. Non-timeout
+        failures (connection refused, auth, etc.) still count as failures.
         """
+        if is_timeout:
+            # Reachable-but-slow: don't drag provider health to "down".
+            return
         self._consecutive_failures[provider_id] = (
             self._consecutive_failures.get(provider_id, 0) + 1
         )
@@ -422,6 +435,14 @@ class _AdmissionController:
                 )
                 insert = pg_insert if dialect == "postgresql" else sqlite_insert
                 now_iso = datetime.now(timezone.utc).isoformat()
+                # window_start is stored as a UTC isoformat string (same
+                # format everywhere), so a lexicographic ``<`` compare is
+                # chronologically correct.
+                cutoff_iso = (
+                    datetime.now(timezone.utc)
+                    - timedelta(seconds=_HEALTH_WINDOW_SECS)
+                ).isoformat()
+                _stale = ProviderHealthWindowORM.window_start < cutoff_iso
                 for provider_id, pending in snapshot.items():
                     if (
                         pending.success_delta == 0
@@ -440,14 +461,23 @@ class _AdmissionController:
                         consecutive_failures=pending.consecutive_failures,
                         throttle_until=None,
                     )
+                    # Roll the window: when the existing one is stale, RESET
+                    # counts to just this flush's deltas (fresh window);
+                    # otherwise accumulate as before.
                     update_values: dict = {
-                        "success_count": (
-                            ProviderHealthWindowORM.success_count
-                            + pending.success_delta
+                        "success_count": case(
+                            (_stale, pending.success_delta),
+                            else_=ProviderHealthWindowORM.success_count
+                            + pending.success_delta,
                         ),
-                        "failure_count": (
-                            ProviderHealthWindowORM.failure_count
-                            + pending.failure_delta
+                        "failure_count": case(
+                            (_stale, pending.failure_delta),
+                            else_=ProviderHealthWindowORM.failure_count
+                            + pending.failure_delta,
+                        ),
+                        "window_start": case(
+                            (_stale, now_iso),
+                            else_=ProviderHealthWindowORM.window_start,
                         ),
                         "consecutive_failures": pending.consecutive_failures,
                     }
