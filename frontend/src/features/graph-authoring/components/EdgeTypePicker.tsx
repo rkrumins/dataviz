@@ -1,61 +1,58 @@
 /**
- * EdgeTypePickerPopover — after a connection resolves a (source, target) pair,
+ * EdgeTypePicker — after a connection resolves a valid (source, target) pair,
  * this floats at the drop point and offers ONLY the drawable raw lineage edge
- * types valid for that pair (per the resolved ontology). AGGREGATED and
- * containment/metadata types never appear. A type that fails the ontology is
- * shown disabled with the reason, so the choice is always explained.
+ * types for that pair (AGGREGATED / containment / metadata never appear). When
+ * multiple lineage types are valid the user disambiguates with the edge's
+ * direction semantics shown ("Source —TYPE→ Target"); a type that fails the
+ * ontology is shown disabled with the reason, so the choice is always explained.
+ * When exactly one type is allowed it auto-confirms.
  */
-import { useMemo, useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
-import { useRelationshipTypes, useContainmentEdgeTypes } from '@/store/schema'
-import { deriveConnectableEdges } from '@/services/ontologyPreflightService'
+import type { AllowedEdgeOption } from '../model/ontologyGuard'
 
-export interface EdgeTypePickerPopoverProps {
+export interface EdgeTypePickerProps {
   sourceId: string
   targetId: string
   /** Drop point in viewport coordinates. */
   position: { x: number; y: number }
+  /** Drawable options for this endpoint pair (from the controller). */
+  options: AllowedEdgeOption[]
   onPick: (edgeType: string) => void
   onCancel: () => void
 }
 
-export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, onCancel }: EdgeTypePickerPopoverProps) {
+export function EdgeTypePicker({ sourceId, targetId, position, options, onPick, onCancel }: EdgeTypePickerProps) {
   const nodes = useCanvasStore((s) => s.nodes)
-  const relationshipTypes = useRelationshipTypes()
-  const containmentEdgeTypes = useContainmentEdgeTypes()
   const ref = useRef<HTMLDivElement>(null)
-
-  const nodeType = (id: string) => {
+  const labelOf = (id: string) => {
     const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
-    return (n?.data?.type as string) || null
+    return (n?.data?.label as string) || id
   }
-  const sourceLabel = useMemo(() => {
-    const n = nodes.find((x) => x.id === sourceId || (x.data?.urn as string) === sourceId)
-    return (n?.data?.label as string) || sourceId
-  }, [nodes, sourceId])
-  const targetLabel = useMemo(() => {
-    const n = nodes.find((x) => x.id === targetId || (x.data?.urn as string) === targetId)
-    return (n?.data?.label as string) || targetId
-  }, [nodes, targetId])
+  const sourceLabel = labelOf(sourceId)
+  const targetLabel = labelOf(targetId)
 
-  const options = useMemo(
-    () => deriveConnectableEdges(nodeType(sourceId), nodeType(targetId), relationshipTypes, containmentEdgeTypes),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodes, sourceId, targetId, relationshipTypes, containmentEdgeTypes],
-  )
+  const allowed = useMemo(() => options.filter((o) => o.allowed), [options])
+
+  // Auto-confirm when exactly one type is allowed — no decision to make.
+  useEffect(() => {
+    if (allowed.length === 1) onPick(allowed[0].edgeType)
+  }, [allowed, onPick])
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onCancel() }
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
-    const t = setTimeout(() => document.addEventListener('mousedown', onDown), 0)
+    const t = window.setTimeout(() => document.addEventListener('mousedown', onDown), 0)
     document.addEventListener('keydown', onKey)
-    return () => { clearTimeout(t); document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
+    return () => { window.clearTimeout(t); document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
   }, [onCancel])
 
-  // Keep the popover on-screen near the drop point.
+  // Don't flash the popover when it's about to auto-confirm.
+  if (allowed.length === 1) return null
+
   const left = Math.min(position.x, window.innerWidth - 300)
   const top = Math.min(position.y, window.innerHeight - 320)
 
@@ -65,7 +62,7 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.12 }}
-      className="fixed z-[210] w-[280px] bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-2xl shadow-lg overflow-hidden"
+      className="fixed z-[210] w-[300px] bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-2xl shadow-lg overflow-hidden"
       style={{ left, top }}
     >
       <div className="px-4 py-3 border-b border-glass-border">
@@ -74,7 +71,7 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
             <LucideIcons.Spline className="w-4 h-4 text-accent-lineage" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-ink">Connect</h3>
+            <h3 className="text-sm font-semibold text-ink">Choose lineage type</h3>
             <p className="text-[10px] text-ink-muted truncate">{sourceLabel} → {targetLabel}</p>
           </div>
         </div>
@@ -98,7 +95,11 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
             <LucideIcons.ArrowRight className={cn('w-3.5 h-3.5 mt-0.5 flex-shrink-0', o.allowed ? 'text-accent-lineage' : 'text-ink-muted')} />
             <div className="min-w-0">
               <div className="text-sm font-medium truncate">{o.label}</div>
-              {(o.description || o.reason) && (
+              {/* Direction semantics — makes "which one" obvious for the user. */}
+              <div className="text-[10px] text-ink-muted truncate">
+                {sourceLabel} <span className="text-accent-lineage">—{o.edgeType}→</span> {targetLabel}
+              </div>
+              {(o.description || (!o.allowed && o.reason)) && (
                 <div className="text-[10px] text-ink-muted line-clamp-2">{o.allowed ? o.description : o.reason}</div>
               )}
             </div>
@@ -109,4 +110,4 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
   )
 }
 
-export default EdgeTypePickerPopover
+export default EdgeTypePicker

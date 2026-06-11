@@ -45,6 +45,8 @@ interface LayerColumnProps {
   onAddToLayer?: (layerId: string) => void
   /** When set (draft/authoring mode), enables the hover connection handle on cards. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+  /** Live connect drag context — drives valid-target ring / invalid-target dim on cards. */
+  connectContext?: { sourceId: string; validTypeIds: Set<string> } | null
   /** Right-click on empty space in this layer column (draft/authoring mode). */
   onLayerContextMenu?: (e: React.MouseEvent, layerId: string) => void
   traceFocusId: string | null
@@ -96,6 +98,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onAddChild,
   onAddToLayer,
   onBeginConnect,
+  connectContext,
   onLayerContextMenu,
   traceFocusId,
   traceNodes: _traceNodes,
@@ -1187,6 +1190,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}
                         onBeginConnect={onBeginConnect}
+                        connectContext={connectContext}
                       />
                     </div>
                   </div>

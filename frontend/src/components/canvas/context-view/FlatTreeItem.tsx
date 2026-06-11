@@ -45,6 +45,8 @@ interface FlatTreeItemProps {
   isSearchVisible?: boolean
   /** When set (draft/authoring mode), show the hover connection handle. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+  /** Live connect drag context — drives valid-target ring / invalid-target dim. */
+  connectContext?: { sourceId: string; validTypeIds: Set<string> } | null
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -74,10 +76,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onToggleSearch,
   isSearchVisible = false,
   onBeginConnect,
+  connectContext,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
   const isLogical = node.isLogical === true
+
+  // Connect-drag validity: while a connection is being drawn from another node,
+  // a legal target gets a ring and an illegal one dims — so the user sees where
+  // the edge may land before dropping (ontology, explained live).
+  const isConnectSource = connectContext?.sourceId === node.id
+  const isConnectValidTarget = !!connectContext && !isConnectSource && connectContext.validTypeIds.has(node.typeId)
+  const isConnectInvalidTarget = !!connectContext && !isConnectSource && !isConnectValidTarget
 
   // Staged-change indicator: a *direct* match wins, but if any descendant is
   // staged the row also tints (lighter) so the user can spot pending work
@@ -292,6 +302,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         stagedRowClass,
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40",
+        // Connect-drag: legal target gets a green ring, illegal target dims.
+        isConnectValidTarget && "ring-2 ring-success/70 ring-offset-1 ring-offset-canvas",
+        isConnectInvalidTarget && "opacity-30",
         // Jump-to-node arrival pulse — one-shot ring animation
         isPulsing && "lineage-pulse"
       )}

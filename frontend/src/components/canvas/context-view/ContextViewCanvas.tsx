@@ -57,9 +57,10 @@ import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { CanvasContextMenu } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette } from '../CommandPalette'
-import { useEdgeConnect } from '../edge-create/useEdgeConnect'
-import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
-import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
+import { useGraphAuthoring } from '@/features/graph-authoring/hooks/useGraphAuthoring'
+import { useConnectGesture } from '@/features/graph-authoring/hooks/useConnectGesture'
+import { ConnectOverlay } from '@/features/graph-authoring/components/ConnectOverlay'
+import { EdgeTypePicker } from '@/features/graph-authoring/components/EdgeTypePicker'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
@@ -337,15 +338,24 @@ export function ContextViewCanvas({
     return true
   }, [trace, removeStoreEdges])
 
-  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
-  // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
-  // before useEdgeConnect exists) can arm connect-mode on the selected node.
-  const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+  // Graph authoring controller — owns the create/connect/compose/edit-panel
+  // modes and all node/edge staging (the rebuilt authoring UX). The connect
+  // flow is driven entirely from here; useConnectGesture binds its pointer
+  // listeners. (Other CRUD entry points migrate off useCanvasInteractions in
+  // later steps.)
+  const isDraftMode = useIsDraftMode()
+  const authoring = useGraphAuthoring({
+    onExpandParent: (parentId) => setExpandedNodes((prev) => new Set(prev).add(parentId)),
+    notify: (message, kind) =>
+      useToastStore.getState().addToast({ type: kind === 'error' ? 'error' : 'info', message }),
+  })
+  useConnectGesture(authoring)
 
+  // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
-    onConnectMode: (nodeId) => { void ensureDraftOpen(); edgeConnectRef.current?.armConnect(nodeId) },
+    onConnectMode: (nodeId) => { void authoring.beginConnect(nodeId, 'armed') },
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
       // Implementation handled by the existing moveToLayer function
@@ -369,15 +379,6 @@ export function ContextViewCanvas({
     enabled: true,
     handlers: interactions.keyboardHandlers,
   })
-
-  // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
-  // stage a RAW create_edge. Only offered in draft (authoring) mode.
-  const isDraftMode = useIsDraftMode()
-  const edgeConnect = useEdgeConnect({
-    onConnect: (sourceUrn, targetUrn, edgeType) =>
-      interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
-  })
-  edgeConnectRef.current = edgeConnect
 
   // Aggregated lineage for progressive edge disclosure
   const {
@@ -2152,10 +2153,15 @@ export function ContextViewCanvas({
           )}
 
           {/* In-progress edge while dragging a connection (shares the overlay
-              coordinate space — absolute sibling inside the scroll container). */}
-          <ConnectionDragLayer
-            sourceId={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceId : null}
-            pointer={edgeConnect.state.pointer}
+              coordinate space — absolute sibling inside the scroll container).
+              Stroke turns valid/invalid as the hovered target enters/leaves the
+              source's legal target types. */}
+          <ConnectOverlay
+            sourceId={authoring.mode.kind === 'connect' && authoring.mode.via === 'drag' ? authoring.mode.sourceId : null}
+            pointer={authoring.mode.kind === 'connect' ? authoring.mode.pointer : null}
+            hoverTargetId={authoring.mode.kind === 'connect' ? authoring.mode.hoverTargetId : null}
+            validTypeIds={authoring.connectContext?.validTypeIds ?? null}
+            typeOf={(id) => (nodes.find((n) => n.id === id)?.data.type as string) ?? null}
           />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
@@ -2234,7 +2240,8 @@ export function ContextViewCanvas({
                   setCreationParentId(null)
                   setIsCreatingEntity(true)
                 }}
-                onBeginConnect={isDraftMode ? edgeConnect.beginDrag : undefined}
+                onBeginConnect={isDraftMode ? (id, start) => void authoring.beginConnect(id, 'drag', start) : undefined}
+                connectContext={authoring.connectContext}
                 onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
                   type: 'canvas',
                   position: { x: e.clientX, y: e.clientY },
@@ -2349,7 +2356,7 @@ export function ContextViewCanvas({
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
-        onConnect={isDraftMode ? (id) => edgeConnect.armConnect(id) : undefined}
+        onConnect={isDraftMode ? (id) => void authoring.beginConnect(id, 'armed') : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
@@ -2392,18 +2399,16 @@ export function ContextViewCanvas({
       />
 
       {/* Edge-type picker — appears at the drop point once a connection
-          resolves a (source, target). Offers only ontology-allowed raw
-          lineage types (never AGGREGATED). */}
-      {edgeConnect.state.mode === 'picking'
-        && edgeConnect.state.sourceId
-        && edgeConnect.state.targetId
-        && edgeConnect.state.pickerPos && (
-        <EdgeTypePickerPopover
-          sourceId={edgeConnect.state.sourceId}
-          targetId={edgeConnect.state.targetId}
-          position={edgeConnect.state.pickerPos}
-          onPick={edgeConnect.confirm}
-          onCancel={edgeConnect.cancel}
+          resolves a valid (source, target). Offers only ontology-allowed raw
+          lineage types (never AGGREGATED); auto-confirms a single option. */}
+      {authoring.mode.kind === 'edge-type-pick' && (
+        <EdgeTypePicker
+          sourceId={authoring.mode.sourceId}
+          targetId={authoring.mode.targetId}
+          position={authoring.mode.position}
+          options={authoring.edgeTypeOptions}
+          onPick={authoring.confirmEdgeType}
+          onCancel={authoring.cancel}
         />
       )}
     </div>
