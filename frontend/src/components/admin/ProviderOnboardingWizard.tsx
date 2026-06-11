@@ -60,6 +60,24 @@ interface SpannerFormState {
   useEmulator: boolean
 }
 
+type FalkorDBMode = 'standalone' | 'sentinel' | 'cluster'
+// A single host:port node. Kept as [host, port] tuples to match the backend
+// falkordbConnection node shape (also accepted as "host:port" / {host,port}).
+type HostPort = [string, number]
+
+interface FalkorDBConnectionState {
+  mode: FalkorDBMode
+  clusterStartupNodes: HostPort[]
+  sentinelMasterName: string
+  sentinelNodes: HostPort[]
+  // Dedicated cache Redis URL (write-only secret — blank on edit). May embed
+  // a password, so it travels via credentials, not extra_config.
+  cacheRedisUrl: string
+  // Advanced knobs kept as strings for the inputs; parsed on submit.
+  socketTimeout: string
+  graphPoolSize: string
+}
+
 interface ProviderOnboardingFormData {
   providerType: ProviderType | ''
   name: string
@@ -73,6 +91,8 @@ interface ProviderOnboardingFormData {
   // Spanner uses project/instance/database identifiers rather than host/port.
   // Field is optional because non-Spanner providers ignore it.
   spanner?: SpannerFormState
+  // FalkorDB connection topology (standalone / sentinel / cluster).
+  falkordbConnection?: FalkorDBConnectionState
 }
 
 interface ConnectivityCheck {
@@ -143,6 +163,16 @@ const DEFAULT_SPANNER_STATE: SpannerFormState = {
   useEmulator: false,
 }
 
+const DEFAULT_FALKORDB_CONNECTION: FalkorDBConnectionState = {
+  mode: 'standalone',
+  clusterStartupNodes: [],
+  sentinelMasterName: '',
+  sentinelNodes: [],
+  cacheRedisUrl: '',
+  socketTimeout: '',
+  graphPoolSize: '',
+}
+
 const DEFAULT_SCHEMA_MAPPING: SchemaMappingState = {
   identityField: 'urn',
   displayNameField: 'displayName',
@@ -171,10 +201,37 @@ function isSpanner(type: ProviderType | ''): boolean {
   return type === 'spanner'
 }
 
+// Normalize stored falkordbConnection nodes (arrays / {host,port} / "host:port")
+// into [host, port] tuples for the form.
+function hydrateNodes(raw: unknown): HostPort[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map((n): HostPort => {
+    if (Array.isArray(n)) return [String(n[0] ?? ''), Number(n[1] ?? 0)]
+    if (n && typeof n === 'object') {
+      const o = n as { host?: unknown; port?: unknown }
+      return [String(o.host ?? ''), Number(o.port ?? 0)]
+    }
+    if (typeof n === 'string') {
+      const idx = n.lastIndexOf(':')
+      return idx > 0 ? [n.slice(0, idx), Number(n.slice(idx + 1))] : [n, 0]
+    }
+    return ['', 0]
+  })
+}
+
+// Drop empty rows and coerce the port to a number on submit.
+function cleanNodes(nodes: HostPort[]): HostPort[] {
+  return nodes
+    .filter((n) => n[0] && n[0].trim())
+    .map((n): HostPort => [n[0].trim(), Number(n[1]) || 0])
+}
+
 function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
   const schemaMapping = provider?.extraConfig?.schemaMapping
   const extra = provider?.extraConfig ?? {}
   const isSpannerProvider = provider?.providerType === 'spanner'
+  const isFalkorDBProvider = provider?.providerType === 'falkordb'
+  const fdbConn = (isFalkorDBProvider && extra.falkordbConnection) || {}
 
   return {
     providerType: provider?.providerType ?? '',
@@ -205,6 +262,19 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
           useEmulator: Boolean(extra.useEmulator),
         }
       : { ...DEFAULT_SPANNER_STATE },
+    falkordbConnection: isFalkorDBProvider
+      ? {
+          mode: (fdbConn.mode as FalkorDBMode) ?? 'standalone',
+          clusterStartupNodes: hydrateNodes(fdbConn.cluster?.startupNodes),
+          sentinelMasterName: fdbConn.sentinel?.masterName ?? '',
+          sentinelNodes: hydrateNodes(fdbConn.sentinel?.nodes),
+          // Cache Redis URL is a write-only secret (carried in credentials,
+          // never echoed back) — blank on edit, like the password.
+          cacheRedisUrl: '',
+          socketTimeout: fdbConn.socketTimeout != null ? String(fdbConn.socketTimeout) : '',
+          graphPoolSize: fdbConn.graphPoolSize != null ? String(fdbConn.graphPoolSize) : '',
+        }
+      : { ...DEFAULT_FALKORDB_CONNECTION },
   }
 }
 
@@ -232,26 +302,58 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
     if (!IS_PROD_BUILD && s.useEmulator) out.useEmulator = true
   }
 
+  if (formData.providerType === 'falkordb' && formData.falkordbConnection) {
+    const fc = formData.falkordbConnection
+    const conn: Record<string, unknown> = {}
+    if (fc.mode === 'sentinel') {
+      conn.mode = 'sentinel'
+      conn.sentinel = { masterName: fc.sentinelMasterName.trim(), nodes: cleanNodes(fc.sentinelNodes) }
+    } else if (fc.mode === 'cluster') {
+      conn.mode = 'cluster'
+      conn.cluster = { startupNodes: cleanNodes(fc.clusterStartupNodes) }
+    }
+    const st = parseFloat(fc.socketTimeout)
+    if (fc.socketTimeout.trim() && !Number.isNaN(st)) conn.socketTimeout = st
+    const gp = parseInt(fc.graphPoolSize, 10)
+    if (fc.graphPoolSize.trim() && !Number.isNaN(gp)) conn.graphPoolSize = gp
+    // Emit only when non-standalone OR an advanced knob is set; standalone
+    // with no knobs stays the legacy single-host path (no key written).
+    if (conn.mode || conn.socketTimeout != null || conn.graphPoolSize != null) {
+      out.falkordbConnection = { mode: conn.mode ?? 'standalone', ...conn }
+    }
+  }
+
   return Object.keys(out).length > 0 ? out : undefined
+}
+
+// Build the credentials payload, shared by the test, create, and update
+// paths so each carries the same secrets (incl. FalkorDB's cache_redis_url).
+function buildCredentials(formData: ProviderOnboardingFormData) {
+  if (isSpanner(formData.providerType)) {
+    return formData.spanner?.serviceAccountJson || formData.spanner?.projectId
+      ? {
+          project_id: formData.spanner?.projectId || undefined,
+          service_account_json: formData.spanner?.serviceAccountJson || undefined,
+        }
+      : undefined
+  }
+  const cacheRedisUrl =
+    formData.providerType === 'falkordb'
+      ? formData.falkordbConnection?.cacheRedisUrl?.trim() || undefined
+      : undefined
+  if (!formData.username && !formData.password && !cacheRedisUrl) return undefined
+  return {
+    username: formData.username || undefined,
+    password: formData.password || undefined,
+    cache_redis_url: cacheRedisUrl,
+  }
 }
 
 function buildConnectivityRequest(formData: ProviderOnboardingFormData): ProviderCreateRequest {
   // Spanner doesn't use host/port/username/password; build credentials and
   // skip host/port for that branch. Other providers stay on the legacy shape.
   const isSpannerType = isSpanner(formData.providerType)
-
-  const credentials = isSpannerType
-    ? (
-        formData.spanner?.serviceAccountJson || formData.spanner?.projectId
-          ? {
-              project_id: formData.spanner?.projectId || undefined,
-              service_account_json: formData.spanner?.serviceAccountJson || undefined,
-            }
-          : undefined
-      )
-    : (formData.username || formData.password)
-      ? { username: formData.username || undefined, password: formData.password || undefined }
-      : undefined
+  const credentials = buildCredentials(formData)
 
   return {
     name: formData.name.trim() || 'Connectivity Check',
@@ -424,6 +526,17 @@ export function ProviderOnboardingWizard({
           // In emulator mode the service-account JSON is optional.
           if (!s.useEmulator && !s.serviceAccountJson.trim()) return false
         }
+        // FalkorDB sentinel/cluster need a valid node list before probing.
+        if (formData.providerType === 'falkordb' && formData.falkordbConnection) {
+          const fc = formData.falkordbConnection
+          const validNodes = (nodes: HostPort[]) =>
+            nodes.length > 0 && nodes.every((n) => n[0]?.trim() && Number(n[1]) > 0)
+          if (fc.mode === 'sentinel') {
+            if (!fc.sentinelMasterName.trim() || !validNodes(fc.sentinelNodes)) return false
+          } else if (fc.mode === 'cluster') {
+            if (!validNodes(fc.clusterStartupNodes)) return false
+          }
+        }
         return true
       }
       case 'schema':
@@ -431,7 +544,7 @@ export function ProviderOnboardingWizard({
       case 'review':
         return true
     }
-  }, [currentStep, formData.name, formData.providerType, nameDuplicate])
+  }, [currentStep, formData.name, formData.providerType, formData.spanner, formData.falkordbConnection, nameDuplicate])
 
   const stepWarnings = useMemo(() => {
     if (currentStep === 'connection') {
@@ -503,6 +616,66 @@ export function ProviderOnboardingWizard({
   const updateFormData = useCallback((updates: Partial<ProviderOnboardingFormData>) => {
     setFormData((previous) => ({ ...previous, ...updates }))
   }, [])
+
+  const updateFalkorConn = useCallback((updates: Partial<FalkorDBConnectionState>) => {
+    setFormData((previous) => ({
+      ...previous,
+      falkordbConnection: {
+        ...(previous.falkordbConnection ?? DEFAULT_FALKORDB_CONNECTION),
+        ...updates,
+      },
+    }))
+  }, [])
+
+  // Repeatable host:port row editor for sentinel/cluster node lists.
+  const renderNodeRows = (
+    nodesKey: 'clusterStartupNodes' | 'sentinelNodes',
+    defaultPort: number,
+  ) => {
+    const nodes = formData.falkordbConnection?.[nodesKey] ?? []
+    const setNodes = (next: HostPort[]) =>
+      updateFalkorConn({ [nodesKey]: next } as Partial<FalkorDBConnectionState>)
+    return (
+      <div className="space-y-2">
+        {nodes.map((node, idx) => (
+          <div key={idx} className="flex gap-2">
+            <input
+              value={node[0]}
+              onChange={(e) =>
+                setNodes(nodes.map((n, i): HostPort => (i === idx ? [e.target.value, n[1]] : n)))
+              }
+              placeholder="host"
+              className="flex-1 rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+            />
+            <input
+              type="number"
+              value={node[1]}
+              onChange={(e) =>
+                setNodes(nodes.map((n, i): HostPort => (i === idx ? [n[0], Number(e.target.value)] : n)))
+              }
+              placeholder="port"
+              className="w-24 rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+            />
+            <button
+              type="button"
+              onClick={() => setNodes(nodes.filter((_, i) => i !== idx))}
+              className="rounded-lg px-2 text-red-500 hover:bg-red-500/10"
+              aria-label="Remove node"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => setNodes([...nodes, ['', defaultPort]])}
+          className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-700"
+        >
+          <Plus className="h-3.5 w-3.5" /> Add node
+        </button>
+      </div>
+    )
+  }
 
   const goNext = useCallback(() => {
     if (!canProceed) return
@@ -630,9 +803,7 @@ export function ProviderOnboardingWizard({
           host: formData.host || undefined,
           port: formData.port || undefined,
           tlsEnabled: formData.tlsEnabled,
-          credentials: (formData.username || formData.password)
-            ? { username: formData.username || undefined, password: formData.password || undefined }
-            : undefined,
+          credentials: buildCredentials(formData),
           extraConfig: buildExtraConfig(formData),
         }
         const updated = await providerService.update(provider.id, req)
@@ -923,6 +1094,119 @@ export function ProviderOnboardingWizard({
                   />
                 </div>
               </div>
+
+              {formData.providerType === 'falkordb' && (
+                <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2">
+                    <Server className="h-4 w-4 text-amber-500" />
+                    <p className="text-sm font-medium text-ink">Connection topology</p>
+                  </div>
+
+                  <div>
+                    <label className="mb-1.5 block text-xs font-medium text-ink">Mode</label>
+                    <select
+                      value={formData.falkordbConnection?.mode ?? 'standalone'}
+                      onChange={(event) =>
+                        updateFalkorConn({ mode: event.target.value as FalkorDBMode })
+                      }
+                      className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    >
+                      <option value="standalone">Standalone (single host)</option>
+                      <option value="sentinel">Redis Sentinel (HA)</option>
+                      <option value="cluster">Redis Cluster</option>
+                    </select>
+                    <p className="mt-1 text-[11px] leading-tight text-ink-muted">
+                      Standalone uses the Host/Port above. A single FalkorDB graph lives on one
+                      cluster shard — cluster mode routes to the shard that owns the graph key.
+                    </p>
+                  </div>
+
+                  {formData.falkordbConnection?.mode === 'cluster' && (
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-ink">
+                        Cluster startup nodes
+                      </label>
+                      {renderNodeRows('clusterStartupNodes', 6379)}
+                    </div>
+                  )}
+
+                  {formData.falkordbConnection?.mode === 'sentinel' && (
+                    <>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-ink">
+                          Sentinel master name
+                        </label>
+                        <input
+                          value={formData.falkordbConnection?.sentinelMasterName ?? ''}
+                          onChange={(event) =>
+                            updateFalkorConn({ sentinelMasterName: event.target.value })
+                          }
+                          placeholder="mymaster"
+                          className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-ink">
+                          Sentinel nodes
+                        </label>
+                        {renderNodeRows('sentinelNodes', 26379)}
+                      </div>
+                    </>
+                  )}
+
+                  <div>
+                    <label className="mb-1.5 block text-xs font-medium text-ink">
+                      Dedicated cache Redis URL <span className="text-ink-muted">(optional)</span>
+                    </label>
+                    <input
+                      type="password"
+                      value={formData.falkordbConnection?.cacheRedisUrl ?? ''}
+                      onChange={(event) => updateFalkorConn({ cacheRedisUrl: event.target.value })}
+                      placeholder={
+                        mode === 'edit'
+                          ? 'unchanged — enter to replace'
+                          : 'redis://:password@cache-host:6379/0'
+                      }
+                      className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    />
+                    <p className="mt-1 text-[11px] leading-tight text-ink-muted">
+                      Recommended in cluster mode (the ancestor/idempotency cache needs a dedicated
+                      Redis). Stored encrypted; leave blank to keep the current value.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-ink">
+                        Socket timeout (s)
+                      </label>
+                      <input
+                        type="number"
+                        value={formData.falkordbConnection?.socketTimeout ?? ''}
+                        onChange={(event) =>
+                          updateFalkorConn({ socketTimeout: event.target.value })
+                        }
+                        placeholder="10"
+                        className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium text-ink">
+                        Graph pool size
+                      </label>
+                      <input
+                        type="number"
+                        value={formData.falkordbConnection?.graphPoolSize ?? ''}
+                        onChange={(event) =>
+                          updateFalkorConn({ graphPoolSize: event.target.value })
+                        }
+                        placeholder="24"
+                        className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>

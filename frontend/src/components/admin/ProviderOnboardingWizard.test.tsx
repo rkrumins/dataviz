@@ -46,7 +46,9 @@ async function moveToReviewStep() {
   const textboxes = await screen.findAllByRole('textbox')
   await user.type(textboxes[0], 'Warehouse Graph')
   await user.type(textboxes[1], 'graph.internal')
-  const portInput = screen.getByRole('spinbutton')
+  // Port is the first spinbutton; the FalkorDB topology section adds more
+  // (socket timeout, pool size), so target by DOM order rather than uniqueness.
+  const portInput = screen.getAllByRole('spinbutton')[0]
   await user.clear(portInput)
   await user.type(portInput, '6379')
   await user.click(screen.getByRole('button', { name: /^next$/i }))
@@ -93,5 +95,38 @@ describe('ProviderOnboardingWizard connectivity checks', () => {
     })
     expect(screen.getByText(/connection refused/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /create provider/i })).toBeInTheDocument()
+  })
+
+  it('serializes FalkorDB cluster topology into the test-connection request', async () => {
+    const testConnection = vi.mocked((providerService as any).testConnection)
+    testConnection.mockResolvedValue({ success: true, latencyMs: 5 })
+
+    const user = userEvent.setup()
+    renderWizard()
+    await user.click(screen.getByRole('button', { name: /falkordb/i }))
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+
+    await screen.findByText(/connect your provider/i)
+    const textboxes = await screen.findAllByRole('textbox')
+    await user.type(textboxes[0], 'Cluster Graph')
+
+    // Switch topology to cluster and add one startup node.
+    await user.selectOptions(screen.getByRole('combobox'), 'cluster')
+    await user.click(screen.getByRole('button', { name: /add node/i }))
+    const hostInputs = await screen.findAllByPlaceholderText('host')
+    await user.type(hostInputs[hostInputs.length - 1], 'node-a')
+    const portInputs = screen.getAllByPlaceholderText('port')
+    await user.clear(portInputs[portInputs.length - 1])
+    await user.type(portInputs[portInputs.length - 1], '7001')
+
+    await user.click(screen.getByRole('button', { name: /^next$/i }))
+    await user.click(screen.getByRole('button', { name: /test connection/i }))
+
+    await waitFor(() => expect(testConnection).toHaveBeenCalled())
+    const payload = testConnection.mock.calls[0][0]
+    expect(payload.extraConfig.falkordbConnection.mode).toBe('cluster')
+    expect(payload.extraConfig.falkordbConnection.cluster.startupNodes).toEqual([
+      ['node-a', 7001],
+    ])
   })
 })
