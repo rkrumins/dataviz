@@ -50,16 +50,25 @@ class Delta:
 def materialize(base_state: Mapping[str, Optional[dict]], ops: List[Mapping]) -> State:
     """Apply ordered working-change *ops* onto *base_state* → head state.
 
-    Each op is ``{"entity_id", "op", "payload"}``.  ``payload`` is the full entity
-    payload; ``delete`` sets a tombstone (``None``).
+    Each op is ``{"entity_id", "op", "payload"}``.  ``delete`` sets a tombstone
+    (``None``).  A ``create`` replaces the entity wholesale; an ``update`` is a
+    field-level PATCH — its payload is merged onto the entity's current value so
+    fields it doesn't mention (urn, displayName, qualifiedName, …) are preserved.
+    (The canvas sends partial update payloads — only the edited fields — so a
+    wholesale replace here would silently strip the rest and surface as blank
+    names + lost properties once a publish/merge projects the truncated entity.
+    Full-payload callers are unaffected: every field is present in the merge.)
     """
     state: State = dict(base_state)
     for op in ops:
         eid = op["entity_id"]
-        if op["op"] == "delete":
+        payload = op.get("payload")
+        if op["op"] == "delete" or payload is None:
             state[eid] = None
-        else:                                   # create | update → full replace
-            state[eid] = dict(op["payload"]) if op.get("payload") is not None else None
+        elif op["op"] == "update" and isinstance(state.get(eid), dict):
+            state[eid] = {**state[eid], **dict(payload)}     # PATCH: merge onto current
+        else:                                                # create → full replace
+            state[eid] = dict(payload)
     return state
 
 

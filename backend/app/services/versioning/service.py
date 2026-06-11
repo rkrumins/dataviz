@@ -3268,15 +3268,29 @@ class GraphVersioningService:
             # Resolve ops → new payloads for the AFFECTED entities only.
             new_vals: Dict[str, Optional[dict]] = {}
             kind_by_entity: Dict[str, str] = {}
+            update_ids: set = set()
             for op in ops:
                 eid = op["entity_id"]
                 payload = op.get("payload") or {}
                 kind_by_entity[eid] = (op.get("entity_kind")
                                        or ("edge" if _is_edge_payload(payload) else "node"))
                 new_vals[eid] = None if op["op"] == "delete" else dict(payload)
+                if op["op"] == "update":
+                    update_ids.add(eid)
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
+
+            # An `update` is a PATCH: merge its fields onto the entity's current value. A version row
+            # stores the FULL payload (composition is last-writer-wins per ENTITY, not per field), so a
+            # partial update — e.g. the canvas sends only displayName + properties — would otherwise
+            # REPLACE the whole payload and silently erase urn/qualifiedName/etc. That truncation stays
+            # invisible on the draft (the overlay still has the base row) but a publish/merge writes the
+            # stripped payload onto main: blank names (the node falls back to its urn) and lost
+            # properties. Merging here preserves every field the op didn't mention.
+            for eid in update_ids:
+                if new_vals.get(eid) is not None:
+                    new_vals[eid] = {**(cur_vals.get(eid) or {}), **new_vals[eid]}
 
             # Cascade a node delete to its containment subtree (ontology-driven) AND every
             # live edge incident to any deleted node (source or target, ANY type) — so no
