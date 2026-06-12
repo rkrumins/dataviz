@@ -700,6 +700,12 @@ class ProviderManager:
             # legacy single-host path. Previously extra_config was dropped
             # on the FalkorDB branch (only Neo4j/Spanner consumed it).
             _falkor_conn = (extra_config or {}).get("falkordbConnection")
+            # Per-provider auth gate (extra_config.falkordbConnection.authEnabled,
+            # default true). When false, the provider nulls the graph
+            # credentials at a single chokepoint so no AUTH leaks to an
+            # unauthenticated FalkorDB (a dedicated cache_redis_url keeps its
+            # own embedded auth).
+            _auth_enabled = (_falkor_conn or {}).get("authEnabled", True)
             return FalkorDBProvider(
                 host=host or "localhost",
                 port=port or 6379,
@@ -709,6 +715,7 @@ class ProviderManager:
                 connection_config=_falkor_conn,
                 # Per-provider dedicated cache Redis (encrypted credential).
                 cache_redis_url=creds.get("cache_redis_url"),
+                auth_enabled=_auth_enabled,
             )
 
         elif ptype == "neo4j":

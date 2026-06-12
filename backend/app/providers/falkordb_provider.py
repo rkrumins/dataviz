@@ -423,6 +423,7 @@ class FalkorDBProvider(GraphDataProvider):
         password: Optional[str] = None,
         connection_config: Optional[dict] = None,
         cache_redis_url: Optional[str] = None,
+        auth_enabled: bool = True,
     ):
         # IPv6 dual-stack guard: "localhost" resolves to BOTH ::1 and
         # 127.0.0.1, and Docker commonly publishes IPv4 only, so the redis
@@ -459,8 +460,19 @@ class FalkorDBProvider(GraphDataProvider):
         # breaker storms. They're now plumbed end-to-end:
         #   __init__ → preflight (RESP AUTH before PING)
         #            → _ensure_connected (driver auth via from_url args)
-        self._username = username
-        self._password = password
+        #
+        # Per-provider auth gate (extra_config.falkordbConnection.authEnabled,
+        # default true). When auth is DISABLED for this provider, null the
+        # FalkorDB graph credentials at this single chokepoint so NOTHING
+        # downstream sends AUTH — the graph pool kwargs, preflight's AUTH-
+        # before-PING, load_connection_config(), and the cache-Redis fallback
+        # (which inherits cfg.username/password) all read these fields. This
+        # prevents credential leakage / NOAUTH storms against an
+        # unauthenticated FalkorDB. A dedicated cache_redis_url keeps its own
+        # embedded auth (separate server) and is intentionally NOT gated.
+        self._auth_enabled = auth_enabled
+        self._username = username if auth_enabled else None
+        self._password = password if auth_enabled else None
         self._graph = None
         self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None       # Graph query pool (used by FalkorDB)
@@ -2978,20 +2990,123 @@ class FalkorDBProvider(GraphDataProvider):
                 "tl": url_levels.get(t),
             })
 
-        # Execute ONE Cypher UNWIND+MERGE per sub-batch.  The Cypher
-        # REDUCE accumulates all edge types into sourceEdgeTypes in a
-        # single pass — no per-edge-type iteration needed.
+        # Execute the MERGE as one or more (cypher, batch) work units. In
+        # dedicated projection mode the units are LABELED node merges grouped
+        # by resolved (srcLabel, tgtLabel) so the per-label URN index serves
+        # the match — removing the dependency on the FalkorDB >=2.10 unlabeled
+        # URN index. in_source mode stays a single unlabeled unit. Each unit
+        # runs through the shared adaptive sub-batch loop.
+        work_units = await self._build_aggregated_merge_units(merge_batch)
 
+        created = 0
+        for unit_cypher, unit_batch in work_units:
+            created += await self._run_aggregated_merge_loop(
+                unit_cypher, unit_batch,
+                baseline_aggregated=baseline_aggregated,
+                running_created=created,
+                intra_batch_callback=intra_batch_callback,
+                should_cancel=should_cancel,
+            )
+
+        return created, 0
+
+    # Shared SET tail for the incremental AGGREGATED MERGE — identical for the
+    # labeled and unlabeled node-match variants. ``coalesce`` never regresses
+    # known level metadata to NULL; REDUCE unions sourceEdgeTypes in one pass.
+    _AGG_MERGE_SET = (
+        "MERGE (s)-[r:AGGREGATED]->(t) "
+        "SET r.weight = item.w, "
+        "    r.latestUpdate = timestamp(), "
+        "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
+        "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+        "    r.sourceEdgeTypes = REDUCE(acc = "
+        "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
+        "           ELSE r.sourceEdgeTypes END, "
+        "      et IN item.et | "
+        "      CASE WHEN et IN acc THEN acc "
+        "           ELSE acc + et END)"
+    )
+    _AGG_MERGE_UNLABELED = (
+        "UNWIND $batch AS item MERGE (s {urn: item.s}) MERGE (t {urn: item.t}) "
+        + _AGG_MERGE_SET
+    )
+
+    async def _build_aggregated_merge_units(
+        self, merge_batch: list[dict[str, Any]],
+    ) -> list[tuple[str, list[dict[str, Any]]]]:
+        """Split an incremental MERGE batch into (cypher, batch) work units.
+
+        ``in_source`` mode → one unlabeled unit (the real entity nodes already
+        carry labels in the source graph). ``dedicated`` mode → one LABELED
+        unit per resolved ``(srcLabel, tgtLabel)`` group plus an unlabeled
+        remainder for pairs whose labels can't be resolved (correctness is
+        preserved — those few fall back rather than being dropped, unlike the
+        bulk-rebuild path). Labeled MERGE lets the per-label URN index serve
+        the node match in the synthetic projection graph, so the write path no
+        longer depends on the FalkorDB >=2.10 unlabeled URN index.
+        """
+        if not merge_batch:
+            return []
+        if self._projection_mode != "dedicated":
+            return [(self._AGG_MERGE_UNLABELED, merge_batch)]
+
+        urns = {it["s"] for it in merge_batch} | {it["t"] for it in merge_batch}
+        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
+
+        labeled: Dict[Tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        unlabeled: list[dict[str, Any]] = []
+        for it in merge_batch:
+            sl = urn_label_map.get(it["s"])
+            tl = urn_label_map.get(it["t"])
+            if sl and tl:
+                labeled[(sl, tl)].append(it)
+            else:
+                unlabeled.append(it)
+
+        labels = {lbl for pair in labeled for lbl in pair}
+        if labels:
+            # Per-label URN indexes on the projection graph make the labeled
+            # MATCH an index seek instead of a scan.
+            await self._ensure_label_urn_indexes(labels)
+
+        units: list[tuple[str, list[dict[str, Any]]]] = []
+        for (sl, tl), items in labeled.items():
+            cypher = (
+                f"UNWIND $batch AS item "
+                f"MERGE (s:{_sanitize_label(sl)} {{urn: item.s}}) "
+                f"MERGE (t:{_sanitize_label(tl)} {{urn: item.t}}) "
+                + self._AGG_MERGE_SET
+            )
+            units.append((cypher, items))
+        if unlabeled:
+            units.append((self._AGG_MERGE_UNLABELED, unlabeled))
+        return units
+
+    async def _run_aggregated_merge_loop(
+        self,
+        merge_cypher: str,
+        merge_batch: list[dict[str, Any]],
+        *,
+        baseline_aggregated: int,
+        running_created: int,
+        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """Run ``merge_cypher`` over ``merge_batch`` in adaptive sub-batches.
+
+        Shared by the labeled and unlabeled incremental MERGE units:
+        cooperative cancel between sub-batches, AIMD sub-batch sizing under
+        provider load, and the intra-batch progress heartbeat. Returns the
+        count created in THIS call; the progress callback reports
+        ``baseline_aggregated + running_created + <created-so-far>`` so a job
+        spanning several units still shows a monotonic running total.
+        """
         created = 0
         chunk_start = 0
         while chunk_start < len(merge_batch):
             # Cooperative cancel between MERGE sub-batches. The previous
-            # sub-batch's MERGE has fully landed in FalkorDB before we
-            # reach this check, so raising here cannot orphan a Cypher
-            # transaction. Without this hook, a single outer batch
-            # (~100+ sub-batches over several minutes) cannot be
-            # cancelled without ``task.cancel()`` interrupting a
-            # mid-flight MERGE.
+            # sub-batch's MERGE has fully landed in FalkorDB before we reach
+            # this check, so raising here cannot orphan a Cypher transaction.
             if should_cancel is not None and should_cancel():
                 from backend.app.services.aggregation.cancel import JobCancelled
                 from datetime import datetime, timezone
@@ -3000,38 +3115,15 @@ class FalkorDBProvider(GraphDataProvider):
                     observed_at=datetime.now(timezone.utc).isoformat(),
                 )
 
-            # Adaptive sub-batch size: starts at the ceiling and shrinks
-            # toward _MERGE_SUB_BATCH_MIN when MERGE latency creeps past
-            # _MERGE_SUB_BATCH_TARGET_HIGH_S. This is the WS1.4 backpressure
-            # mechanism — when FalkorDB CPU spikes, sub-batches slow down,
-            # and shrinking the size both reduces per-call MERGE work and
-            # makes the cooperative-cancel check fire more often.
+            # Adaptive sub-batch size: starts at the ceiling and shrinks toward
+            # _MERGE_SUB_BATCH_MIN when MERGE latency creeps past the high
+            # target — the WS1.4 backpressure mechanism.
             sub_batch_size = self._aggregation_sub_batch_size
             chunk = merge_batch[chunk_start:chunk_start + sub_batch_size]
             chunk_start += len(chunk)
 
             t_merge_start = time.monotonic()
-            await self._proj_query(
-                "UNWIND $batch AS item "
-                "MERGE (s {urn: item.s}) "
-                "MERGE (t {urn: item.t}) "
-                "MERGE (s)-[r:AGGREGATED]->(t) "
-                "SET r.weight = item.w, "
-                "    r.latestUpdate = timestamp(), "
-                # Level-pair fast-path props. ``coalesce`` keeps a previously
-                # backfilled value when the new resolution couldn't find a
-                # label (cold cache / unknown entity type) — never regresses
-                # known level metadata to NULL.
-                "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
-                "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
-                "    r.sourceEdgeTypes = REDUCE(acc = "
-                "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
-                "           ELSE r.sourceEdgeTypes END, "
-                "      et IN item.et | "
-                "      CASE WHEN et IN acc THEN acc "
-                "           ELSE acc + et END)",
-                params={"batch": chunk},
-            )
+            await self._proj_query(merge_cypher, params={"batch": chunk})
             t_merge_elapsed = time.monotonic() - t_merge_start
             created += len(chunk)
 
@@ -3076,34 +3168,21 @@ class FalkorDBProvider(GraphDataProvider):
                 # only triggers after a run of clearly-under-target calls.
                 self._aggregation_sub_batch_under_target_run = 0
 
-            # Intra-batch heartbeat. A single outer batch fans out to
-            # tens of thousands of ancestor pairs and runs ~100+ Cypher
-            # MERGE sub-batches; each sub-batch is ~1–3s, so the outer
-            # batch can take many minutes. Without an intra-batch hook
-            # the worker's checkpoint can't update ``created_edges`` /
-            # ``last_checkpoint_at`` for the duration, leaving the UI
-            # apparently frozen even though aggregation is making
-            # steady progress in FalkorDB.
-            #
-            # The callback receives the running aggregated total
-            # (across all completed outer batches up to and including
-            # this sub-batch). It deliberately doesn't touch the input
-            # cursor — that's the caller's job after the full outer
-            # batch lands, so a mid-batch crash still resumes from the
-            # last fully-committed boundary (writes are idempotent via
-            # MERGE + the SADD idempotency tracker, but we keep the
-            # boundary clean for clarity).
+            # Intra-batch heartbeat so the worker's checkpoint can update
+            # created_edges / last_checkpoint_at during a multi-minute outer
+            # batch instead of the UI appearing frozen.
             if intra_batch_callback is not None:
                 try:
-                    await intra_batch_callback(baseline_aggregated + created)
+                    await intra_batch_callback(
+                        baseline_aggregated + running_created + created
+                    )
                 except Exception as cb_exc:
                     logger.error(
                         "Intra-batch progress callback failed at sub-batch "
                         "ending %d (continuing): %s",
                         chunk_start + len(chunk), cb_exc, exc_info=True,
                     )
-
-        return created, 0
+        return created
 
     # ====================================================================== #
     # Bulk Rebuild Path (Phase 1 of aggregation hardening)                    #

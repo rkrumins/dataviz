@@ -230,6 +230,10 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
                 raise ValueError
         except (TypeError, ValueError):
             raise ValueError(f"falkordbConnection.{key} must be {label}.")
+    # Per-provider auth gate. Optional; when present must be a bool. False
+    # disables FalkorDB graph AUTH for this provider (anonymous connect).
+    if "authEnabled" in fc and not isinstance(fc.get("authEnabled"), bool):
+        raise ValueError("falkordbConnection.authEnabled must be a boolean.")
 
 
 class ProviderCreateRequest(BaseModel):

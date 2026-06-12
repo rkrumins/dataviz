@@ -306,3 +306,66 @@ async def test_no_lineage_types_is_noop(monkeypatch):
     )
     assert res["processed"] == 0
     assert res["aggregated_edges_affected"] == 0
+
+
+# ── incremental labeled-MERGE work units (dedicated projection) ──────
+
+@pytest.mark.asyncio
+async def test_in_source_yields_single_unlabeled_unit():
+    p = _make_provider()
+    p._projection_mode = "in_source"
+    batch = [{"s": "a", "t": "b", "w": 1, "et": ["X"], "sl": None, "tl": None}]
+    units = await p._build_aggregated_merge_units(batch)
+    assert len(units) == 1
+    cypher, items = units[0]
+    assert items == batch
+    assert "MERGE (s {urn: item.s})" in cypher  # unlabeled
+    assert ":AGGREGATED" in cypher
+
+
+@pytest.mark.asyncio
+async def test_dedicated_groups_labeled_units(monkeypatch):
+    p = _make_provider()
+    p._projection_mode = "dedicated"
+
+    labels = {"a1": "Dataset", "b1": "Domain", "a2": "Dataset", "b2": "Domain",
+              "c": "Table", "d": None}
+
+    async def fake_resolve(urns):
+        return {u: labels.get(u) for u in urns}
+
+    ensured = {}
+
+    async def fake_ensure(lbls):
+        ensured["labels"] = set(lbls)
+
+    monkeypatch.setattr(p, "_resolve_urn_labels_bulk", fake_resolve)
+    monkeypatch.setattr(p, "_ensure_label_urn_indexes", fake_ensure)
+
+    batch = [
+        {"s": "a1", "t": "b1", "w": 1, "et": ["X"], "sl": None, "tl": None},
+        {"s": "a2", "t": "b2", "w": 1, "et": ["X"], "sl": None, "tl": None},
+        {"s": "c", "t": "d", "w": 1, "et": ["X"], "sl": None, "tl": None},  # d unresolved
+    ]
+    units = await p._build_aggregated_merge_units(batch)
+
+    labeled = [u for u in units if "MERGE (s:" in u[0]]
+    unlabeled = [u for u in units if "MERGE (s {urn: item.s})" in u[0]]
+
+    # Both (Dataset,Domain) pairs collapse into ONE labeled unit (2 items).
+    assert len(labeled) == 1
+    assert "MERGE (s:Dataset {urn: item.s})" in labeled[0][0]
+    assert "MERGE (t:Domain {urn: item.t})" in labeled[0][0]
+    assert len(labeled[0][1]) == 2
+    # The unresolved-label pair falls back to the unlabeled unit.
+    assert len(unlabeled) == 1
+    assert unlabeled[0][1] == [batch[2]]
+    # Per-label URN indexes ensured for the resolved labels only.
+    assert ensured["labels"] == {"Dataset", "Domain"}
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_yields_no_units():
+    p = _make_provider()
+    p._projection_mode = "dedicated"
+    assert await p._build_aggregated_merge_units([]) == []
