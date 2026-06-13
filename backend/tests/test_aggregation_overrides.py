@@ -319,7 +319,8 @@ async def test_trigger_without_overrides_preserves_default_behaviour(
 
 async def test_resume_with_overrides_updates_orm_fields() -> None:
     """Resume with overrides bumps timeout_secs / max_retries and
-    preserves last_cursor; status flips to pending; retry_count + 1."""
+    preserves last_cursor; status flips to pending; the AUTOMATED retry
+    budget is reset to 0 (manual resume never consumes it)."""
     job = _seed_required_orm_defaults(AggregationJobORM(
         id="agg_failedjob01",
         data_source_id="ds_xyz",
@@ -343,7 +344,7 @@ async def test_resume_with_overrides_updates_orm_fields() -> None:
     assert job.max_retries == 10
     assert job.last_cursor == "abc123", "last_cursor must be preserved on resume"
     assert job.status == "pending"
-    assert job.retry_count == 3
+    assert job.retry_count == 0  # automated budget reset on manual resume
     assert response.timeout_secs == 14400
     assert response.max_retries == 10
     assert response.last_cursor == "abc123"
@@ -375,7 +376,7 @@ async def test_resume_accepts_cancelled_status() -> None:
 
     assert response.status == "pending"
     assert job.status == "pending"
-    assert job.retry_count == 2
+    assert job.retry_count == 0  # automated budget reset on manual resume
     assert job.last_cursor == "cur_after_cancel"  # preserved
 
 
@@ -400,29 +401,57 @@ async def test_resume_rejects_other_statuses() -> None:
             await service.resume("ds_xyz", f"agg_{status}", session)
 
 
-async def test_resume_without_overrides_blocks_exhausted_job() -> None:
-    """Without overrides, an exhausted job (retry_count >= max_retries)
-    must be rejected with the explicit ValueError."""
+async def test_resume_without_overrides_allows_exhausted_job() -> None:
+    """A user can ALWAYS manually resume an exhausted job (retry_count >=
+    max_retries) — the cap bounds only automated retries. Resume succeeds,
+    flips to pending, resets the automated budget, and preserves the
+    checkpoint. (Regression for: a Failed job past the threshold was stuck
+    with no way to restart — e.g. a transient FalkorDB BusyLoadingError.)"""
     job = _seed_required_orm_defaults(AggregationJobORM(
         id="agg_exhausted1",
         data_source_id="ds_xyz",
         status="failed",
         max_retries=3,
-        retry_count=3,
-        batch_size=1000,
+        retry_count=4,  # past the cap, as in the reported incident
+        last_cursor="cur_742305",
+        batch_size=5000,
         projection_mode="in_source",
         created_at="2026-04-22T00:00:00Z",
     ))
     session = _FakeSession(seeded_job=job)
     service = _make_service()
 
-    with pytest.raises(ValueError, match="exceeded max retries"):
-        await service.resume("ds_xyz", "agg_exhausted1", session)
+    response = await service.resume("ds_xyz", "agg_exhausted1", session)
+
+    assert response.status == "pending"
+    assert job.status == "pending"
+    assert job.retry_count == 0          # fresh automated budget
+    assert job.max_retries == 3          # cap unchanged (no override needed)
+    assert job.last_cursor == "cur_742305"  # resume from checkpoint, not zero
+    assert job.error_message is None
+    service._dispatcher.dispatch.assert_awaited_once_with("agg_exhausted1")
 
 
-async def test_resume_with_max_retries_override_unblocks_exhausted_job() -> None:
-    """Bumping max_retries via overrides must let the same job resume
-    (the override is applied BEFORE the gate check, by design)."""
+async def test_exhausted_failed_job_reports_resumable() -> None:
+    """The response's ``resumable`` flag must be True for a Failed job past
+    the cap so the UI exposes the Resume/Restart affordance."""
+    job = _seed_required_orm_defaults(AggregationJobORM(
+        id="agg_exhausted_flag",
+        data_source_id="ds_xyz",
+        status="failed",
+        max_retries=3,
+        retry_count=4,
+        batch_size=5000,
+        projection_mode="in_source",
+        created_at="2026-04-22T00:00:00Z",
+    ))
+    resp = AggregationService._to_response(job)
+    assert resp.resumable is True
+
+
+async def test_resume_with_max_retries_override_also_resets_budget() -> None:
+    """Overrides still apply (e.g. a larger cap for the fresh run); the
+    automated budget is reset regardless."""
     job = _seed_required_orm_defaults(AggregationJobORM(
         id="agg_exhausted2",
         data_source_id="ds_xyz",
@@ -444,9 +473,8 @@ async def test_resume_with_max_retries_override_unblocks_exhausted_job() -> None
 
     assert job.max_retries == 5
     assert job.status == "pending"
-    assert job.retry_count == 4
+    assert job.retry_count == 0
     assert response.id == "agg_exhausted2"
-    # The dispatcher must have been re-asked to dispatch the job.
     service._dispatcher.dispatch.assert_awaited_once_with("agg_exhausted2")
 
 

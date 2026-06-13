@@ -207,7 +207,7 @@ class AggregationJobResponse(BaseModel):
     created_edges: int = Field(alias="createdEdges")
     batch_size: int = Field(alias="batchSize")
     last_checkpoint_at: Optional[str] = Field(None, alias="lastCheckpointAt")
-    resumable: bool  # True if status is 'failed' and retries remaining
+    resumable: bool  # True when status is 'failed'/'cancelled' (manual resume always allowed)
     retry_count: int = Field(alias="retryCount")
     error_message: Optional[str] = Field(None, alias="errorMessage")
     estimated_completion_at: Optional[str] = Field(None, alias="estimatedCompletionAt")
