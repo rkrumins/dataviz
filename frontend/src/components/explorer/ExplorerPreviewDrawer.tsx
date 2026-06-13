@@ -39,6 +39,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { View } from '@/services/viewApiService'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { ViewLayerConfig } from '@/types/schema'
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -321,21 +322,16 @@ export function ExplorerPreviewDrawer({
   healthStatus,
 }: ExplorerPreviewDrawerProps) {
   const content = (
-    <AnimatePresence>
-      {isOpen && view && (
-        <>
-          {/* Backdrop */}
-          <motion.div
-            className="fixed inset-0 z-[60] bg-black/40"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            onClick={onClose}
-          />
+    <>
+      {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+          StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+      <Backdrop open={!!(isOpen && view)} onClick={onClose} zClassName="z-[60]" />
 
-          {/* Drawer panel */}
+      {/* Drawer panel — keyed single child so AnimatePresence tracks its exit cleanly */}
+      <AnimatePresence>
+        {isOpen && view && (
           <motion.aside
+            key="explorer-preview-drawer"
             className={cn(
               'fixed right-0 top-0 h-full w-[440px] max-w-[90vw] z-[61]',
               'bg-canvas border-l border-glass-border',
@@ -718,9 +714,9 @@ export function ExplorerPreviewDrawer({
               </div>
             </div>
           </motion.aside>
-        </>
-      )}
-    </AnimatePresence>
+        )}
+      </AnimatePresence>
+    </>
   )
 
   // Render via portal to avoid z-index / overflow issues

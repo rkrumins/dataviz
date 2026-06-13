@@ -23,6 +23,7 @@ import { permissionsService, type RoleDefinitionResponse, type UserAccessRespons
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { usePermission } from '@/store/auth'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
@@ -893,16 +894,20 @@ export function AdminUsers() {
             )}
 
             {/* ── Modals ──────────────────────────────────────────────── */}
-            <AnimatePresence>
-                {modal && (
-                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        transition={{ duration: 0.15 }} className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                        <div className="absolute inset-0 bg-black/50" onClick={closeModal} />
-                        <motion.div initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={!!modal} onClick={closeModal} zClassName="z-50" className="bg-black/50" />
+
+            {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+                through to the Backdrop beneath → outside-click still closes). */}
+            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
+                    {modal && (
+                        <motion.div key="admin-users-modal-card" initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.96, opacity: 0 }} transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
                             className={cn(
-                                "relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6",
+                                "pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6",
                                 // Phase 14: the invite modal carries more sections
                                 // (role + workspace + groups + recipient + expiry +
                                 // summary) and needs more horizontal room for the
@@ -1179,34 +1184,24 @@ export function AdminUsers() {
                                 </>
                             )}
                         </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
+                    )}
+                </AnimatePresence>
+            </div>
 
             {/* Per-user access drawer — opens on row click. Reuses
                 AccessSummary so this page and `/admin/permissions` →
                 "By user" can't drift visually or factually. */}
+            {/* Scrim — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks).
+                ``backdrop-blur-sm`` was a perf killer — blur is GPU-expensive and the
+                browser had to recompute it every frame while the drawer slid in,
+                stalling the panel transform. Plain opacity dim achieves the same visual
+                focus at zero cost. shadow-2xl on the drawer was the second offender
+                (large shadow + moving transform = recomposite per frame); shadow-xl
+                looks the same at 480px wide and animates clean. */}
+            <Backdrop open={!!accessUser} onClick={closeAccessDrawer} zClassName="z-40" className="bg-black/40" />
             <AnimatePresence>
                 {accessUser && (
-                    <>
-                        {/* Overlay: ``backdrop-blur-sm`` was a perf killer —
-                            blur is GPU-expensive and the browser had to
-                            recompute it every frame while the drawer slid
-                            in, stalling the panel transform. Plain opacity
-                            dim achieves the same visual focus at zero cost.
-                            shadow-2xl on the drawer was the second
-                            offender (large shadow + moving transform =
-                            recomposite per frame); shadow-xl looks the
-                            same at 480px wide and animates clean. */}
-                        <motion.div
-                            key="access-overlay"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            transition={{ duration: 0.15 }}
-                            onClick={closeAccessDrawer}
-                            className="fixed inset-0 bg-black/40 z-40"
-                        />
                         <motion.aside
                             key="access-drawer"
                             initial={{ x: '100%' }}
@@ -1265,7 +1260,6 @@ export function AdminUsers() {
                                 ) : null}
                             </div>
                         </motion.aside>
-                    </>
                 )}
             </AnimatePresence>
         </div>

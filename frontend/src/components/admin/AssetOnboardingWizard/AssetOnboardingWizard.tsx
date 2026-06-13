@@ -14,6 +14,7 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Database, Settings, BookOpen, Check, ChevronLeft, ChevronRight, Loader2, X, Wand2, AlertTriangle, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { workspaceService } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
@@ -776,19 +777,18 @@ export function AssetOnboardingWizard({
                 </motion.div>
 
                 {/* Unsaved changes confirmation overlay */}
-                <AnimatePresence>
-                    {showCloseConfirm && (
-                        <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40"
-                        >
+                {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                    StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+                <Backdrop open={showCloseConfirm} zClassName="z-[70]" className="bg-black/40" />
+                <div className="fixed inset-0 z-[71] flex items-center justify-center pointer-events-none">
+                    <AnimatePresence>
+                        {showCloseConfirm && (
                             <motion.div
+                                key="onboarding-close-confirm"
                                 initial={{ scale: 0.95, opacity: 0 }}
                                 animate={{ scale: 1, opacity: 1 }}
                                 exit={{ scale: 0.95, opacity: 0 }}
-                                className="bg-canvas-elevated border border-glass-border rounded-xl shadow-lg p-6 max-w-sm mx-4 space-y-4"
+                                className="pointer-events-auto bg-canvas-elevated border border-glass-border rounded-xl shadow-lg p-6 max-w-sm mx-4 space-y-4"
                             >
                                 <div className="flex items-start gap-3">
                                     <div className="w-9 h-9 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
@@ -816,9 +816,9 @@ export function AssetOnboardingWizard({
                                     </button>
                                 </div>
                             </motion.div>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
+                        )}
+                    </AnimatePresence>
+                </div>
             </motion.div>
         </AnimatePresence>
     )

@@ -35,6 +35,7 @@ import {
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
@@ -603,24 +604,24 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             />
 
             {/* Modals */}
-            <AnimatePresence>
-                {modal && (
-                    <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.15 }}
-                        className="fixed inset-0 z-50 flex items-center justify-center p-4"
-                    >
-                        <div className="absolute inset-0 bg-black/50" onClick={() => setModal(null)} />
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={!!modal} onClick={() => setModal(null)} zClassName="z-50" className="bg-black/50" />
+
+            {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+                through to the Backdrop beneath → outside-click still closes). */}
+            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
+                    {modal && (
                         <motion.div
+                            key="workspace-members-modal-card"
                             initial={{ scale: 0.96, opacity: 0 }}
                             animate={{ scale: 1, opacity: 1 }}
                             exit={{ scale: 0.96, opacity: 0 }}
                             transition={{ duration: 0.2 }}
                             onClick={(e) => e.stopPropagation()}
                             className={cn(
-                                'relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6 max-h-[90vh] overflow-y-auto',
+                                'pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full p-6 max-h-[90vh] overflow-y-auto',
                                 modal.kind === 'add' ? 'max-w-2xl' : 'max-w-md',
                             )}
                         >
@@ -634,9 +635,9 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                 />
                             )}
                         </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
+                    )}
+                </AnimatePresence>
+            </div>
 
             {/* Revoke confirmation with impact preview (Phase 4.4) */}
             <ImpactPreviewModal
