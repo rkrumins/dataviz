@@ -315,6 +315,7 @@ class ProviderRegistry:
                 connection_config=_falkor_conn,
                 cache_redis_url=creds.get("cache_redis_url"),
                 auth_enabled=_auth_enabled,
+                tls_enabled=tls_enabled,
             )
 
         elif ptype == "neo4j":

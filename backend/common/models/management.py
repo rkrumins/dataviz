@@ -234,6 +234,29 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
     # disables FalkorDB graph AUTH for this provider (anonymous connect).
     if "authEnabled" in fc and not isinstance(fc.get("authEnabled"), bool):
         raise ValueError("falkordbConnection.authEnabled must be a boolean.")
+    # Per-provider TLS / mutual-TLS. Optional object; cert inputs are file
+    # PATHS (non-secret). Applies to the graph (all topologies), preflight,
+    # and the cache.
+    tls = fc.get("tls")
+    if tls is not None:
+        if not isinstance(tls, dict):
+            raise ValueError("falkordbConnection.tls must be an object.")
+        if "enabled" in tls and not isinstance(tls.get("enabled"), bool):
+            raise ValueError("falkordbConnection.tls.enabled must be a boolean.")
+        if "checkHostname" in tls and not isinstance(tls.get("checkHostname"), bool):
+            raise ValueError("falkordbConnection.tls.checkHostname must be a boolean.")
+        verify = tls.get("verifyMode")
+        if verify is not None and str(verify).strip().lower() not in (
+            "required", "optional", "none",
+        ):
+            raise ValueError(
+                "falkordbConnection.tls.verifyMode must be one of "
+                "'required', 'optional', 'none'."
+            )
+        for path_key in ("caCertPath", "certPath", "keyPath"):
+            val = tls.get(path_key)
+            if val is not None and not isinstance(val, str):
+                raise ValueError(f"falkordbConnection.tls.{path_key} must be a string path.")
 
 
 class ProviderCreateRequest(BaseModel):

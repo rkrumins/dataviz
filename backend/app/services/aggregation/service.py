@@ -44,6 +44,16 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
+def _is_resumable(job) -> bool:
+    """Whether a job can be MANUALLY resumed/restarted from its checkpoint.
+
+    A user restart is always allowed for a failed or cancelled job — the
+    ``max_retries`` cap bounds only AUTOMATED retries (crash recovery /
+    delivery attempts), never the user. (Drives the UI's resume affordance.)
+    """
+    return job.status in ("failed", "cancelled")
+
+
 class AggregationService:
     """REST API-driven aggregation orchestrator.
 
@@ -560,7 +570,7 @@ class AggregationService:
             created_edges=job.created_edges,
             batch_size=job.batch_size,
             last_checkpoint_at=job.last_checkpoint_at,
-            resumable=job.status == "failed" and job.retry_count < job.max_retries,
+            resumable=_is_resumable(job),
             retry_count=job.retry_count,
             error_message=job.error_message,
             estimated_completion_at=estimated,
@@ -611,8 +621,7 @@ class AggregationService:
                 f"resume requires 'failed' or 'cancelled')"
             )
 
-        # Apply overrides BEFORE the max_retries gate so a caller who
-        # raises max_retries can resume a job that exhausted the old cap.
+        # Apply optional per-job overrides (e.g. a larger timeout / batch).
         if overrides is not None:
             if overrides.timeout_secs is not None:
                 job.timeout_secs = overrides.timeout_secs
@@ -623,18 +632,25 @@ class AggregationService:
             if overrides.max_retries is not None:
                 job.max_retries = overrides.max_retries
 
-        if job.retry_count >= job.max_retries:
-            raise ValueError(f"Job {job_id} has exceeded max retries ({job.max_retries})")
-
+        # A manual resume/restart is ALWAYS allowed for a failed/cancelled job —
+        # the max_retries cap bounds only AUTOMATED retries (crash recovery /
+        # delivery attempts), never the user. We RESET the automated retry
+        # budget so the restarted run gets a fresh set of auto-retries for
+        # transient provider blips (e.g. FalkorDB "BusyLoadingError: Redis is
+        # loading the dataset in memory"). The checkpoint (last_cursor) is
+        # preserved, so it resumes from where it stopped — not from zero.
         job.status = "pending"
-        job.retry_count += 1
+        job.retry_count = 0
         job.error_message = None
         job.updated_at = _now()
         await session.commit()
 
         await self._dispatcher.dispatch(job.id)
 
-        logger.info("Aggregation job %s resumed (retry %d/%d)", job_id, job.retry_count, job.max_retries)
+        logger.info(
+            "Aggregation job %s manually resumed (automated retry budget reset; "
+            "max_retries=%d)", job_id, job.max_retries,
+        )
 
         return self._to_response(job)
 
@@ -1191,7 +1207,7 @@ class AggregationService:
             created_edges=job.created_edges,
             batch_size=job.batch_size,
             last_checkpoint_at=job.last_checkpoint_at,
-            resumable=job.status == "failed" and job.retry_count < job.max_retries,
+            resumable=_is_resumable(job),
             retry_count=job.retry_count,
             error_message=job.error_message,
             estimated_completion_at=estimated,

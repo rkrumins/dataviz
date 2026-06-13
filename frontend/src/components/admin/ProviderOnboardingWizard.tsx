@@ -76,6 +76,13 @@ interface FalkorDBConnectionState {
   // Advanced knobs kept as strings for the inputs; parsed on submit.
   socketTimeout: string
   graphPoolSize: string
+  // TLS / mutual-TLS detail (the enable flag is the top-level `tlsEnabled`).
+  // Cert inputs are file PATHS to PEMs mounted into the services (non-secret).
+  tlsCaCertPath: string
+  tlsCertPath: string
+  tlsKeyPath: string
+  tlsVerifyMode: 'required' | 'optional' | 'none'
+  tlsCheckHostname: boolean
 }
 
 interface ProviderOnboardingFormData {
@@ -171,6 +178,11 @@ const DEFAULT_FALKORDB_CONNECTION: FalkorDBConnectionState = {
   cacheRedisUrl: '',
   socketTimeout: '',
   graphPoolSize: '',
+  tlsCaCertPath: '',
+  tlsCertPath: '',
+  tlsKeyPath: '',
+  tlsVerifyMode: 'required',
+  tlsCheckHostname: true,
 }
 
 const DEFAULT_SCHEMA_MAPPING: SchemaMappingState = {
@@ -273,6 +285,11 @@ function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboa
           cacheRedisUrl: '',
           socketTimeout: fdbConn.socketTimeout != null ? String(fdbConn.socketTimeout) : '',
           graphPoolSize: fdbConn.graphPoolSize != null ? String(fdbConn.graphPoolSize) : '',
+          tlsCaCertPath: fdbConn.tls?.caCertPath ?? '',
+          tlsCertPath: fdbConn.tls?.certPath ?? '',
+          tlsKeyPath: fdbConn.tls?.keyPath ?? '',
+          tlsVerifyMode: (fdbConn.tls?.verifyMode as FalkorDBConnectionState['tlsVerifyMode']) ?? 'required',
+          tlsCheckHostname: fdbConn.tls?.checkHostname ?? true,
         }
       : { ...DEFAULT_FALKORDB_CONNECTION },
   }
@@ -316,9 +333,22 @@ function buildExtraConfig(formData: ProviderOnboardingFormData) {
     if (fc.socketTimeout.trim() && !Number.isNaN(st)) conn.socketTimeout = st
     const gp = parseInt(fc.graphPoolSize, 10)
     if (fc.graphPoolSize.trim() && !Number.isNaN(gp)) conn.graphPoolSize = gp
-    // Emit only when non-standalone OR an advanced knob is set; standalone
+    // TLS detail (CA / client cert+key / verify mode) when TLS is enabled.
+    // Cert inputs are file paths (non-secret) → they ride extra_config.
+    if (formData.tlsEnabled) {
+      const tls: Record<string, unknown> = {
+        enabled: true,
+        verifyMode: fc.tlsVerifyMode,
+        checkHostname: fc.tlsCheckHostname,
+      }
+      if (fc.tlsCaCertPath.trim()) tls.caCertPath = fc.tlsCaCertPath.trim()
+      if (fc.tlsCertPath.trim()) tls.certPath = fc.tlsCertPath.trim()
+      if (fc.tlsKeyPath.trim()) tls.keyPath = fc.tlsKeyPath.trim()
+      conn.tls = tls
+    }
+    // Emit only when non-standalone OR an advanced knob/TLS is set; standalone
     // with no knobs stays the legacy single-host path (no key written).
-    if (conn.mode || conn.socketTimeout != null || conn.graphPoolSize != null) {
+    if (conn.mode || conn.socketTimeout != null || conn.graphPoolSize != null || conn.tls) {
       out.falkordbConnection = { mode: conn.mode ?? 'standalone', ...conn }
     }
   }
@@ -1249,6 +1279,80 @@ export function ProviderOnboardingWizard({
               className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
             />
           </label>
+
+          {formData.providerType === 'falkordb' && formData.tlsEnabled && (
+            <div className="mt-3 space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
+              <p className="text-xs font-medium text-ink">TLS / mutual TLS</p>
+              <p className="text-[11px] leading-tight text-ink-muted">
+                Paths to PEM files mounted into the services. Leave the CA blank to use the
+                system trust store; set client cert + key for mutual TLS.
+              </p>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-ink">
+                  CA certificate path <span className="text-ink-muted">(optional)</span>
+                </label>
+                <input
+                  value={formData.falkordbConnection?.tlsCaCertPath ?? ''}
+                  onChange={(event) => updateFalkorConn({ tlsCaCertPath: event.target.value })}
+                  placeholder="/certs/ca.crt"
+                  className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-ink">
+                    Client cert path <span className="text-ink-muted">(mTLS)</span>
+                  </label>
+                  <input
+                    value={formData.falkordbConnection?.tlsCertPath ?? ''}
+                    onChange={(event) => updateFalkorConn({ tlsCertPath: event.target.value })}
+                    placeholder="/certs/client.crt"
+                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-ink">
+                    Client key path <span className="text-ink-muted">(mTLS)</span>
+                  </label>
+                  <input
+                    value={formData.falkordbConnection?.tlsKeyPath ?? ''}
+                    onChange={(event) => updateFalkorConn({ tlsKeyPath: event.target.value })}
+                    placeholder="/certs/client.key"
+                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-ink">Verify mode</label>
+                  <select
+                    value={formData.falkordbConnection?.tlsVerifyMode ?? 'required'}
+                    onChange={(event) =>
+                      updateFalkorConn({
+                        tlsVerifyMode: event.target.value as FalkorDBConnectionState['tlsVerifyMode'],
+                      })
+                    }
+                    className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  >
+                    <option value="required">Required (verify server)</option>
+                    <option value="optional">Optional</option>
+                    <option value="none">None (self-signed)</option>
+                  </select>
+                </div>
+                <label className="flex items-end gap-2 pb-2 text-xs text-ink">
+                  <input
+                    type="checkbox"
+                    checked={formData.falkordbConnection?.tlsCheckHostname ?? true}
+                    onChange={(event) =>
+                      updateFalkorConn({ tlsCheckHostname: event.target.checked })
+                    }
+                    className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+                  />
+                  Check hostname
+                </label>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

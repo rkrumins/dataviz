@@ -716,6 +716,9 @@ class ProviderManager:
                 # Per-provider dedicated cache Redis (encrypted credential).
                 cache_redis_url=creds.get("cache_redis_url"),
                 auth_enabled=_auth_enabled,
+                # Connection-level TLS (the falkordbConnection.tls object adds
+                # CA/client-cert/verify mode). Previously dropped for FalkorDB.
+                tls_enabled=tls_enabled,
             )
 
         elif ptype == "neo4j":

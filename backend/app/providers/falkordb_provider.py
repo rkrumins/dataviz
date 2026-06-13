@@ -431,6 +431,7 @@ class FalkorDBProvider(GraphDataProvider):
         connection_config: Optional[dict] = None,
         cache_redis_url: Optional[str] = None,
         auth_enabled: bool = True,
+        tls_enabled: bool = False,
     ):
         # IPv6 dual-stack guard: "localhost" resolves to BOTH ::1 and
         # 127.0.0.1, and Docker commonly publishes IPv4 only, so the redis
@@ -480,6 +481,10 @@ class FalkorDBProvider(GraphDataProvider):
         self._auth_enabled = auth_enabled
         self._username = username if auth_enabled else None
         self._password = password if auth_enabled else None
+        # Connection-level TLS toggle (the provider record's tls_enabled, plus
+        # the finer falkordbConnection.tls object resolved in _ensure_connected).
+        # Applies to the graph (all topologies), preflight, and the cache.
+        self._tls_enabled = tls_enabled
         self._graph = None
         self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None       # Graph query pool (used by FalkorDB)
@@ -659,18 +664,61 @@ class FalkorDBProvider(GraphDataProvider):
         host fails fast (≤1.5s) instead of triggering 30-45s of half-
         blocking init in ``_ensure_connected``.
 
-        P1.6 — credential plumbing: when a password is configured,
+        P1.6 — credential plumbing: when a username/password is configured,
         ``redis_ping_preflight`` runs ``AUTH`` before ``PING``. Without
         this, an auth-protected FalkorDB would fail preflight with
         NOAUTH and trigger the same false breaker storm we're trying to
-        prevent for unreachable hosts.
+        prevent for unreachable hosts. When TLS is enabled, the probe
+        completes a real TLS handshake (else a TLS-only server is wrongly
+        marked unreachable). For sentinel/cluster the probe hits the first
+        configured node; connect() remains the authoritative topology check.
         """
         from backend.common.interfaces.preflight import redis_ping_preflight
-        return await redis_ping_preflight(
-            self._host, self._port,
-            deadline_s=deadline_s,
-            password=self._password,
+        from backend.app.providers.falkordb_connection import load_connection_config
+        from backend.common.adapters.redis_tls import build_ssl_context
+
+        # Resolve TLS/topology so preflight matches what connect() will use.
+        cfg = self._conn_cfg or load_connection_config(
+            self._connection_config,
+            host=self._host, port=self._port,
+            username=self._username, password=self._password,
+            tls_enabled=self._tls_enabled,
         )
+        host, port = self._host, self._port
+        if cfg.mode == "sentinel" and cfg.sentinel_nodes:
+            host, port = cfg.sentinel_nodes[0]
+        elif cfg.mode == "cluster" and cfg.cluster_nodes:
+            host, port = cfg.cluster_nodes[0]
+        return await redis_ping_preflight(
+            host, port,
+            deadline_s=deadline_s,
+            username=self._username,
+            password=self._password,
+            ssl_context=build_ssl_context(cfg.tls_settings()),
+        )
+
+    def _build_pool_kwargs(self, socket_timeout: float) -> dict:
+        """Graph connection-pool kwargs (sizing + timeouts + auth). TLS is
+        applied inside the connection factory (raw pools need
+        ``connection_class=SSLConnection``). Shared by the initial connect and
+        the failover rebuild so the two can never drift apart."""
+        graph_pool_size = (
+            (self._conn_cfg.graph_pool_size if self._conn_cfg else None)
+            or int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
+        )
+        kw: dict = {
+            "max_connections": graph_pool_size,
+            "socket_connect_timeout": 2.0,
+            "socket_timeout": socket_timeout,
+            "decode_responses": True,
+        }
+        # P1.6 — auth so the pool issues AUTH transparently (else NOAUTH is
+        # mis-classified as a network failure and trips a false breaker).
+        if self._username:
+            kw["username"] = self._username
+        if self._password:
+            kw["password"] = self._password
+        return kw
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB.
@@ -694,7 +742,7 @@ class FalkorDBProvider(GraphDataProvider):
             from backend.app.providers.falkordb_connection import (
                 load_connection_config,
                 build_graph_client,
-                build_cache_redis_fallback,
+                build_cache_client,
             )
 
             # Resolve the connection topology (standalone / sentinel /
@@ -703,36 +751,23 @@ class FalkorDBProvider(GraphDataProvider):
             # connection factory's adapter (the FalkorDB client only
             # accepts ``connection_pool=``). A single FalkorDB graph key
             # lives on one node, so cluster mode routes to the owning node.
+            # tls_enabled (+ falkordbConnection.tls) gives TLS/mTLS in every
+            # mode; resolved into self._conn_cfg so preflight/cache reuse it.
             self._conn_cfg = load_connection_config(
                 self._connection_config,
                 host=self._host, port=self._port,
                 username=self._username, password=self._password,
-            )
-            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. The
-            # default 10s is generous for reads but necessary for batch
-            # MERGE in the aggregation worker. Host/port are supplied by
-            # the factory per mode, so they're omitted from pool_kwargs.
-            # Per-provider overrides (from extra_config.falkordbConnection)
-            # take precedence over the process-wide env defaults.
-            graph_pool_size = self._conn_cfg.graph_pool_size or int(
-                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
+                tls_enabled=self._tls_enabled,
             )
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
             )
-            _graph_pool_kwargs: dict = {
-                "max_connections": graph_pool_size,
-                "socket_connect_timeout": 2.0,
-                "socket_timeout": socket_timeout,
-                "decode_responses": True,
-            }
-            # P1.6 — auth credentials propagated to the driver so the pool
-            # issues AUTH transparently (else NOAUTH is mis-classified as a
-            # network failure and trips a false breaker outage).
-            if self._username:
-                _graph_pool_kwargs["username"] = self._username
-            if self._password:
-                _graph_pool_kwargs["password"] = self._password
+            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. Auth + TLS
+            # are applied inside the connection factory (TLS via
+            # connection_class=SSLConnection on the raw pools); pool_kwargs
+            # carries only sizing/timeouts/auth/decode. Built once here and
+            # reused verbatim on failover rebuild.
+            _graph_pool_kwargs = self._build_pool_kwargs(socket_timeout)
             if self._conn_cfg.mode != "standalone":
                 logger.info(
                     "FalkorDB provider connecting graph %r via %s",
@@ -765,32 +800,22 @@ class FalkorDBProvider(GraphDataProvider):
             self._redis_available = True
             try:
                 if cache_redis_url:
-                    # CACHE_REDIS_URL embeds its own auth (e.g.
-                    # redis://:password@host:port/0) so we don't pass our
-                    # FalkorDB password here — the cache Redis is a separate
-                    # instance that may have separate credentials.
+                    # CACHE_REDIS_URL embeds its own auth/scheme — a separate
+                    # instance with possibly separate credentials. A rediss://
+                    # URL also picks up the connection's CA/client-cert (mTLS).
                     logger.info(
                         "FalkorDB provider using dedicated cache Redis %s "
                         "(decoupled from graph host %s:%s).",
                         _redact_redis_url(cache_redis_url), self._host, self._port,
                     )
-                    _raw_redis = Redis.from_url(
-                        cache_redis_url,
-                        max_connections=redis_pool_size,
-                        socket_connect_timeout=2.0,
-                        socket_timeout=socket_timeout,
-                        decode_responses=True,
-                    )
-                    self._redis_pool = None  # managed by from_url
                 else:
-                    # Cache Redis falls back to the FalkorDB instance — same
-                    # topology, same auth (P1.6). Dev-compat only: in
-                    # production CACHE_REDIS_URL MUST be set to a separate
-                    # Redis. Mode-aware via the connection factory:
-                    # standalone/sentinel build a fallback client; cluster
-                    # returns None (cache needs cross-slot SCAN/pipelines a
-                    # single node can't serve), and the provider degrades to
-                    # cache-disabled rather than misbehaving.
+                    # Cache Redis falls back to the FalkorDB topology — same
+                    # nodes, same auth/TLS. Dev-compat only: in production
+                    # CACHE_REDIS_URL SHOULD be set to a separate Redis. Mode-
+                    # aware via the connection factory: standalone/sentinel
+                    # build a single client; cluster builds a dedicated
+                    # RedisCluster cache client (the cache ops are single-key /
+                    # single-hash, so cluster-safe).
                     logger.warning(
                         "CACHE_REDIS_URL is not set; FalkorDB provider's "
                         "ancestor/URN caches will share the FalkorDB instance "
@@ -798,16 +823,18 @@ class FalkorDBProvider(GraphDataProvider):
                         "Set CACHE_REDIS_URL to a dedicated Redis in "
                         "production.", self._conn_cfg.describe(),
                     )
-                    _redis_pool_kwargs: dict = {
-                        "max_connections": redis_pool_size,
-                        "socket_connect_timeout": 2.0,
-                        "socket_timeout": socket_timeout,
-                        "decode_responses": True,
-                    }
-                    _raw_redis = build_cache_redis_fallback(
-                        self._conn_cfg, pool_kwargs=_redis_pool_kwargs,
-                    )
-                    self._redis_pool = None
+                _redis_pool_kwargs: dict = {
+                    "max_connections": redis_pool_size,
+                    "socket_connect_timeout": 2.0,
+                    "socket_timeout": socket_timeout,
+                    "decode_responses": True,
+                }
+                _raw_redis = build_cache_client(
+                    self._conn_cfg,
+                    cache_url=cache_redis_url,
+                    pool_kwargs=_redis_pool_kwargs,
+                )
+                self._redis_pool = None
                 # Wrap in TimeoutRedis — every async call and pipeline.execute()
                 # automatically gets an asyncio.wait_for() deadline. No call-site
                 # wrapping needed. See backend/common/adapters/timeout_redis.py.
@@ -955,19 +982,9 @@ class FalkorDBProvider(GraphDataProvider):
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
             )
-            graph_pool_size = self._conn_cfg.graph_pool_size or int(
-                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
-            )
-            pool_kwargs: dict = {
-                "max_connections": graph_pool_size,
-                "socket_connect_timeout": 2.0,
-                "socket_timeout": socket_timeout,
-                "decode_responses": True,
-            }
-            if self._username:
-                pool_kwargs["username"] = self._username
-            if self._password:
-                pool_kwargs["password"] = self._password
+            # Same kwargs as the initial connect (auth; TLS re-applied inside
+            # the factory) so failover never drops credentials or TLS.
+            pool_kwargs = self._build_pool_kwargs(socket_timeout)
 
             old_pool, old_proj_pool = self._pool, self._proj_pool
             self._db, self._pool = await build_graph_client(
