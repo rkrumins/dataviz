@@ -1,0 +1,61 @@
+# FalkorDB in Sentinel HA: 1 master + 2 replicas + 3 sentinels, with auth.
+# (Plaintext here for clarity; add the --tls-* args from the standalone file to
+# the master/replicas and `sentinel` blocks for TLS.)
+#
+#   docker compose -f deploy/topologies/docker-compose.falkordb-sentinel.yml up -d
+#
+# Integration test env:
+#   FALKORDB_TEST_MODE=sentinel FALKORDB_TEST_SENTINEL_MASTER=mymaster \
+#   FALKORDB_TEST_SENTINEL_NODES=127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381 \
+#   FALKORDB_TEST_PASSWORD=testpass \
+#   pytest backend/tests/integration/test_topologies.py -v
+#
+# Failover drill: `docker kill falkordb-master` then re-run — the provider's
+# sentinel client transparently follows the promoted replica.
+x-falkor-common: &falkor-common
+  image: falkordb/falkordb:latest
+  restart: unless-stopped
+
+services:
+  falkordb-master:
+    <<: *falkor-common
+    ports: ["6379:6379"]
+    environment:
+      REDIS_ARGS: "--requirepass testpass --masterauth testpass"
+
+  falkordb-replica-1:
+    <<: *falkor-common
+    depends_on: [falkordb-master]
+    ports: ["6380:6379"]
+    environment:
+      REDIS_ARGS: "--replicaof falkordb-master 6379 --requirepass testpass --masterauth testpass"
+
+  falkordb-replica-2:
+    <<: *falkor-common
+    depends_on: [falkordb-master]
+    ports: ["6381:6379"]
+    environment:
+      REDIS_ARGS: "--replicaof falkordb-master 6379 --requirepass testpass --masterauth testpass"
+
+  # Three sentinels for quorum. Each writes its config from the template on boot.
+  sentinel-1: &sentinel
+    image: redis:7-alpine
+    depends_on: [falkordb-master]
+    ports: ["26379:26379"]
+    command: >-
+      sh -c '
+      printf "port 26379\n
+      sentinel monitor mymaster falkordb-master 6379 2\n
+      sentinel auth-pass mymaster testpass\n
+      sentinel down-after-milliseconds mymaster 5000\n
+      sentinel failover-timeout mymaster 10000\n
+      sentinel resolve-hostnames yes\n" > /tmp/s.conf &&
+      redis-server /tmp/s.conf --sentinel'
+
+  sentinel-2:
+    <<: *sentinel
+    ports: ["26380:26379"]
+
+  sentinel-3:
+    <<: *sentinel
+    ports: ["26381:26379"]
