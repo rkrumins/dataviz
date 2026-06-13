@@ -253,3 +253,55 @@ python backend/scripts/repair_revert_commit.py --graph-id <gid> --commit-id <cid
 - `4dd7df4` — ⭐ `update` ops are field-level patches (fixes merge data-loss / name loss).
 - `540d390` — `repair_revert_commit.py` + integration test.
 - `4382756` (prior) — merge→FalkorDB reflection + full re-seed (context for §3.5).
+
+---
+
+## 9. Diagnostic trail — what was ruled out (so you don't repeat it)
+
+The merge corruption took three passes and two wrong turns; recording them:
+
+- **The read-overlay (`DraftOverlayProvider`) is NOT a write path.** Verified it has zero references in
+  any write/merge/publish/projection path — it cannot corrupt stored data. It had just been deployed
+  when the corruption surfaced, which made it a tempting but incorrect suspect.
+- **The `searchableText`/`entityId` leak (§3.2) was real but secondary.** Reproduced: a node round-
+  tripped through the projector schema (`_node_item` → `n += nativeProps` / `n.searchableText` →
+  `_node_from_props`) reads back with `searchableText` (`"<displayName> <qualifiedName>"`) and
+  `entityId` leaking into `properties` because they weren't reserved. Genuinely fixed — **but the
+  user's junk keys were `id`/`confidence`, not these**, so this did not resolve the report (→ §5.1).
+- **The projection full re-seed (`4382756`) was the *trigger*, not the *cause*.**
+  `ensure_projection_target` resets the watermark → a full rebuild rewrote every node from the
+  (truncated) Postgres state, which is why corruption appeared graph-wide after a merge. The projector
+  itself is correct.
+- **The node/edge `_compute_changes` collision hypothesis** (an edge row overwriting a node in the
+  incremental `last` map) was considered and rejected — it would *drop* a node, not give it edge-shaped
+  keys, and node (`urn`) vs edge (`id`) entity_ids don't collide in practice.
+- **The frontend is a pass-through, not the cause.** `toCanvasNode` (`frontend/src/hooks/useGraphHydration.ts`)
+  copies `n.properties` verbatim; `nodeUpdatePayload` (`frontend/src/features/versioning/model/stagedChangesToOps.ts`)
+  sends only the edited fields — a *partial* update. So the fix had to be backend patch semantics
+  (§3.3), which makes any partial caller safe rather than relying on the client to send full payloads.
+- **The cause was found only by reproducing the full pipeline** (`/tmp/repro_merge_corruption.py`:
+  seed → partial-update draft → publish → project → read) and observing the Postgres payload collapse
+  to `displayName=None, properties=null`. Lesson: reproduce end-to-end before fixing; static analysis
+  alone sent me down the two wrong turns above.
+
+## 10. Per-commit file manifest
+
+- **`84a467f`** — new `backend/app/providers/draft_overlay_provider.py` (`DraftOverlayProvider` +
+  `_OverlayDelta` index: node/edge upsert/remove maps, lineage-vs-containment split, childCount delta);
+  `backend/app/services/context_engine.py` (live-draft routing → overlay); `service.py` (new
+  `branch_overlay_delta` → `{nodesUpsert, nodesRemove, edgesUpsert, edgesRemove}`, and
+  `aggregated_overlay_adjust` → `{(srcUrn,tgtUrn): {weight, types}}`); tests
+  `test_draft_overlay_provider.py`, `integration/test_draft_overlay_delta.py`, and updated
+  `integration/test_versioning_draft_read_routing.py`.
+- **`28de8d5`** — `backend/app/providers/falkordb_provider.py` (`_RESERVED_NODE_KEYS` += `entityId`,
+  `searchableText`); test `test_node_property_hygiene.py`.
+- **`4dd7df4`** — `backend/app/services/versioning/changeset.py` (`materialize()` update→patch),
+  `backend/app/services/versioning/service.py` (`_apply_ops_once` update→patch); test
+  `test_changeset_materialize.py`.
+- **`540d390`** — new `backend/scripts/repair_revert_commit.py`; test
+  `integration/test_repair_revert_commit.py`.
+- **`c1e67b5`** — `docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md` (this doc); `docs/TECHNICAL_DEBT.md`
+  §2.3 pointer.
+
+> The session also produced throwaway repro scripts under `/tmp` (`repro_corruption.py`,
+> `repro_merge_corruption.py`) — not committed; their logic is preserved in the regression tests above.
