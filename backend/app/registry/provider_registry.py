@@ -302,6 +302,10 @@ class ProviderRegistry:
             host, port = apply_local_dev_falkordb_override(host, port)
             creds = credentials or {}
             _falkor_conn = (extra_config or {}).get("falkordbConnection")
+            # Per-provider auth gate (default enabled). When false, the
+            # provider nulls the graph credentials so no AUTH leaks to an
+            # unauthenticated FalkorDB.
+            _auth_enabled = (_falkor_conn or {}).get("authEnabled", True)
             return FalkorDBProvider(
                 host=host or "localhost",
                 port=port or 6379,
@@ -310,6 +314,7 @@ class ProviderRegistry:
                 password=creds.get("password"),
                 connection_config=_falkor_conn,
                 cache_redis_url=creds.get("cache_redis_url"),
+                auth_enabled=_auth_enabled,
             )
 
         elif ptype == "neo4j":

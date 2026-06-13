@@ -157,6 +157,11 @@ services:
       FALKORDB_SOCKET_TIMEOUT: "5"
       FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
+      # Constant-memory streaming rebuild (indexed ID(r) cursor, per-page
+      # flush, resume-from-cursor on every retry). Default on; set "false"
+      # to roll back to the legacy accumulate-in-memory path.
+      AGGREGATION_STREAMING_REBUILD_ENABLED: "${AGGREGATION_STREAMING_REBUILD_ENABLED:-true}"
+
       AGGREGATION_API_PORT: "8091"
       SYNODIC_ROLE: controlplane
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -278,6 +283,12 @@ services:
       FALKORDB_DOCKER_LOCALHOST_REWRITE: "${FALKORDB_DOCKER_LOCALHOST_REWRITE:-falkordb}"
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "60"
+
+      # Constant-memory streaming rebuild (indexed ID(r) cursor, per-page
+      # flush, resume-from-cursor on every retry) — the path that survives
+      # the 1M+-edge memory-spike resets. Default on; "false" rolls back to
+      # the legacy accumulate-in-memory rebuild.
+      AGGREGATION_STREAMING_REBUILD_ENABLED: "${AGGREGATION_STREAMING_REBUILD_ENABLED:-true}"
 
       # Concurrency: max parallel aggregation jobs per worker replica.
       # Pool sizes are auto-computed: graph = concurrency*4+8, redis = concurrency*3+8
