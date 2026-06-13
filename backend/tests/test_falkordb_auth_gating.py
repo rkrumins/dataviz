@@ -49,8 +49,10 @@ def test_default_auth_enabled_is_true():
 async def test_preflight_sends_no_password_when_auth_disabled(monkeypatch):
     captured = {}
 
-    async def fake_preflight(host, port, *, deadline_s, password=None):
+    async def fake_preflight(host, port, *, deadline_s, password=None,
+                             username=None, ssl_context=None):
         captured["password"] = password
+        captured["username"] = username
         from backend.common.interfaces.preflight import PreflightResult
         return PreflightResult.success(peer=f"{host}:{port}", elapsed_ms=1)
 
@@ -63,6 +65,7 @@ async def test_preflight_sends_no_password_when_auth_disabled(monkeypatch):
     )
     await p.preflight()
     assert captured["password"] is None  # gated → no AUTH attempted
+    assert captured["username"] is None
 
 
 # ── both instantiation paths read + forward authEnabled ─────────────
@@ -108,3 +111,23 @@ def test_manager_defaults_auth_enabled_when_flag_absent():
     )
     assert inst._auth_enabled is True
     assert inst._username == "u" and inst._password == "p"
+
+
+def test_manager_forwards_tls_enabled():
+    from backend.app.providers.manager import ProviderManager
+
+    inst = ProviderManager._create_provider_instance(
+        "falkordb", "h", 6379, "g", True,  # tls_enabled positional
+        credentials=_CREDS, extra_config=_conn(),
+    )
+    assert inst._tls_enabled is True
+
+
+def test_registry_forwards_tls_enabled():
+    from backend.app.registry.provider_registry import provider_registry
+
+    inst = provider_registry._create_provider_instance(
+        "falkordb", "h", 6379, "g", True,
+        credentials=_CREDS, extra_config=_conn(),
+    )
+    assert inst._tls_enabled is True

@@ -114,12 +114,26 @@ def fake_redis_and_falkor(monkeypatch):
             self.connection_pool = connection_pool
             captured["falkordb"] = self
 
+    class FakeClusterNode:
+        def __init__(self, host, port):
+            self.host = host
+            self.port = port
+
+    class FakeRedisCluster:
+        def __init__(self, startup_nodes=None, **kwargs):
+            captured["cluster_startup_nodes"] = startup_nodes
+            captured["cluster_kwargs"] = kwargs
+
     # redis.asyncio
     redis_asyncio = types.ModuleType("redis.asyncio")
     redis_asyncio.ConnectionPool = FakePool
     redis_asyncio.Redis = FakeRedis
     sentinel_mod = types.ModuleType("redis.asyncio.sentinel")
     sentinel_mod.Sentinel = FakeSentinel
+    cluster_mod = types.ModuleType("redis.asyncio.cluster")
+    cluster_mod.RedisCluster = FakeRedisCluster
+    redis_cluster_mod = types.ModuleType("redis.cluster")
+    redis_cluster_mod.ClusterNode = FakeClusterNode
 
     redis_pkg = types.ModuleType("redis")
     redis_asyncio_pkg = types.ModuleType("redis.asyncio")
@@ -133,6 +147,8 @@ def fake_redis_and_falkor(monkeypatch):
     monkeypatch.setitem(sys.modules, "redis", redis_pkg)
     monkeypatch.setitem(sys.modules, "redis.asyncio", redis_asyncio_pkg)
     monkeypatch.setitem(sys.modules, "redis.asyncio.sentinel", sentinel_mod)
+    monkeypatch.setitem(sys.modules, "redis.asyncio.cluster", cluster_mod)
+    monkeypatch.setitem(sys.modules, "redis.cluster", redis_cluster_mod)
     monkeypatch.setitem(sys.modules, "falkordb", falkor_pkg)
     monkeypatch.setitem(sys.modules, "falkordb.asyncio", falkor_asyncio)
     captured["FakePool"] = FakePool
@@ -191,8 +207,18 @@ async def test_build_graph_client_cluster_routes_to_owning_node(fake_redis_and_f
 
 
 @pytest.mark.asyncio
-async def test_cache_fallback_cluster_returns_none(fake_redis_and_falkor):
-    cfg = FalkorDBConnConfig(mode="cluster", cluster_nodes=[("n1", 7000)])
+async def test_cache_fallback_cluster_builds_cluster_client(fake_redis_and_falkor):
+    # Cluster cache is now served by a dedicated RedisCluster client (no longer
+    # degraded to None) — safe because the cache ops are single-key/single-hash.
+    cfg = FalkorDBConnConfig(mode="cluster", cluster_nodes=[("n1", 7000), ("n2", 7001)])
+    client = build_cache_redis_fallback(cfg, pool_kwargs={"socket_timeout": 3.0})
+    assert client is not None
+    assert len(fake_redis_and_falkor["cluster_startup_nodes"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_fallback_cluster_no_nodes_returns_none(fake_redis_and_falkor):
+    cfg = FalkorDBConnConfig(mode="cluster", cluster_nodes=[])
     assert build_cache_redis_fallback(cfg, pool_kwargs={"socket_timeout": 3.0}) is None
 
 

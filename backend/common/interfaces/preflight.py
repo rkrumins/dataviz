@@ -118,12 +118,36 @@ def _redis_auth_reason(line: bytes, *, had_password: bool) -> str | None:
     return None
 
 
+def _resp_auth(username: str | None, password: str) -> bytes:
+    """RESP-encode ``AUTH [username] password``. The two-arg form is required
+    for Redis 6+ ACL named users; the one-arg form targets the default user."""
+    pw = password.encode()
+    if username:
+        u = username.encode()
+        return (
+            b"*3\r\n$4\r\nAUTH\r\n"
+            b"$" + str(len(u)).encode() + b"\r\n" + u + b"\r\n"
+            b"$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+        )
+    return b"*2\r\n$4\r\nAUTH\r\n$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+
+
 async def redis_ping_preflight(
-    host: str, port: int, *, deadline_s: float, password: str | None = None
+    host: str,
+    port: int,
+    *,
+    deadline_s: float,
+    password: str | None = None,
+    username: str | None = None,
+    ssl_context: "ssl.SSLContext | None" = None,
 ) -> PreflightResult:
-    """TCP-connect + send RESP ``PING`` + read the reply within
+    """TCP(/TLS)-connect + send RESP ``PING`` + read the reply within
     ``deadline_s``. Confirms the peer is actually a Redis-protocol server,
     not just a port that happens to accept TCP.
+
+    When ``ssl_context`` is provided the probe completes a real TLS handshake
+    (so a TLS-only server isn't wrongly marked unreachable). When ``username``
+    is provided the two-arg ``AUTH user pass`` is used (Redis 6 ACL users).
 
     Used by FalkorDB (which speaks Redis protocol) and any other
     Redis-compatible backend.
@@ -131,8 +155,11 @@ async def redis_ping_preflight(
     t0 = time.monotonic()
     writer = None
     try:
+        open_kwargs: dict = {}
+        if ssl_context is not None:
+            open_kwargs = {"ssl": ssl_context, "server_hostname": host}
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
+            asyncio.open_connection(host, port, **open_kwargs),
             timeout=deadline_s,
         )
 
@@ -143,8 +170,7 @@ async def redis_ping_preflight(
         # (e.g. the server has no auth set and rejects an unexpected AUTH) is
         # ignored — we fall through to PING, preserving the old behavior.
         if password:
-            pw = password.encode()
-            auth = b"*2\r\n$4\r\nAUTH\r\n$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+            auth = _resp_auth(username, password)
             writer.write(auth)
             await writer.drain()
             # Read just enough to clear the reply line. Bound by remaining budget.
