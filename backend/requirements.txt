@@ -42,3 +42,4 @@ anyio>=4.0.0                                 # Threadpool used by Spanner async/
 python-json-logger>=2.0.7
 
 greenlet
+python-multipart
