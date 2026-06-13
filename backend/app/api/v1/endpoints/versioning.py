@@ -32,11 +32,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
-from backend.app.db.engine import get_async_session, get_db_session
+from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
 from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.messaging import nudge_projection
@@ -122,24 +123,9 @@ async def _repair_projection_target(graph_id: str) -> Optional[str]:
     not an orphan ``gv_<id>``. This lives at the app layer because only here can we read the data
     source's ``graph_name`` (the graphver store may be a separate DB). Self-heals graphs created
     before the name was injected. Returns a now-orphaned ``gv_*`` name to drop (else ``None``).
-    Never raises — projection proceeds regardless."""
-    try:
-        svc = get_versioning_service()
-        meta = await svc.get_graph(graph_id)
-        ds_id = meta.get("data_source_id") if meta else None
-        if not ds_id:
-            return None
-        async with get_async_session() as s:
-            ds_row = await data_source_repo.get_data_source_orm(s, str(ds_id))
-        if ds_row is None or not ds_row.graph_name:
-            return None
-        old = await svc.ensure_projection_target(graph_id=graph_id, falkor_graph_name=ds_row.graph_name)
-        # Only the synthetic orphan is safe to drop — never a real ds.graph_name or a fork's graph.
-        if old and old != ds_row.graph_name and old.startswith("gv_"):
-            return old
-    except Exception as exc:
-        logger.warning("projection-target repair for %s skipped: %s", graph_id, exc)
-    return None
+    Never raises — projection proceeds regardless. The async worker self-heals via the same shared
+    resolver, injected into its projector (``FalkorProjector(target_resolver=...)``)."""
+    return await repair_projection_target(get_versioning_service(), graph_id)
 
 
 async def project_now(graph_id: str) -> None:

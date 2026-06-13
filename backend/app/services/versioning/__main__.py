@@ -20,13 +20,16 @@ from .projection import FalkorProjector, make_falkor_graph_factory
 from .service import GraphVersioningService
 from .worker import ProjectionWorker
 from backend.app.providers.eviction_budget import make_registry_budget_resolver
+from backend.app.services.projection_target import repair_projection_target
 
 logger = logging.getLogger(__name__)
 
 
 async def _amain() -> None:
     await models.create_schema_and_partitions()
-    projector = FalkorProjector(make_falkor_graph_factory())
+    # target_resolver self-heals the projection target (the data source's real graph the canvas reads)
+    # on every projection, so the standalone worker matches the interactive project_now path.
+    projector = FalkorProjector(make_falkor_graph_factory(), target_resolver=repair_projection_target)
     worker = ProjectionWorker(
         projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
         versioning=GraphVersioningService(),

@@ -10,7 +10,11 @@ These are pure-function tests (no infra): they round-trip a payload through the 
 `_node_item` write → FalkorDB SET semantics → `_node_from_props` read, and assert the reserved set
 covers every direct write-field.
 """
-from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS, _node_from_props
+from backend.app.providers.falkordb_provider import (
+    _RESERVED_NODE_KEYS,
+    _node_from_props,
+    _sanitize_node_properties,
+)
 from backend.app.services.versioning.projection import _node_item
 
 
@@ -56,7 +60,35 @@ def test_reserved_set_covers_every_denormalised_write_field():
     assert not unreserved, f"projector writes unreserved node attrs (they will leak on read): {unreserved}"
 
 
+def test_sanitize_strips_reserved_keys_mirrored_into_properties():
+    """WRITE-path hygiene: the read path mirrors denormalised fields (`childCount`, …) INTO
+    `properties` and the canvas round-trips `properties` verbatim on save, so reserved keys land back
+    in the stored payload — which the projector then drops one-by-one, logging the reserved-key
+    warning per node. Sanitising on write removes exactly those keys (top-level fields untouched) so
+    the projector finds nothing to drop."""
+    payload = {
+        "urn": "urn:li:dataset:x", "displayName": "X", "entityType": "dataset", "childCount": 7,
+        "properties": {"owner": "fin", "rows": 42, "childCount": 7, "entityId": "urn:li:dataset:x",
+                       "searchableText": "X x", "tags": ["a"]},
+    }
+    out = _sanitize_node_properties(payload)
+    assert out["properties"] == {"owner": "fin", "rows": 42}          # reserved keys gone
+    assert out["childCount"] == 7 and out["displayName"] == "X"       # top-level fields intact
+    assert not (set(out["properties"]) & _RESERVED_NODE_KEYS)         # nothing left for the projector to drop
+
+
+def test_sanitize_is_identity_for_clean_payloads():
+    """A clean payload (or one with no `properties`) is returned UNCHANGED — same object — so the
+    content hash of an already-clean entity is byte-identical before and after this change."""
+    clean = {"urn": "y", "properties": {"a": 1}}
+    assert _sanitize_node_properties(clean) is clean
+    assert _sanitize_node_properties({"urn": "z"}) == {"urn": "z"}
+    assert _sanitize_node_properties(None) is None
+
+
 if __name__ == "__main__":
     test_projected_node_reads_back_clean_properties()
     test_reserved_set_covers_every_denormalised_write_field()
+    test_sanitize_strips_reserved_keys_mirrored_into_properties()
+    test_sanitize_is_identity_for_clean_payloads()
     print("node property hygiene: OK")

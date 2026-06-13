@@ -15,6 +15,9 @@ the canvas reflects the restored ``main``. No data loss: the pre-commit payloads
 history; FalkorDB is a rebuildable cache.
 
 Usage:
+  # 0) Diagnose "a merge to main doesn't persist / the canvas shows the old state" (read-only):
+  python backend/scripts/repair_revert_commit.py --graph-id <gid> --diagnose
+
   # 1) Find the offending commit (read-only):
   python backend/scripts/repair_revert_commit.py --data-source-id <ds> --list 20
   python backend/scripts/repair_revert_commit.py --graph-id <gid> --list 20
@@ -86,6 +89,95 @@ async def _reproject(svc: GraphVersioningService, gid: str) -> None:
     print(f"  projection: committed={wm.get('committed')} projected={wm.get('projected')} → {state}")
 
 
+async def _falkor_counts(factory, name: str):
+    """(nodes, edges) live in FalkorDB graph ``name``, or a reason string when absent/unreadable."""
+    try:
+        client = factory(name)
+        nodes = (await client.query("MATCH (n) RETURN count(n)")).result_set[0][0]
+        edges = (await client.query("MATCH ()-[r]->() RETURN count(r)")).result_set[0][0]
+        return (int(nodes), int(edges))
+    except Exception as exc:
+        msg = str(exc)
+        if "empty key" in msg.lower():
+            return "(absent — never projected into this graph)"
+        return f"(unreadable: {msg[:80]})"
+
+
+async def _diagnose(svc: GraphVersioningService, gid: str) -> None:
+    """Read-only: why a merge to main isn't showing on the canvas. Compares the graph the PROJECTION
+    writes (``projection_state.falkor_graph_name``) against the graph the CANVAS reads (the data
+    source's ``graph_name``), reports the watermark, and dumps live FalkorDB counts per candidate
+    graph — so a target mismatch or a lagging/failed projection is obvious."""
+    from backend.app.services.versioning import db as vdb
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+
+    print(f"=== projection diagnosis for graph {gid} ===\n")
+    async with vdb.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        graph = await s.get(GraphORM, gid)
+
+    print("committed main head seq :", graph.main_head_commit_seq if graph else None)
+    if ps is None:
+        print("projection_state        : (none) — this graph has never been projected.")
+    else:
+        print("projection_state:")
+        print(f"  falkor_graph_name     : {ps.falkor_graph_name!r}   <- projection WRITES here")
+        print(f"  projected_commit_seq  : {ps.projected_commit_seq}")
+        print(f"  target_commit_seq     : {ps.target_commit_seq}")
+        print(f"  status                : {ps.status}")
+        print(f"  last_projected_at     : {ps.last_projected_at}")
+        print(f"  last_error            : {ps.last_error!r}")
+
+    wm = await svc.projection_watermark(gid)
+    fresh = wm.get("fresh")
+    print(f"\nwatermark: committed={wm.get('committed')} projected={wm.get('projected')} fresh={fresh}"
+          f"  ({'live FalkorDB is served' if fresh else 'Postgres read-fallback is served'})")
+
+    # The canvas reads the data source's real graph_name (separate management DB).
+    ds_name, ds_id = None, None
+    meta = await svc.get_graph(gid)
+    ds_id = meta.get("data_source_id") if meta else None
+    if ds_id:
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.repositories import data_source_repo
+        try:
+            async with get_async_session() as s:
+                ds_row = await data_source_repo.get_data_source_orm(s, str(ds_id))
+            ds_name = ds_row.graph_name if ds_row else None
+        except Exception as exc:
+            print(f"\n(could not read data source {ds_id}: {type(exc).__name__}: "
+                  f"{str(exc).splitlines()[0][:160]})")
+    print(f"\ndata source             : {ds_id}")
+    print(f"canvas READS graph      : {ds_name!r}")
+
+    proj_name = (ps.falkor_graph_name if ps else None) or f"gv_{gid}"
+    if ds_name and proj_name != ds_name:
+        print(f"\n*** TARGET MISMATCH — projection writes {proj_name!r} but the canvas reads {ds_name!r}; "
+              f"merged main never surfaces. The worker now self-heals (target_resolver); to fix now, run "
+              f"any publish/merge (project_now re-points it) or `--revert-head` to re-project. ***")
+    elif ds_name:
+        print(f"\ntarget OK — projection writes {proj_name!r}, the same graph the canvas reads.")
+    if ps and ps.projected_commit_seq < ps.target_commit_seq:
+        print("*** PROJECTION LAGGING — projected < target; the worker hasn't caught up (check last_error). ***")
+
+    try:
+        from backend.app.services.versioning.projection import make_falkor_graph_factory
+        factory = make_falkor_graph_factory()
+    except Exception as exc:
+        print(f"\n(FalkorDB unconfigured — skipping live counts: {exc})")
+        return
+    seen, candidates = set(), []
+    for nm in (ds_name, f"{ds_name}_proj" if ds_name else None, f"gv_{gid}", proj_name):
+        if nm and nm not in seen:
+            seen.add(nm)
+            candidates.append(nm)
+    print("\nlive FalkorDB graph contents (nodes, edges):")
+    for nm in candidates:
+        tag = "  <- canvas reads" if nm == ds_name else ("  <- projection writes" if nm == proj_name else "")
+        print(f"  {nm:<42} {await _falkor_counts(factory, nm)}{tag}")
+    print()
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description="Revert a corrupted merge commit on main and re-project.")
     g = p.add_mutually_exclusive_group(required=True)
@@ -93,6 +185,10 @@ async def main() -> None:
     g.add_argument("--data-source-id", help="data source id (resolved to its graph)")
     p.add_argument("--list", nargs="?", const=20, type=int, metavar="N",
                    help="list the N newest main commits (default action; read-only)")
+    p.add_argument("--diagnose", action="store_true",
+                   help="diagnose 'merge doesn't persist / canvas shows old state': dump the projection "
+                        "target vs the graph the canvas reads, the watermark, and live FalkorDB counts "
+                        "(read-only)")
     p.add_argument("--commit-id", help="commit to revert")
     p.add_argument("--revert-head", action="store_true",
                    help="revert the current head commit (conflict-free; rerun to peel several)")
@@ -103,6 +199,11 @@ async def main() -> None:
 
     svc = GraphVersioningService()
     gid = await _resolve_graph_id(svc, args)
+
+    if args.diagnose:
+        await _diagnose(svc, gid)
+        return
+
     main_id = await svc.main_branch_id(gid)
 
     # Default / explicit list: read-only.
