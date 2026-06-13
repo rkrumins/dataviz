@@ -152,6 +152,24 @@ for stmt in migrations:
 - Separate table creation from migration
 - Add migration lock for concurrent deployments
 
+### 2.3 Versioning merge field-loss + draft read model (MOSTLY RESOLVED)
+
+A draft `update` op was applied as a **wholesale replace**, so a partial edit (the canvas sends only
+the edited fields) truncated the entity on `main` at publish/merge — nodes lost `displayName`
+(rendered their URN) and `properties`. Fixed by making `update` a field-level patch
+(`changeset.py::materialize` + `service.py::_apply_ops_once`, commit `4dd7df4`). Draft lineage now
+renders via a sparse read-overlay (`draft_overlay_provider.py`, commit `84a467f`). A repair CLI reverts
+the offending commit + re-projects (`backend/scripts/repair_revert_commit.py`, commit `540d390`).
+
+**Still open:** a `{ "id": "{}", "confidence": "<name> <name>" }` properties leak on some nodes was
+**not reproduced** and may predate the corrupting commit (so `revert` won't clear it). After a repair,
+confirm whether it persists and reproduce-first before fixing. Also: the code fix must be deployed
+*with* any repair, or corruption recurs on the next edit; already-damaged data only heals via the
+repair tool.
+
+> Full engineering memory: [VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md](VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md)
+> (requirements, design decisions, gaps, verification, repair runbook).
+
 ---
 
 ## 3. Architecture Issues
