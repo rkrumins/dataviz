@@ -120,6 +120,18 @@ def _is_transient_connection_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_null_handle_error(exc: BaseException) -> bool:
+    """True when *exc* is a ``NoneType`` attribute error from dereferencing a
+    graph handle that was nulled mid-flight — e.g. the ProviderManager evicted
+    and ``close()``-d this instance during a ``_run_guarded`` retry backoff.
+    Treated as reconnect-and-retry rather than a hard failure."""
+    return (
+        isinstance(exc, AttributeError)
+        and "NoneType" in str(exc)
+        and ("query" in str(exc) or "ro_query" in str(exc) or "select_graph" in str(exc))
+    )
+
+
 def _is_missing_graph_error(exc: BaseException) -> bool:
     """True when *exc* indicates the FalkorDB graph KEY does not exist yet.
 
@@ -479,6 +491,10 @@ class FalkorDBProvider(GraphDataProvider):
         # Applies to the graph (all topologies), preflight, and the cache.
         self._tls_enabled = tls_enabled
         self._graph = None
+        # In-flight guarded-op count. The ProviderManager's recovery eviction
+        # defers close() while this is > 0 so it cannot tear the pool out from
+        # under a running aggregation job (the 'NoneType has no query' race).
+        self._inflight = 0
         self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None       # Graph query pool (used by FalkorDB)
         self._redis_pool = None  # Separate pool for Redis data-structure ops (caching, SADD, etc.)
@@ -621,6 +637,11 @@ class FalkorDBProvider(GraphDataProvider):
         if self._projection_mode == "dedicated" and self._proj_graph is not None:
             return self._proj_graph
         return self._graph
+
+    def inflight_ops(self) -> int:
+        """Number of guarded graph ops currently executing. The manager uses
+        this to avoid closing a provider mid-job during recovery eviction."""
+        return self._inflight
 
     async def preflight(self, *, deadline_s: float = 1.5):
         """Fast reachability probe — TCP connect + Redis PING within
@@ -1010,43 +1031,62 @@ class FalkorDBProvider(GraphDataProvider):
         """
         attempt = 0
         max_retries = len(_TRANSIENT_RETRY_BACKOFFS)
-        while True:
-            try:
-                return await call()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                cluster = (
-                    self._conn_cfg is not None
-                    and self._conn_cfg.mode == "cluster"
-                )
-                # Cluster slot moved → rebuild the single-node client, retry.
-                if cluster and _is_cluster_routing_error(exc):
-                    if attempt >= max_retries:
-                        raise
-                    gen = self._conn_generation
-                    attempt += 1
-                    logger.warning(
-                        "FalkorDB %s: cluster redirect (%s) — rebuilding "
-                        "client and retrying (%d/%d).",
-                        self._graph_name, type(exc).__name__,
-                        attempt, max_retries,
+        # In-flight op count: the manager's recovery-eviction defers close()
+        # while this is > 0 so it can't tear the pool out from under a job.
+        self._inflight += 1
+        try:
+            while True:
+                try:
+                    return await call()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    cluster = (
+                        self._conn_cfg is not None
+                        and self._conn_cfg.mode == "cluster"
                     )
-                    await self._rebuild_graph_client_for_failover(gen)
-                    continue
-                # Transient connection drop (any mode) → short backoff + retry.
-                if _is_transient_connection_error(exc) and attempt < max_retries:
-                    backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
-                    attempt += 1
-                    logger.warning(
-                        "FalkorDB %s: transient connection error (%s) — "
-                        "retry %d/%d after %.2fs.",
-                        self._graph_name, type(exc).__name__,
-                        attempt, max_retries, backoff,
-                    )
-                    await asyncio.sleep(backoff)
-                    continue
-                raise
+                    # Cluster slot moved → rebuild the single-node client, retry.
+                    if cluster and _is_cluster_routing_error(exc):
+                        if attempt >= max_retries:
+                            raise
+                        gen = self._conn_generation
+                        attempt += 1
+                        logger.warning(
+                            "FalkorDB %s: cluster redirect (%s) — rebuilding "
+                            "client and retrying (%d/%d).",
+                            self._graph_name, type(exc).__name__,
+                            attempt, max_retries,
+                        )
+                        await self._rebuild_graph_client_for_failover(gen)
+                        continue
+                    # Transient connection drop (any mode) OR a graph handle that
+                    # was nulled mid-flight (evicted/closed by the manager's
+                    # recovery path during this retry) → rebuild the client and
+                    # retry within budget. _ensure_connected is a no-op when the
+                    # handle is still live (redis-py self-heals the pool) and a
+                    # full rebuild when close() nulled it.
+                    handle_lost = _is_null_handle_error(exc)
+                    if (handle_lost or _is_transient_connection_error(exc)) and attempt < max_retries:
+                        backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
+                        attempt += 1
+                        logger.warning(
+                            "FalkorDB %s: %s (%s) — reconnect + retry %d/%d after %.2fs.",
+                            self._graph_name,
+                            "lost graph handle" if handle_lost else "transient connection error",
+                            type(exc).__name__, attempt, max_retries, backoff,
+                        )
+                        try:
+                            await self._ensure_connected()
+                        except Exception as reconnect_exc:
+                            logger.warning(
+                                "FalkorDB %s: reconnect during retry failed (%s); "
+                                "retrying anyway.", self._graph_name, reconnect_exc,
+                            )
+                        await asyncio.sleep(backoff)
+                        continue
+                    raise
+        finally:
+            self._inflight -= 1
 
     async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the source graph."""
@@ -2823,8 +2863,10 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Keep parameter lists bounded so a single misconfigured outer
         # batch (e.g. 10k URNs) doesn't generate a single oversized
-        # query plan that itself spikes provider CPU.
-        chunk_size = 500
+        # query plan that itself spikes provider CPU. The default is tuned
+        # to cut per-page round-trips (each page resolves ~2×batch_size URNs);
+        # override via FALKORDB_ANCESTOR_CHUNK_SIZE.
+        chunk_size = int(os.getenv("FALKORDB_ANCESTOR_CHUNK_SIZE", "2000"))
 
         # ``MATCH (child) WHERE child.urn IN $urns`` is one node-scan for
         # the whole chunk; ``UNWIND $urns AS u MATCH (child {urn:u})``
@@ -3762,6 +3804,8 @@ class FalkorDBProvider(GraphDataProvider):
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
         last_cursor: Optional[str],
+        resume_processed: int = 0,
+        resume_created: int = 0,
     ) -> Dict[str, Any]:
         """Bulk-rebuild orchestrator — Phase 1 of aggregation hardening.
 
@@ -3806,6 +3850,8 @@ class FalkorDBProvider(GraphDataProvider):
                 intra_batch_callback=intra_batch_callback,
                 should_cancel=should_cancel,
                 last_cursor=last_cursor,
+                resume_processed=resume_processed,
+                resume_created=resume_created,
             )
 
         containment = containment_edge_types or list(self._get_containment_edge_types())
@@ -4261,15 +4307,32 @@ class FalkorDBProvider(GraphDataProvider):
         just slower.
         """
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
-        try:
-            await asyncio.wait_for(
-                self._proj.query(
-                    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)"
-                ),
-                timeout=_init_timeout,
-            )
-        except Exception:
-            pass  # already exists or unsupported
+        # The aggKey edge index is what keeps MERGE-on-aggKey an index seek
+        # rather than an O(out_degree) scan on high-fan-in hubs — a silently
+        # missing index is the difference between fast and quadratic, so log
+        # the outcome instead of swallowing it.
+        for stmt, what in (
+            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)", "aggKey"),
+            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggEpoch)", "aggEpoch"),
+        ):
+            try:
+                await asyncio.wait_for(
+                    self._proj.query(stmt), timeout=_init_timeout,
+                )
+                logger.info(
+                    "streaming_rebuild on %s: ensured AGGREGATED(%s) edge index.",
+                    self._graph_name, what,
+                )
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already" in msg or "exist" in msg:
+                    continue  # idempotent — fine
+                logger.warning(
+                    "streaming_rebuild on %s: could NOT create AGGREGATED(%s) "
+                    "edge index (%s). MERGE/sweep will be slower (O(out_degree) "
+                    "on hubs); upgrade FalkorDB if this persists.",
+                    self._graph_name, what, exc,
+                )
 
     async def _materialize_aggregated_edges_streaming_rebuild(
         self,
@@ -4281,6 +4344,8 @@ class FalkorDBProvider(GraphDataProvider):
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
         last_cursor: Optional[str],
+        resume_processed: int = 0,
+        resume_created: int = 0,
     ) -> Dict[str, Any]:
         """Constant-memory, crash-resumable bulk rebuild.
 
@@ -4351,9 +4416,23 @@ class FalkorDBProvider(GraphDataProvider):
 
         max_pairs_per_page = int(os.getenv("AGGREGATION_MAX_PAIRS_PER_PAGE", "200000"))
 
-        processed = 0
-        running_created = 0
-        total = max(total_estimate, 0)
+        # Seed the per-run counters from the resume baseline so a resumed job
+        # reports CUMULATIVE progress instead of resetting the bar to 0%. The
+        # scan never re-walks edges <= rid and the epoch is reused, so
+        # baseline + this-run is the correct total. Fresh runs start at 0.
+        processed = resume_processed if resume is not None else 0
+        running_created = resume_created if resume is not None else 0
+        # Loud signal if a job that HAD progress resumes with an unparseable
+        # cursor — that's a genuine restart (new epoch), not a continuation.
+        if resume is None and resume_processed > 0 and last_cursor:
+            logger.warning(
+                "streaming_rebuild on %s: resume requested with processed=%d but "
+                "cursor %r did not parse — RESTARTING from 0 under a new epoch; "
+                "the prior generation will be swept at end.",
+                self._graph_name, resume_processed, last_cursor,
+            )
+        total = max(total_estimate, processed)
+        scanned = processed  # absolute edges scanned (seeded at the baseline)
 
         if progress_callback is not None:
             try:
@@ -4364,6 +4443,50 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass
 
+        # Cross-page accumulator. High-fan-in hub pairs (a top domain→domain pair
+        # appears under most leaves) are MERGED once per FLUSH WINDOW instead of
+        # once per page — cutting MERGE volume, and the O(out_degree) hub MERGE
+        # cost, by 1–2 orders of magnitude on deep hierarchies. Bounded by
+        # AGGREGATION_MAX_PAIRS_PER_PAGE; the flush boundary is also the
+        # checkpoint boundary so processed + cursor advance together (sound
+        # resume).
+        pending_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        checkpoint_cursor = (
+            last_cursor if resume is not None
+            else self._make_stream_cursor(epoch, start_type_index, start_rid)
+        )
+
+        async def _flush_and_checkpoint(
+            flush_type_index: int, flush_rid: int, phase: str,
+        ) -> None:
+            nonlocal pending_pairs, processed, running_created, checkpoint_cursor
+            if pending_pairs:
+                running_created += await self._flush_streaming_pairs(
+                    page_pairs=pending_pairs, entity_levels=entity_levels,
+                    level_digest=level_digest, epoch=epoch,
+                    running_created=running_created,
+                    intra_batch_callback=intra_batch_callback,
+                    should_cancel=should_cancel,
+                )
+                pending_pairs = {}
+            # Everything scanned so far is now durably MERGED → advance the
+            # persisted cursor + processed together (consistent for resume).
+            processed = scanned
+            checkpoint_cursor = self._make_stream_cursor(
+                epoch, flush_type_index, flush_rid,
+            )
+            if progress_callback is not None:
+                try:
+                    await progress_callback(
+                        processed, max(total, processed), checkpoint_cursor,
+                        running_created, phase,
+                    )
+                except Exception as cb_exc:
+                    logger.error(
+                        "streaming_rebuild checkpoint callback failed "
+                        "(continuing): %s", cb_exc, exc_info=True,
+                    )
+
         for type_index in range(start_type_index, len(effective)):
             etype = effective[type_index]
             safe_type = _sanitize_label(etype)
@@ -4371,8 +4494,10 @@ class FalkorDBProvider(GraphDataProvider):
 
             while True:
                 if should_cancel is not None and should_cancel():
+                    # Resume from the last FLUSHED boundary; the unflushed tail
+                    # re-scans on resume (idempotent via MERGE).
                     raise JobCancelled(
-                        job_id=self._make_stream_cursor(epoch, type_index, rid_cursor),
+                        job_id=checkpoint_cursor,
                         observed_at=datetime.now(timezone.utc).isoformat(),
                     )
 
@@ -4387,6 +4512,8 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 rows = res.result_set or []
                 if not rows:
+                    # End of this type — flush the accumulated tail + checkpoint.
+                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
                     break
 
                 page_urns: Set[str] = set()
@@ -4399,8 +4526,7 @@ class FalkorDBProvider(GraphDataProvider):
                     list(page_urns),
                 )
 
-                # Expand (s_chain × t_chain) for THIS PAGE only.
-                page_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+                # Expand (s_chain × t_chain) into the CROSS-PAGE accumulator.
                 for _rid, s_urn, t_urn in rows:
                     if not s_urn or not t_urn:
                         continue
@@ -4410,56 +4536,26 @@ class FalkorDBProvider(GraphDataProvider):
                         for ta in t_chain:
                             if sa == ta:
                                 continue
-                            meta = page_pairs.get((sa, ta))
+                            meta = pending_pairs.get((sa, ta))
                             if meta is None:
                                 meta = {"weight": 0, "edge_types": set()}
-                                page_pairs[(sa, ta)] = meta
+                                pending_pairs[(sa, ta)] = meta
                             meta["weight"] += 1
                             meta["edge_types"].add(etype)
-                    # Safety valve: a single high-fan-in hub page must not
-                    # expand without bound. Flush + reset when the budget is
-                    # hit; MERGE accumulates across flushes so correctness
-                    # holds.
-                    if len(page_pairs) >= max_pairs_per_page:
-                        running_created += await self._flush_streaming_pairs(
-                            page_pairs=page_pairs, entity_levels=entity_levels,
-                            level_digest=level_digest, epoch=epoch,
-                            running_created=running_created,
-                            intra_batch_callback=intra_batch_callback,
-                            should_cancel=should_cancel,
-                        )
-                        page_pairs = {}
 
-                if page_pairs:
-                    running_created += await self._flush_streaming_pairs(
-                        page_pairs=page_pairs, entity_levels=entity_levels,
-                        level_digest=level_digest, epoch=epoch,
-                        running_created=running_created,
-                        intra_batch_callback=intra_batch_callback,
-                        should_cancel=should_cancel,
-                    )
-
-                processed += len(rows)
+                scanned += len(rows)
                 rid_cursor = int(rows[-1][0])
-                if total < processed:
-                    total = processed  # keep % monotonic when estimate is low
-                cursor = self._make_stream_cursor(epoch, type_index, rid_cursor)
+                if total < scanned:
+                    total = scanned  # keep % monotonic when estimate is low
 
-                # Checkpoint at the page boundary. The page's edges are fully
-                # MERGE'd at this point, so resume from this cursor is sound.
-                if progress_callback is not None:
-                    try:
-                        await progress_callback(
-                            processed, max(total, processed), cursor,
-                            running_created, "creating",
-                        )
-                    except Exception as cb_exc:
-                        logger.error(
-                            "streaming_rebuild checkpoint callback failed "
-                            "(continuing): %s", cb_exc, exc_info=True,
-                        )
+                # Flush when the accumulator hits its memory budget (this is the
+                # checkpoint boundary). Otherwise keep accumulating across pages.
+                if len(pending_pairs) >= max_pairs_per_page:
+                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
 
                 if len(rows) < batch_size:
+                    # End of this type — flush the accumulated tail + checkpoint.
+                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
                     break
 
         # End-of-run generation swap. Only a fully-scanned run reaches here.
@@ -5102,8 +5198,15 @@ class FalkorDBProvider(GraphDataProvider):
         progress_callback: Optional[Any] = None,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        resume_processed: int = 0,
+        resume_created: int = 0,
     ) -> Dict[str, Any]:
         """Batch materialization using ancestor-chain approach with cursor-based pagination.
+
+        ``resume_processed`` / ``resume_created`` are the job's already-committed
+        progress at resume time; the streaming rebuild seeds its per-run counters
+        from them (when the cursor parses) so a resumed job reports cumulative
+        progress instead of resetting the bar to 0%.
 
         Instead of Cypher variable-length paths with Cartesian products,
         this uses pre-computed ancestor chains stored in Redis Hashes.
@@ -5145,6 +5248,8 @@ class FalkorDBProvider(GraphDataProvider):
                 intra_batch_callback=intra_batch_callback,
                 should_cancel=should_cancel,
                 last_cursor=last_cursor,
+                resume_processed=resume_processed,
+                resume_created=resume_created,
             )
 
         containment = containment_edge_types or list(self._get_containment_edge_types())

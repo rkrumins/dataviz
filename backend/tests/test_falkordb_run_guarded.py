@@ -122,3 +122,63 @@ async def test_cluster_routing_error_rebuilds_client_then_retries(monkeypatch):
     assert await p._run_guarded(call) == "ok"
     assert calls["n"] == 2
     assert rebuilds["n"] == 1  # rebuilt the single-node client once
+
+
+@pytest.mark.asyncio
+async def test_null_handle_error_reconnects_then_retries(monkeypatch):
+    """A graph handle nulled mid-flight (manager evicted+closed the instance
+    during a job) surfaces as ``'NoneType' object has no attribute 'query'``.
+    _run_guarded must reconnect (rebuild the handle) and retry rather than
+    failing the job (Follow-up 9)."""
+    p = _provider()
+    reconnects = {"n": 0}
+
+    async def fake_ensure():
+        reconnects["n"] += 1
+
+    monkeypatch.setattr(p, "_ensure_connected", fake_ensure)
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AttributeError("'NoneType' object has no attribute 'query'")
+        return "ok"
+
+    assert await p._run_guarded(call) == "ok"
+    assert calls["n"] == 2          # one retry
+    assert reconnects["n"] == 1     # rebuilt the nulled handle before retrying
+
+
+@pytest.mark.asyncio
+async def test_unrelated_attribute_error_is_not_retried():
+    """A generic AttributeError (not a nulled graph-handle deref) still
+    propagates immediately — we only self-heal the NoneType.query signature."""
+    p = _provider()
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        raise AttributeError("'Foo' object has no attribute 'bar'")
+
+    with pytest.raises(AttributeError):
+        await p._run_guarded(call)
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_inflight_counter_tracks_guarded_ops():
+    """The in-flight counter (used by the manager to defer eviction-close)
+    is incremented during a guarded op and restored to 0 after."""
+    p = _provider()
+    seen = {"during": None}
+
+    async def call():
+        seen["during"] = p.inflight_ops()
+        return "ok"
+
+    assert p.inflight_ops() == 0
+    await p._run_guarded(call)
+    assert seen["during"] == 1
+    assert p.inflight_ops() == 0

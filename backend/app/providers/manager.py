@@ -23,7 +23,8 @@ import json
 import logging
 import os
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -591,18 +592,60 @@ class ProviderManager:
     # ------------------------------------------------------------------ #
 
     async def evict_data_source(self, provider_id: str, graph_name: str) -> None:
-        """Evict cached provider for a (provider_id, graph_name) pair."""
+        """Evict cached provider for a (provider_id, graph_name) pair.
+
+        Removes it from the cache (so new traffic re-instantiates cleanly) but
+        DEFERS ``close()`` while the provider has in-flight guarded ops — closing
+        mid-job nulls the graph handle out from under a running aggregation and
+        surfaces as ``'NoneType' object has no attribute 'query'``. When busy we
+        background a drain-then-close so the pool isn't leaked.
+        """
         cache_key = (provider_id, graph_name or "")
         provider = self._providers.pop(cache_key, None)
-        if provider is not None:
-            try:
-                await provider.close()
-            except Exception as exc:
-                logger.warning("Error closing provider %s: %s", cache_key, exc)
         self._locks.pop(cache_key, None)
         # Also reset the instantiation breaker so re-instantiation is attempted
         self._instantiation_breakers.pop(cache_key, None)
+        if provider is not None:
+            inflight = 0
+            try:
+                inflight = provider.inflight_ops()
+            except Exception:
+                inflight = 0
+            if inflight > 0:
+                logger.info(
+                    "Provider %s evicted from cache but has %d in-flight ops — "
+                    "deferring close until idle.", cache_key, inflight,
+                )
+                asyncio.create_task(self._close_when_idle(cache_key, provider))
+            else:
+                try:
+                    await provider.close()
+                except Exception as exc:
+                    logger.warning("Error closing provider %s: %s", cache_key, exc)
         logger.info("Evicted provider for key=%s", cache_key)
+
+    async def _close_when_idle(
+        self, cache_key: tuple, provider: Any, *, timeout_s: float = 600.0,
+    ) -> None:
+        """Wait for a deferred-evicted provider to drain its in-flight ops, then
+        close it. Bounded so a stuck op can't leak the pool forever."""
+        deadline = time.monotonic() + timeout_s
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    if provider.inflight_ops() <= 0:
+                        break
+                except Exception:
+                    break
+                await asyncio.sleep(2.0)
+        finally:
+            try:
+                await provider.close()
+                logger.info("Closed deferred-evicted provider %s.", cache_key)
+            except Exception as exc:
+                logger.warning(
+                    "Error closing deferred provider %s: %s", cache_key, exc,
+                )
 
     async def evict_workspace(self, workspace_id: str, session: AsyncSession) -> None:
         """Evict all cached providers for all data sources in a workspace."""

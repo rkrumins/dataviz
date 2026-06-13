@@ -369,3 +369,95 @@ async def test_empty_batch_yields_no_units():
     p = _make_provider()
     p._projection_mode = "dedicated"
     assert await p._build_aggregated_merge_units([]) == []
+
+
+# ── Follow-up 9: resume continuity + cross-page MERGE-volume reduction ──
+
+@pytest.mark.asyncio
+async def test_resume_seeds_progress_counters(monkeypatch):
+    """On resume the per-run counters are seeded from the baseline so progress
+    continues cumulatively instead of resetting the bar to 0%."""
+    p = _make_provider()
+    ancestors = {"a1": [], "a2": [], "b1": [], "b2": []}
+    edges = {"FLOWS": [(10, "a1", "b1"), (20, "a2", "b2")]}
+    _wire_fake_graph(p, monkeypatch, edges_by_type=edges, ancestors=ancestors)
+
+    seen = []
+
+    async def cb(processed, total, cursor, created, phase):
+        seen.append((processed, created, phase))
+
+    res = await p._materialize_aggregated_edges_streaming_rebuild(
+        batch_size=100,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"],
+        progress_callback=cb,
+        intra_batch_callback=None,
+        should_cancel=None,
+        last_cursor="v2:777:0:10",   # resume after rid 10 → only rid 20 left
+        resume_processed=100,
+        resume_created=50,
+    )
+    # processed/created continue from the baseline (100/50), not 0.
+    assert res["processed"] == 101  # 100 baseline + 1 new edge
+    assert seen[0][0] == 100  # the very first ('scanning') callback shows baseline
+    creating = [(pr, cr) for pr, cr, ph in seen if ph == "creating"]
+    assert creating, "expected a creating checkpoint"
+    assert creating[-1] == (101, 51)  # processed=100+1, created=50+1 (a2|b2)
+
+
+@pytest.mark.asyncio
+async def test_fresh_run_starts_counters_at_zero(monkeypatch):
+    """A non-resume run (cursor doesn't parse) ignores the baselines."""
+    p = _make_provider()
+    ancestors = {"a1": [], "b1": []}
+    edges = {"FLOWS": [(1, "a1", "b1")]}
+    _wire_fake_graph(p, monkeypatch, edges_by_type=edges, ancestors=ancestors)
+
+    res = await p._materialize_aggregated_edges_streaming_rebuild(
+        batch_size=100,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"],
+        progress_callback=None,
+        intra_batch_callback=None,
+        should_cancel=None,
+        last_cursor=None,
+        resume_processed=999,  # ignored — fresh run
+        resume_created=999,
+    )
+    assert res["processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_page_accumulation_reduces_merge_calls(monkeypatch):
+    """10 leaves on 10 separate pages, all sharing the hub pair (H,TP), must
+    flush ONCE (cross-page accumulation) rather than once per page — the fix
+    for the O(out_degree) hub-MERGE slowdown."""
+    p = _make_provider()
+    ancestors = {f"a{i}": ["H"] for i in range(10)}
+    ancestors.update({f"b{i}": ["TP"] for i in range(10)})
+    edges = {"FLOWS": [(i + 1, f"a{i}", f"b{i}") for i in range(10)]}
+    fake = _wire_fake_graph(p, monkeypatch, edges_by_type=edges, ancestors=ancestors)
+
+    inner = p._proj_query
+    merge_calls = {"n": 0}
+
+    async def counting_proj_query(cypher, params=None, **kw):
+        if "MERGE" in cypher:
+            merge_calls["n"] += 1
+        return await inner(cypher, params=params, **kw)
+
+    monkeypatch.setattr(p, "_proj_query", counting_proj_query)
+
+    await p._materialize_aggregated_edges_streaming_rebuild(
+        batch_size=1,  # one edge per page → 10 pages
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"],
+        progress_callback=None,
+        intra_batch_callback=None,
+        should_cancel=None,
+        last_cursor=None,
+    )
+    # One accumulated flush (single label group), NOT one MERGE per page.
+    assert merge_calls["n"] <= 2, f"expected ~1 flush, got {merge_calls['n']}"
+    assert fake.edges["H|TP"]["weight"] == 10  # correctness preserved

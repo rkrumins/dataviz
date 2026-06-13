@@ -940,6 +940,11 @@ class AggregationWorker:
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,
             should_cancel=should_cancel,
+            # Resume baselines so a resumed job's progress continues from its
+            # last checkpoint instead of resetting the bar to 0% (the streaming
+            # rebuild applies these only when last_cursor parses).
+            resume_processed=job.processed_edges or 0,
+            resume_created=job.created_edges or 0,
         )
 
         return result
