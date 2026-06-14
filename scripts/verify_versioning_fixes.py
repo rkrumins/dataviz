@@ -332,6 +332,33 @@ async def part_1e(svc, c, actor, ws):
         fn2 = (await client.query("MATCH (n) RETURN count(n) AS c")).result_set[0][0]
         c.check(fn2 == 4, "1E: a dropped FalkorDB node is bounded-healed (reseed)",
                 f"1E: heal did not restore the dropped node (n={fn2})")
+
+        # A node deleted on main but STRANDED in the cache (an incremental delete the cache missed —
+        # the reported "deleted entity still in FalkorDB") must be swept on heal, while a legacy
+        # (never-versioned) node is left for bootstrap. Delete urns[1], project (removes it), then
+        # forcibly re-insert it as a strand and project an unrelated change: heal sweeps the strand.
+        d3 = await svc.open_draft(graph_id=gid, owner=actor)
+        await svc.apply_ops(graph_id=gid, branch_id=d3, actor=actor,
+                            ops=[{"op": "delete", "entity_kind": "node", "entity_id": urns[1], "payload": None}])
+        await svc.publish(graph_id=gid, branch_id=d3, actor=actor, message="del urns[1]")
+        await proj.project_graph(gid)
+        await client.query("MERGE (n {urn: $u}) SET n.entityId = $u, n.displayName = 'strand'",
+                           params={"u": urns[1]})           # resurrect the deleted node in the cache
+        ghost = f"urn:li:dataset:legacy_{uuid.uuid4().hex[:6]}"
+        await client.query("MERGE (n {urn: $u}) SET n.entityId = $u, n.displayName = 'legacy'",
+                           params={"u": ghost})              # never-versioned legacy node (no tombstone)
+        u5 = f"urn:li:dataset:p_5_{uuid.uuid4().hex[:6]}"
+        d4 = await svc.open_draft(graph_id=gid, owner=actor)
+        await svc.apply_ops(graph_id=gid, branch_id=d4, actor=actor, ops=[_node_op(u5)])
+        await svc.publish(graph_id=gid, branch_id=d4, actor=actor, message="n5")
+        await proj.project_graph(gid)                        # urns[1] is outside this window — only heal can clear it
+        strand_gone = (await client.query("MATCH (n {urn: $u}) RETURN count(n) AS c",
+                                          params={"u": urns[1]})).result_set[0][0] == 0
+        legacy_kept = (await client.query("MATCH (n {urn: $u}) RETURN count(n) AS c",
+                                          params={"u": ghost})).result_set[0][0] == 1
+        c.check(strand_gone and legacy_kept,
+                "1E: tombstoned-but-stranded node swept on heal; legacy node preserved",
+                f"1E: tombstone sweep off (strand_gone={strand_gone}, legacy_kept={legacy_kept})")
     finally:
         try:
             await client.delete()
