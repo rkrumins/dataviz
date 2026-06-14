@@ -113,7 +113,15 @@ PROJECTION_BATCH_SIZE: int = int(os.getenv("GRAPHVER_PROJECTION_BATCH_SIZE", "50
 # tolerance (a read serves from FalkorDB while projected >= committed - lag),
 # the worker's health port, and whether the web process also runs the poll loop.
 PROJECTION_POLL_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_POLL_SECS", "5"))
+# Max graphs projected concurrently per reconciling poll pass (each id appears once per pass,
+# so there's no same-graph race) — keeps the worker caught up across 100s of graphs.
+PROJECTION_CONCURRENCY: int = int(os.getenv("GRAPHVER_PROJECTION_CONCURRENCY", "8"))
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
+# After each projection, cheaply reconcile live node/edge COUNTS between Postgres
+# (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
+# graph from Postgres once. Guards against a silently dropped delete leaving the
+# cache diverged from committed main. Disable with GRAPHVER_PROJECTION_VERIFY=0.
+PROJECTION_VERIFY_ENABLED: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY", "1").lower() not in ("0", "false", "no")
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 

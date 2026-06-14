@@ -74,24 +74,15 @@ class VersionedWriteProvider:
                     if res is not None:
                         self._gid = res["graph_id"]
                     else:
-                        self._gid = (await self._svc.create_graph(
+                        # Atomic, complete, idempotent enablement: create-graph + full
+                        # provider import in one transaction (no half-enabled graph that
+                        # would hijack reads while empty), so every editable entity gets a
+                        # Postgres version row and edits can't spawn phantoms.
+                        self._gid = (await self._svc.enable_versioning(
                             data_source_id=self._ds, workspace_id=self._ws,
-                            actor=self._actor,
+                            actor=self._actor, provider=self._inner,
                             falkor_graph_name=self._falkor_graph_name))["graph_id"]
-                        await self._maybe_bootstrap(self._gid)
         return self._gid
-
-    async def _maybe_bootstrap(self, graph_id: str) -> None:
-        """Seed the new versioned graph from the provider's current state so branches and
-        history cover the WHOLE graph, not just edits — best-effort (ops can re-run the
-        explicit POST /graph/bootstrap if the provider can't be fully read here)."""
-        try:
-            from .versioned_bootstrap import bootstrap_versioned_graph
-            await bootstrap_versioned_graph(self._svc, self._inner, graph_id, actor=self._actor)
-        except Exception:                                # pragma: no cover - provider read varies
-            logger.warning(
-                "versioned-graph bootstrap from provider failed for %s; base may be "
-                "incomplete until POST /graph/bootstrap is run", graph_id, exc_info=True)
 
     async def _record(self, ops: List[dict], message: str) -> None:
         ops = [o for o in ops if o is not None]

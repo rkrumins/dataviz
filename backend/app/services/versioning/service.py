@@ -221,6 +221,56 @@ class GraphVersioningService:
             )
             return {"graph_id": graph.id, "main_branch_id": main.id, "genesis_commit_id": genesis.id}
 
+    async def enable_versioning(
+        self, *, data_source_id: str, workspace_id: str, actor: str,
+        provider=None, falkor_graph_name: Optional[str] = None,
+        kind: str = "manual", batch: int = 2000,
+    ) -> Dict[str, object]:
+        """Turn on versioning for a data source that may ALREADY hold data in its provider
+        (e.g. a FalkorDB-only graph). The supported, explicit enablement entry point.
+
+        * **Idempotent** on the data source: if a versioned graph already exists, returns
+          it untouched (``already_enabled=True``) — never re-imports.
+        * **Complete + atomic**: snapshots the provider's FULL current state (paged
+          OUTSIDE the transaction, since paging is slow) and writes create-graph +
+          ``import`` commit in ONE transaction, so a provider-read failure leaves NO
+          half-enabled graph hijacking reads. Pass ``provider`` to import its rows; omit
+          it to enable an empty graph.
+        * After this, the projector makes FalkorDB a derived view of committed ``main``
+          (``falkor_graph_name`` pins it to the data source's real graph), so every
+          editable entity has a Postgres version row and edits can't spawn phantoms."""
+        existing = await self.get_graph_by_data_source(data_source_id)
+        if existing is not None:
+            return {"graph_id": existing["graph_id"], "already_enabled": True,
+                    "imported": 0, "rows": 0}
+        rows = None
+        if provider is not None:
+            from backend.app.providers.versioned_bootstrap import collect_provider_rows
+            rows = await collect_provider_rows(provider, batch=batch)   # slow paging — OUTSIDE the txn
+        try:
+            async with self._session() as s:
+                gid = (await self.create_graph(
+                    data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
+                    actor=actor, falkor_graph_name=falkor_graph_name, session=s))["graph_id"]
+                imported = 0
+                if rows:
+                    report = await self.bulk_ingest(
+                        graph_id=gid, rows=rows, actor=actor,
+                        idempotency_key=f"bootstrap:{gid}",
+                        message="enable versioning import", session=s)
+                    st = report.get("stats") or {}
+                    imported = int(report.get("applied")
+                                   or (st.get("nodes", 0) + st.get("edges", 0)))
+            return {"graph_id": gid, "already_enabled": False,
+                    "imported": imported, "rows": len(rows or [])}
+        except IntegrityError:
+            # Lost a concurrent enable race (uq_graphs_data_source) — return the winner.
+            again = await self.get_graph_by_data_source(data_source_id)
+            if again is None:
+                raise
+            return {"graph_id": again["graph_id"], "already_enabled": True,
+                    "imported": 0, "rows": 0}
+
     async def open_draft(
         self,
         *,
@@ -384,6 +434,28 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
     ) -> Optional[str]:
+        """Fold uncommitted working changes into a draft commit, retrying on a
+        ``commit_seq`` collision so two collaborators checkpointing the SAME shared
+        draft concurrently don't crash (one retries against the other's new head)."""
+        return await self._retry_seq(
+            f"checkpoint {branch_id}",
+            lambda: self._checkpoint_once(
+                graph_id=graph_id, branch_id=branch_id, actor=actor, message=message,
+                resolutions=resolutions, actor_groups=actor_groups,
+                containment_edge_types=containment_edge_types),
+        )
+
+    async def _checkpoint_once(
+        self,
+        *,
+        graph_id: str,
+        branch_id: str,
+        actor: str,
+        message: Optional[str] = None,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        actor_groups: Sequence[str] = (),
+        containment_edge_types: Optional[Sequence[str]] = None,
+    ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
 
@@ -480,6 +552,33 @@ class GraphVersioningService:
             branch.updated_at = _now()
             return commit.id
 
+    async def _flush_pending_changes(
+        self, *, graph_id: str, branch_id: str, actor: str,
+        actor_groups: Sequence[str] = (),
+        containment_edge_types: Optional[Sequence[str]] = None,
+    ) -> Optional[str]:
+        """Fold any staged-but-uncommitted ``working_changes`` on a draft into a
+        checkpoint commit. Publish/merge read the draft side from committed heads
+        (``_branch_own_payloads`` → ``entity_heads``), so a draft that staged edits
+        but never checkpointed would otherwise publish/merge an EMPTY delta and
+        silently drop those edits. Returns the new commit id, or ``None`` if there
+        was nothing pending."""
+        async with self._session() as s:
+            pending = (await s.execute(
+                select(func.count()).select_from(WorkingChangeORM).where(
+                    WorkingChangeORM.graph_id == graph_id,
+                    WorkingChangeORM.branch_id == branch_id,
+                    WorkingChangeORM.committed_into_commit_id.is_(None),
+                )
+            )).scalar_one()
+        if not pending:
+            return None
+        return await self.checkpoint(
+            graph_id=graph_id, branch_id=branch_id, actor=actor,
+            message="auto-checkpoint pending changes before merge",
+            actor_groups=actor_groups, containment_edge_types=containment_edge_types,
+        )
+
     # ------------------------------------------------------------------ #
     # Publish (squash draft → main)                                       #
     # ------------------------------------------------------------------ #
@@ -504,26 +603,35 @@ class GraphVersioningService:
         covers the no-advance case (then base == theirs, so the merge reduces to
         the draft's own delta).
         """
-        async with self._session() as s:
-            graph = await s.get(GraphORM, graph_id)
-            draft = await s.get(BranchORM, branch_id)
-            if graph is None or draft is None or draft.graph_id != graph_id:
-                raise ValueError("unknown graph/branch")
-            self._require_open(draft)
-            if draft.is_shared:                           # publishing a shared draft → maintainer
-                await self._require_manage(s, draft, actor, actor_groups)
-            main_id = await self._main_branch_id(s, graph_id)
-            if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
-                raise NotUpToDate(branch_id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
+        # Fold any staged-but-uncommitted edits first, so a publish never silently
+        # drops working changes that were staged but not checkpointed.
+        await self._flush_pending_changes(
+            graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups
+        )
 
-            merged_state, conflicts, theirs = await self._compute_merge(
-                s, graph_id, graph, draft, main_id, dict(resolutions or {})
-            )
-            if conflicts:
-                raise MergeConflict(conflicts)
-            return await self._apply_draft_squash(
-                s, graph, draft, main_id, merged_state, theirs, actor, message
-            )
+        async def _once():
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)       # serialize same-graph merges (see _lock_graph)
+                graph = await s.get(GraphORM, graph_id)
+                draft = await s.get(BranchORM, branch_id)
+                if graph is None or draft is None or draft.graph_id != graph_id:
+                    raise ValueError("unknown graph/branch")
+                self._require_open(draft)
+                if draft.is_shared:                       # publishing a shared draft → maintainer
+                    await self._require_manage(s, draft, actor, actor_groups)
+                main_id = await self._main_branch_id(s, graph_id)
+                if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
+                    raise NotUpToDate(branch_id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
+
+                merged_state, conflicts, theirs = await self._compute_merge_bounded(
+                    s, graph_id, graph, draft, main_id, dict(resolutions or {})
+                )
+                if conflicts:
+                    raise MergeConflict(conflicts)
+                return await self._apply_draft_squash(
+                    s, graph, draft, main_id, merged_state, theirs, actor, message
+                )
+        return await self._retry_seq(f"publish {branch_id}", _once)
 
     async def _apply_draft_squash(
         self, s, graph, draft, main_id, merged_state, theirs, actor, message,
@@ -534,6 +642,11 @@ class GraphVersioningService:
         mark the draft merged + projection target. Shared by :meth:`publish` and the
         reviewed :meth:`merge_mr` (so both attribute contributors and re-gate ontology
         identically)."""
+        # merged_state/theirs may be SPARSE (bounded merge). Hydrate the live main
+        # neighborhood the next two guards reason about so they behave identically to the
+        # full-state path: incident edges of tombstoned nodes (to cascade) + endpoints of
+        # added edges (so an edge between two unchanged nodes isn't a false dangle).
+        await self._hydrate_merge_neighborhood(s, graph.id, main_id, merged_state, theirs)
         # Deleting a node cascades to its incident edges in this same commit;
         # the guard then only rejects edges to an endpoint that never existed
         # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
@@ -570,6 +683,7 @@ class GraphVersioningService:
         kind_by_entity = await self._kind_map_multi(
             s, [(graph.id, draft.id), (graph.id, main_id)]
         )
+        kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
         ontology = Ontology.from_spec(graph.ontology_spec)   # PR re-validation gate (§16.5 #6)
         if ontology is not None and graph.ontology_enforcement == "strict":
             viol = validate_entities(
@@ -731,10 +845,24 @@ class GraphVersioningService:
                 raise ValueError("cannot revert the genesis commit")
 
             k, head_seq = target.commit_seq, graph.main_head_commit_seq
-            before = await self._state_as_of(s, graph_id, main_id, k - 1)
-            after = await self._state_as_of(s, graph_id, main_id, k)
-            cur = await self._state_as_of(s, graph_id, main_id, head_seq)
             touched = await self._changed_in_window(s, graph_id, main_id, k - 1, k)
+            # Bounded (O(touched)) for a non-fork main: read only the touched entities at the
+            # three points via the index-backed _values_at, not the O(history) _state_as_of.
+            # A fork keeps the full (CoW-aware) replay (its base inherits from the parent).
+            if graph.fork_parent_graph_id:
+                before = await self._state_as_of(s, graph_id, main_id, k - 1)
+                after = await self._state_as_of(s, graph_id, main_id, k)
+                cur = await self._state_as_of(s, graph_id, main_id, head_seq)
+                merged = dict(cur)
+                for eid in touched:
+                    merged[eid] = before.get(eid)      # restore (None ⇒ tombstone)
+                theirs = cur
+            else:
+                before = await self._values_at(s, graph_id, main_id, touched, k - 1)
+                after = await self._values_at(s, graph_id, main_id, touched, k)
+                cur = await self._values_at(s, graph_id, main_id, touched, head_seq)
+                merged = {eid: before.get(eid) for eid in touched}   # restore (None ⇒ tombstone)
+                theirs = {eid: cur.get(eid) for eid in touched}
 
             conflicts = [
                 {"entity_id": eid, "path": [], "reason": "modified after the reverted commit"}
@@ -744,13 +872,12 @@ class GraphVersioningService:
             if conflicts:
                 raise MergeConflict(conflicts)
 
-            merged = dict(cur)
-            for eid in touched:
-                merged[eid] = before.get(eid)          # restore (None ⇒ tombstone)
+            # Hydrate the live neighborhood for the in-dict cascade/integrity guards (sparse-safe).
+            await self._hydrate_merge_neighborhood(s, graph_id, main_id, merged, theirs)
             self._cascade_incident_edges(merged)
             self._assert_referential_integrity(merged)
 
-            deltas = net_delta(cur, merged)
+            deltas = net_delta(theirs, merged)
             if not deltas:
                 return ""                              # nothing to undo
 
@@ -764,6 +891,7 @@ class GraphVersioningService:
             s.add(revert)
             await s.flush()
             kind_by_entity = await self._kind_map_multi(s, [(graph_id, main_id)])
+            kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
             await self._write_deltas(s, graph_id, main_id, revert, deltas, kind_by_entity, actor)
             main.head_commit_id = revert.id
             graph.main_head_commit_seq = new_seq
@@ -968,79 +1096,84 @@ class GraphVersioningService:
         :class:`MergeConflict` (resubmit with ``resolutions``).  Already-merged
         divergence nets to zero on any later PR, so the fork keeps its base and
         can keep diverging."""
-        async with self._session() as s:
-            pr = await s.get(MergeRequestORM, pr_id)
-            if pr is None:
-                raise ValueError(f"unknown pr {pr_id}")
-            if pr.status in ("merged", "closed"):
-                raise ValueError(f"pr {pr_id} is {pr.status}")
-            fork = await s.get(GraphORM, pr.graph_id)
-            parent = await s.get(GraphORM, pr.target_graph_id)
-            if fork is None or parent is None:
-                raise ValueError("pr endpoints missing")
-            parent_main = await self._main_branch_id(s, parent.id)
-            fork_main = await self._main_branch_id(s, fork.id)
+        async def _once():
+            async with self._session() as s:
+                pr = await s.get(MergeRequestORM, pr_id)
+                if pr is None:
+                    raise ValueError(f"unknown pr {pr_id}")
+                if pr.status in ("merged", "closed"):
+                    raise ValueError(f"pr {pr_id} is {pr.status}")
+                fork = await s.get(GraphORM, pr.graph_id)
+                parent = await s.get(GraphORM, pr.target_graph_id)
+                if fork is None or parent is None:
+                    raise ValueError("pr endpoints missing")
+                await self._lock_graph(s, parent.id)      # serialize merges into this parent's main
+                await s.refresh(parent)                   # head may have advanced before the lock
+                parent_main = await self._main_branch_id(s, parent.id)
+                fork_main = await self._main_branch_id(s, fork.id)
 
-            merged, conflicts, theirs = await self._compute_fork_merge(
-                s, fork, dict(resolutions or {})
-            )
-            if conflicts:
-                pr.status = "conflicts"
-                pr.conflicts = conflicts
-                raise MergeConflict(conflicts)
-            self._cascade_incident_edges(merged)
-            self._assert_referential_integrity(merged)
+                merged, conflicts, theirs = await self._compute_fork_merge(
+                    s, fork, dict(resolutions or {})
+                )
+                if conflicts:
+                    pr.status = "conflicts"
+                    pr.conflicts = conflicts
+                    raise MergeConflict(conflicts)
+                self._cascade_incident_edges(merged)
+                self._assert_referential_integrity(merged)
 
-            deltas = net_delta(theirs, merged)
-            if not deltas:
+                deltas = net_delta(theirs, merged)
+                if not deltas:
+                    pr.status = "merged"
+                    return ""
+
+                # PR gates (P8): re-validate the merged result against the target's
+                # ontology, then require every requested reviewer's approval — both
+                # checked before any write to main.
+                kind_by_entity = await self._kind_map_multi(
+                    s, [(fork.id, fork_main), (parent.id, parent_main)]
+                )
+                kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
+                checks = self._pr_ontology_check(parent, deltas, kind_by_entity)
+                pr.checks_status = checks
+                if not checks["ontology"]["ok"]:
+                    raise OntologyViolation(checks["ontology"]["violations"])
+                reviewers = set(pr.reviewers or [])
+                if reviewers and pr.approval_status != "approved":
+                    raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
+
+                new_seq = parent.main_head_commit_seq + 1
+                contributors = await self._branch_contributors(s, fork.id, fork_main)
+                source_commits = await self._branch_commit_ids(s, fork.id, fork_main)
+                main = await s.get(BranchORM, parent_main)
+                squash = CommitORM(
+                    graph_id=parent.id, branch_id=parent_main, commit_seq=new_seq,
+                    parent_commit_id=main.head_commit_id, kind="squash_publish",
+                    message=message, actor=actor, contributors=contributors,
+                    source_branch_id=fork_main, source_commit_ids=source_commits,
+                    source_commit_count=len(source_commits),
+                )
+                s.add(squash)
+                await s.flush()
+
+                await self._write_deltas(s, parent.id, parent_main, squash, deltas, kind_by_entity, actor)
+
+                main.head_commit_id = squash.id
+                parent.main_head_commit_seq = new_seq      # advance head before merkle
+                parent.updated_at = _now()
+                squash.merkle_root = await self._commit_merkle(s, parent.id, parent_main, squash, deltas)
+                squash.stats = _delta_stats(deltas)
+
                 pr.status = "merged"
-                return ""
-
-            # PR gates (P8): re-validate the merged result against the target's
-            # ontology, then require every requested reviewer's approval — both
-            # checked before any write to main.
-            kind_by_entity = await self._kind_map_multi(
-                s, [(fork.id, fork_main), (parent.id, parent_main)]
-            )
-            checks = self._pr_ontology_check(parent, deltas, kind_by_entity)
-            pr.checks_status = checks
-            if not checks["ontology"]["ok"]:
-                raise OntologyViolation(checks["ontology"]["violations"])
-            reviewers = set(pr.reviewers or [])
-            if reviewers and pr.approval_status != "approved":
-                raise ApprovalRequired(pr_id, sorted(reviewers - set(pr.approved_by or [])))
-
-            new_seq = parent.main_head_commit_seq + 1
-            contributors = await self._branch_contributors(s, fork.id, fork_main)
-            source_commits = await self._branch_commit_ids(s, fork.id, fork_main)
-            main = await s.get(BranchORM, parent_main)
-            squash = CommitORM(
-                graph_id=parent.id, branch_id=parent_main, commit_seq=new_seq,
-                parent_commit_id=main.head_commit_id, kind="squash_publish",
-                message=message, actor=actor, contributors=contributors,
-                source_branch_id=fork_main, source_commit_ids=source_commits,
-                source_commit_count=len(source_commits),
-            )
-            s.add(squash)
-            await s.flush()
-
-            await self._write_deltas(s, parent.id, parent_main, squash, deltas, kind_by_entity, actor)
-
-            main.head_commit_id = squash.id
-            parent.main_head_commit_seq = new_seq      # advance head before merkle
-            parent.updated_at = _now()
-            squash.merkle_root = await self._commit_merkle(s, parent.id, parent_main, squash, deltas)
-            squash.stats = _delta_stats(deltas)
-
-            pr.status = "merged"
-            pr.resulting_commit_id = squash.id
-            pr.merged_at = _now()
-            pr.merged_by = actor
-            pr.updated_at = _now()
-            ps = await s.get(ProjectionStateORM, parent.id)
-            if ps is not None:
-                ps.target_commit_seq = new_seq
-            return squash.id
+                pr.resulting_commit_id = squash.id
+                pr.merged_at = _now()
+                pr.merged_by = actor
+                pr.updated_at = _now()
+                ps = await s.get(ProjectionStateORM, parent.id)
+                if ps is not None:
+                    ps.target_commit_seq = new_seq
+                return squash.id
+        return await self._retry_seq(f"merge_pr {pr_id}", _once)
 
     # ---- draft → main merge request (reviewed publish) ------------------- #
     @staticmethod
@@ -1186,39 +1319,52 @@ class GraphVersioningService:
             if pr is None:
                 raise ValueError(f"unknown merge request {mr_id}")
             is_draft = self._is_draft_mr(pr)
+            flush_gid = pr.target_graph_id
+            flush_bid = pr.source_branch_id
+            draft_branch = await s.get(BranchORM, pr.source_branch_id)
+            flush_actor = (draft_branch.owner if draft_branch else None) or actor
         if not is_draft:
             return await self.merge_pr(
                 pr_id=mr_id, actor=actor, message=message, resolutions=resolutions
             )
-        async with self._session() as s:
-            pr = await s.get(MergeRequestORM, mr_id)
-            if pr.status in ("merged", "closed"):
-                raise ValueError(f"merge request {mr_id} is {pr.status}")
-            graph = await s.get(GraphORM, pr.target_graph_id)
-            draft = await s.get(BranchORM, pr.source_branch_id)
-            if graph is None or draft is None:
-                raise ValueError("merge request endpoints missing")
-            self._require_open(draft)
-            main_id = await self._main_branch_id(s, graph.id)
-            if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
-                raise NotUpToDate(draft.id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
-            merged_state, conflicts, theirs = await self._compute_merge(
-                s, graph.id, graph, draft, main_id, dict(resolutions or {})
-            )
-            if conflicts:
-                raise MergeConflict(conflicts)
-            reviewers = set(pr.reviewers or [])              # approval gate (plan §17 #5)
-            if reviewers and pr.approval_status != "approved":
-                raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
-            commit_id = await self._apply_draft_squash(
-                s, graph, draft, main_id, merged_state, theirs, actor, message
-            )
-            pr.status = "merged"
-            pr.resulting_commit_id = commit_id
-            pr.merged_at = _now()
-            pr.merged_by = actor
-            pr.updated_at = _now()
-            return commit_id
+        # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
+        # so the merge never silently drops working changes that were never checkpointed.
+        await self._flush_pending_changes(
+            graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor
+        )
+
+        async def _once():
+            async with self._session() as s:
+                await self._lock_graph(s, flush_gid)      # serialize merges into this graph's main
+                pr = await s.get(MergeRequestORM, mr_id)
+                if pr.status in ("merged", "closed"):
+                    raise ValueError(f"merge request {mr_id} is {pr.status}")
+                graph = await s.get(GraphORM, pr.target_graph_id)
+                draft = await s.get(BranchORM, pr.source_branch_id)
+                if graph is None or draft is None:
+                    raise ValueError("merge request endpoints missing")
+                self._require_open(draft)
+                main_id = await self._main_branch_id(s, graph.id)
+                if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
+                    raise NotUpToDate(draft.id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
+                merged_state, conflicts, theirs = await self._compute_merge_bounded(
+                    s, graph.id, graph, draft, main_id, dict(resolutions or {})
+                )
+                if conflicts:
+                    raise MergeConflict(conflicts)
+                reviewers = set(pr.reviewers or [])          # approval gate (plan §17 #5)
+                if reviewers and pr.approval_status != "approved":
+                    raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
+                commit_id = await self._apply_draft_squash(
+                    s, graph, draft, main_id, merged_state, theirs, actor, message
+                )
+                pr.status = "merged"
+                pr.resulting_commit_id = commit_id
+                pr.merged_at = _now()
+                pr.merged_by = actor
+                pr.updated_at = _now()
+                return commit_id
+        return await self._retry_seq(f"merge_mr {mr_id}", _once)
 
     async def _compute_fork_merge(self, s, fork, resolutions):
         """3-way merge a fork's divergence into its parent's current main.
@@ -2941,6 +3087,85 @@ class GraphVersioningService:
                 })
         return merged, conflicts, theirs
 
+    async def _compute_merge_bounded(self, s, graph_id, graph, draft, main_id, resolutions):
+        """Bounded (O(changed)) analogue of :meth:`_compute_merge` for the WRITE path.
+
+        Composes base/theirs/ours only over the entities that actually changed — the draft's
+        own edits ∪ entities main changed since the draft's branch point ∪ explicit
+        resolutions — via the index-backed :meth:`_values_at` (DISTINCT ON), NOT the
+        O(history) :meth:`_state_as_of` full replay. Entities outside this set are identical
+        on all three sides, so they contribute nothing to ``net_delta(theirs, merged)``;
+        excluding them is exact. Returns SPARSE ``(merged, conflicts, theirs)`` — the
+        squash then hydrates the live neighborhood the cascade/integrity guards need
+        (:meth:`_hydrate_merge_neighborhood`).
+
+        Falls back to the full (fork-aware) :meth:`_compute_merge` for a fork graph, whose
+        base/theirs need copy-on-write parent composition that ``_values_at`` doesn't do."""
+        if graph.fork_parent_graph_id:
+            return await self._compute_merge(s, graph_id, graph, draft, main_id, resolutions)
+        base_seq = draft.base_commit_seq or 0
+        head_seq = graph.main_head_commit_seq
+        own = await self._branch_own_payloads(s, graph_id, draft.id)
+        changed = set(own) | set(resolutions)
+        changed |= await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq)
+        base = await self._values_at(s, graph_id, main_id, changed, base_seq)
+        theirs = await self._values_at(s, graph_id, main_id, changed, head_seq)
+        ours = {eid: base.get(eid) for eid in changed}
+        ours.update(own)
+
+        set_fields = frozenset(config.SET_FIELDS)
+        merged: Dict[str, Optional[dict]] = {}
+        conflicts: List[dict] = []
+        for eid in sorted(changed):
+            if eid in resolutions:
+                merged[eid] = resolutions[eid]
+                continue
+            out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+            merged[eid] = out.merged
+            for c in out.conflicts:
+                conflicts.append({
+                    "entity_id": eid, "path": list(c.path),
+                    "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
+                })
+        return merged, conflicts, theirs
+
+    async def _hydrate_merge_neighborhood(self, s, graph_id, main_id, merged, theirs) -> None:
+        """Make a SPARSE merged/theirs (from :meth:`_compute_merge_bounded`) safe for the
+        in-dict cascade + referential-integrity guards, which only see entities present in
+        the dict. Pulls the live MAIN neighborhood the guards reason about:
+
+        * live incident edges (on main) of every tombstoned entity in ``merged`` — so a
+          node delete cascades to an edge that the draft didn't itself touch, AND
+        * the current value of every endpoint referenced by a live edge in ``merged`` — so
+          an edge added between two UNCHANGED main nodes doesn't trip a false 'dangling' error.
+
+        Each hydrated entity is added at its current main value to BOTH ``merged`` and
+        ``theirs`` (so it nets to zero in ``net_delta`` unless the cascade then tombstones
+        it). Bounded by the degree of the tombstoned nodes — never the whole graph."""
+        graph = await s.get(GraphORM, graph_id)
+        head = graph.main_head_commit_seq if graph else (1 << 62)
+        tomb = [eid for eid, p in merged.items() if p is None]
+        incident = await self._incident_live_edges(s, graph_id, main_id, tomb) if tomb else {}
+        endpoints: set = set()
+        for p in list(merged.values()) + list(incident.values()):
+            if not p:
+                continue
+            a, b = _edge_src_tgt(p)
+            if a:
+                endpoints.add(a)
+            if b:
+                endpoints.add(b)
+        need = [e for e in (set(incident) | endpoints) if e not in merged]
+        if not need:
+            return
+        main_vals = await self._values_at(s, graph_id, main_id, need, head)
+        for eid in need:
+            v = main_vals.get(eid)
+            if v is None:
+                continue                     # absent/tombstoned on main — nothing to hydrate
+            merged.setdefault(eid, v)        # present as current main value (unchanged → no delta)
+            theirs.setdefault(eid, v)        # mirror so net_delta nets it to zero
+
     async def _kind_map_multi(self, s, pairs: Sequence[Tuple[str, str]]) -> Dict[str, str]:
         """``entity_id → kind`` across several ``(graph_id, branch_id)`` head sets
         (first match wins) — spans a fork and its parent for cross-graph merges."""
@@ -2953,6 +3178,28 @@ class GraphVersioningService:
             )).all()
             for eid, kind in rows:
                 out.setdefault(eid, kind)
+        return out
+
+    @staticmethod
+    def _resolve_delta_kinds(
+        deltas: List[Delta], fallback: Dict[str, str]
+    ) -> Dict[str, str]:
+        """Authoritative node/edge kind for each delta being written: the PAYLOAD
+        shape wins (``_is_edge_payload``), matching the edit/sync paths
+        (``_apply_ops_once``/``sync_ingest``). A delete delta carries no payload, so
+        it falls back to the head-pointer kind, then ``node``.
+
+        The merge paths previously trusted only the mutable ``EntityHeadORM`` kind
+        (``_kind_map_multi``), which — combined with the head upsert formerly omitting
+        ``entity_kind`` — could be stale and steer a merged delta into the WRONG
+        version table, so it then read back as missing (deleted) and got re-created.
+        Deriving kind from the payload here makes the write table deterministic."""
+        out = dict(fallback)
+        for d in deltas:
+            if d.payload is not None:
+                out[d.entity_id] = "edge" if _is_edge_payload(d.payload) else "node"
+            else:
+                out.setdefault(d.entity_id, fallback.get(d.entity_id, "node"))
         return out
 
     async def _merkle_root(self, s, graph_id: str, branch_id: str) -> str:
@@ -3072,6 +3319,26 @@ class GraphVersioningService:
                 ps.target_commit_seq = new_seq
             return {"commit_id": commit.id, "commit_seq": new_seq, "ingested": len(deltas),
                     "nodes": len(node_deltas), "edges": len(edge_deltas), "rejected": rejected}
+
+    async def resync_from_provider(
+        self, *, graph_id: str, provider, actor: str, source: str = "provider",
+        strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        containment_edge_types: Optional[Sequence[str]] = None, batch: int = 2000,
+    ) -> Dict[str, object]:
+        """Re-synchronize a versioned graph from its provider's CURRENT state, on demand —
+        runnable at any time for any versioned graph (requirement: on-demand sync). Pages
+        the provider's full snapshot (OUTSIDE the txn) and feeds it through the 3-way
+        :meth:`sync_ingest`, so authoritative source changes land on ``main`` WITHOUT
+        clobbering user edits (a field both sides changed conflicts unless
+        ``strategy='external_wins'``). The projector then refreshes FalkorDB. The
+        ``collect_provider_rows`` output shape (kind/urn/entityType for nodes;
+        edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes."""
+        from backend.app.providers.versioned_bootstrap import collect_provider_rows
+        rows = await collect_provider_rows(provider, batch=batch)
+        return await self.sync_ingest(
+            graph_id=graph_id, rows=rows, actor=actor, source=source,
+            strategy=strategy, resolutions=resolutions,
+            containment_edge_types=containment_edge_types, message="resync from provider")
 
     async def sync_ingest(
         self, *, graph_id: str, rows, actor: str, source: str = "external",
@@ -3222,6 +3489,30 @@ class GraphVersioningService:
             theirs[eid] = payload
         return theirs, rejected
 
+    async def _retry_seq(self, label: str, fn):
+        """Run ``fn`` — an async thunk that opens its OWN session, RE-FETCHES state, and
+        commits — retrying on a ``commit_seq`` unique-constraint collision with bounded
+        backoff. Because the whole body re-runs on each attempt, the write is always
+        recomputed against the current head: this fixes both the crash (unhandled
+        ``IntegrityError``) AND the read-stale-then-write race where a merge computed
+        against a stale ``main`` would otherwise silently drop intervening edits."""
+        for attempt in range(config.COMMIT_MAX_RETRIES):
+            try:
+                return await fn()
+            except IntegrityError:
+                if attempt + 1 >= config.COMMIT_MAX_RETRIES:
+                    raise ConcurrencyError(f"{label} commit-seq contention")
+                await asyncio.sleep(0.02 * (2 ** attempt))
+
+    @staticmethod
+    async def _lock_graph(s, graph_id: str) -> None:
+        """Serialize same-graph main-advancing writes (publish/merge/revert/sync) with a
+        transaction-scoped Postgres advisory lock (auto-released at commit/rollback).
+        Acquire it BEFORE reading ``main`` head/state so the merge composes against the
+        current main; different graphs never contend, so this adds no cross-graph
+        latency and makes the commit-seq retry converge in ~1 attempt."""
+        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(graph_id))))
+
     async def apply_ops(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
         message: str = "edit", branch_id: Optional[str] = None,
@@ -3243,16 +3534,12 @@ class GraphVersioningService:
         :class:`ConcurrencyError`. Under ``strict`` ontology enforcement the written
         entities are validated (the write-through gate, parity with publish/stage).
         """
-        for attempt in range(config.COMMIT_MAX_RETRIES):
-            try:
-                return await self._apply_ops_once(
-                    graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
-                    containment_edge_types=containment_edge_types)
-            except IntegrityError:
-                if attempt + 1 >= config.COMMIT_MAX_RETRIES:
-                    raise ConcurrencyError(
-                        f"apply_ops commit-seq contention on {graph_id}/{branch_id or 'main'}")
-                await asyncio.sleep(0.02 * (2 ** attempt))
+        return await self._retry_seq(
+            f"apply_ops on {graph_id}/{branch_id or 'main'}",
+            lambda: self._apply_ops_once(
+                graph_id=graph_id, ops=ops, actor=actor, message=message,
+                branch_id=branch_id, containment_edge_types=containment_edge_types),
+        )
 
     async def _apply_ops_once(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
@@ -3470,7 +3757,8 @@ class GraphVersioningService:
             ).on_conflict_do_update(
                 index_elements=["graph_id", "branch_id", "entity_id"],
                 set_={"head_version_id": vid, "content_hash": d.content_hash,
-                      "is_tombstone": (d.op == "delete"), "updated_at": _now()},
+                      "is_tombstone": (d.op == "delete"), "entity_kind": kind,
+                      "updated_at": _now()},
             )
             await s.execute(stmt)
 

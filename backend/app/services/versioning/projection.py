@@ -18,15 +18,17 @@ composition); later passes apply only the rows in `(projected, target]`.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from . import config, db
 from .models import (
     EdgeVersionORM,
+    EntityHeadORM,
     GraphORM,
     NodeVersionORM,
     ProjectionStateORM,
@@ -81,11 +83,17 @@ def _batches(seq, n):
 
 def _node_urn(entity_id: str, payload: Optional[dict]) -> str:
     """The node's FalkorDB key — its `urn`, or a stable `gv:<entity_id>` fallback
-    when the manual node has no urn (so the node always has a key)."""
+    when the manual node has no urn (so the node always has a key).
+
+    A `gv:` fallback for a node that *should* have a urn is a smell: it can mint a
+    duplicate of an existing urn-keyed node (the partial-update-against-an-unbacked-
+    entity phantom). We WARN so the FalkorDB<->Postgres reconciliation has a signal."""
     if payload:
         u = payload.get("urn")
         if u:
             return str(u)
+    logger.warning("projection: node %s has no urn in payload; keying as gv:<entity_id> "
+                   "(possible phantom / FalkorDB-not-subset-of-Postgres)", entity_id)
     return f"gv:{entity_id}"
 
 
@@ -167,6 +175,7 @@ class FalkorProjector:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             ps.status = "projecting"
             main_id = await self._svc._main_branch_id(s, graph_id)
+            is_fork = graph.fork_parent_graph_id is not None
             changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
 
         client = self._client(name)
@@ -191,26 +200,54 @@ class FalkorProjector:
                     ps.last_error = str(exc)[:500]
             raise
 
+        # Reconcile PG (SoR) vs FalkorDB (cache) and bounded-heal a dropped delta before
+        # the watermark advances, so the cache can't silently diverge from committed main.
+        verify_error = (
+            await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork)
+            if config.PROJECTION_VERIFY_ENABLED else None
+        )
+
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             ps.projected_commit_seq = to_seq
             ps.status = "idle"
             ps.falkor_graph_name = name
             ps.last_projected_at = _now()
-            ps.last_error = None
+            ps.last_error = verify_error
 
         applied = sum(len(c) for c in changes)
-        return {"projected": to_seq, "applied": applied, "noop": False}
+        return {"projected": to_seq, "applied": applied, "noop": False, "verify_error": verify_error}
 
-    async def project_pending(self, limit: int = 100) -> List[Dict[str, object]]:
-        """Catch up every graph whose projection lags (`projected < target`)."""
+    async def project_pending(
+        self, limit: int = 100, concurrency: Optional[int] = None
+    ) -> List[Dict[str, object]]:
+        """Catch up every graph whose projection lags (`projected < target`), STALEST first,
+        with bounded concurrency so the reconciling loop keeps up across 100s of graphs
+        (the serial version made a full pass cost the SUM of per-graph times). The select is
+        keyed by ``graph_id`` (PK) so each id appears once per pass — no same-graph race; a
+        per-graph failure is logged and does not abort the batch."""
         async with self._session() as s:
             ids = (await s.execute(
                 select(ProjectionStateORM.graph_id).where(
                     ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq
+                ).order_by(
+                    (ProjectionStateORM.target_commit_seq
+                     - ProjectionStateORM.projected_commit_seq).desc()
                 ).limit(limit)
             )).scalars().all()
-        return [await self.project_graph(gid) for gid in ids]
+        if not ids:
+            return []
+        sem = asyncio.Semaphore(concurrency or config.PROJECTION_CONCURRENCY)
+
+        async def _one(gid: str) -> Dict[str, object]:
+            async with sem:
+                try:
+                    return await self.project_graph(gid)
+                except Exception as exc:                       # pragma: no cover - infra
+                    logger.exception("project_pending: %s failed", gid)
+                    return {"graph_id": gid, "error": str(exc)[:200]}
+
+        return list(await asyncio.gather(*[_one(g) for g in ids]))
 
     async def _compute_changes(
         self, s, graph: GraphORM, main_id: str, from_seq: int, to_seq: int
@@ -239,8 +276,11 @@ class FalkorProjector:
                 edge_upserts.append((eid, su, tu, p))
             return node_upserts, edge_upserts, node_deletes, edge_deletes
 
-        # Incremental: net of each entity's rows in (from_seq, to_seq].
-        last: Dict[str, Tuple[str, str, Optional[dict]]] = {}
+        # Incremental: net of each entity's rows in (from_seq, to_seq]. Key the fold by
+        # (kind, entity_id) — NOT entity_id alone — so a node and an edge that ever share
+        # an entity_id can never overwrite each other (which would silently drop a node
+        # delete/upsert by mis-handling it as an edge).
+        last: Dict[Tuple[str, str], Tuple[str, str, Optional[dict]]] = {}
         for model, kind in ((NodeVersionORM, "node"), (EdgeVersionORM, "edge")):
             rows = (await s.execute(
                 select(model).where(
@@ -249,8 +289,8 @@ class FalkorProjector:
                 ).order_by(model.commit_seq, model.created_at)
             )).scalars().all()
             for r in rows:
-                last[r.entity_id] = (kind, r.op, r.payload)
-        for eid, (kind, op, p) in last.items():
+                last[(kind, r.entity_id)] = (kind, r.op, r.payload)
+        for (kind, eid), (_, op, p) in last.items():
             if kind != "node":
                 continue
             if op == "delete":
@@ -259,7 +299,7 @@ class FalkorProjector:
                 urn = _node_urn(eid, p)
                 urn_of[eid] = urn
                 node_upserts.append((eid, urn, p))
-        for eid, (kind, op, p) in last.items():
+        for (kind, eid), (_, op, p) in last.items():
             if kind != "edge":
                 continue
             if op == "delete":
@@ -286,7 +326,92 @@ class FalkorProjector:
             if parent is not None:
                 pmain = await self._svc._main_branch_id(s, parent.id)
                 return await self._urn_for(s, parent, pmain, entity_id)
+        logger.warning("projection: no urn for node entity %s on %s; keying as gv:<entity_id>",
+                       entity_id, graph.id)
         return f"gv:{entity_id}"
+
+    async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
+        """Live (non-tombstone) node/edge counts on ``main`` from ``entity_heads`` —
+        O(1)-ish via ``ix_heads_kind``. Returns ``(nodes, edges)`` only for a NON-fork
+        main that is fully caught up (``main_head == to_seq``); ``None`` otherwise
+        (a fork's composed count is O(graph); a lagging head verifies on catch-up)."""
+        if is_fork:
+            return None
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None or graph.main_head_commit_seq != to_seq:
+                return None
+            pg_nodes = (await s.execute(
+                select(func.count()).select_from(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.entity_kind == "node", EntityHeadORM.is_tombstone.is_(False),
+                ))).scalar_one()
+            pg_edges = (await s.execute(
+                select(func.count()).select_from(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
+                ))).scalar_one()
+        return int(pg_nodes), int(pg_edges)
+
+    @staticmethod
+    async def _falkor_counts(client):
+        fn = await client.query("MATCH (n) RETURN count(n) AS c")
+        fe = await client.query("MATCH ()-[r]->() RETURN count(r) AS c")
+        return int(fn.result_set[0][0]), int(fe.result_set[0][0])
+
+    async def _verify_and_heal(
+        self, client, graph_id, main_id, from_seq, to_seq, is_fork
+    ) -> Optional[str]:
+        """Reconcile live node/edge COUNTS between Postgres (SoR) and FalkorDB after an
+        apply. Best-effort (any count failure → skip). Two mismatch directions:
+
+        * FalkorDB has FEWER than committed main (a dropped delta): bounded-heal by
+          reseeding the graph from Postgres ONCE (idempotent MERGE/DELETE).
+        * FalkorDB has MORE than committed main (un-imported legacy/aggregation nodes —
+          the subset invariant is broken): DO NOT auto-delete (that would wipe
+          un-versioned data); record the discrepancy so enablement/bootstrap reconciles.
+
+        Returns an error string (recorded on ``projection_state.last_error``) or ``None``."""
+        try:
+            pg = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
+            if pg is None:
+                return None                              # fork / lagging head — not applicable
+            fk = await self._falkor_counts(client)
+        except Exception:
+            logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
+            return None
+        if pg == fk:
+            return None
+        pg_n, pg_e = pg
+        f_n, f_e = fk
+        if f_n > pg_n or f_e > pg_e:
+            msg = (f"FalkorDB has extra entities vs committed main "
+                   f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}) — "
+                   f"run versioning enablement/bootstrap to import them")
+            logger.error("%s for %s", msg, graph_id)
+            return msg
+        if from_seq > 0:                                 # missing committed data → reseed once
+            logger.warning("projection verify mismatch for %s (PG n=%d,e=%d > Falkor n=%d,e=%d); "
+                           "reseeding from Postgres (bounded heal)", graph_id, pg_n, pg_e, f_n, f_e)
+            try:
+                async with self._session() as s:
+                    graph = await s.get(GraphORM, graph_id)
+                    seed = await self._compute_changes(s, graph, main_id, 0, to_seq)
+                try:
+                    await client.delete()
+                except Exception:
+                    pass
+                await self._apply(client, *seed)
+                pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
+                fk2 = await self._falkor_counts(client)
+                if pg2 is None or pg2 == fk2:
+                    return None
+            except Exception:
+                logger.exception("projection heal reseed failed for %s", graph_id)
+                return f"projection heal reseed failed at seq {to_seq}"
+        msg = f"projection verify mismatch at seq {to_seq} after heal (committed != FalkorDB)"
+        logger.error("%s for %s", msg, graph_id)
+        return msg
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes) -> None:
         # Nodes in (grouped by label), edges in (grouped by type), edges out, nodes out.

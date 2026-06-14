@@ -112,21 +112,36 @@ async def bootstrap_versioned_graph_endpoint(
     half-enabled graph (a graph row with no imported data). Provider reads happen first,
     outside the transaction."""
     from backend.app.services.versioning.service import GraphVersioningService
-    from backend.app.providers.versioned_bootstrap import collect_provider_rows
+    actor = user.id if user else "system"
+    svc = GraphVersioningService()
+    # Single idempotent enablement path: already-enabled → returns the graph untouched;
+    # else create-graph + full provider import in ONE transaction (paging happens outside
+    # it). Never leaves a half-enabled graph that would hijack reads while empty.
+    return await svc.enable_versioning(
+        data_source_id=dataSourceId, workspace_id=ws_id, actor=actor, provider=engine.provider)
+
+
+@router.post("/resync")
+async def resync_versioned_graph_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
+    strategy: str = Query("merge", description="merge | external_wins"),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
+    any time for any versioned graph. 3-way merge preserves user edits (a field both the
+    source and a user changed conflicts under ``merge``; pass ``external_wins`` to take the
+    source). 404 if the data source isn't versioned yet (enable it first)."""
+    from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
     res = await svc.resolve_graph(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
-    # Pure source reads (no DB writes) up front — don't hold the seed transaction open
-    # while paging a large provider.
-    rows = await collect_provider_rows(engine.provider)
-    async with svc._session() as s:
-        graph_id = res["graph_id"] if res is not None else (
-            await svc.create_graph(
-                data_source_id=dataSourceId, workspace_id=ws_id, actor=actor, session=s))["graph_id"]
-        return await svc.bulk_ingest(
-            graph_id=graph_id, rows=rows, actor=actor,
-            idempotency_key=f"bootstrap:{graph_id}", message="bootstrap import", session=s)
+    if res is None:
+        raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
+    return await svc.resync_from_provider(
+        graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
 
 
 # ------------------------------------------------------------------ #

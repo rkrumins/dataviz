@@ -24,6 +24,13 @@ from backend.app.services.versioning.projection import (
 from backend.app.services.versioning.service import GraphVersioningService
 
 
+class _Result:
+    """Minimal FalkorDB query result (only ``.result_set`` is read by the projector)."""
+
+    def __init__(self, result_set):
+        self.result_set = result_set
+
+
 class FakeGraph:
     """Interprets the projector's reader-compatible Cypher into an in-memory graph."""
 
@@ -33,6 +40,10 @@ class FakeGraph:
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
+        if cypher == "MATCH (n) RETURN count(n) AS c":          # projection verify (Part 1E)
+            return _Result([[len(self.nodes)]])
+        if cypher == "MATCH ()-[r]->() RETURN count(r) AS c":   # projection verify (Part 1E)
+            return _Result([[len(self.edges)]])
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):
             for it in params["batch"]:
                 self.nodes[it["urn"]] = dict(it)
