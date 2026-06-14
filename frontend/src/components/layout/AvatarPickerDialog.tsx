@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { usePreferencesStore } from '@/store/preferences'
 
 interface AvatarPickerDialogProps {
@@ -136,108 +137,107 @@ export function AvatarPickerDialog({ isOpen, onClose, initials }: AvatarPickerDi
   )
 
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          className="fixed inset-0 z-[100] flex items-center justify-center"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
-          onKeyDown={handleKeyDown}
-        >
-          {/* Backdrop */}
-          <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+    <>
+      {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+          StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+      <Backdrop open={isOpen} onClick={onClose} zClassName="z-[100]" className="bg-black/40" />
 
-          {/* Panel */}
-          <motion.div
-            className={cn(
-              'relative w-full max-w-sm mx-4 rounded-2xl shadow-lg',
-              'bg-canvas-elevated border border-glass-border',
-              'p-5',
-            )}
-            initial={{ opacity: 0, scale: 0.95, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 8 }}
-            transition={{ duration: 0.15 }}
-          >
-            {/* Header */}
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-ink">Choose Avatar</h2>
-              <button
-                onClick={onClose}
-                className="p-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Initials (default) option */}
-            <button
-              onClick={() => setSelected(null)}
+      {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+          through to the Backdrop beneath → outside-click still closes). */}
+      <div className="fixed inset-0 z-[101] flex items-center justify-center pointer-events-none">
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div
+              key="avatar-picker-card"
               className={cn(
-                'w-full flex items-center gap-3 px-3 py-2 rounded-xl mb-3 transition-colors duration-100',
-                selected === null
-                  ? 'bg-accent-lineage/10 ring-2 ring-accent-lineage/40'
-                  : 'hover:bg-black/5 dark:hover:bg-white/5',
+                'pointer-events-auto relative w-full max-w-sm mx-4 rounded-2xl shadow-lg',
+                'bg-canvas-elevated border border-glass-border',
+                'p-5',
               )}
+              initial={{ opacity: 0, scale: 0.95, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 8 }}
+              transition={{ duration: 0.15 }}
+              onKeyDown={handleKeyDown}
             >
-              <div className="w-10 h-10 rounded-full bg-accent-lineage/15 flex items-center justify-center shrink-0">
-                <span className="text-sm font-semibold text-accent-lineage select-none">{initials}</span>
-              </div>
-              <span className="text-sm text-ink">Use my initials</span>
-              {selected === null && <Check className="w-4 h-4 ml-auto text-accent-lineage" />}
-            </button>
-
-            {/* Avatar grid */}
-            <div className="grid grid-cols-4 gap-2">
-              {AVATARS.map((av) => (
+              {/* Header */}
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-semibold text-ink">Choose Avatar</h2>
                 <button
-                  key={av.id}
-                  onClick={() => setSelected(av.id)}
-                  className={cn(
-                    'flex flex-col items-center gap-1.5 p-2 rounded-xl transition-colors duration-100',
-                    selected === av.id
-                      ? 'bg-accent-lineage/10 ring-2 ring-accent-lineage/40'
-                      : 'hover:bg-black/5 dark:hover:bg-white/5',
-                  )}
-                  title={av.label}
+                  onClick={onClose}
+                  className="p-1 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                 >
-                  <div
-                    className={cn(
-                      'w-10 h-10 rounded-full flex items-center justify-center',
-                      av.bg,
-                    )}
-                  >
-                    {av.content('w-6 h-6 text-ink')}
-                  </div>
-                  <span className="text-[10px] text-ink-muted leading-none">{av.label}</span>
+                  <X className="w-4 h-4" />
                 </button>
-              ))}
-            </div>
+              </div>
 
-            {/* Actions */}
-            <div className="flex items-center justify-end gap-2 mt-4 pt-3 border-t border-glass-border">
+              {/* Initials (default) option */}
               <button
-                onClick={onClose}
-                className="px-3 py-1.5 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
+                onClick={() => setSelected(null)}
                 className={cn(
-                  'px-4 py-1.5 text-sm font-medium rounded-lg transition-colors',
-                  'bg-accent-lineage text-white hover:bg-accent-lineage/90',
+                  'w-full flex items-center gap-3 px-3 py-2 rounded-xl mb-3 transition-colors duration-100',
+                  selected === null
+                    ? 'bg-accent-lineage/10 ring-2 ring-accent-lineage/40'
+                    : 'hover:bg-black/5 dark:hover:bg-white/5',
                 )}
               >
-                Save
+                <div className="w-10 h-10 rounded-full bg-accent-lineage/15 flex items-center justify-center shrink-0">
+                  <span className="text-sm font-semibold text-accent-lineage select-none">{initials}</span>
+                </div>
+                <span className="text-sm text-ink">Use my initials</span>
+                {selected === null && <Check className="w-4 h-4 ml-auto text-accent-lineage" />}
               </button>
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+
+              {/* Avatar grid */}
+              <div className="grid grid-cols-4 gap-2">
+                {AVATARS.map((av) => (
+                  <button
+                    key={av.id}
+                    onClick={() => setSelected(av.id)}
+                    className={cn(
+                      'flex flex-col items-center gap-1.5 p-2 rounded-xl transition-colors duration-100',
+                      selected === av.id
+                        ? 'bg-accent-lineage/10 ring-2 ring-accent-lineage/40'
+                        : 'hover:bg-black/5 dark:hover:bg-white/5',
+                    )}
+                    title={av.label}
+                  >
+                    <div
+                      className={cn(
+                        'w-10 h-10 rounded-full flex items-center justify-center',
+                        av.bg,
+                      )}
+                    >
+                      {av.content('w-6 h-6 text-ink')}
+                    </div>
+                    <span className="text-[10px] text-ink-muted leading-none">{av.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-2 mt-4 pt-3 border-t border-glass-border">
+                <button
+                  onClick={onClose}
+                  className="px-3 py-1.5 text-sm text-ink-secondary rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSave}
+                  className={cn(
+                    'px-4 py-1.5 text-sm font-medium rounded-lg transition-colors',
+                    'bg-accent-lineage text-white hover:bg-accent-lineage/90',
+                  )}
+                >
+                  Save
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </>
   )
 }
 

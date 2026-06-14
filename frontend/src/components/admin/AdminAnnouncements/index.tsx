@@ -17,6 +17,7 @@ import {
 } from '@/services/announcementService'
 import { useAnnouncementStore } from '@/store/announcements'
 import { useAuthStore } from '@/store/auth'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 const ANN_LIST_QUERY_KEY = ['admin', 'announcements', 'list'] as const
 const ANN_CONFIG_QUERY_KEY = ['admin', 'announcements', 'config'] as const
@@ -725,21 +726,24 @@ export function AdminAnnouncements() {
       )}
 
       {/* Delete Confirmation */}
-      <AnimatePresence>
-        {deletingId && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40"
-            onClick={() => !deleteLoading && setDeletingId(null)}
-          >
+      {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+          StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+      <Backdrop open={!!deletingId} onClick={() => !deleteLoading && setDeletingId(null)} zClassName="z-[100]" className="bg-black/40" />
+
+      {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+          through to the Backdrop beneath → outside-click still closes). */}
+      <div className="fixed inset-0 z-[101] flex items-center justify-center pointer-events-none">
+        <AnimatePresence>
+          {deletingId && (
             <motion.div
+              key="delete-confirm-card"
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-canvas-elevated rounded-2xl border border-glass-border shadow-lg p-6 max-w-sm w-full mx-4"
+              className="pointer-events-auto bg-canvas-elevated rounded-2xl border border-glass-border shadow-lg p-6 max-w-sm w-full mx-4"
+              role="dialog"
+              aria-modal="true"
             >
               <h3 className="text-lg font-semibold text-ink mb-2">Delete Announcement</h3>
               <p className="text-sm text-ink-secondary mb-6">
@@ -765,9 +769,9 @@ export function AdminAnnouncements() {
                 </button>
               </div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          )}
+        </AnimatePresence>
+      </div>
 
       {/* Toast */}
       <AnimatePresence>

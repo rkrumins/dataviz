@@ -45,6 +45,7 @@ import { useToast } from '@/components/ui/toast'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { ImpactPreviewModal } from './ImpactPreviewModal'
 import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
 import { AccessSummary } from '@/components/access/AccessSummary'
@@ -320,30 +321,47 @@ export function AdminPermissions() {
             )}
 
             {/* Role lifecycle modals (visible from any tab) */}
-            <AnimatePresence>
-                {showCreateRole && permissions && (
-                    <CreateRoleModal
-                        permissions={permissions}
-                        existingNames={(roles ?? []).map(r => r.name)}
-                        onClose={() => setShowCreateRole(false)}
-                        onCreated={async () => {
-                            setShowCreateRole(false)
-                            await fetchCatalogue()
-                        }}
-                    />
-                )}
-                {editingRole && permissions && (
-                    <RoleEditorDrawer
-                        role={editingRole}
-                        permissions={permissions}
-                        onClose={() => setEditingRole(null)}
-                        onChanged={async () => {
-                            setEditingRole(null)
-                            await fetchCatalogue()
-                        }}
-                    />
-                )}
-            </AnimatePresence>
+            {/* Backdrops — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop
+                open={!!(showCreateRole && permissions)}
+                onClick={() => setShowCreateRole(false)}
+                zClassName="z-50"
+                className="bg-black/50"
+            />
+            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
+                    {showCreateRole && permissions && (
+                        <CreateRoleModal
+                            key="create-role-modal"
+                            permissions={permissions}
+                            existingNames={(roles ?? []).map(r => r.name)}
+                            onClose={() => setShowCreateRole(false)}
+                            onCreated={async () => {
+                                setShowCreateRole(false)
+                                await fetchCatalogue()
+                            }}
+                        />
+                    )}
+                </AnimatePresence>
+            </div>
+            <Backdrop
+                open={!!(editingRole && permissions)}
+                onClick={() => setEditingRole(null)}
+                zClassName="z-50"
+                className="bg-black/50"
+            />
+            {editingRole && permissions && (
+                <RoleEditorDrawer
+                    role={editingRole}
+                    permissions={permissions}
+                    onClose={() => setEditingRole(null)}
+                    onChanged={async () => {
+                        setEditingRole(null)
+                        await fetchCatalogue()
+                    }}
+                />
+            )}
         </div>
     )
 }
@@ -719,20 +737,31 @@ function RoleMatrixTab({
                 </div>
             </div>
 
-            {/* Permission detail drawer */}
-            <AnimatePresence>
-                {selectedPerm && (
-                    <PermissionDetailDrawer
-                        permission={selectedPerm}
-                        roles={roles}
-                        onClose={() => setSelectedPerm(null)}
-                        onUpdated={(updated) => {
-                            setSelectedPerm(updated)
-                            onPermissionUpdated()
-                        }}
-                    />
-                )}
-            </AnimatePresence>
+            {/* Permission detail modal */}
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop
+                open={!!selectedPerm}
+                onClick={() => setSelectedPerm(null)}
+                zClassName="z-50"
+                className="bg-black/50"
+            />
+            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
+                    {selectedPerm && (
+                        <PermissionDetailDrawer
+                            key="permission-detail-modal"
+                            permission={selectedPerm}
+                            roles={roles}
+                            onClose={() => setSelectedPerm(null)}
+                            onUpdated={(updated) => {
+                                setSelectedPerm(updated)
+                                onPermissionUpdated()
+                            }}
+                        />
+                    )}
+                </AnimatePresence>
+            </div>
         </div>
     )
 }
@@ -795,21 +824,14 @@ function PermissionDetailDrawer({
     }
 
     return (
-        <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-        >
-            <div className="absolute inset-0 bg-black/50" onClick={onClose} />
             <motion.div
+                key="permission-detail-modal"
                 initial={{ scale: 0.96, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 exit={{ scale: 0.96, opacity: 0 }}
                 transition={{ duration: 0.2 }}
                 onClick={(e) => e.stopPropagation()}
-                className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md p-6"
+                className="pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-md p-6"
             >
                 <div className="flex items-start justify-between mb-4 gap-2">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
@@ -988,7 +1010,6 @@ function PermissionDetailDrawer({
                         </button>
                     </div>
                 )}
-            </motion.div>
         </motion.div>
     )
 }
@@ -1782,22 +1803,17 @@ function RoleEditorDrawer({
     const labelText = isSystem ? v.label : role.name
 
     return (
-        <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-50 flex"
-        >
-            <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-            <motion.aside
-                initial={{ x: '100%' }}
-                animate={{ x: 0 }}
-                exit={{ x: '100%' }}
-                transition={{ type: 'spring', damping: 30, stiffness: 280 }}
-                onClick={(e) => e.stopPropagation()}
-                className="ml-auto relative w-full max-w-md bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
-            >
+        <>
+            <AnimatePresence>
+                <motion.aside
+                    key="role-editor-drawer"
+                    initial={{ x: '100%' }}
+                    animate={{ x: 0 }}
+                    exit={{ x: '100%' }}
+                    transition={{ type: 'spring', damping: 30, stiffness: 280 }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="fixed right-0 top-0 h-full w-full max-w-md z-[51] bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
+                >
                 {/* Header */}
                 <div className="px-5 py-4 border-b border-glass-border flex items-start gap-3">
                     <div className={cn('w-11 h-11 rounded-xl border flex items-center justify-center shrink-0', v.iconBg)}>
@@ -1982,7 +1998,8 @@ function RoleEditorDrawer({
                         </button>
                     </div>
                 )}
-            </motion.aside>
+                </motion.aside>
+            </AnimatePresence>
 
             {/* Phase 4.4 — impact preview gates the destructive write. */}
             <ImpactPreviewModal
@@ -2006,7 +2023,7 @@ function RoleEditorDrawer({
                     else if (previewState?.kind === 'save') void commitSave()
                 }}
             />
-        </motion.div>
+        </>
     )
 }
 
@@ -2120,21 +2137,14 @@ function CreateRoleModal({
 
     return (
         <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            key="create-role-modal"
+            initial={{ scale: 0.96, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.96, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onClick={(e) => e.stopPropagation()}
+            className="pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl flex flex-col max-h-[90vh]"
         >
-            <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-            <motion.div
-                initial={{ scale: 0.96, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.96, opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                onClick={(e) => e.stopPropagation()}
-                className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg w-full max-w-2xl flex flex-col max-h-[90vh]"
-            >
                 {/* Header */}
                 <div className="flex items-center justify-between px-5 py-4 border-b border-glass-border shrink-0">
                     <div className="flex items-center gap-3">
@@ -2377,7 +2387,6 @@ function CreateRoleModal({
                         Create role
                     </button>
                 </div>
-            </motion.div>
         </motion.div>
     )
 }

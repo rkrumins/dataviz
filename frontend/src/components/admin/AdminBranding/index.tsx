@@ -21,6 +21,7 @@ import {
     type Branding, type BrandingPatch,
 } from '@/services/brandingService'
 import { useBrandingStore } from '@/store/branding'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { cn } from '@/lib/utils'
 
 const BRANDING_QUERY_KEY = ['admin', 'branding'] as const
@@ -412,59 +413,61 @@ function ResetConfirmModal({
     onConfirm: () => void
 }) {
     return (
-        <AnimatePresence>
-            {open && (
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-                    onClick={() => !loading && onClose()}
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="branding-reset-title"
-                >
-                    <motion.div
-                        initial={{ scale: 0.96, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0.96, opacity: 0 }}
-                        transition={{ duration: 0.2 }}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-xl p-6"
-                    >
-                        <h3 id="branding-reset-title" className="text-lg font-bold text-ink mb-2">
-                            Reset to defaults
-                        </h3>
-                        <p className="text-sm text-ink-muted mb-6 leading-relaxed">
-                            Clear every branding override — name, logo, favicon, colours
-                            and legal text — and revert to this deployment's defaults?
-                            This applies immediately and can't be undone.
-                        </p>
-                        <div className="flex justify-end gap-3">
-                            <button
-                                type="button"
-                                onClick={onClose}
-                                disabled={loading}
-                                className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="button"
-                                onClick={onConfirm}
-                                disabled={loading}
-                                className="px-4 py-2 rounded-xl text-sm font-semibold bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition-colors flex items-center gap-2"
-                            >
-                                {loading ? <Loader2 className="w-4 h-4 animate-spin" />
-                                    : <RotateCcw className="w-4 h-4" />}
-                                Reset
-                            </button>
-                        </div>
-                    </motion.div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+        <>
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={open} onClick={() => !loading && onClose()} zClassName="z-50" className="bg-black/50" />
+
+            {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+                through to the Backdrop beneath → outside-click still closes). */}
+            <div className="fixed inset-0 z-[51] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
+                    {open && (
+                        <motion.div
+                            key="branding-reset-card"
+                            initial={{ scale: 0.96, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.96, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="pointer-events-auto w-full max-w-md rounded-2xl bg-canvas-elevated border border-glass-border shadow-xl p-6"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="branding-reset-title"
+                        >
+                            <h3 id="branding-reset-title" className="text-lg font-bold text-ink mb-2">
+                                Reset to defaults
+                            </h3>
+                            <p className="text-sm text-ink-muted mb-6 leading-relaxed">
+                                Clear every branding override — name, logo, favicon, colours
+                                and legal text — and revert to this deployment's defaults?
+                                This applies immediately and can't be undone.
+                            </p>
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={onClose}
+                                    disabled={loading}
+                                    className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={onConfirm}
+                                    disabled={loading}
+                                    className="px-4 py-2 rounded-xl text-sm font-semibold bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition-colors flex items-center gap-2"
+                                >
+                                    {loading ? <Loader2 className="w-4 h-4 animate-spin" />
+                                        : <RotateCcw className="w-4 h-4" />}
+                                    Reset
+                                </button>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+            </div>
+        </>
     )
 }
 
