@@ -19,7 +19,7 @@ import { useAbandonDraft, useBootstrapGraph, useBranches, useDiffVsMain, useReso
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { BranchSwitcher } from './BranchSwitcher'
-import { PullLatestButton } from './PullLatestButton'
+import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
@@ -179,11 +179,6 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
               {showDiff ? 'Hide changes' : 'Review changes'}
             </button>
 
-            <PullLatestButton
-              variant="bar" wsId={workspaceId} graphId={graphId ?? ''}
-              branchId={branchId} behind={behindMain}
-            />
-
             <button
               onClick={() => setShowPublish(true)}
               className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm transition-all"
@@ -203,6 +198,16 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
           </>
         )}
       </div>
+
+      {isDraft && branchId && graphId && behindMain && (
+        <PullBeforeMergeBanner
+          wsId={workspaceId}
+          graphId={graphId}
+          branchId={branchId}
+          baseCommitSeq={activeBranch?.baseCommitSeq ?? 0}
+          mainHead={mainHead}
+        />
+      )}
 
       {showPublish && branchId && (
         <CommitDialog

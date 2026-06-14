@@ -74,6 +74,12 @@ def _edge_merge_cypher(rel_type: str) -> str:
 
 _DELETE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) DETACH DELETE n"
 _DELETE_EDGES = "UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r"
+# Heal-path sweep: match the deleted node by its committed urn (the indexed key, so this stays
+# fast on a million-node graph) and confirm entityId, so a live entity that reused the urn is
+# never deleted by mistake.
+_DELETE_NODES_BY_PAIR = (
+    "UNWIND $pairs AS p MATCH (n {urn: p.urn}) WHERE n.entityId = p.eid DETACH DELETE n"
+)
 
 
 def _batches(seq, n):
@@ -201,15 +207,21 @@ class FalkorProjector:
                 try:
                     await client.delete()
                 except Exception as exc:
-                    # Usually benign: the graph doesn't exist yet (fresh) and the MERGE below creates
-                    # it. But if it DID exist and the wipe genuinely failed, the MERGE-only apply runs
-                    # on top of stale contents, so a merged draft's DELETES survive — the reported
-                    # "merge reverts to old state". Log it so the two are distinguishable in the logs.
-                    logger.warning(
-                        "full-seed wipe of FalkorDB graph %r for %s failed; proceeding to MERGE (if the "
-                        "graph already existed, prior deletions may not have cleared): %s",
-                        name, graph_id, exc,
-                    )
+                    # FalkorDB raises "Invalid graph operation on empty key" when the graph key does
+                    # not exist yet — the expected, benign case for a fresh graph's first projection
+                    # (the MERGE below creates it). Anything ELSE means the graph DID exist and the
+                    # wipe genuinely failed, so the MERGE-only apply runs on top of stale contents and
+                    # a merged draft's DELETES would survive ("merge reverts to old state"). Keep those
+                    # two distinct so a real wipe failure isn't lost in fresh-graph noise.
+                    if "empty key" in str(exc).lower():
+                        logger.debug("full-seed wipe: FalkorDB graph %r for %s did not exist yet "
+                                     "(fresh); MERGE will create it", name, graph_id)
+                    else:
+                        logger.warning(
+                            "full-seed wipe of FalkorDB graph %r for %s FAILED on an existing graph; "
+                            "proceeding to MERGE — prior deletions may not have cleared: %s",
+                            name, graph_id, exc,
+                        )
             await self._apply(client, *changes)
         except Exception as exc:                       # pragma: no cover - infra
             logger.exception("projection apply failed for %s: %s", graph_id, exc)
@@ -393,9 +405,13 @@ class FalkorProjector:
 
         * FalkorDB has FEWER than committed main (a dropped delta): bounded-heal by
           reseeding the graph from Postgres ONCE (idempotent MERGE/DELETE).
-        * FalkorDB has MORE than committed main (un-imported legacy/aggregation nodes —
-          the subset invariant is broken): DO NOT auto-delete (that would wipe
-          un-versioned data); record the discrepancy so enablement/bootstrap reconciles.
+        * FalkorDB has MORE than committed main: first sweep anything ``main`` has
+          TOMBSTONED that the incremental pass missed (an explicit delete the cache
+          stranded — urn drift, a re-point reset, or a pre-versioning seed); a tombstone
+          is main's authoritative "this is deleted" and must always clear the cache.
+          Whatever extra remains is un-imported legacy/aggregation data (no tombstone):
+          DO NOT auto-delete it (that would wipe un-versioned data); record the
+          discrepancy so enablement/bootstrap reconciles.
 
         Returns an error string (recorded on ``projection_state.last_error``) or ``None``."""
         try:
@@ -410,6 +426,22 @@ class FalkorProjector:
             return None
         pg_n, pg_e = pg
         f_n, f_e = fk
+        if f_n > pg_n or f_e > pg_e:
+            # Remove deleted-on-main entities the cache stranded, then re-count. Legacy
+            # (never-versioned) entities carry no tombstone, so they survive the sweep.
+            try:
+                await self._sweep_tombstoned(client, graph_id, main_id)
+                fk = await self._falkor_counts(client)
+            except Exception:
+                logger.exception("projection tombstone sweep failed for %s", graph_id)
+            else:
+                if f_n - fk[0] or f_e - fk[1]:
+                    logger.warning("projection: swept %d node(s) + %d edge(s) tombstoned-but-"
+                                   "lingering from FalkorDB for %s (deletes the incremental pass "
+                                   "missed)", f_n - fk[0], f_e - fk[1], graph_id)
+                if pg == fk:
+                    return None
+                f_n, f_e = fk
         if f_n > pg_n or f_e > pg_e:
             msg = (f"FalkorDB has extra entities vs committed main "
                    f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}) — "
@@ -438,6 +470,51 @@ class FalkorProjector:
         msg = f"projection verify mismatch at seq {to_seq} after heal (committed != FalkorDB)"
         logger.error("%s for %s", msg, graph_id)
         return msg
+
+    async def _sweep_tombstoned(self, client, graph_id, main_id) -> None:
+        """DETACH DELETE from the cache every node/edge ``main`` has TOMBSTONED that the
+        incremental pass stranded (a re-point reset, a partial delete, or a pre-versioning seed).
+        A tombstone is main's authoritative "this is deleted", so it must always clear the cache;
+        never-versioned legacy entities carry no tombstone and are left for enablement/bootstrap.
+
+        Nodes are matched by their committed ``urn`` (the indexed key — fast on a large graph) with
+        the entityId confirmed, so a live entity that later reused the urn is never deleted. The
+        rare case where a stranded node's cache urn DIFFERS from its committed urn is not caught
+        here (it needs a full reseed/resync); the count check still flags it.
+
+        Reached only on the heal path (a count mismatch on a caught-up, non-fork main), so the
+        work is bounded by the number of deletes on the graph, not by the graph size."""
+        async with self._session() as s:
+            node_ids = (await s.execute(
+                select(EntityHeadORM.entity_id).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.entity_kind == "node", EntityHeadORM.is_tombstone.is_(True),
+                ))).scalars().all()
+            edge_ids = (await s.execute(
+                select(EntityHeadORM.entity_id).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(True),
+                ))).scalars().all()
+            # Resolve each tombstoned node's last committed urn (the delete row's urn is null, so
+            # take the latest non-null) via the indexed urn column, chunking the IN-list.
+            pairs: List[dict] = []
+            for chunk in _batches(list(node_ids), self._batch):
+                rows = (await s.execute(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                        NodeVersionORM.entity_id.in_(list(chunk)), NodeVersionORM.urn.is_not(None),
+                    ).order_by(NodeVersionORM.commit_seq)
+                )).all()
+                latest: Dict[str, str] = {}
+                for eid, urn in rows:
+                    latest[eid] = urn               # ascending commit_seq → last non-null wins
+                pairs.extend({"urn": u, "eid": e} for e, u in latest.items())
+        # Reads no query stats — the FalkorDB asyncio client mis-parses them; removal is measured
+        # by the caller's re-count (mirrors the incremental delete in ``_apply``).
+        for chunk in _batches(pairs, self._batch):
+            await client.query(_DELETE_NODES_BY_PAIR, params={"pairs": list(chunk)})
+        for chunk in _batches(list(edge_ids), self._batch):
+            await client.query(_DELETE_EDGES, params={"ids": list(chunk)})
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes) -> None:
         # Nodes in (grouped by label), edges in (grouped by type), edges out, nodes out.
