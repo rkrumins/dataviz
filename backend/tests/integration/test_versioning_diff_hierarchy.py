@@ -5,7 +5,7 @@ The canvas review layer reshapes the flat squash diff into a lazy-loadable conta
 the change history to a view. This e2e pins the load-bearing invariants:
 
 * the hierarchical summary's GLOBAL counts equal the flat diff's (preview ≡ diff, just reshaped);
-* changes nest under their real containment parent; parent-less changes bucket by type;
+* changes nest under their real containment parent; parent-less changes are their own named row;
 * children page with accurate totals; a deleted container is marked and its subtree pages through;
 * the PR/branch paths agree; PR scope filters + counts isolate by view and by data source;
 * commit_log scopes to a view (across branches) vs the graph-wide branch log.

@@ -4418,8 +4418,9 @@ def _build_diff_hierarchy(
     """Index a flat squash (``net_delta(theirs, merged)``) as a containment tree.
 
     Changed nodes nest under their real containment parent, walked up to a root; a change with
-    no containment parent is bucketed by entityType; a non-containment edge change is bucketed
-    by edgeType. Containment-edge changes are *structural* — implied by their child node's
+    no containment parent appears as its OWN top-level row (consistently named, whether or not it
+    has changed descendants); a non-containment edge change is bucketed by edgeType.
+    Containment-edge changes are *structural* — implied by their child node's
     create/delete — so they count toward the global totals but never get their own row. The PR
     path passes full merge states (every container present); the branch path passes its changes
     plus the unchanged ancestor skeleton. O(changed + containment edges in the states).
@@ -4478,10 +4479,14 @@ def _build_diff_hierarchy(
     for eid in relevant:
         if parent_of.get(eid) in relevant:
             continue                                     # nested under a relevant container
-        if eid in children_of:
-            roots.append(eid)                            # top-level container w/ changed descendants
-        else:                                            # parent-less changed leaf → type bucket
-            buckets.setdefault("type:" + (payload_of(eid).get("entityType") or "Other"), []).append(eid)
+        # Every top-level changed entity is its OWN named row — whether or not it has changed
+        # descendants. (Previously a top-level change WITHOUT changed children was hidden in a
+        # "type:<entityType>" bucket, so e.g. a renamed domain with changed children showed by name
+        # while a renamed domain without changed children showed under a generic "domain" bucket —
+        # the same entity kind grouped two different ways. Naming both is consistent and, since
+        # parent-less changes are roots/orphans (rare), doesn't flood the tree; volume is handled by
+        # the summary-collapse + the group limit.)
+        roots.append(eid)
     for eid in changed_edges:
         p = payload_of(eid)
         if (p.get("edgeType") or "").upper() in cset:
