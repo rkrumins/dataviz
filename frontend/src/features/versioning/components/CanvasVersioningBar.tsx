@@ -40,8 +40,8 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
 
   const branchId = useEffectiveBranchId(workspaceId, dataSourceId)
   const isDraft = !!branchId
-  const showDiff = useBranchStore((s) => s.showDiff)
-  const setShowDiff = useBranchStore((s) => s.setShowDiff)
+  const committedDiffHidden = useBranchStore((s) => s.committedDiffHidden)
+  const setCommittedDiffHidden = useBranchStore((s) => s.setCommittedDiffHidden)
   const setActiveChangeSet = useBranchStore((s) => s.setActiveChangeSet)
   const switchToMain = useBranchStore((s) => s.switchToMain)
 
@@ -140,15 +140,23 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
           <div className="flex items-center gap-2 text-ink-muted">
             {diffQ.isLoading ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : changeSet.changes.length > 0 ? (
-              <ChangeCountChips changeSet={changeSet} />
             ) : (
-              <span className="text-xs">No committed changes yet</span>
-            )}
-            {uncommitted > 0 && (
-              <span className="text-xs text-amber-500" title="Edits not yet committed to the draft">
-                · {uncommitted} unsaved
-              </span>
+              <>
+                {changeSet.changes.length > 0 ? (
+                  <span className="flex items-center gap-1.5" title="Committed to this branch — not merged to main yet">
+                    <ChangeCountChips changeSet={changeSet} />
+                    <span className="text-[11px] text-ink-muted/80">in branch</span>
+                  </span>
+                ) : uncommitted === 0 ? (
+                  <span className="text-xs">No changes yet</span>
+                ) : null}
+                {uncommitted > 0 && (
+                  <span className="text-xs font-medium text-amber-500 inline-flex items-center gap-1"
+                        title="Edited on the canvas but not saved to the branch yet">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> {uncommitted} unsaved
+                  </span>
+                )}
+              </>
             )}
           </div>
         )}
@@ -168,16 +176,11 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
 
         {isDraft && branchId && (
           <>
-            <button
-              onClick={() => setShowDiff(!showDiff, { source: 'branch', branchId })}
-              className={cn(
-                'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors',
-                showDiff ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
-              )}
-            >
-              {showDiff ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              {showDiff ? 'Hide changes' : 'Review changes'}
-            </button>
+            <ChangeHighlightControl
+              committedHidden={committedDiffHidden}
+              onToggle={() => setCommittedDiffHidden(!committedDiffHidden)}
+              hasCommitted={changeSet.changes.length > 0}
+            />
 
             <button
               onClick={() => setShowPublish(true)}
@@ -232,5 +235,53 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
         />
       )}
     </>
+  )
+}
+
+/** Committed-vs-main highlight toggle + a hover legend. The canvas always shows STAGED (unsaved)
+ *  edits as a dashed halo; this toggle shows/hides the SOLID committed-vs-main rings so older
+ *  committed work can be muted. Both keep the green/orange/rose colour language. */
+function ChangeHighlightControl({
+  committedHidden,
+  onToggle,
+  hasCommitted,
+}: {
+  committedHidden: boolean
+  onToggle: () => void
+  hasCommitted: boolean
+}) {
+  return (
+    <div className="relative group">
+      <button
+        onClick={onToggle}
+        disabled={!hasCommitted}
+        title={committedHidden ? 'Show committed changes on the canvas' : 'Hide committed changes on the canvas'}
+        className={cn(
+          'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors disabled:opacity-40',
+          !committedHidden && hasCommitted ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+        )}
+      >
+        {committedHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+        Committed
+      </button>
+      <div className="absolute right-0 top-full mt-1.5 w-64 p-3 rounded-xl bg-canvas border border-glass-border shadow-xl text-[11px] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+        <p className="font-semibold text-ink mb-2">How changes are marked on the canvas</p>
+        <div className="space-y-1.5 text-ink-muted">
+          <div className="flex items-center gap-2">
+            <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
+            solid ring = committed to this branch
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
+            dashed halo = unsaved (staged)
+          </div>
+          <div className="pt-1.5 mt-1 border-t border-glass-border/60 flex items-center gap-3">
+            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
+            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
+            <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }

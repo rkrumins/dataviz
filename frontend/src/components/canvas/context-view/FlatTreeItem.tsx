@@ -8,8 +8,8 @@ import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
-import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
-import { useDiffDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
 import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
@@ -45,6 +45,18 @@ interface FlatTreeItemProps {
   isSearchVisible?: boolean
   /** When set (draft/authoring mode), show the hover connection handle. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+}
+
+// Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
+// adds a dashed halo = "unsaved"; COMMITTED uses the same colours in a lighter, solid-ring form =
+// "saved to the branch, not merged". Same colour language as the graph canvas.
+const FLAT_ROW_STYLE: Record<string, string> = {
+  'staged-added': 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-green-300/70',
+  'staged-modified': 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-orange-300/70',
+  'staged-removed': 'bg-gradient-to-r from-rose-500/30 via-rose-500/20 to-rose-500/8 ring-2 ring-rose-400/80 shadow-lg shadow-rose-500/25 opacity-90 outline-dashed outline-1 -outline-offset-[3px] outline-rose-300/70',
+  'committed-added': 'bg-green-500/[0.10] ring-1 ring-inset ring-green-500/60',
+  'committed-modified': 'bg-orange-500/[0.10] ring-1 ring-inset ring-orange-500/60',
+  'committed-removed': 'bg-rose-500/[0.12] ring-1 ring-inset ring-rose-500/60 opacity-90',
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -105,36 +117,19 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // per-id via the store's setTimeout (~900ms).
   const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(node.id))
 
-  const stagedColor = directChange ? stagedChangeColor(directChange.type) : (hasDescendantChange ? 'cascade' : null)
-  // Branch-diff overlay: when "Review changes" is on, tint nodes that differ from
-  // main using the same vocabulary. Uncommitted staged edits take precedence.
-  const diffStatus = useDiffDecoration().statusForEntity(node.urn ?? node.id)
-  const diffColor: 'green' | 'amber' | 'red' | null =
-    diffStatus === 'added' ? 'green' : diffStatus === 'modified' ? 'amber' : diffStatus === 'removed' ? 'red' : null
-  const reviewColor = stagedColor ?? diffColor
+  // Direct change decoration — STAGED (your unsaved edit) takes precedence over COMMITTED (saved to
+  // the branch, not merged). Dashed = staged, solid = committed; color = type — the SAME vocabulary
+  // as the graph canvas, so "saved vs not" reads identically everywhere. Cascade (a descendant has a
+  // staged change) keeps its muted left stripe.
+  const directDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  const isPendingDelete = directDeco?.status === 'removed'
   const stagedSummary = directChange?.summary
+    ?? (directDeco?.state === 'committed' ? `${directDeco.status} vs main` : undefined)
+    ?? (directDeco?.state === 'staged' ? `${directDeco.status} · unsaved` : undefined)
     ?? (hasDescendantChange ? 'Contains staged changes' : undefined)
-    ?? (diffStatus ? `${diffStatus} vs main` : undefined)
-
-  // Strong, full-width background tint — the user wanted the ENTIRE row to
-  // glow in the change color so the canvas reads as a heatmap of pending edits.
-  // Direct changes get saturated tints; cascade indicates child changes with a
-  // muted left-bar treatment so it's spottable but not overpowering.
-  const stagedRowClass = (() => {
-    switch (reviewColor) {
-      case 'green':
-        return 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20'
-      case 'red':
-        return 'bg-gradient-to-r from-rose-500/30 via-rose-500/20 to-rose-500/8 ring-2 ring-rose-400/80 shadow-lg shadow-rose-500/25 opacity-90'
-      case 'amber':
-        return 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20'
-      case 'cascade':
-        // Indicate that a descendant has a staged change with a soft amber edge stripe.
-        return 'border-l-[3px] border-l-amber-400/50'
-      default:
-        return ''
-    }
-  })()
+  const stagedRowClass = directDeco
+    ? FLAT_ROW_STYLE[`${directDeco.state}-${directDeco.status}`]
+    : (hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50' : '')
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
@@ -459,8 +454,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           textClass,
           isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
-          // Strikethrough for pending-delete makes the destruction intent unmissable
-          stagedColor === 'red' && "line-through decoration-rose-300/80 decoration-2",
+          // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
+          isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
           // 3-line cap + word-wrap. ``break-words`` triggers only
           // when a word genuinely cannot fit, so normal labels
           // stay on a single line. The 3-line ceiling handles

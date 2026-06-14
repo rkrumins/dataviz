@@ -24,7 +24,6 @@ import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
-import { DiffReviewRail } from '@/features/versioning/components/DiffReviewRail'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -159,9 +158,6 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
             />
           </div>
         )}
-
-        {/* Diff review rail — shown when "Review changes" is toggled in a draft. */}
-        <DiffReviewRail />
       </div>
     </div>
     </ReactFlowProvider>

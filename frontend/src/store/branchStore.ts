@@ -12,7 +12,7 @@
  */
 import { create } from 'zustand'
 import type { ResolveResponse } from '@/services/versioningApiService'
-import type { ChangeSet, ChangeOrigin } from '@/features/versioning/model/changeModel'
+import type { ChangeSet } from '@/features/versioning/model/changeModel'
 
 interface BranchState {
   /** The (workspace, data source) this branch context is scoped to — a branchId is
@@ -30,10 +30,12 @@ interface BranchState {
   /** The view a draft was opened from, threaded into `openDraft({originatingViewId})`. */
   originatingViewId: string | null
 
-  /** Diff overlay state. */
-  showDiff: boolean
-  diffSource: ChangeOrigin | null
+  /** The draft-vs-main change set (committed branch changes). Owned by the CanvasVersioningBar
+   *  effect; cleared only on a branch switch. */
   activeChangeSet: ChangeSet | null
+  /** Committed-vs-main highlighting on the canvas is ON by default; this hides it so the user
+   *  isn't confused by older committed work. Staged (uncommitted) edits ALWAYS show. */
+  committedDiffHidden: boolean
 
   /** Bumped on publish/merge so live `main` reads refetch (folded into providerVersion). */
   mainEpoch: number
@@ -46,7 +48,7 @@ interface BranchState {
   setResolved: (scope: { workspaceId: string; dataSourceId: string }, r: ResolveResponse) => void
   switchToMain: () => void
   switchToDraft: (branchId: string, originatingViewId?: string | null) => void
-  setShowDiff: (on: boolean, source?: ChangeOrigin | null) => void
+  setCommittedDiffHidden: (hidden: boolean) => void
   setActiveChangeSet: (cs: ChangeSet | null) => void
   bumpMainEpoch: () => void
   /** Clear all branch context — call when leaving a data source / view. */
@@ -61,9 +63,8 @@ const INITIAL = {
   mainHeadCommitSeq: 0,
   currentBranchId: null,
   originatingViewId: null,
-  showDiff: false,
-  diffSource: null,
   activeChangeSet: null,
+  committedDiffHidden: false,
   mainEpoch: 0,
 } as const
 
@@ -93,7 +94,7 @@ export const useBranchStore = create<BranchState>((set, get) => ({
         // Resolving a *different* data source resets the active branch to trunk.
         ...(sameScope
           ? {}
-          : { currentBranchId: null, originatingViewId: null, showDiff: false, diffSource: null, activeChangeSet: null }),
+          : { currentBranchId: null, originatingViewId: null, activeChangeSet: null }),
       }
     }),
 
@@ -101,8 +102,6 @@ export const useBranchStore = create<BranchState>((set, get) => ({
     set({
       currentBranchId: null,
       originatingViewId: null,
-      showDiff: false,
-      diffSource: null,
       activeChangeSet: null,
     }),
 
@@ -110,21 +109,14 @@ export const useBranchStore = create<BranchState>((set, get) => ({
     set({
       currentBranchId: branchId,
       originatingViewId,
-      // Leaving any prior diff overlay behind — it described a different branch.
-      showDiff: false,
-      diffSource: null,
+      // Leaving any prior diff set behind — it described a different branch.
       activeChangeSet: null,
     }),
 
-  // Visibility only — never touches activeChangeSet. The diff data is owned by the
-  // CanvasVersioningBar effect (a faithful reflection of the draft-vs-main query) and is cleared
-  // solely on a branch change (switchToMain/switchToDraft). Toggling the overlay off then on must
-  // NOT drop it, or it can't be restored without a full page reload.
-  setShowDiff: (on, source = null) =>
-    set((s) => ({
-      showDiff: on,
-      diffSource: on ? source ?? s.diffSource : null,
-    })),
+  // The committed-vs-main highlight is a view preference: it survives branch switches (so the
+  // user's show/hide choice sticks) and never touches activeChangeSet (the data, owned by the
+  // CanvasVersioningBar effect, cleared only on a branch change).
+  setCommittedDiffHidden: (hidden) => set({ committedDiffHidden: hidden }),
 
   setActiveChangeSet: (cs) => set({ activeChangeSet: cs }),
 
@@ -138,7 +130,7 @@ export const useCurrentBranchId = () => useBranchStore((s) => s.currentBranchId)
 export const useIsDraftMode = () =>
   useBranchStore((s) => !!s.currentBranchId && s.currentBranchId !== s.mainBranchId)
 export const useGraphId = () => useBranchStore((s) => s.graphId)
-export const useShowDiff = () => useBranchStore((s) => s.showDiff)
+export const useCommittedDiffHidden = () => useBranchStore((s) => s.committedDiffHidden)
 
 /** The branchId to apply to reads in (wsId, dataSourceId), or null if the active
  *  branch context belongs to a different scope (or is trunk). */
