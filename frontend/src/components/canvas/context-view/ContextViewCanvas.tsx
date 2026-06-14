@@ -2082,8 +2082,11 @@ export function ContextViewCanvas({
               })
               // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).
               useStagedChangesStore.setState({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
-              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(bs.workspaceId ?? undefined, bs.graphId, bs.currentBranchId) })
-              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(bs.workspaceId ?? undefined, bs.graphId, bs.currentBranchId) })
+              // A save creates a new draft commit that every versioning surface must reflect — the
+              // cumulative branch diff (Changes tab), the commit log (Commits tab), and per-entity
+              // history. Invalidate the whole versioning namespace so saved changes appear at once
+              // (a save is user-initiated and infrequent, so the broad refetch is fine).
+              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await saveToBackend(activeWorkspaceId)   // view/blueprint config (layers) — not graph entities
               closeStagedChangesPanel()
               showToast('success', 'Saved to draft.')

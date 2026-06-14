@@ -228,6 +228,7 @@ export function ChangeTreePanel({
   origin,
   emptyHint = 'No changes yet.',
   className,
+  summaryFirst = false,
 }: {
   summary?: DiffSummaryResponse
   isLoading?: boolean
@@ -235,8 +236,15 @@ export function ChangeTreePanel({
   origin: ChangeOrigin
   emptyHint?: string
   className?: string
+  /** Show only the impact summary, with the detail tree behind a toggle (the cumulative branch
+   *  view). Off for already-drilled-in contexts like a single commit's diff. */
+  summaryFirst?: boolean
 }) {
   const exp = useChangeTreeExpansion(fetchChildren)
+  // Summary-first: the impact header always shows; the per-entity detail tree is revealed on demand
+  // so a large change set reads as a glanceable summary, not a wall of rows. `null` = auto (small
+  // sets open, large sets collapsed); once the user toggles, their choice sticks.
+  const [treeOpen, setTreeOpen] = useState<boolean | null>(null)
 
   if (isLoading && !summary) {
     return (
@@ -249,19 +257,35 @@ export function ChangeTreePanel({
     return <div className="py-10 text-center"><p className="text-sm text-ink-muted">{emptyHint}</p></div>
   }
 
+  const totalChanges = summary.counts.added + summary.counts.modified + summary.counts.removed
+  // summaryFirst: small sets auto-expand, larger ones collapse to the summary until toggled.
+  const isOpen = !summaryFirst || (treeOpen ?? totalChanges <= 6)
+
   return (
-    <div className={cn('space-y-3', className)}>
+    <div className={cn('space-y-2.5', className)}>
       <ImpactHeader summary={summary} />
-      <div className="space-y-1.5">
-        {summary.groups.map((g) => (
-          <TreeRow key={g.key} node={g} depth={0} exp={exp} origin={origin} />
-        ))}
-        {summary.groupTotal > summary.groups.length && (
-          <p className="text-[11px] text-ink-muted px-1 pt-1">
-            Showing {summary.groups.length} of {summary.groupTotal} groups — refine in a draft to narrow the change set.
-          </p>
-        )}
-      </div>
+      {summaryFirst && (
+        <button
+          onClick={() => setTreeOpen(!isOpen)}
+          className="w-full flex items-center gap-1.5 px-1 py-1 text-[12px] font-medium text-ink-muted hover:text-ink transition-colors"
+          aria-expanded={isOpen}
+        >
+          <ChevronRight className={cn('w-3.5 h-3.5 transition-transform', isOpen && 'rotate-90')} />
+          {isOpen ? 'Hide details' : `Show details — ${totalChanges} change${totalChanges === 1 ? '' : 's'}`}
+        </button>
+      )}
+      {isOpen && (
+        <div className="space-y-1.5">
+          {summary.groups.map((g) => (
+            <TreeRow key={g.key} node={g} depth={0} exp={exp} origin={origin} />
+          ))}
+          {summary.groupTotal > summary.groups.length && (
+            <p className="text-[11px] text-ink-muted px-1 pt-1">
+              Showing the first {summary.groups.length} of {summary.groupTotal} top-level groups.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }

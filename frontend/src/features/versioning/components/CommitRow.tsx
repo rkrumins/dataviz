@@ -104,6 +104,7 @@ export function CommitRow({
             fetchChildren={fetchChildren}
             origin={{ source: 'commit', commitId }}
             emptyHint="No changes in this commit."
+            summaryFirst
           />
         </div>
       )}

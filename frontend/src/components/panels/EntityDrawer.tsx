@@ -39,6 +39,7 @@ import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
+import { useEffectiveBranchId } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { cn } from '@/lib/utils'
 
@@ -97,6 +98,8 @@ export function EntityDrawer({
   const historyWsId = activeView?.workspaceId
   const historyGraphId = resolve.data?.graphId ?? null
   const historyMainBranch = resolve.data?.mainBranchId ?? null
+  // The active draft (if any), so the History section also shows this branch's unmerged commits.
+  const historyBranchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null)
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
@@ -580,6 +583,7 @@ export function EntityDrawer({
               wsId={historyWsId}
               graphId={historyGraphId}
               mainBranchId={historyMainBranch}
+              branchId={historyBranchId}
             />
           )}
 
@@ -804,6 +808,7 @@ interface ViewModeContentProps {
   wsId?: string
   graphId?: string | null
   mainBranchId?: string | null
+  branchId?: string | null
 }
 
 function ViewModeContent({
@@ -819,6 +824,7 @@ function ViewModeContent({
   wsId,
   graphId,
   mainBranchId,
+  branchId,
 }: ViewModeContentProps) {
   const hasAdditional = Object.keys(propertiesBag).length > 0
   return (
@@ -890,7 +896,7 @@ function ViewModeContent({
       {/* History — real per-entity revision history (main line). Hidden when version control is off. */}
       {wsId && graphId && (
         <Section title="History" icon={LucideIcons.History}>
-          <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} />
+          <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} branchId={branchId} />
         </Section>
       )}
     </div>

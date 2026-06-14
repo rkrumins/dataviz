@@ -1,15 +1,20 @@
 /**
- * ViewVersioningPanel — the canvas review surface for a view, as a slide-over with three
- * tabs: Changes (this draft's hierarchical diff), Pull Requests (raised from this view, or
- * the whole data source), and History (this view's change log). Reuses the diff tree, the
- * existing PR list/detail, and the commit timeline; the shell mirrors PrDetailDrawer.
+ * ViewVersioningPanel — the canvas review hub for a view, as a slide-over with three tabs:
+ *   • Changes — one place for everything in this branch: PENDING (unsaved canvas edits) at the top
+ *     with a Review & Save action, then ALL committed branch changes cumulatively (summary-first
+ *     tree). So after you save, your work doesn't "disappear" — it moves from Pending to Committed
+ *     in the same view.
+ *   • Commits — the branch's history commit-by-commit (this draft / this view / whole graph), each
+ *     expandable to its own diff (GitHub-style).
+ *   • Pull Requests — raised from this view, or the whole data source.
  */
 import { useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, FileDiff, GitPullRequest, History } from 'lucide-react'
+import { X, FileDiff, GitPullRequest, GitCommit, PencilLine } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import * as api from '@/services/versioningApiService'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchDiffSummary } from '../hooks/useVersioning'
 import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
@@ -19,9 +24,40 @@ export type ViewPanelTab = 'changes' | 'prs' | 'history'
 
 const TABS: Array<{ id: ViewPanelTab; label: string; Icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'changes', label: 'Changes', Icon: FileDiff },
+  { id: 'history', label: 'Commits', Icon: GitCommit },
   { id: 'prs', label: 'Pull Requests', Icon: GitPullRequest },
-  { id: 'history', label: 'History', Icon: History },
 ]
+
+/** Unsaved canvas edits for the active branch (from the staged store) — surfaced in the hub so the
+ *  user always sees what's pending, with one click to the Review & Save modal. */
+function PendingChanges() {
+  const changes = useStagedChangesStore((s) => s.changes)
+  const openReview = useStagedChangesStore((s) => s.openReviewPanel)
+  if (changes.length === 0) return null
+  const creates = changes.filter((c) => c.type.startsWith('create')).length
+  const deletes = changes.filter((c) => c.type.startsWith('delete')).length
+  const edits = changes.length - creates - deletes
+  return (
+    <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-amber-700 dark:text-amber-300">
+          <PencilLine className="w-3.5 h-3.5" />
+          {changes.length} unsaved {changes.length === 1 ? 'edit' : 'edits'}
+        </span>
+        <button
+          onClick={openReview}
+          className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-300 hover:bg-amber-500/25 transition-colors"
+        >
+          Review &amp; Save
+        </button>
+      </div>
+      <p className="text-[11px] text-ink-muted mt-1.5">
+        {[creates && `${creates} created`, edits && `${edits} edited`, deletes && `${deletes} deleted`]
+          .filter(Boolean).join(' · ')} — not committed to the branch yet.
+      </p>
+    </div>
+  )
+}
 
 export function ViewVersioningPanel({
   wsId,
@@ -44,7 +80,9 @@ export function ViewVersioningPanel({
 }) {
   const [tab, setTab] = useState<ViewPanelTab>(initialTab)
 
-  const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null)
+  // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
+  // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
+  const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null, 1000)
   const fetchChildren = useCallback(
     (key: string, offset: number) =>
       api.getBranchDiffChildren(wsId, graphId, branchId!, key, { offset, limit: 50 }),
@@ -98,13 +136,22 @@ export function ViewVersioningPanel({
         <div className="flex-1 overflow-y-auto custom-scrollbar px-5 py-5">
           {tab === 'changes' &&
             (branchId ? (
-              <ChangeTreePanel
-                summary={summaryQ.data}
-                isLoading={summaryQ.isLoading}
-                fetchChildren={fetchChildren}
-                origin={{ source: 'branch', branchId }}
-                emptyHint="This draft has no changes yet."
-              />
+              <div className="space-y-4">
+                <PendingChanges />
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2 px-0.5">
+                    Committed in this branch
+                  </p>
+                  <ChangeTreePanel
+                    summary={summaryQ.data}
+                    isLoading={summaryQ.isLoading}
+                    fetchChildren={fetchChildren}
+                    origin={{ source: 'branch', branchId }}
+                    emptyHint="Nothing committed to this branch yet — saved canvas edits show up here."
+                    summaryFirst
+                  />
+                </div>
+              </div>
             ) : (
               <div className="py-10 text-center">
                 <p className="text-sm text-ink-muted">Switch to a draft to review its changes.</p>

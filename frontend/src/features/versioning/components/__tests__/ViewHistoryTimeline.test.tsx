@@ -22,6 +22,7 @@ const useCommitDiffSummary = vi.fn((_ws?: string, _gid?: string | null, cid?: st
 }))
 
 vi.mock('../../hooks/useVersioning', () => ({
+  useCommitLog: () => ({ data: { commits: [] }, isLoading: false }),
   useViewCommitLog: () => ({
     data: { commits: [{ commit_id: 'cmt_1', commit_seq: 2, message: 'Add Sales dataset', actor: 'u@x', created_at: '2024-01-01T00:00:00Z', stats: { create: 1 } }] },
     isLoading: false,
