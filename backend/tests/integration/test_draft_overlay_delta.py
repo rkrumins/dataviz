@@ -41,7 +41,7 @@ async def _run() -> None:
     # ── no-change draft → empty patch set (the invariant's source) ──────────────
     d0 = await svc.open_draft(graph_id=gid, owner="u")
     assert await svc.branch_overlay_delta(graph_id=gid, branch_id=d0) == {
-        "nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": []}
+        "nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [], "nodesNew": []}
     assert await svc.aggregated_overlay_adjust(
         graph_id=gid, branch_id=d0, source_urns=["A", "B"], target_urns=["A", "B"],
         lineage_delta=[], containment_edge_types=CONT) == {}

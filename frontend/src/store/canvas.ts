@@ -15,6 +15,8 @@ export interface LineageNode extends Node {
     metadata?: Record<string, unknown>
     /** Editable property bag (the canvas convention; see toCanvasNode). */
     properties?: Record<string, unknown>
+    /** OCC token (content hash) the node was read at — echoed as baseVersion on an edit. */
+    version?: string
     // Hierarchy
     childIds?: string[]
     parentId?: string
@@ -38,6 +40,8 @@ export interface LineageEdge extends Edge {
     isAggregated?: boolean
     sourceEdgeCount?: number
     sourceEdges?: string[]
+    /** OCC token (content hash) the edge was read at — echoed as baseVersion on an edit. */
+    version?: string
   }
 }
 

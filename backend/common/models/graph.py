@@ -34,6 +34,7 @@ class GraphNode(BaseModel):
     child_count: Optional[int] = Field(None, alias="childCount")
     source_system: Optional[str] = Field(None, alias="sourceSystem")
     last_synced_at: Optional[str] = Field(None, alias="lastSyncedAt")
+    version: Optional[str] = None  # OCC token (content hash) — echo as baseVersion on an edit
 
     class Config:
         populate_by_name = True
@@ -45,6 +46,7 @@ class GraphEdge(BaseModel):
     edge_type: str = Field(alias="edgeType")  # open string; validated against the active ontology
     confidence: Optional[float] = None
     properties: Dict[str, Any] = Field(default_factory=dict)
+    version: Optional[str] = None  # OCC token (content hash) — echo as baseVersion on an edit
 
     class Config:
         populate_by_name = True

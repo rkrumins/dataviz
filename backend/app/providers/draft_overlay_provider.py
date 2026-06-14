@@ -30,6 +30,7 @@ class _OverlayDelta:
     def __init__(self, raw: Dict[str, Any], containment_types: List[str]):
         cset = {t.upper() for t in (containment_types or [])}
         self.node_upsert: Dict[str, GraphNode] = {}
+        self.node_new: set = set(raw.get("nodesNew", []))   # urns CREATED in the draft (vs modified)
         self.node_remove: set = set()
         self.edge_upsert: Dict[str, GraphEdge] = {}
         self.edge_remove: Dict[str, GraphEdge] = {}
@@ -76,6 +77,21 @@ class _OverlayDelta:
         if not adj:
             return node
         return node.model_copy(update={"child_count": max(0, (node.child_count or 0) + adj)})
+
+    def overlay_existing(self, base_node: GraphNode) -> Optional[GraphNode]:
+        """The visible form of a node that EXISTS in base (main): removed → None; modified → the
+        draft's changed fields but KEEPING the base node's containment context (childCount, and its
+        tree position) — the upsert from ``branch_overlay_delta`` is a reader node with NO childCount,
+        so a plain replace would orphan a renamed node (childCount→0, drops out of its parent). Then
+        the draft's own containment delta under the node is applied."""
+        if base_node.urn in self.node_remove:
+            return None
+        up = self.node_upsert.get(base_node.urn)
+        if up is None:
+            return self.with_child_count(base_node)
+        if base_node.child_count is not None:               # a MODIFIED existing node keeps main's count
+            up = up.model_copy(update={"child_count": base_node.child_count})
+        return self.with_child_count(up)
 
 
 class DraftOverlayProvider:
@@ -132,10 +148,11 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if urn in d.node_remove:
             return None
-        if urn in d.node_upsert:
-            return d.with_child_count(d.node_upsert[urn])
-        node = await self._base.get_node(urn)
-        return d.with_child_count(node) if node else None
+        base = await self._base.get_node(urn)
+        if base is not None:                                 # exists in main → merge changes, keep childCount
+            return d.overlay_existing(base)
+        up = d.node_upsert.get(urn)                          # draft-NEW node (no base)
+        return d.with_child_count(up) if up else None
 
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
         base = await self._base.get_nodes(query)
@@ -147,11 +164,14 @@ class DraftOverlayProvider:
         for n in base:
             if n.urn in d.node_remove:
                 continue
-            n = d.node_upsert.get(n.urn, n)                  # replace modified with the draft's value
-            out.append(d.with_child_count(n))
+            merged = d.overlay_existing(n)                   # modified → changes + base's childCount
+            if merged is not None:
+                out.append(merged)
             seen.add(n.urn)
-        for urn, n in d.node_upsert.items():                 # draft-new nodes matching the query
-            if urn not in seen and self._matches(n, query):
+        for urn, n in d.node_upsert.items():                 # draft-NEW nodes matching the query
+            if urn in seen or urn not in d.node_new:
+                continue
+            if self._matches(n, query):
                 out.append(d.with_child_count(n))
         return out
 
@@ -161,10 +181,16 @@ class DraftOverlayProvider:
         if d.empty:
             return base
         q = (query or "").lower()
-        out = [d.node_upsert.get(n.urn, n) for n in base if n.urn not in d.node_remove]
+        out: List[GraphNode] = []
+        for n in base:
+            if n.urn in d.node_remove:
+                continue
+            merged = d.overlay_existing(n)
+            if merged is not None:
+                out.append(merged)
         seen = {n.urn for n in out}
-        for urn, n in d.node_upsert.items():
-            if urn not in seen and q in (n.display_name or "").lower():
+        for urn, n in d.node_upsert.items():                 # draft-NEW matches only
+            if urn not in seen and urn in d.node_new and q in (n.display_name or "").lower():
                 out.append(n)
         return out
 
@@ -206,14 +232,20 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
-        # children: drop removed, replace modified, add the draft's new children of THIS parent
-        children = [d.node_upsert.get(c.urn, c) for c in base.children if c.urn not in d.node_remove]
+        # children: drop removed, overlay modified (keeping each child's base childCount so a renamed
+        # child isn't orphaned), add the draft's new containment children of THIS parent.
+        children = []
+        for c in base.children:
+            if c.urn in d.node_remove:
+                continue
+            merged = d.overlay_existing(c)
+            if merged is not None:
+                children.append(merged)
         present = {c.urn for c in children}
         for e in d.cont_added:
             if e.source_urn == parent_urn and e.target_urn in d.node_upsert and e.target_urn not in present:
-                children.append(d.node_upsert[e.target_urn])
+                children.append(d.with_child_count(d.node_upsert[e.target_urn]))
                 present.add(e.target_urn)
-        children = [d.with_child_count(c) for c in children]
         # containment edges under this parent
         cont = [e for e in base.containment_edges if e.id not in d.edge_remove]
         cont += [e for e in d.cont_added if e.source_urn == parent_urn]
@@ -252,19 +284,27 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
-        # A draft-new node is top-level iff nothing (base or draft) contains it. We can only see the
-        # draft's containment here, so treat a new node as a root when no draft containment targets it.
+        # Overlay main's top-level set: drop removed, merge modified (keeping base childCount). A
+        # draft-CREATED node becomes a new root only when no draft containment targets it. Crucially a
+        # MODIFIED existing node (e.g. a rename) is NOT hoisted to top-level — its parent edge lives on
+        # main (outside the draft delta), so it keeps its real position; hoisting it was what made a
+        # single rename "break the containment tree" (the node jumped to the root with childCount 0).
         has_parent = {e.target_urn for e in d.cont_added}
-        nodes = [d.node_upsert.get(n.urn, n) for n in base.nodes if n.urn not in d.node_remove]
+        nodes = []
+        for n in base.nodes:
+            if n.urn in d.node_remove:
+                continue
+            merged = d.overlay_existing(n)
+            if merged is not None:
+                nodes.append(merged)
         present = {n.urn for n in nodes}
         et = set(entity_types or [])
         for urn, n in d.node_upsert.items():
-            if urn in present or urn in has_parent:
+            if urn in present or urn in has_parent or urn not in d.node_new:
                 continue
             if et and n.entity_type not in et:
                 continue
-            nodes.append(n)
-        nodes = [d.with_child_count(n) for n in nodes]
+            nodes.append(d.with_child_count(n))
         return base.model_copy(update={"nodes": nodes, "total_count": len(nodes)})
 
     async def get_aggregated_edges_between(

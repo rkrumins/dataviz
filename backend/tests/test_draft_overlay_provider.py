@@ -143,6 +143,31 @@ async def _run() -> None:
     assert await p5.get_node("B.c") is None
     assert {n.urn for n in await p5.get_nodes(NodeQuery())} == {"A", "B", "A.c"}
 
+    # ── MODIFIED existing node (rename) ⇒ tree UNCHANGED. Regression: the upsert from
+    #    branch_overlay_delta has no childCount/parent context, so a plain replace dropped the
+    #    node's childCount to 0 AND (for a child) hoisted it to top-level — i.e. ONE rename
+    #    "broke the entire containment tree". `nodesNew` is empty (it's modified, not created). ──
+    p6 = _mk(base, {**_EMPTY, "nodesNew": [],
+                    "nodesUpsert": [{"urn": "A", "entityType": "Table", "displayName": "A_RENAMED"}]})
+    assert (await p6.get_node("A")).display_name == "A_RENAMED"     # rename visible
+    assert (await p6.get_node("A")).child_count == 1               # childCount PRESERVED (not 0)
+    top6 = (await p6.get_top_level_or_orphan_nodes()).nodes
+    assert {n.urn for n in top6} == {"A", "B"}                     # A not duplicated/hoisted
+    assert next(n for n in top6 if n.urn == "A").child_count == 1  # and keeps its count at top-level
+    assert {c.urn for c in (await p6.get_children_with_edges("A")).children} == {"A.c"}  # children intact
+
+    # ── renaming a CHILD keeps it under its parent, never hoists it to top-level ─
+    p7 = _mk(base, {**_EMPTY, "nodesNew": [],
+                    "nodesUpsert": [{"urn": "A.c", "entityType": "Column", "displayName": "A.c_RENAMED"}]})
+    assert (await p7.get_node("A.c")).display_name == "A.c_RENAMED"
+    assert {n.urn for n in (await p7.get_top_level_or_orphan_nodes()).nodes} == {"A", "B"}  # A.c NOT top-level
+    assert {c.urn for c in (await p7.get_children_with_edges("A")).children} == {"A.c"}      # still A's child
+
+    # ── a CREATED orphan (nodesNew) DOES appear at top-level (the legit new-root case) ─
+    p8 = _mk(base, {**_EMPTY, "nodesNew": ["Z"],
+                    "nodesUpsert": [{"urn": "Z", "entityType": "Table", "displayName": "Z"}]})
+    assert {n.urn for n in (await p8.get_top_level_or_orphan_nodes()).nodes} == {"A", "B", "Z"}
+
 
 def test_draft_overlay_invariant_and_delta():
     asyncio.run(_run())

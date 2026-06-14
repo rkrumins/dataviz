@@ -1,10 +1,11 @@
-"""Pull-latest (rebase_draft) + require-up-to-date-before-merge gate — needs Postgres.
+"""Pull-latest (rebase_draft) + auto-rebase-when-clean on merge — needs Postgres.
 
 Multiple named drafts run in parallel off the same main. Merging one advances main, so the others
-go out of date and are HARD-blocked from publish/merge (NotUpToDate) until they pull the latest
-changes. rebase_draft re-bases a draft's edits onto current main with the same 3-way merge as
-publish — surfacing same-field conflicts for resolution — and on a clean rebase the draft becomes
-up-to-date and mergeable, its composed state reflecting both main's advance and its own edits.
+go out of date. A stale draft is NO LONGER hard-blocked: merge auto-rebases it against current main
+in one step when the 3-way merge is conflict-free (non-overlapping edits), and only raises
+MergeConflict on a genuine same-field clash — which the user resolves via rebase_draft(resolutions=)
+(the explicit "pull latest" path, still available). The PR `behind`/`behind_by` meta still surfaces
+staleness for the UI even though it no longer blocks a clean merge.
 """
 import asyncio
 import os
@@ -12,7 +13,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.service import GraphVersioningService, NotUpToDate
+from backend.app.services.versioning.service import GraphVersioningService, MergeConflict
 
 
 def _node(eid, **kw):
@@ -52,32 +53,29 @@ async def _run() -> None:
     assert await svc.merge_mr(mr_id=mr1, actor="alice", message="merge x")
     head = (await svc.get_graph(gid))["main_head_commit_seq"]
 
-    # ── the others are now behind → HARD-blocked at merge AND publish ──
+    # ── the others are now behind: meta still surfaces it, but merge is no longer hard-blocked ──
     mr2 = await svc.open_draft_mr(graph_id=gid, branch_id=d2, actor="bob")
     pr2 = await svc.get_pr(mr2)
-    assert pr2["behind"] is True and pr2["behind_by"] >= 1     # meta surfaces staleness for the FE gate
-    with pytest.raises(NotUpToDate):
-        await svc.merge_mr(mr_id=mr2, actor="bob", message="merge y")
-    with pytest.raises(NotUpToDate):
-        await svc.publish(graph_id=gid, branch_id=d2, actor="bob", message="pub y")
+    assert pr2["behind"] is True and pr2["behind_by"] >= 1     # meta still surfaces staleness for the UI
+    _ = head
 
-    # ── pull latest into d2: non-overlapping → clean, becomes up-to-date, then merges ──
-    r = await svc.rebase_draft(graph_id=gid, branch_id=d2, actor="bob")
-    assert r["clean"] is True and r["base_commit_seq"] == head
-    assert (await svc.get_pr(mr2))["behind"] is False          # rebase cleared the merge gate
-    st2 = await svc.materialize_state(graph_id=gid, branch_id=d2)             # pulled main's A.f=2 + own B.f=2
-    assert st2["nodes"]["A"]["f"] == 2 and st2["nodes"]["B"]["f"] == 2
+    # ── d2 edits B (non-overlapping) → merge AUTO-REBASES clean in one step, no pull needed ──
     assert await svc.merge_mr(mr_id=mr2, actor="bob", message="merge y")
-    assert (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]["B"]["f"] == 2
+    st_main = await svc.materialize_state(graph_id=gid, branch_id=main)
+    assert st_main["nodes"]["A"]["f"] == 2 and st_main["nodes"]["B"]["f"] == 2   # both edits on main
 
-    # ── d3 also edited A → rebase surfaces a same-field conflict, resolvable in the draft ──
+    # ── d3 also edited A → auto-rebase hits a same-field clash → MergeConflict (the only hard stop) ──
+    mr3a = await svc.open_draft_mr(graph_id=gid, branch_id=d3, actor="carol")
+    with pytest.raises(MergeConflict):
+        await svc.merge_mr(mr_id=mr3a, actor="carol", message="merge z")
+    # explicit pull-latest with a resolution still works, then the merge lands ──
     rc = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol")
     assert rc["clean"] is False and rc["conflicts"][0]["entity_id"] == "A"
     rc2 = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol",
                                  resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}})
     assert rc2["clean"] is True
     mr3 = await svc.open_draft_mr(graph_id=gid, branch_id=d3, actor="carol")
-    assert await svc.merge_mr(mr_id=mr3, actor="carol", message="merge z")
+    assert await svc.merge_mr(mr_id=mr3, actor="carol", message="merge z2")
     assert (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]["A"]["f"] == 99
 
     await db.dispose_engine()

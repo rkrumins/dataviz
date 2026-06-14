@@ -22,6 +22,7 @@ import { useLoadingToast } from '@/components/ui/toast'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { DiffReviewRail } from '@/features/versioning/components/DiffReviewRail'
 import { GraphCanvas } from './GraphCanvas'
@@ -87,6 +88,20 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     clearTrace()
     resetAddedEdgeIds()
   }, [activeViewId, currentBranchId])
+
+  // Scope staged changes to the active (workspace, data source, branch). Staged edits belong to
+  // ONE branch — a draft is isolated until merged — so switching branches must PARK the current
+  // branch's staged edits and load the target branch's slice (empty for a fresh branch). Without
+  // this the staged store is a global singleton, so a delete staged on branch "123" bleeds onto
+  // branch "456"/"789"'s canvas + containment tree (which read the staged store), making it look
+  // like an unmerged change leaked across branches. (Symmetric to the trace clear above; the
+  // canvas itself rehydrates from the branch-scoped provider via ViewExecutionContext.)
+  const scopeWs = useBranchStore((s) => s.workspaceId)
+  const scopeDs = useBranchStore((s) => s.dataSourceId)
+  useEffect(() => {
+    const key = `${scopeWs ?? ''}::${scopeDs ?? ''}::${currentBranchId ?? 'main'}`
+    useStagedChangesStore.getState().setScope(key)
+  }, [scopeWs, scopeDs, currentBranchId])
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {

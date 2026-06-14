@@ -21,6 +21,15 @@ const IMMUTABLE_EDGE_KEYS = new Set([
 const asObj = (v: unknown): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 
+/** The OCC token (`version` content-hash) the entity was read at, for optimistic concurrency.
+ * Looks on the staged `before` (node/edge as read) or its nested `edge`. Absent ⇒ the backend
+ * falls back to a plain patch (no OCC) — so this is safe even before hydration carries `version`. */
+function versionOf(before: unknown): string | undefined {
+  const b = asObj(before)
+  const v = b.version ?? asObj(b.edge).version ?? asObj(b.node).version
+  return typeof v === 'string' ? v : undefined
+}
+
 /** Map the canvas node display shape → backend GraphNode fields (partial update). */
 function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
@@ -51,7 +60,8 @@ export function stagedChangesToOps(
       case 'update_entity': {
         const payload = nodeUpdatePayload(asObj(c.after))
         if (Object.keys(payload).length > 0) {
-          ops.push({ op: 'update', kind: 'node', id: c.targetUrn ?? c.targetId, payload })
+          ops.push({ op: 'update', kind: 'node', id: c.targetUrn ?? c.targetId, payload,
+                     baseVersion: versionOf(c.before) })
         }
         break
       }
@@ -64,7 +74,7 @@ export function stagedChangesToOps(
         for (const [k, v] of Object.entries(after)) {
           if (!IMMUTABLE_EDGE_KEYS.has(k)) payload[k] = v
         }
-        ops.push({ op: 'update', kind: 'edge', id: c.targetId, payload })
+        ops.push({ op: 'update', kind: 'edge', id: c.targetId, payload, baseVersion: versionOf(c.before) })
         break
       }
       case 'delete_edge':

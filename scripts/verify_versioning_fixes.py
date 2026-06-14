@@ -169,20 +169,41 @@ async def part_3(svc, c, actor, ws):
     await svc.apply_ops(graph_id=gid, branch_id=d0, actor=actor, ops=[_node_op(base)])
     await svc.publish(graph_id=gid, branch_id=d0, actor=actor, message="seed")
     dA, dB = await svc.open_draft(graph_id=gid, owner=actor), await svc.open_draft(graph_id=gid, owner=actor)
-    await svc.apply_ops(graph_id=gid, branch_id=dA, actor=actor,
-                        ops=[_node_op(f"urn:li:dataset:A_{uuid.uuid4().hex[:6]}")])
-    await svc.apply_ops(graph_id=gid, branch_id=dB, actor=actor,
-                        ops=[_node_op(f"urn:li:dataset:B_{uuid.uuid4().hex[:6]}")])
+    ua, ub = f"urn:li:dataset:A_{uuid.uuid4().hex[:6]}", f"urn:li:dataset:B_{uuid.uuid4().hex[:6]}"
+    await svc.apply_ops(graph_id=gid, branch_id=dA, actor=actor, ops=[_node_op(ua)])
+    await svc.apply_ops(graph_id=gid, branch_id=dB, actor=actor, ops=[_node_op(ub)])
     pubs = await asyncio.gather(
         svc.publish(graph_id=gid, branch_id=dA, actor=actor, message="A"),
         svc.publish(graph_id=gid, branch_id=dB, actor=actor, message="B"),
         return_exceptions=True)
-    oks = [p for p in pubs if isinstance(p, str)]
     errs = [p for p in pubs if isinstance(p, Exception)]
-    bad = [e for e in errs if isinstance(e, (IntegrityError, ConcurrencyError))]
-    c.check(len(oks) == 1 and not bad and all(isinstance(e, NotUpToDate) for e in errs),
-            "3: concurrent publish -> 1 wins, loser gets clean NotUpToDate",
-            f"3: concurrent publish bad outcome oks={len(oks)} errs={[type(e).__name__ for e in errs]}")
+    st = await svc.materialize_state(graph_id=gid, branch_id=mid)
+    # WS-3: disjoint concurrent merges both land (the stale one auto-rebases) — no NotUpToDate.
+    c.check(not errs and ua in st["nodes"] and ub in st["nodes"],
+            "3: concurrent independent merges -> both land (auto-rebase, no silent loss)",
+            f"3: concurrent publish bad outcome errs={[type(e).__name__ for e in errs]} "
+            f"A_in={ua in st['nodes']} B_in={ub in st['nodes']}")
+
+    # OCC: concurrent SAME-field edits on one draft -> exactly one wins + one MergeConflict.
+    from backend.app.services.versioning.service import MergeConflict
+    dO = await svc.open_draft(graph_id=gid, owner=actor)
+    occ = f"urn:li:dataset:occ_{uuid.uuid4().hex[:6]}"
+    await svc.apply_ops(graph_id=gid, branch_id=dO, actor=actor, ops=[_node_op(occ, displayName="v0")])
+    tok = None
+    async with db.graphver_session() as s:
+        tok = await svc._effective_head_hash(s, gid, dO, occ)
+    occ_res = await asyncio.gather(
+        svc.apply_ops(graph_id=gid, branch_id=dO, actor="alice",
+                      ops=[{"op": "update", "entity_kind": "node", "entity_id": occ,
+                            "payload": {"displayName": "alice"}, "base_version": tok}]),
+        svc.apply_ops(graph_id=gid, branch_id=dO, actor="bob",
+                      ops=[{"op": "update", "entity_kind": "node", "entity_id": occ,
+                            "payload": {"displayName": "bob"}, "base_version": tok}]),
+        return_exceptions=True)
+    c.check(sum(isinstance(r, MergeConflict) for r in occ_res) == 1
+            and sum(not isinstance(r, Exception) for r in occ_res) == 1,
+            "3: concurrent same-field edit -> exactly one wins + one MergeConflict (OCC)",
+            f"3: OCC same-field not enforced: {[type(r).__name__ for r in occ_res]}")
 
 
 async def part_2(svc, c, actor, ws):

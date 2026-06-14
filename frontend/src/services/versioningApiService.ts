@@ -414,6 +414,10 @@ export interface GraphChangeOp {
   id?: string
   ref?: string
   payload?: Record<string, unknown> | null
+  /** Optimistic-concurrency token: the `version` (content hash) the entity was read at. On an
+   *  update the server 3-way merges against it so a concurrent same-field edit conflicts instead
+   *  of silently overwriting. Omit ⇒ plain patch (no OCC). */
+  baseVersion?: string
 }
 
 export interface GraphChangesResult {

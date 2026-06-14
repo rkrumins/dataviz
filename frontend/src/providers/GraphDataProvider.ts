@@ -78,6 +78,10 @@ export interface GraphNode {
 
     /** Last sync timestamp */
     lastSyncedAt?: string
+
+    /** Optimistic-concurrency token (content hash) — echoed back as `baseVersion` on an edit so
+     *  the server can detect a concurrent same-field change instead of silently overwriting it. */
+    version?: string
 }
 
 /**
@@ -101,6 +105,9 @@ export interface GraphEdge {
 
     /** Additional edge properties */
     properties?: Record<string, unknown>
+
+    /** Optimistic-concurrency token (content hash) — echoed back as `baseVersion` on an edit. */
+    version?: string
 }
 
 // ============================================

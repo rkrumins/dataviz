@@ -498,8 +498,18 @@ class GraphVersioningService:
             composed = await self._composed_state(s, graph_id, branch_id)
             base_state = {eid: composed.get(eid) for eid in touched}
             if branch.is_shared:
+                # Resolve the value each edit was STAGED against (per base_content_hash, first
+                # occurrence per entity) so the fold's OCC ancestor is the editor's view, not the
+                # live head — catching a stale single-actor checkpoint, not just within-batch clashes.
+                staged_tokens: Dict[str, str] = {}
+                for c in changes:
+                    if c.base_content_hash and c.entity_id not in staged_tokens:
+                        staged_tokens[c.entity_id] = c.base_content_hash
+                base_by_entity = await self._payloads_by_content_hash(
+                    s, graph_id, staged_tokens, kind_by_entity) if staged_tokens else {}
                 head_state, conflicts = _fold_shared(
-                    base_state, changes, frozenset(config.SET_FIELDS), resolutions or {}
+                    base_state, changes, frozenset(config.SET_FIELDS), resolutions or {},
+                    base_by_entity,
                 )
                 if conflicts:
                     raise MergeConflict(conflicts)       # rolls back — nothing committed
@@ -625,9 +635,12 @@ class GraphVersioningService:
                 if draft.is_shared:                       # publishing a shared draft → maintainer
                     await self._require_manage(s, draft, actor, actor_groups)
                 main_id = await self._main_branch_id(s, graph_id)
-                if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
-                    raise NotUpToDate(branch_id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
-
+                # Auto-rebase-when-clean: if main advanced under the draft we DON'T hard-block —
+                # _compute_merge_bounded 3-way merges the draft against CURRENT main (base = main@the
+                # draft's branch point, theirs = current main head) and _apply_draft_squash writes
+                # net_delta(current main, merged) + advances the draft's base, so a conflict-free stale
+                # merge rebases-and-squashes in one step under _lock_graph. A genuine clash still raises
+                # MergeConflict for the user to resolve (the only remaining hard stop).
                 merged_state, conflicts, theirs = await self._compute_merge_bounded(
                     s, graph_id, graph, draft, main_id, dict(resolutions or {})
                 )
@@ -1350,8 +1363,9 @@ class GraphVersioningService:
                     raise ValueError("merge request endpoints missing")
                 self._require_open(draft)
                 main_id = await self._main_branch_id(s, graph.id)
-                if (draft.base_commit_seq or 0) < graph.main_head_commit_seq:   # require up-to-date before merge
-                    raise NotUpToDate(draft.id, draft.base_commit_seq or 0, graph.main_head_commit_seq)
+                # Auto-rebase-when-clean (see publish): a stale draft is NOT hard-blocked — the 3-way
+                # merge against current main rebases-and-squashes in one step when conflict-free; a
+                # real clash still raises MergeConflict.
                 merged_state, conflicts, theirs = await self._compute_merge_bounded(
                     s, graph.id, graph, draft, main_id, dict(resolutions or {})
                 )
@@ -2394,7 +2408,8 @@ class GraphVersioningService:
                     ).distinct()
                 )).scalars().all()
                 changed.update(rows)
-            empty = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": []}
+            empty = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
+                     "nodesNew": []}
             if not changed:
                 return empty
             before = await self._values_at(s, graph_id, main_id, changed, base_seq)
@@ -2403,6 +2418,7 @@ class GraphVersioningService:
         nodes_remove: List[dict] = []
         edges_upsert: List[dict] = []
         edges_remove: List[dict] = []
+        nodes_new: List[str] = []          # urns the draft CREATED (absent in main@base) vs merely modified
         for eid in changed:
             b, a = before.get(eid), after.get(eid)
             if b is None and a is None:
@@ -2420,9 +2436,12 @@ class GraphVersioningService:
                     src, tgt = _edge_src_tgt(a)
                     edges_upsert.append(_graphedge_dict(eid, a, {src: src, tgt: tgt}))
                 else:
-                    nodes_upsert.append(_graphnode_dict(eid, a.get("urn") or f"gv:{eid}", a))
+                    urn = a.get("urn") or f"gv:{eid}"
+                    nodes_upsert.append(_graphnode_dict(eid, urn, a))
+                    if b is None:                          # created in the draft — not present in main
+                        nodes_new.append(urn)
         return {"nodesUpsert": nodes_upsert, "nodesRemove": nodes_remove,
-                "edgesUpsert": edges_upsert, "edgesRemove": edges_remove}
+                "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
 
     async def aggregated_overlay_adjust(
         self, *, graph_id: str, branch_id: str, source_urns: Sequence[str],
@@ -3563,6 +3582,7 @@ class GraphVersioningService:
             new_vals: Dict[str, Optional[dict]] = {}
             kind_by_entity: Dict[str, str] = {}
             update_ids: set = set()
+            base_versions: Dict[str, str] = {}        # entity_id → client's OCC token (content_hash)
             for op in ops:
                 eid = op["entity_id"]
                 payload = op.get("payload") or {}
@@ -3573,20 +3593,40 @@ class GraphVersioningService:
                     new_vals[eid] = _sanitize_node_properties(new_vals[eid])
                 if op["op"] == "update":
                     update_ids.add(eid)
+                    if op.get("base_version"):
+                        base_versions[eid] = op["base_version"]
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
 
-            # An `update` is a PATCH: merge its fields onto the entity's current value. A version row
-            # stores the FULL payload (composition is last-writer-wins per ENTITY, not per field), so a
-            # partial update — e.g. the canvas sends only displayName + properties — would otherwise
-            # REPLACE the whole payload and silently erase urn/qualifiedName/etc. That truncation stays
-            # invisible on the draft (the overlay still has the base row) but a publish/merge writes the
-            # stripped payload onto main: blank names (the node falls back to its urn) and lost
-            # properties. Merging here preserves every field the op didn't mention.
+            # An `update` is a field-level PATCH onto the entity's current value (a version row stores
+            # the FULL payload, composed last-writer-wins per ENTITY), preserving fields the op didn't
+            # mention. When the op carries a `base_version` (the content_hash the client edited FROM),
+            # enforce OPTIMISTIC CONCURRENCY: 3-way merge (base, base⊕patch, current_head) so two users
+            # editing the SAME field concurrently CONFLICT instead of one silently overwriting the
+            # other; disjoint fields still auto-merge. No / unresolvable token ⇒ plain PATCH-onto-current
+            # (backward-compatible — provider write-through and full-payload callers are unaffected).
+            base_payloads = (await self._payloads_by_content_hash(
+                s, graph_id, base_versions, kind_by_entity) if base_versions else {})
+            occ_conflicts: List[dict] = []
+            occ_set_fields = frozenset(config.SET_FIELDS)
             for eid in update_ids:
-                if new_vals.get(eid) is not None:
-                    new_vals[eid] = {**(cur_vals.get(eid) or {}), **new_vals[eid]}
+                patch = new_vals.get(eid)
+                if patch is None:
+                    continue
+                cur = cur_vals.get(eid)
+                base = base_payloads.get(eid)
+                if base is not None and cur is not None:
+                    out = three_way_merge(base, self._patch_payload(base, patch), cur, occ_set_fields)
+                    new_vals[eid] = out.merged
+                    for cf in out.conflicts:
+                        occ_conflicts.append({
+                            "entity_id": eid, "path": list(cf.path), "base": cf.base,
+                            "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind})
+                else:
+                    new_vals[eid] = self._patch_payload(cur, patch)
+            if occ_conflicts:
+                raise MergeConflict(occ_conflicts)
 
             # Cascade a node delete to its containment subtree (ontology-driven) AND every
             # live edge incident to any deleted node (source or target, ANY type) — so no
@@ -3728,6 +3768,44 @@ class GraphVersioningService:
                       "entity_kind": stmt.excluded.entity_kind,
                       "updated_at": stmt.excluded.updated_at},
             ))
+
+    @staticmethod
+    def _patch_payload(base: Optional[dict], patch: dict) -> dict:
+        """Apply a partial update `patch` onto `base`: top-level fields override, and the
+        nested ``properties`` dict is DEEP-merged (a partial properties patch must not drop
+        the keys it didn't mention). Mirrors the merge the canvas endpoint used to do."""
+        base = base or {}
+        out = {**base, **patch}
+        if patch.get("properties") is not None or base.get("properties") is not None:
+            out["properties"] = {**(base.get("properties") or {}), **(patch.get("properties") or {})}
+        return out
+
+    async def _payloads_by_content_hash(
+        self, s, graph_id: str, eid_to_token: Mapping[str, str], kind_by_entity: Mapping[str, str]
+    ) -> Dict[str, dict]:
+        """Resolve each entity's payload at the version whose ``content_hash`` == the client's
+        echoed OCC token — the base the client edited from. Bounded point-lookups via
+        ``ix_nv_content_hash``/``ix_ev_content_hash``; a token with no matching row (squashed /
+        GC'd / cross-graph) is simply absent (OCC degrades to a plain patch for that entity)."""
+        out: Dict[str, dict] = {}
+        node_ids = [e for e in eid_to_token if kind_by_entity.get(e) != "edge"]
+        edge_ids = [e for e in eid_to_token if kind_by_entity.get(e) == "edge"]
+        for model, ids in ((NodeVersionORM, node_ids), (EdgeVersionORM, edge_ids)):
+            if not ids:
+                continue
+            tokens = list({eid_to_token[e] for e in ids})
+            for chunk in _chunks(ids, _IN_LIST_MAX):
+                rows = (await s.execute(
+                    select(model.entity_id, model.content_hash, model.payload).where(
+                        model.graph_id == graph_id, model.entity_id.in_(chunk),
+                        model.content_hash.in_(tokens))
+                )).all()
+                by = {(eid, h): p for eid, h, p in rows}
+                for e in chunk:
+                    p = by.get((e, eid_to_token[e]))
+                    if p is not None:
+                        out[e] = p
+        return out
 
     async def _write_deltas(
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor
@@ -4117,29 +4195,34 @@ def _fold_shared(
     changes: Sequence["WorkingChangeORM"],
     set_fields: frozenset,
     resolutions: Mapping[str, Optional[dict]],
+    base_by_entity: Optional[Mapping[str, Optional[dict]]] = None,
 ) -> Tuple[Dict[str, Optional[dict]], List[dict]]:
     """Fold a shared draft's working changes into head state with per-collaborator
     3-way field merge (shared-draft OCC, plan §8).
 
-    A single actor's edits to an entity fold by seq order (full replace) — exactly
-    as a private draft would, so behaviour is unchanged when only one person
-    touched it.  When *different* actors touched the same entity, each actor's net
-    payload is 3-way merged over the committed base (``base_state`` — the common
-    ancestor every concurrent edit was staged against, per ``base_content_hash``):
-    disjoint fields union, a same-field clash becomes a conflict unless
-    ``resolutions`` (``{entity_id: payload|None}``) settles it.
+    The OCC ancestor is the value each edit was STAGED against (``base_by_entity``,
+    resolved from ``WorkingChangeORM.base_content_hash``), NOT the live head — so a
+    same-field clash is caught even across separate checkpoints, not just within one
+    batch. Different actors' edits 3-way merge over that ancestor (disjoint union,
+    same-field → conflict); then, if the live head (``base_state``) MOVED since staging
+    (e.g. a concurrent ``apply_ops`` on the shared draft), the folded result is 3-way
+    merged against the current head too — so a single-actor stale checkpoint conflicts
+    instead of silently overwriting. ``resolutions`` (``{entity_id: payload|None}``)
+    settles an entity outright.
     """
     head: Dict[str, Optional[dict]] = dict(base_state)
     conflicts: List[dict] = []
     by_entity: Dict[str, List["WorkingChangeORM"]] = {}
     for c in changes:                                    # arrive in seq order
         by_entity.setdefault(c.entity_id, []).append(c)
+    base_by_entity = base_by_entity or {}
 
     for eid, chs in by_entity.items():
         if eid in resolutions:                           # caller settled this entity
             head[eid] = resolutions[eid]
             continue
-        ancestor = base_state.get(eid)
+        current = base_state.get(eid)                    # live committed head
+        ancestor = base_by_entity.get(eid, current)      # what the editors staged against
         order: List[str] = []                            # actors, first-seen order
         net: Dict[str, Optional[dict]] = {}
         for c in chs:
@@ -4149,8 +4232,17 @@ def _fold_shared(
                 dict(c.payload) if c.payload is not None else None
             )
         merged = net[order[0]]
-        for a in order[1:]:                              # iterative 3-way over one ancestor
+        for a in order[1:]:                              # iterative 3-way over the staged ancestor
             out = three_way_merge(ancestor, merged, net[a], set_fields)
+            merged = out.merged
+            for cf in out.conflicts:
+                conflicts.append({
+                    "entity_id": eid, "path": list(cf.path),
+                    "base": cf.base, "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind,
+                })
+        # OCC vs the live head: if it moved since these edits were staged, reconcile.
+        if content_hash(ancestor) != content_hash(current):
+            out = three_way_merge(ancestor, merged, current, set_fields)
             merged = out.merged
             for cf in out.conflicts:
                 conflicts.append({
@@ -4193,6 +4285,9 @@ def _graphnode_dict(entity_id: str, urn: str, payload: dict) -> dict:
         "layerAssignment": payload.get("layerAssignment"),
         "sourceSystem": payload.get("sourceSystem"),
         "lastSyncedAt": payload.get("lastSyncedAt"),
+        # OCC token: content_hash of THIS stored payload (matches the version row's content_hash, so
+        # the client can echo it as `baseVersion` and the server resolves the base it edited from).
+        "version": content_hash(payload),
     }
 
 
@@ -4213,6 +4308,7 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
         "edgeType": payload.get("edgeType"),
         "confidence": payload.get("confidence"),
         "properties": payload.get("properties") or {},
+        "version": content_hash(payload),       # OCC token (see _graphnode_dict)
     }
 
 

@@ -80,6 +80,16 @@ interface StagedChangesState {
   /** Most-recently-discarded changes (for Undo). Multiple-step undo via stack. */
   redoStack: StagedChange[]
 
+  /** Active scope key = `${wsId}::${dsId}::${branchId|main}`. Staged edits belong to ONE
+   *  branch; switching branches must NOT show another branch's edits (a draft is isolated
+   *  until merged). `changes`/`redoStack` always hold the ACTIVE scope's slice. */
+  _scopeKey: string | null
+  /** Parked per-scope slices, so switching away and back preserves each branch's own edits. */
+  _byScope: Record<string, { changes: StagedChange[]; redoStack: StagedChange[] }>
+  /** Make `key` the active scope: park the current slice and load `key`'s (empty if none).
+   *  Called whenever the active (workspace, data source, branch) changes. */
+  setScope: (key: string | null) => void
+
   stage: (input: Omit<StagedChange, 'id' | 'timestamp'>) => string
   /** Replace an existing change for the same target — useful when the user renames the same node twice. */
   stageOrReplace: (
@@ -118,12 +128,35 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   create_edge: 5,
 }
 
+const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
+
 export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   changes: [],
   isReviewPanelOpen: false,
   applyStatus: 'idle',
   lastApplyResult: null,
   redoStack: [],
+  _scopeKey: null,
+  _byScope: {},
+
+  setScope: (key) => {
+    const s = get()
+    if (s._scopeKey === key) return                       // already active — no-op
+    const byScope = { ...s._byScope }
+    // Park the current active slice under its key (so returning to this branch restores it).
+    byScope[s._scopeKey ?? _SCOPE_NULL] = { changes: s.changes, redoStack: s.redoStack }
+    const next = byScope[key ?? _SCOPE_NULL] ?? { changes: [], redoStack: [] }
+    delete byScope[key ?? _SCOPE_NULL]                    // active slice lives in `changes`, not parked
+    set({
+      _scopeKey: key,
+      _byScope: byScope,
+      changes: next.changes,
+      redoStack: next.redoStack,
+      // Transient apply/UI state never carries across a branch switch.
+      applyStatus: 'idle',
+      lastApplyResult: null,
+    })
+  },
 
   stage: (input) => {
     const id = generateId('staged')

@@ -1593,6 +1593,11 @@ class GraphChangeOp(BaseModel):
     id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
     ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
     payload: Optional[dict] = None
+    base_version: Optional[str] = Field(
+        default=None, alias="baseVersion",
+        description="optimistic-concurrency token: the `version` (content hash) the client read for "
+        "this entity. When present on an update, the server 3-way merges so a concurrent same-field "
+        "edit raises a conflict instead of silently overwriting. Absent ⇒ plain patch (no OCC).")
 
     class Config:
         populate_by_name = True
@@ -1652,15 +1657,14 @@ async def apply_graph_changes(
                 assigned[o.ref] = eid
             assigned.setdefault(eid, eid)
             ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": o.payload or {}})
-        else:  # update — merge the partial onto current draft state (full-replace otherwise clobbers)
+        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
+               # authoritative field-level merge (patch onto current, or a 3-way conflict check when a
+               # base_version is supplied). The endpoint no longer pre-merges (which baked the client's
+               # possibly-stale view of `cur` into the op before any concurrency check could see it).
             if not o.id:
                 continue
-            cur = await svc.entity_value(graph_id=graph_id, entity_id=o.id, branch_id=branchId) or {}
-            patch = o.payload or {}
-            merged = {**cur, **patch}
-            if patch.get("properties") is not None or cur.get("properties") is not None:
-                merged["properties"] = {**(cur.get("properties") or {}), **(patch.get("properties") or {})}
-            ops.append({"op": "update", "entity_kind": kind, "entity_id": o.id, "payload": merged})
+            ops.append({"op": "update", "entity_kind": kind, "entity_id": o.id,
+                        "payload": o.payload or {}, "base_version": o.base_version})
 
     if not ops:
         return {"commitId": None, "assigned": assigned}

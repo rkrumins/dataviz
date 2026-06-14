@@ -109,6 +109,8 @@ export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }):
             childCount: n.childCount,
             // Editable property bag (renamed from `metadata` → `properties`)
             properties: n.properties,
+            // OCC token (content hash) the node was read at — echoed as baseVersion on an edit.
+            version: n.version,
             // Frontend conveniences derived from the property bag / tags
             classifications: n.tags,
             businessLabel: (n.properties?.businessLabel as string) ?? undefined,
@@ -127,6 +129,7 @@ export function toCanvasEdge(e: GraphEdge): LineageEdge {
             edgeType: e.edgeType,
             relationship: e.edgeType,
             confidence: e.confidence,
+            version: e.version,   // OCC token — echoed as baseVersion on an edit
         },
     }
 }
