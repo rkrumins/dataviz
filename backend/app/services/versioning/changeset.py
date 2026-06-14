@@ -82,8 +82,13 @@ def net_delta(base_state: Mapping[str, Optional[dict]], head_state: Mapping[str,
     for eid in sorted(set(base_state) | set(head_state)):
         b = base_state.get(eid)
         h = head_state.get(eid)
-        b_live = b is not None
-        h_live = h is not None
+        # A degenerate EMPTY payload ({}) is not a live entity (no urn/entityType/endpoints) — treat
+        # it as a tombstone, never an update/create, so a merge that collapses an entity to {} (e.g. a
+        # both-sides-delete-all-fields field merge, or a client that encoded "accept deletion" as {})
+        # is DELETED, not persisted as a live identity-less node that fails GraphNode validation on
+        # read. This is the universal write chokepoint, backstopping every state-building path.
+        b_live = bool(b)
+        h_live = bool(h)
         if not b_live and not h_live:
             continue                            # never existed / created+deleted
         if h_live and not b_live:

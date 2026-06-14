@@ -1416,7 +1416,7 @@ class GraphVersioningService:
                     "entity_id": eid, "path": list(c.path),
                     "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
                 })
-        return merged, conflicts, theirs
+        return _collapse_empty_payloads(merged), conflicts, theirs
 
     # ------------------------------------------------------------------ #
     # Reads / audit                                                       #
@@ -3117,7 +3117,7 @@ class GraphVersioningService:
                     "entity_id": eid, "path": list(c.path),
                     "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
                 })
-        return merged, conflicts, theirs
+        return _collapse_empty_payloads(merged), conflicts, theirs
 
     async def _compute_merge_bounded(self, s, graph_id, graph, draft, main_id, resolutions):
         """Bounded (O(changed)) analogue of :meth:`_compute_merge` for the WRITE path.
@@ -3159,7 +3159,7 @@ class GraphVersioningService:
                     "entity_id": eid, "path": list(c.path),
                     "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
                 })
-        return merged, conflicts, theirs
+        return _collapse_empty_payloads(merged), conflicts, theirs
 
     async def _hydrate_merge_neighborhood(self, s, graph_id, main_id, merged, theirs) -> None:
         """Make a SPARSE merged/theirs (from :meth:`_compute_merge_bounded`) safe for the
@@ -3432,6 +3432,7 @@ class GraphVersioningService:
             if conflicts:
                 raise MergeConflict(conflicts)
 
+            _collapse_empty_payloads(merged)                            # {} → tombstone before guards
             self._cascade_containment(merged, containment_edge_types)   # drop orphaned descendants
             self._cascade_incident_edges(merged)                        # then their dangling edges
             self._assert_referential_integrity(merged)
@@ -4258,7 +4259,7 @@ def _fold_shared(
                     "base": cf.base, "ours": cf.ours, "theirs": cf.theirs, "kind": cf.kind,
                 })
         head[eid] = merged
-    return head, conflicts
+    return _collapse_empty_payloads(head), conflicts
 
 
 def _is_edge_payload(payload: Mapping) -> bool:
@@ -4270,6 +4271,19 @@ def _is_edge_payload(payload: Mapping) -> bool:
     has_src = "sourceEntityId" in payload or "source_entity_id" in payload
     has_tgt = "targetEntityId" in payload or "target_entity_id" in payload
     return has_src and has_tgt
+
+
+def _collapse_empty_payloads(state: Dict[str, Optional[dict]]) -> Dict[str, Optional[dict]]:
+    """In place: collapse any degenerate EMPTY payload ({}) in a merged state to None (a tombstone).
+    A {} entity has no identity (no urn/entityType/endpoints); three_way_merge can emit one on the
+    auto-merge branch (both sides reduce every field to MISSING), and that value would otherwise slip
+    past the cascade + referential-integrity guards (which key off ``p is None``) and net_delta as a
+    live node — the delete/modify 500 class. Running this before those guards makes such a value
+    delete + cascade like any other tombstone. Returns the same dict for chaining."""
+    for eid, p in list(state.items()):
+        if p is not None and not p:
+            state[eid] = None
+    return state
 
 
 def _normalize_resolution(payload: Optional[dict]) -> Optional[dict]:
