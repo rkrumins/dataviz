@@ -1407,7 +1407,7 @@ class GraphVersioningService:
         conflicts: List[dict] = []
         for eid in sorted(set(base) | set(ours) | set(theirs)):
             if eid in resolutions:
-                merged[eid] = resolutions[eid]
+                merged[eid] = _normalize_resolution(resolutions[eid])
                 continue
             out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
             merged[eid] = out.merged
@@ -2377,7 +2377,11 @@ class GraphVersioningService:
         removed: List[dict] = []
         modified: List[dict] = []
         for eid in changed:
-            b, a = before.get(eid), after.get(eid)
+            # A degenerate empty payload ({}) is not a live entity (no urn/entityType/endpoints) —
+            # normalize it to absent so it reads as a deletion, never as a node that fails GraphNode
+            # validation downstream (the reported 500) or shows as an empty diff row. Guards against
+            # any pre-existing malformed row as well as a freshly-corrupt one.
+            b, a = before.get(eid) or None, after.get(eid) or None
             if b is None and a is None:
                 continue
             kind = "edge" if _is_edge_payload(a or b or {}) else "node"
@@ -2420,7 +2424,11 @@ class GraphVersioningService:
         edges_remove: List[dict] = []
         nodes_new: List[str] = []          # urns the draft CREATED (absent in main@base) vs merely modified
         for eid in changed:
-            b, a = before.get(eid), after.get(eid)
+            # A degenerate empty payload ({}) is not a live entity (no urn/entityType/endpoints) —
+            # normalize it to absent so it reads as a deletion, never as a node that fails GraphNode
+            # validation downstream (the reported 500) or shows as an empty diff row. Guards against
+            # any pre-existing malformed row as well as a freshly-corrupt one.
+            b, a = before.get(eid) or None, after.get(eid) or None
             if b is None and a is None:
                 continue
             eff = a if a is not None else b
@@ -3100,7 +3108,7 @@ class GraphVersioningService:
         conflicts: List[dict] = []
         for eid in sorted(set(base) | set(theirs) | set(ours)):
             if eid in resolutions:
-                merged[eid] = resolutions[eid]
+                merged[eid] = _normalize_resolution(resolutions[eid])
                 continue
             out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
             merged[eid] = out.merged
@@ -3142,7 +3150,7 @@ class GraphVersioningService:
         conflicts: List[dict] = []
         for eid in sorted(changed):
             if eid in resolutions:
-                merged[eid] = resolutions[eid]
+                merged[eid] = _normalize_resolution(resolutions[eid])
                 continue
             out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
             merged[eid] = out.merged
@@ -3409,7 +3417,7 @@ class GraphVersioningService:
             conflicts: List[dict] = []
             for eid in sorted(set(base) | set(ours) | set(theirs)):
                 if eid in res:
-                    merged[eid] = res[eid]
+                    merged[eid] = _normalize_resolution(res[eid])
                     continue
                 out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
                 if out.conflicts and strategy == "external_wins":
@@ -4219,7 +4227,7 @@ def _fold_shared(
 
     for eid, chs in by_entity.items():
         if eid in resolutions:                           # caller settled this entity
-            head[eid] = resolutions[eid]
+            head[eid] = _normalize_resolution(resolutions[eid])
             continue
         current = base_state.get(eid)                    # live committed head
         ancestor = base_by_entity.get(eid, current)      # what the editors staged against
@@ -4262,6 +4270,17 @@ def _is_edge_payload(payload: Mapping) -> bool:
     has_src = "sourceEntityId" in payload or "source_entity_id" in payload
     has_tgt = "targetEntityId" in payload or "target_entity_id" in payload
     return has_src and has_tgt
+
+
+def _normalize_resolution(payload: Optional[dict]) -> Optional[dict]:
+    """Interpret a conflict resolution. ``None`` means "delete this entity"; so does a
+    degenerate EMPTY payload (``{}``) — which is what a client sends when it encodes "accept the
+    upstream deletion" of a delete/modify conflict as an empty object instead of ``null`` (the
+    whole-entity ``setIn(seed, [], null)`` case). Mapping both to ``None`` keeps an accepted
+    deletion from landing as a LIVE but identity-less node (no urn/entityType), which then fails
+    GraphNode validation on every read (the reported 500). A real resolution payload is returned
+    unchanged."""
+    return payload or None
 
 
 def _edge_src_tgt(p: Mapping) -> Tuple[str, str]:

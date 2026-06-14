@@ -62,6 +62,32 @@ describe('buildResolutions', () => {
     const conflicts: Conflict[] = [{ entity_id: 'ghost', path: ['name'], ours: 'O', theirs: 'T' }]
     expect(buildResolutions(groupByEntity(conflicts), {}, {}, {}).ghost).toEqual({ name: 'O' })
   })
+
+  // ── delete/modify (the reported crash): accepting the deletion must be null, never {} ──
+  const dm: Conflict = {
+    entity_id: 'd1', path: [], kind: 'delete/modify',
+    base: { urn: 'd1', entityType: 'dataset', displayName: 'orig' },
+    ours: { urn: 'd1', entityType: 'dataset', displayName: 'my edit' },
+    theirs: null, // deleted on main
+  }
+
+  it('accepting an upstream deletion resolves to null (not {})', () => {
+    const picks = { [conflictKey(dm)]: 'theirs' as const } // pick the deleted side
+    const out = buildResolutions(groupByEntity([dm]), picks, {}, { d1: dm.ours as Record<string, unknown> })
+    expect(out.d1).toBeNull() // a real delete — must NOT be {}
+  })
+
+  it('keeping your version of a deleted-on-main entity resurrects the full payload', () => {
+    const picks = { [conflictKey(dm)]: 'ours' as const }
+    const out = buildResolutions(groupByEntity([dm]), picks, {}, { d1: dm.ours as Record<string, unknown> })
+    expect(out.d1).toEqual({ urn: 'd1', entityType: 'dataset', displayName: 'my edit' })
+  })
+
+  it('default pick (ours) on a delete/modify keeps your version, never produces {}', () => {
+    const out = buildResolutions(groupByEntity([dm]), {}, {}, {})
+    expect(out.d1).toEqual(dm.ours)
+    expect(out.d1).not.toEqual({})
+  })
 })
 
 describe('normalizeConflict', () => {

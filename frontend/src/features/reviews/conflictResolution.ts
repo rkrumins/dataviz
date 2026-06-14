@@ -34,6 +34,11 @@ export function normalizeConflict(raw: Record<string, unknown>): Conflict {
 /** Stable key for a single conflicting field (entity + path). */
 export const conflictKey = (c: Conflict) => `${c.entity_id}::${c.path.join('.')}`
 
+/** A delete/modify conflict: one whole-entity (empty path) slice where a side is absent (deleted)
+ *  while the other modified it. Resolving it is a binary keep-vs-delete, never a per-field merge. */
+export const isDeleteModify = (c: Conflict) =>
+  c.path.length === 0 && (c.kind === 'delete/modify' || c.base == null || c.ours == null || c.theirs == null)
+
 /** Immutable deep-set of `value` at `path` within `obj`. Empty path replaces the whole entity. */
 export function setIn(obj: Record<string, unknown>, path: (string | number)[], value: unknown): Record<string, unknown> {
   if (path.length === 0) return (value ?? {}) as Record<string, unknown>
@@ -69,6 +74,15 @@ export function buildResolutions(
   for (const [eid, list] of byEntity) {
     if (deleted[eid]) {
       res[eid] = null
+      continue
+    }
+    // Whole-entity (delete/modify) conflict: the pick IS the entity. Picking the absent side means
+    // "accept the deletion" → resolve to null (a real delete), NEVER {} — an empty payload would
+    // land as a live but identity-less node and crash every later read.
+    const dm = list.find(isDeleteModify)
+    if (dm) {
+      const chosen = dm[picks[conflictKey(dm)] ?? 'ours']
+      res[eid] = chosen == null ? null : (chosen as Record<string, unknown>)
       continue
     }
     let payload: Record<string, unknown> = { ...(seeds[eid] ?? {}) }
