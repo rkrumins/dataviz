@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import {
   useStagedChangesStore,
   stagedChangeColor,
@@ -153,37 +154,33 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
   }
 
   return createPortal(
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          key="staged-modal-shell"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
-          className="fixed inset-0 z-[80] flex items-center justify-center px-4 py-6"
-          aria-hidden={!isOpen}
-        >
-          {/* Backdrop — full coverage, blurred, dismisses on click */}
-          <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-md"
-            onClick={close}
-            data-canvas-interactive
-          />
+    <>
+      {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+          StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+      <Backdrop
+        open={isOpen}
+        onClick={close}
+        zClassName="z-[80]"
+        className="bg-black/70 backdrop-blur-md"
+      />
 
-          {/* Modal card — centered via flex above; content sized to fit */}
-          <motion.div
-            key="staged-modal-card"
-            initial={{ opacity: 0, scale: 0.96, y: 12 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.97, y: 8 }}
-            transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="staged-modal-title"
-            className="relative w-full max-w-[760px] max-h-[min(820px,100%)] flex flex-col rounded-3xl overflow-hidden shadow-[0_50px_120px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)]"
-            data-canvas-interactive
-          >
+      {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+          through to the Backdrop beneath → outside-click still closes). */}
+      <div className="fixed inset-0 z-[81] flex items-center justify-center px-4 py-6 pointer-events-none">
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div
+              key="staged-modal-card"
+              initial={{ opacity: 0, scale: 0.96, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ type: 'spring', damping: 28, stiffness: 320 }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="staged-modal-title"
+              className="pointer-events-auto relative w-full max-w-[760px] max-h-[min(820px,100%)] flex flex-col rounded-3xl overflow-hidden shadow-[0_50px_120px_-20px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.06)]"
+              data-canvas-interactive
+            >
             {/* Background — premium gradient + subtle noise */}
             <div className="absolute inset-0 bg-gradient-to-br from-[#0e1119] via-[#11141d] to-[#0c0e15]" />
             <div
@@ -390,9 +387,10 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
               </div>
             )}
           </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
+          )}
+        </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }

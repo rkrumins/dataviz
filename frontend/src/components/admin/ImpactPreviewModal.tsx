@@ -24,6 +24,7 @@ import type {
     ImpactPreviewUser,
 } from '@/services/permissionsService'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 
 export interface ImpactPreviewModalProps {
@@ -60,86 +61,88 @@ export function ImpactPreviewModal({
         }
 
     return (
-        <AnimatePresence>
-            {open && (
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.15 }}
-                    className="fixed inset-0 z-[90] flex items-center justify-center p-4"
-                >
-                    <div className="absolute inset-0 bg-black/60" onClick={onCancel} />
-                    <motion.div
-                        initial={{ scale: 0.96, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        exit={{ scale: 0.96, opacity: 0 }}
-                        transition={{ duration: 0.18 }}
-                        onClick={(e) => e.stopPropagation()}
-                        className="relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-xl w-full max-w-2xl flex flex-col max-h-[80vh] overflow-hidden"
-                    >
-                        <div className="p-6 pb-4 border-b border-glass-border flex items-start gap-3">
-                            <div className={cn(
-                                'w-10 h-10 rounded-xl border flex items-center justify-center shrink-0',
-                                intentColors.iconBg,
-                            )}>
-                                <AlertTriangle className={cn('w-5 h-5', intentColors.icon)} />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <h2 className="text-lg font-bold text-ink">{title}</h2>
-                                <p className="text-xs text-ink-muted mt-0.5">
-                                    Review the impact below before confirming. This action cannot be undone automatically.
-                                </p>
-                            </div>
-                            <button
-                                onClick={onCancel}
-                                className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
-                                aria-label="Close"
-                            >
-                                <X className="w-4 h-4" />
-                            </button>
-                        </div>
+        <>
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={open} onClick={onCancel} zClassName="z-[90]" className="bg-black/60" />
 
-                        <div className="flex-1 overflow-y-auto p-6 space-y-4">
-                            {loading ? (
-                                <div className="flex items-center justify-center py-12">
-                                    <Loader2 className="w-5 h-5 animate-spin text-ink-muted" />
+            {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+                through to the Backdrop beneath → outside-click still closes). */}
+            <div className="fixed inset-0 z-[91] flex items-center justify-center p-4 pointer-events-none">
+                <AnimatePresence>
+                    {open && (
+                        <motion.div
+                            key="impact-preview-card"
+                            initial={{ scale: 0.96, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.96, opacity: 0 }}
+                            transition={{ duration: 0.18 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="pointer-events-auto relative bg-canvas-elevated border border-glass-border rounded-2xl shadow-xl w-full max-w-2xl flex flex-col max-h-[80vh] overflow-hidden"
+                        >
+                            <div className="p-6 pb-4 border-b border-glass-border flex items-start gap-3">
+                                <div className={cn(
+                                    'w-10 h-10 rounded-xl border flex items-center justify-center shrink-0',
+                                    intentColors.iconBg,
+                                )}>
+                                    <AlertTriangle className={cn('w-5 h-5', intentColors.icon)} />
                                 </div>
-                            ) : error ? (
-                                <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
-                                    {error}
+                                <div className="flex-1 min-w-0">
+                                    <h2 className="text-lg font-bold text-ink">{title}</h2>
+                                    <p className="text-xs text-ink-muted mt-0.5">
+                                        Review the impact below before confirming. This action cannot be undone automatically.
+                                    </p>
                                 </div>
-                            ) : preview ? (
-                                <PreviewBody preview={preview} />
-                            ) : null}
-                        </div>
+                                <button
+                                    onClick={onCancel}
+                                    className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5"
+                                    aria-label="Close"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
 
-                        <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-2">
-                            <button
-                                onClick={onCancel}
-                                disabled={confirming}
-                                className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink bg-glass-base/40 border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={onConfirm}
-                                disabled={loading || !!error || confirming}
-                                className={cn(
-                                    'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors',
-                                    intentColors.confirm,
-                                )}
-                            >
-                                {confirming
-                                    ? <Loader2 className="w-4 h-4 animate-spin" />
-                                    : <Check className="w-4 h-4" />}
-                                {confirmLabel}
-                            </button>
-                        </div>
-                    </motion.div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+                            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                                {loading ? (
+                                    <div className="flex items-center justify-center py-12">
+                                        <Loader2 className="w-5 h-5 animate-spin text-ink-muted" />
+                                    </div>
+                                ) : error ? (
+                                    <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-600 dark:text-red-400">
+                                        {error}
+                                    </div>
+                                ) : preview ? (
+                                    <PreviewBody preview={preview} />
+                                ) : null}
+                            </div>
+
+                            <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-2">
+                                <button
+                                    onClick={onCancel}
+                                    disabled={confirming}
+                                    className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink bg-glass-base/40 border border-glass-border hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={onConfirm}
+                                    disabled={loading || !!error || confirming}
+                                    className={cn(
+                                        'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors',
+                                        intentColors.confirm,
+                                    )}
+                                >
+                                    {confirming
+                                        ? <Loader2 className="w-4 h-4 animate-spin" />
+                                        : <Check className="w-4 h-4" />}
+                                    {confirmLabel}
+                                </button>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+            </div>
+        </>
     )
 }
 

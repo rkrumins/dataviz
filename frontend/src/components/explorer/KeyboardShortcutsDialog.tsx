@@ -10,6 +10,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { createPortal } from 'react-dom'
 import { Command, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useEffect } from 'react'
 
 interface Shortcut {
@@ -54,60 +55,62 @@ export function KeyboardShortcutsDialog({ isOpen, onClose }: KeyboardShortcutsDi
   if (typeof document === 'undefined') return null
 
   return createPortal(
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
-          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/50"
-          onClick={onClose}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Keyboard shortcuts"
-        >
-          <motion.div
-            initial={{ opacity: 0, y: 8, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 8, scale: 0.98 }}
-            transition={{ duration: 0.15, ease: 'easeOut' }}
-            className={cn(
-              'w-full max-w-lg rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg',
-              'overflow-hidden',
-            )}
-            onClick={e => e.stopPropagation()}
-          >
-            {/* ── Header ── */}
-            <div className="flex items-center gap-3 px-5 py-4 border-b border-glass-border/60">
-              <div className="w-8 h-8 rounded-lg bg-accent-lineage/10 border border-accent-lineage/20 flex items-center justify-center">
-                <Command className="w-4 h-4 text-accent-lineage" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h2 className="text-sm font-bold text-ink">Keyboard shortcuts</h2>
-                <p className="text-[11px] text-ink-muted">
-                  Press <Kbd>?</Kbd> anywhere to open this again
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-lg p-1.5 text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
-                aria-label="Close"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+    <>
+      {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+          StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+      <Backdrop open={isOpen} onClick={onClose} zClassName="z-[90]" className="bg-black/50" />
 
-            {/* ── Sections ── */}
-            <div className="px-5 py-4 grid gap-5 sm:grid-cols-2">
-              <ShortcutSection title="Navigation" items={NAV_SHORTCUTS} />
-              <ShortcutSection title="Grid & cards" items={GRID_SHORTCUTS} />
-            </div>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>,
+      {/* Centering layer: plain, always-mounted, transparent to clicks (they fall
+          through to the Backdrop beneath → outside-click still closes). */}
+      <div className="fixed inset-0 z-[91] flex items-center justify-center p-4 pointer-events-none">
+        <AnimatePresence>
+          {isOpen && (
+            <motion.div
+              key="shortcuts-card"
+              initial={{ opacity: 0, y: 8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.98 }}
+              transition={{ duration: 0.15, ease: 'easeOut' }}
+              className={cn(
+                'pointer-events-auto w-full max-w-lg rounded-2xl border border-glass-border bg-canvas-elevated shadow-lg',
+                'overflow-hidden',
+              )}
+              onClick={e => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Keyboard shortcuts"
+            >
+              {/* ── Header ── */}
+              <div className="flex items-center gap-3 px-5 py-4 border-b border-glass-border/60">
+                <div className="w-8 h-8 rounded-lg bg-accent-lineage/10 border border-accent-lineage/20 flex items-center justify-center">
+                  <Command className="w-4 h-4 text-accent-lineage" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-sm font-bold text-ink">Keyboard shortcuts</h2>
+                  <p className="text-[11px] text-ink-muted">
+                    Press <Kbd>?</Kbd> anywhere to open this again
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-lg p-1.5 text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                  aria-label="Close"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* ── Sections ── */}
+              <div className="px-5 py-4 grid gap-5 sm:grid-cols-2">
+                <ShortcutSection title="Navigation" items={NAV_SHORTCUTS} />
+                <ShortcutSection title="Grid & cards" items={GRID_SHORTCUTS} />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }

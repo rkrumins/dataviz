@@ -13,6 +13,7 @@ import {
     GitBranch, Star, Clock, Compass, Save, RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
@@ -230,21 +231,16 @@ export function DataSourceDetailPanel({
     const aggMeta = AGG_STATUS_META[ds?.aggregationStatus || 'none'] || AGG_STATUS_META.none
 
     const content = (
-        <AnimatePresence>
-            {isOpen && ds && (
-                <>
-                    {/* Backdrop */}
-                    <motion.div
-                        className="fixed inset-0 z-[60] bg-black/40"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ duration: 0.2 }}
-                        onClick={onClose}
-                    />
+        <>
+            {/* Backdrop — plain CSS transition, never inside AnimatePresence (fixes the
+                StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
+            <Backdrop open={!!(isOpen && ds)} onClick={onClose} zClassName="z-[60]" />
 
-                    {/* Drawer */}
+            {/* Drawer panel — keyed single child so AnimatePresence tracks its exit cleanly */}
+            <AnimatePresence>
+                {isOpen && ds && (
                     <motion.aside
+                        key="data-source-detail-drawer"
                         className={cn(
                             'fixed right-0 top-0 h-full w-[480px] max-w-[92vw] z-[61]',
                             'bg-canvas border-l border-glass-border',
@@ -634,9 +630,9 @@ export function DataSourceDetailPanel({
                             </button>
                         </div>
                     </motion.aside>
-                </>
-            )}
-        </AnimatePresence>
+                )}
+            </AnimatePresence>
+        </>
     )
 
     return createPortal(content, document.body)
