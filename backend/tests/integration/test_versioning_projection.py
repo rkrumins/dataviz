@@ -218,6 +218,57 @@ def test_versioning_projection_e2e():
     asyncio.run(_run())
 
 
+async def _run_target_resolver() -> None:
+    """B1: a worker-driven projection self-heals its target via the injected ``target_resolver``.
+
+    A graph projected before its real FalkorDB name was injected lives in an orphan ``gv_<id>`` that
+    the canvas never reads, so merged main never surfaces ("merge reverts to old state"). The async
+    worker has no access to the app-layer ``project_now`` repair, so its projector is given a
+    ``target_resolver`` (mirrors ``FalkorProjector(target_resolver=repair_projection_target)``): every
+    ``project_graph`` re-points to the real graph, rebuilds there, and drops the orphan."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    gid = G["graph_id"]
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+    ], "seed")
+
+    # A resolver-less projector first lands the data in the orphan gv_<id> (pre-B1 / un-injected graph).
+    orphan_name = FalkorProjector.default_graph_name(gid)
+    await FalkorProjector(graph_client_factory=fake, batch_size=2).project_graph(gid)
+    assert await _graph_name(gid) == orphan_name
+    assert fake.graphs[orphan_name].entity_ids() == {"A", "B"}
+
+    # The worker's projector carries a target_resolver pinning the data source's REAL graph.
+    real_name = "real_ds_graph_b1"
+
+    async def resolver(s, graph_id):                 # same contract as repair_projection_target(svc, gid)
+        return await s.ensure_projection_target(graph_id=graph_id, falkor_graph_name=real_name)
+
+    worker_proj = FalkorProjector(graph_client_factory=fake, batch_size=2, target_resolver=resolver)
+    await _edit_publish(svc, gid, "alice",
+                        [{"op": "create", "entity_kind": "node", "entity_id": "C", "payload": _node("Gamma")}],
+                        "grow")
+
+    r = await worker_proj.project_graph(gid)
+    assert not r["noop"], r
+    assert await _graph_name(gid) == real_name                       # self-healed: re-pointed to the real graph
+    assert fake.graphs[real_name].entity_ids() == {"A", "B", "C"}    # full rebuild == materialized main
+    assert fake(orphan_name).entity_ids() == set()                   # orphan dropped (RAM reclaimed)
+    assert (await worker_proj.project_graph(gid))["noop"] is True    # caught up; idempotent
+
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_versioning_projection_target_resolver_e2e():
+    asyncio.run(_run_target_resolver())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("versioning FalkorDB projection e2e: OK")

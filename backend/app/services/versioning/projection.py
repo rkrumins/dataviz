@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import func, select
 
@@ -143,11 +143,20 @@ class FalkorProjector:
         graph_client_factory: Callable[[str], object],
         session_factory=db.graphver_session,
         batch_size: Optional[int] = None,
+        target_resolver: Optional[
+            Callable[[GraphVersioningService, str], Awaitable[Optional[str]]]
+        ] = None,
     ):
         self._client = graph_client_factory
         self._session = session_factory
         self._svc = GraphVersioningService(session_factory)
         self._batch = batch_size or config.PROJECTION_BATCH_SIZE
+        # Pins the projection to the data source's REAL graph (the one the canvas reads) on every
+        # projection, so the async worker self-heals the same way the interactive `project_now` path
+        # does — without it, a worker-driven projection can land in an orphan `gv_<id>` nothing reads
+        # and merged main never surfaces. Injected (not imported) so this package stays decoupled from
+        # the management DB. None ⇒ no repair (the app path repairs explicitly before projecting).
+        self._target_resolver = target_resolver
 
     @staticmethod
     def default_graph_name(graph_id: str) -> str:
@@ -162,6 +171,9 @@ class FalkorProjector:
 
     async def project_graph(self, graph_id: str) -> Dict[str, object]:
         """Catch a graph's FalkorDB projection up to its target watermark."""
+        # Self-heal the target FIRST (re-points an orphaned graph to the data source's real graph and
+        # resets the watermark to replay full main into it). Returns the now-unread orphan to reclaim.
+        orphan = await self._target_resolver(self._svc, graph_id) if self._target_resolver else None
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             if ps is None:
@@ -188,8 +200,16 @@ class FalkorProjector:
                 # back to Postgres while projected < committed, so the brief empty window is never served.
                 try:
                     await client.delete()
-                except Exception:
-                    pass                               # nonexistent graph (fresh) → MERGE will create it
+                except Exception as exc:
+                    # Usually benign: the graph doesn't exist yet (fresh) and the MERGE below creates
+                    # it. But if it DID exist and the wipe genuinely failed, the MERGE-only apply runs
+                    # on top of stale contents, so a merged draft's DELETES survive — the reported
+                    # "merge reverts to old state". Log it so the two are distinguishable in the logs.
+                    logger.warning(
+                        "full-seed wipe of FalkorDB graph %r for %s failed; proceeding to MERGE (if the "
+                        "graph already existed, prior deletions may not have cleared): %s",
+                        name, graph_id, exc,
+                    )
             await self._apply(client, *changes)
         except Exception as exc:                       # pragma: no cover - infra
             logger.exception("projection apply failed for %s: %s", graph_id, exc)
@@ -214,6 +234,12 @@ class FalkorProjector:
             ps.falkor_graph_name = name
             ps.last_projected_at = _now()
             ps.last_error = verify_error
+
+        if orphan:                                     # the old gv_* graph is now unread — reclaim its RAM
+            try:
+                await self.drop_graph(orphan)
+            except Exception as exc:                   # pragma: no cover - infra
+                logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
 
         applied = sum(len(c) for c in changes)
         return {"projected": to_seq, "applied": applied, "noop": False, "verify_error": verify_error}

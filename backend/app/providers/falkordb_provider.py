@@ -335,6 +335,27 @@ def _split_user_properties(
     return native, json.dumps(residual)
 
 
+def _sanitize_node_properties(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Drop reserved keys from a node payload's nested ``properties`` dict on the WRITE path.
+
+    The read path mirrors denormalised top-level fields (``childCount``, ``tags``, …) INTO
+    ``properties``, and the canvas round-trips ``properties`` verbatim on save — so without this the
+    stored version-row ``properties`` accumulates reserved keys, which the projector then drops one by
+    one via :func:`_split_user_properties`, logging ``user-property keys collided with reserved node
+    keys`` for every node. Sanitising on write keeps stored payloads to exactly the keys the projector
+    would keep, silencing that flood and closing the pollution channel (same class as the earlier
+    ``{id, confidence}`` corruption). Only the nested ``properties`` is touched — legitimate top-level
+    fields (``urn``/``displayName``/``childCount``/…) are untouched. Returns the original payload
+    unchanged when nothing is reserved (so hashes for already-clean payloads are byte-identical)."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("properties"), dict):
+        return payload
+    props = payload["properties"]
+    clean = {k: v for k, v in props.items() if k not in _RESERVED_NODE_KEYS}
+    if len(clean) == len(props):
+        return payload
+    return {**payload, "properties": clean}
+
+
 def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
 

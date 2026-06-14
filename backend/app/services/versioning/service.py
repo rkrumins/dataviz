@@ -52,6 +52,9 @@ from .models import (
     WorkingChangeORM,
     _now,
 )
+# Strip reserved keys from incoming node `properties` so they don't pollute stored payloads (and
+# flood the projector with reserved-key-drop warnings). The provider owns the canonical key set.
+from backend.app.providers.falkordb_provider import _sanitize_node_properties
 
 # Keys read out of a payload into denormalised, queryable version columns.
 _NODE_DENORM = {
@@ -397,6 +400,8 @@ class GraphVersioningService:
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
                 payload = op.get("payload")
+                if op["entity_kind"] == "node":
+                    payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
                     entities.append((entity_id, op["entity_kind"], payload))
                 base_hash = None
@@ -3268,7 +3273,8 @@ class GraphVersioningService:
                         rejected.append({"row": i, "reason": "node missing entityType"})
                         continue
                     eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
-                    payload = {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")}
+                    payload = _sanitize_node_properties(
+                        {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
                     node_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
                     if row.get("urn"):
                         urn_to_eid[row["urn"]] = eid
@@ -3461,7 +3467,8 @@ class GraphVersioningService:
             urn = row.get("urn")
             eid = (urn_index.get(urn) or row.get("entity_id") or row.get("id")
                    or (f"sync:{urn}" if urn else prefixed_id("ent")))
-            payload = {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")}
+            payload = _sanitize_node_properties(
+                {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
             theirs[eid] = payload
             if urn:
                 urn_to_eid[urn] = eid
@@ -3562,6 +3569,8 @@ class GraphVersioningService:
                 kind_by_entity[eid] = (op.get("entity_kind")
                                        or ("edge" if _is_edge_payload(payload) else "node"))
                 new_vals[eid] = None if op["op"] == "delete" else dict(payload)
+                if new_vals[eid] is not None and kind_by_entity[eid] == "node":
+                    new_vals[eid] = _sanitize_node_properties(new_vals[eid])
                 if op["op"] == "update":
                     update_ids.add(eid)
 
