@@ -37,8 +37,14 @@ from backend.app.db.repositories.role_repo import (
     RoleInUseError,
     RoleNameConflictError,
     RoleNotFoundError,
+    RoleProtectedPermissionError,
     RoleScopeError,
     UnknownPermissionError,
+)
+from backend.common.role_defaults import (
+    SYSTEM_ROLE_DEFAULTS,
+    default_permissions,
+    locked_permissions,
 )
 from backend.app.services.permission_service import (
     compute_implied_by,
@@ -175,6 +181,14 @@ async def _binding_counts(
 
 
 def _role_to_response(role, *, permissions: list[str], binding_count: int) -> RoleDefinitionResponse:
+    # "Modified?" is a sync diff of the already-fetched bundle + description
+    # against the seeded default — no extra query. Only system roles with a
+    # known default can be modified; custom roles are always "not modified".
+    spec = SYSTEM_ROLE_DEFAULTS.get(role.name) if role.is_system else None
+    is_modified = spec is not None and (
+        set(permissions) != set(spec.permissions)
+        or (role.description or "") != (spec.description or "")
+    )
     return RoleDefinitionResponse(
         name=role.name,
         description=role.description,
@@ -186,6 +200,8 @@ def _role_to_response(role, *, permissions: list[str], binding_count: int) -> Ro
         updated_at=role.updated_at,
         created_by=role.created_by,
         binding_count=binding_count,
+        is_modified=is_modified,
+        locked_permissions=sorted(locked_permissions(role.name)),
     )
 
 
@@ -280,10 +296,12 @@ async def update_role(
     admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Update a custom role's description and/or permission bundle.
+    """Update a role's description and/or permission bundle.
 
-    System roles cannot be edited (returns 409 — a conflict between
-    the request and the role's immutable nature)."""
+    Works for custom *and* system roles. Stripping a protected floor
+    permission from a system role (e.g. ``system:admin`` from
+    ``super_admin``) returns 422 — that floor gates platform
+    administration and cannot be removed."""
     try:
         role = await role_repo.update_role(
             session,
@@ -293,8 +311,8 @@ async def update_role(
         )
     except RoleNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Role '{name}' not found") from exc
-    except RoleImmutableError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RoleProtectedPermissionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except UnknownPermissionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -326,6 +344,63 @@ async def update_role(
                 "actor_id": admin.id,
                 "users_revoked": cascade_revoked,
                 "reason": "role_permissions_updated",
+            },
+        )
+    bundles = await role_repo.role_names_with_permissions(session, [name])
+    counts = await _binding_counts(session, [name])
+    return _role_to_response(
+        role,
+        permissions=bundles.get(name, []),
+        binding_count=counts.get(name, 0),
+    )
+
+
+@router.post(
+    "/roles/{name}/reset",
+    response_model=RoleDefinitionResponse,
+    response_model_by_alias=True,
+)
+async def reset_role(
+    name: str = Path(...),
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Reset a system role to its seeded default permission bundle.
+
+    Only system roles with a known default can be reset (custom roles
+    have nothing to reset to — 409). Like an edit, this fans out to every
+    bound subject: their live sessions are revoked so the restored
+    permission set takes effect immediately."""
+    try:
+        role = await role_repo.reset_role_to_default(session, name)
+    except RoleNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Role '{name}' not found") from exc
+    except RoleImmutableError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    from backend.app.services.revocation_service import revoke_role_sessions
+    cascade_revoked = await revoke_role_sessions(
+        name, session=session, reason="role_reset_to_default",
+    )
+
+    await user_repo.create_outbox_event(
+        session,
+        event_type="rbac.role.reset",
+        payload={
+            "name": name,
+            "actor_id": admin.id,
+            "cascade_sessions_revoked": cascade_revoked,
+        },
+    )
+    if cascade_revoked:
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.role.cascade_revoked",
+            payload={
+                "role_name": name,
+                "actor_id": admin.id,
+                "users_revoked": cascade_revoked,
+                "reason": "role_reset_to_default",
             },
         )
     bundles = await role_repo.role_names_with_permissions(session, [name])
@@ -658,6 +733,66 @@ async def preview_role_update(
 
     current_perms = set(await permission_repo.get_role_permissions(session, role_name))
     proposed_perms = set(body.permissions)
+    user_ids = await _affected_users_for_role(session, role_name)
+
+    aggregate_gained: set[str] = set()
+    aggregate_lost: set[str] = set()
+    affected_ws: set[str] = set()
+    user_impact: list[ImpactPreviewUser] = []
+
+    for uid in user_ids:
+        before_g, before_w = await simulate_for_user(
+            session, uid,
+            role_perm_override={role_name: list(current_perms)},
+        )
+        after_g, after_w = await simulate_for_user(
+            session, uid,
+            role_perm_override={role_name: list(proposed_perms)},
+        )
+        impact = await _hydrate_user_impact(
+            session, uid,
+            before_global=before_g, before_ws=before_w,
+            after_global=after_g, after_ws=after_w,
+        )
+        if impact is None:
+            continue
+        user_impact.append(impact)
+        aggregate_gained.update(impact.gained)
+        aggregate_lost.update(impact.lost)
+        affected_ws |= _ws_changes_count(before_w, after_w)
+
+    return ImpactPreviewResponse(
+        affected_users=len(user_impact),
+        affected_workspaces=len(affected_ws),
+        gained_perms=sorted(aggregate_gained),
+        lost_perms=sorted(aggregate_lost),
+        user_impact=user_impact,
+    )
+
+
+@router.post(
+    "/roles/{role_name}/preview-reset",
+    response_model=ImpactPreviewResponse,
+    response_model_by_alias=True,
+)
+async def preview_role_reset(
+    role_name: str,
+    _admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Read-only sibling of ``POST /admin/roles/{name}/reset``.
+
+    Computes the diff between the system role's current bundle and its
+    seeded default, then simulates each affected user's resulting
+    permissions — the FE gates the reset on this confirmation."""
+    role_def = await role_repo.get_role(session, role_name)
+    if role_def is None:
+        raise HTTPException(status_code=404, detail="Role not found")
+    if not role_def.is_system or role_name not in SYSTEM_ROLE_DEFAULTS:
+        raise HTTPException(status_code=409, detail="Role has no seeded default")
+
+    current_perms = set(await permission_repo.get_role_permissions(session, role_name))
+    proposed_perms = set(default_permissions(role_name))
     user_ids = await _affected_users_for_role(session, role_name)
 
     aggregate_gained: set[str] = set()

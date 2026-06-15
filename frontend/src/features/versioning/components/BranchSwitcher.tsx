@@ -8,8 +8,9 @@
  * no versioned graph (the common case until a graph is created).
  */
 import { useEffect, useRef, useState } from 'react'
-import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal, Settings2 } from 'lucide-react'
+import { GitBranch, Check, Plus, ChevronDown, Loader2, Globe, Settings2, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
@@ -17,8 +18,11 @@ import { useActiveView } from '@/store/schema'
 import { useBranches, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
+import { BRANCH_VOCAB, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
+import { DraftStatusPill, OwnerAvatar } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
+import { BranchManager } from './BranchManager'
 
 interface BranchSwitcherProps {
   workspaceId: string
@@ -31,6 +35,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [settingsBranch, setSettingsBranch] = useState<Branch | null>(null)
+  const [managerOpen, setManagerOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
@@ -92,7 +97,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
         onSuccess: (r) => {
           switchToDraft(r.branchId, originatingViewId)
           setOpen(false)
-          showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — edits stay isolated until merged.`)
+          showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
           setNewName('')
           setCreating(false)
         },
@@ -101,7 +106,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
     )
   }
 
-  const label = onMain ? 'Main' : activeDraft?.name || 'Draft'
+  const label = onMain ? BRANCH_VOCAB.published : activeDraft?.name || BRANCH_VOCAB.draft
 
   return (
     <div ref={rootRef} className={cn('relative', className)}>
@@ -112,52 +117,57 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           'bg-canvas-elevated border border-glass-border hover:bg-canvas-overlay',
           !onMain && 'text-amber-500 border-amber-500/30',
         )}
-        title={onMain ? 'On main' : `On draft: ${label}`}
+        title={onMain ? `On the ${BRANCH_VOCAB.published} version` : `On draft: ${label}`}
       >
-        <GitBranch className={cn('w-4 h-4', onMain ? 'text-ink-muted' : 'text-amber-500')} />
+        {onMain
+          ? <Globe className="w-4 h-4 text-ink-muted" />
+          : <GitBranch className="w-4 h-4 text-amber-500" />}
         <span className="max-w-[10rem] truncate">{label}</span>
         {!onMain && activeDraft && isBehind(activeDraft) && (
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" title="Behind main — pull latest before merging" />
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" title="Updates available — get the latest before publishing" />
         )}
         <ChevronDown className="w-3.5 h-3.5 text-ink-muted" />
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full mt-1.5 w-80 z-50 rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden animate-fade-in">
+        <div className="absolute left-0 top-full mt-1.5 w-[21rem] z-50 rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden animate-fade-in">
           <div className="px-3 py-2 border-b border-glass-border">
-            <p className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Branch</p>
+            <p className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Version</p>
           </div>
           <div className="max-h-72 overflow-y-auto py-1">
             <BranchRow
-              icon={<GitCommitHorizontal className="w-4 h-4 text-ink-muted" />}
-              title="Main"
-              subtitle="The published graph"
+              icon={<span className="flex items-center justify-center w-6 h-6 rounded-full bg-canvas-overlay"><Globe className="w-3.5 h-3.5 text-ink-muted" /></span>}
+              title={BRANCH_VOCAB.published}
+              subtitle={BRANCH_VOCAB.publishedSub}
               active={onMain}
               onClick={() => {
                 switchToMain()
                 setOpen(false)
               }}
             />
+            {drafts.length > 0 && (
+              <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-ink-muted/70 uppercase tracking-wider">{BRANCH_VOCAB.yourDrafts}</p>
+            )}
             {drafts.map((b) => {
-              const behind = isBehind(b)
+              const status = draftStatus(b.baseCommitSeq, mainHead)
               return (
                 <BranchRow
                   key={b.branchId}
-                  icon={<GitBranch className="w-4 h-4 text-amber-500" />}
-                  title={b.name || 'Untitled draft'}
+                  icon={<OwnerAvatar owner={b.owner} size="sm" />}
+                  title={b.name || BRANCH_VOCAB.untitled}
                   subtitle={draftSubtitle(b)}
                   active={b.branchId === currentBranchId}
-                  status={behind ? 'behind' : 'up-to-date'}
+                  statusPill={status}
                   pullSlot={canManage ? (
                     <PullLatestButton
                       variant="row" wsId={workspaceId} graphId={graphId ?? ''}
-                      branchId={b.branchId} behind={behind}
+                      branchId={b.branchId} behind={status.behind}
                     />
                   ) : undefined}
                   settingsSlot={canManage ? (
                     <button
                       onClick={(e) => { e.stopPropagation(); setSettingsBranch(b); setOpen(false) }}
-                      title="Branch settings — rename, describe, share link"
+                      title="Settings — rename, describe, share link"
                       className="shrink-0 p-1 rounded-md text-ink-muted/70 hover:text-ink hover:bg-canvas-base transition-colors"
                     >
                       <Settings2 className="w-3.5 h-3.5" />
@@ -172,8 +182,17 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
             })}
             {branchesQ.isLoading && (
               <div className="px-3 py-2 flex items-center gap-2 text-xs text-ink-muted">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading branches…
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading drafts…
               </div>
+            )}
+            {drafts.length > 0 && (
+              <button
+                onClick={() => { setManagerOpen(true); setOpen(false) }}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2 mt-1 text-[12px] font-medium text-ink-muted hover:text-ink hover:bg-canvas-overlay transition-colors"
+              >
+                <span>{BRANCH_VOCAB.manageAll}</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
             )}
           </div>
           {canManage && (
@@ -204,7 +223,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                 className="w-full flex items-center gap-2 px-3 py-2.5 border-t border-glass-border text-sm font-medium text-accent-lineage hover:bg-canvas-overlay transition-colors"
               >
                 <Plus className="w-4 h-4" />
-                New draft
+                {BRANCH_VOCAB.newDraft}
               </button>
             )
           )}
@@ -220,13 +239,25 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           onClose={() => setSettingsBranch(null)}
         />
       )}
+
+      {managerOpen && graphId && (
+        <BranchManager
+          wsId={workspaceId}
+          graphId={graphId}
+          viewId={originatingViewId}
+          mainHead={mainHead}
+          currentBranchId={currentBranchId}
+          canManage={canManage}
+          switchToDraft={switchToDraft}
+          onClose={() => setManagerOpen(false)}
+        />
+      )}
     </div>
   )
 }
 
 function draftSubtitle(b: Branch): string {
-  const who = b.owner ? `by ${b.owner.split('@')[0]}` : ''
-  return [b.originatingViewId ? 'from a view' : '', who].filter(Boolean).join(' · ') || 'draft'
+  return [ownerName(b.owner), `edited ${timeAgo(b.updatedAt)}`].join(' · ')
 }
 
 function BranchRow({
@@ -234,7 +265,7 @@ function BranchRow({
   title,
   subtitle,
   active,
-  status,
+  statusPill,
   pullSlot,
   settingsSlot,
   onClick,
@@ -243,7 +274,7 @@ function BranchRow({
   title: string
   subtitle: string
   active: boolean
-  status?: 'behind' | 'up-to-date'
+  statusPill?: DraftStatus
   pullSlot?: React.ReactNode
   settingsSlot?: React.ReactNode
   onClick: () => void
@@ -256,9 +287,7 @@ function BranchRow({
           <span className="block text-sm text-ink truncate">{title}</span>
           <span className="block text-[11px] text-ink-muted truncate">{subtitle}</span>
         </span>
-        {status === 'behind' && (
-          <span className="shrink-0 text-[10px] font-medium text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded">Behind</span>
-        )}
+        {statusPill && <DraftStatusPill status={statusPill} className="shrink-0" />}
         {active && <Check className="w-4 h-4 text-accent-lineage shrink-0" />}
       </button>
       {pullSlot}

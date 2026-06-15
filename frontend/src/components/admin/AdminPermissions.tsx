@@ -25,6 +25,7 @@ import {
     RefreshCw, Search, Loader2, AlertCircle, Check, X, Info, Sparkles,
     ChevronRight, GitBranch, Layers, Lock, Zap, BookOpen,
     Plus, Pencil, Trash2, Globe, AlertTriangle, ExternalLink, Navigation,
+    RotateCcw,
 } from 'lucide-react'
 import { ROLE_VISUAL, customRoleVisual } from '@/lib/roleVisual'
 import { ROLE_NAMES } from '@/lib/roleNames'
@@ -540,6 +541,7 @@ function RoleMatrixTab({
     const kpis = useMemo(() => ({
         roles: roles.length,
         custom: roles.filter(r => !r.isSystem).length,
+        customized: roles.filter(r => r.isSystem && r.isModified).length,
         permissions: permissions.length,
         scoped: roles.filter(r => r.scopeType === 'workspace').length,
     }), [roles, permissions])
@@ -547,6 +549,7 @@ function RoleMatrixTab({
     const KPIS = [
         { key: 'roles', label: 'Roles', value: kpis.roles, icon: Shield, gradient: 'from-amber-500/20 to-amber-500/0', accent: 'text-amber-600 dark:text-amber-400', iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20' },
         { key: 'custom', label: 'Custom roles', value: kpis.custom, icon: Sparkles, gradient: 'from-violet-500/20 to-violet-500/0', accent: 'text-violet-600 dark:text-violet-400', iconBg: 'bg-violet-500/10 text-violet-500 border-violet-500/20' },
+        { key: 'customized', label: 'Customized built-ins', value: kpis.customized, icon: Pencil, gradient: 'from-amber-500/20 to-amber-500/0', accent: 'text-amber-600 dark:text-amber-400', iconBg: 'bg-amber-500/10 text-amber-500 border-amber-500/20' },
         { key: 'permissions', label: 'Permissions', value: kpis.permissions, icon: KeyRound, gradient: 'from-emerald-500/20 to-emerald-500/0', accent: 'text-emerald-600 dark:text-emerald-400', iconBg: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' },
         { key: 'scoped', label: 'Workspace-scoped', value: kpis.scoped, icon: Briefcase, gradient: 'from-indigo-500/20 to-indigo-500/0', accent: 'text-indigo-600 dark:text-indigo-400', iconBg: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20' },
     ] as const
@@ -554,7 +557,7 @@ function RoleMatrixTab({
     return (
         <div className="space-y-5">
             {/* KPI strip */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
                 {KPIS.map(kpi => {
                     const Icon = kpi.icon
                     return (
@@ -598,7 +601,7 @@ function RoleMatrixTab({
                                             <button
                                                 onClick={() => onEditRole(r)}
                                                 title={r.isSystem
-                                                    ? `${labelText} — system role (read-only)`
+                                                    ? `Edit ${labelText} — built-in role${r.isModified ? ' (customized)' : ''}`
                                                     : `Edit ${labelText}`}
                                                 className="w-full flex flex-col items-center gap-1 px-1 py-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors group"
                                             >
@@ -607,13 +610,18 @@ function RoleMatrixTab({
                                                         <RoleIcon className="w-4 h-4" />
                                                     </div>
                                                     {r.isSystem ? (
-                                                        <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-canvas-elevated border border-glass-border flex items-center justify-center" title="System role">
+                                                        <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-canvas-elevated border border-glass-border flex items-center justify-center group-hover:opacity-0 transition-opacity" title="Built-in role">
                                                             <Lock className="w-2.5 h-2.5 text-ink-muted" />
                                                         </span>
-                                                    ) : (
-                                                        <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-canvas-elevated border border-glass-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" title="Edit">
-                                                            <Pencil className="w-2.5 h-2.5 text-ink-muted" />
-                                                        </span>
+                                                    ) : null}
+                                                    <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-canvas-elevated border border-glass-border flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" title="Edit">
+                                                        <Pencil className="w-2.5 h-2.5 text-ink-muted" />
+                                                    </span>
+                                                    {r.isSystem && r.isModified && (
+                                                        <span
+                                                            className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500 border-2 border-canvas-elevated"
+                                                            title="Customized — differs from default"
+                                                        />
                                                     )}
                                                 </div>
                                                 <span className={cn(
@@ -1700,13 +1708,20 @@ function RoleEditorDrawer({
     const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set(role.permissions))
     const [saving, setSaving] = useState(false)
     // Phase 4.4: gate destructive saves/deletes on an impact preview.
+    // System roles add a 'reset' kind (revert to seeded default).
     const [previewState, setPreviewState] = useState<{
-        kind: 'save' | 'delete'
+        kind: 'save' | 'delete' | 'reset'
         loading: boolean
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
     const { showToast } = useToast()
+
+    // The permission floor a system role must keep (e.g. super_admin must
+    // retain system:admin). Locked checkboxes render checked + disabled.
+    const lockedPerms = useMemo(
+        () => new Set(role.lockedPermissions ?? []), [role.lockedPermissions],
+    )
 
     const grouped = useMemo(() => groupByCategory(permissions), [permissions])
 
@@ -1719,7 +1734,7 @@ function RoleEditorDrawer({
     }, [description, selectedPerms, role])
 
     const togglePerm = (id: string) => {
-        if (isSystem) return
+        if (lockedPerms.has(id)) return  // floor permission — cannot remove
         setSelectedPerms(prev => {
             const next = new Set(prev)
             if (next.has(id)) next.delete(id); else next.add(id)
@@ -1728,18 +1743,31 @@ function RoleEditorDrawer({
     }
 
     const commitSave = async () => {
-        if (isSystem) return
         setSaving(true)
         try {
             await permissionsService.updateRole(role.name, {
                 description: description.trim() || null,
                 permissions: Array.from(selectedPerms),
             })
-            showToast('success', `Updated role "${role.name}"`)
+            showToast('success', `Updated role "${labelText}"`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
             showToast('error', err instanceof Error ? err.message : 'Save failed')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const commitReset = async () => {
+        setSaving(true)
+        try {
+            await permissionsService.resetRole(role.name)
+            showToast('success', `Reset "${labelText}" to default`)
+            setPreviewState(null)
+            await onChanged()
+        } catch (err) {
+            showToast('error', err instanceof Error ? err.message : 'Reset failed')
         } finally {
             setSaving(false)
         }
@@ -1761,7 +1789,6 @@ function RoleEditorDrawer({
     }
 
     const handleSave = async () => {
-        if (isSystem) return
         setPreviewState({ kind: 'save', loading: true, preview: null, error: null })
         try {
             const preview = await permissionsService.previewRoleUpdate(
@@ -1774,6 +1801,23 @@ function RoleEditorDrawer({
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to compute impact'
             setPreviewState(prev => prev?.kind === 'save'
+                ? { ...prev, loading: false, error: msg }
+                : prev,
+            )
+        }
+    }
+
+    const handleReset = async () => {
+        setPreviewState({ kind: 'reset', loading: true, preview: null, error: null })
+        try {
+            const preview = await permissionsService.previewRoleReset(role.name)
+            setPreviewState(prev => prev?.kind === 'reset'
+                ? { ...prev, loading: false, preview }
+                : prev,
+            )
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : 'Failed to compute impact'
+            setPreviewState(prev => prev?.kind === 'reset'
                 ? { ...prev, loading: false, error: msg }
                 : prev,
             )
@@ -1855,8 +1899,10 @@ function RoleEditorDrawer({
                     <div className="px-5 py-3 border-b border-glass-border bg-amber-500/5 flex items-start gap-2">
                         <Info className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
                         <p className="text-xs text-amber-700 dark:text-amber-300 leading-relaxed">
-                            System roles are read-only — their permission bundles are part of the platform's contract.
-                            To customize, create a new role and bind it instead.
+                            Built-in role. You can tailor its permissions — changes apply to everyone bound to it.
+                            {role.isModified
+                                ? ' This role has been customized; reset it to the seeded default anytime.'
+                                : ' Reset to the seeded default anytime.'}
                         </p>
                     </div>
                 )}
@@ -1868,19 +1914,13 @@ function RoleEditorDrawer({
                         <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2 block">
                             Description
                         </label>
-                        {isSystem ? (
-                            <p className="text-sm text-ink-secondary p-3 rounded-lg border border-glass-border bg-glass-base/30">
-                                {role.description || <span className="italic text-ink-muted">No description</span>}
-                            </p>
-                        ) : (
-                            <textarea
-                                value={description}
-                                onChange={(e) => setDescription(e.target.value)}
-                                rows={2}
-                                placeholder="What this role is for..."
-                                className="input w-full text-sm resize-none"
-                            />
-                        )}
+                        <textarea
+                            value={description}
+                            onChange={(e) => setDescription(e.target.value)}
+                            rows={2}
+                            placeholder="What this role is for..."
+                            className="input w-full text-sm resize-none"
+                        />
                     </div>
 
                     {/* Permission picker */}
@@ -1907,25 +1947,27 @@ function RoleEditorDrawer({
                                         </div>
                                         {list.map(p => {
                                             const on = selectedPerms.has(p.id)
+                                            const locked = lockedPerms.has(p.id)
                                             return (
                                                 <div
                                                     key={p.id}
                                                     role="button"
-                                                    tabIndex={isSystem ? -1 : 0}
+                                                    tabIndex={locked ? -1 : 0}
                                                     aria-pressed={on}
-                                                    aria-disabled={isSystem}
-                                                    onClick={() => { if (!isSystem) togglePerm(p.id) }}
+                                                    aria-disabled={locked}
+                                                    onClick={() => { if (!locked) togglePerm(p.id) }}
                                                     onKeyDown={(e) => {
-                                                        if (isSystem) return
+                                                        if (locked) return
                                                         if (e.key === ' ' || e.key === 'Enter') {
                                                             e.preventDefault()
                                                             togglePerm(p.id)
                                                         }
                                                     }}
+                                                    title={locked ? 'Required for platform administration — cannot be removed' : undefined}
                                                     className={cn(
                                                         'w-full flex items-start gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border text-left transition-colors',
                                                         on ? 'bg-emerald-500/5' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
-                                                        isSystem ? 'cursor-default' : 'cursor-pointer',
+                                                        locked ? 'cursor-default opacity-90' : 'cursor-pointer',
                                                     )}
                                                 >
                                                     <div className={cn(
@@ -1941,6 +1983,12 @@ function RoleEditorDrawer({
                                                             <code className="text-[11px] font-mono font-semibold text-ink truncate block">
                                                                 {p.id}
                                                             </code>
+                                                            {locked && (
+                                                                <span className="inline-flex items-center gap-0.5 px-1 py-px rounded text-[9px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0">
+                                                                    <Lock className="w-2 h-2" />
+                                                                    Required
+                                                                </span>
+                                                            )}
                                                             <PermissionTooltip permission={p} placement="right" />
                                                         </div>
                                                         <p className="text-[10px] text-ink-muted truncate">{p.description}</p>
@@ -1976,28 +2024,52 @@ function RoleEditorDrawer({
                             </button>
                         </div>
                     )}
+
+                    {/* Reset-to-default zone for system roles */}
+                    {isSystem && (
+                        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+                            <div className="flex items-center gap-2 mb-1.5">
+                                <RotateCcw className="w-3.5 h-3.5 text-amber-500" />
+                                <h4 className="text-[11px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                                    Reset to default
+                                </h4>
+                            </div>
+                            <p className="text-[10px] text-ink-muted leading-relaxed mb-2">
+                                {role.isModified
+                                    ? 'Restore this built-in role to its seeded permission set and description.'
+                                    : 'This role matches its seeded default — nothing to reset.'}
+                            </p>
+                            <button
+                                onClick={() => void handleReset()}
+                                disabled={!role.isModified || saving}
+                                title={role.isModified ? 'Reset to the seeded default' : 'Already at default'}
+                                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                                <RotateCcw className="w-3 h-3" />
+                                Reset to default
+                            </button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Footer */}
-                {!isSystem && (
-                    <div className="px-5 py-3 border-t border-glass-border bg-glass-base/20 flex items-center justify-end gap-2">
-                        <button
-                            onClick={onClose}
-                            disabled={saving}
-                            className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                        >
-                            Close
-                        </button>
-                        <button
-                            onClick={() => void handleSave()}
-                            disabled={!dirty || saving}
-                            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-accent-lineage hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-accent-lineage/20"
-                        >
-                            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                            Save changes
-                        </button>
-                    </div>
-                )}
+                <div className="px-5 py-3 border-t border-glass-border bg-glass-base/20 flex items-center justify-end gap-2">
+                    <button
+                        onClick={onClose}
+                        disabled={saving}
+                        className="px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+                    >
+                        Close
+                    </button>
+                    <button
+                        onClick={() => void handleSave()}
+                        disabled={!dirty || saving}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-accent-lineage hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm shadow-accent-lineage/20"
+                    >
+                        {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                        Save changes
+                    </button>
+                </div>
                 </motion.aside>
             </AnimatePresence>
 
@@ -2006,12 +2078,18 @@ function RoleEditorDrawer({
                 open={previewState !== null}
                 title={
                     previewState?.kind === 'delete'
-                        ? `Delete role "${role.name}"?`
-                        : `Save changes to "${role.name}"?`
+                        ? `Delete role "${labelText}"?`
+                        : previewState?.kind === 'reset'
+                            ? `Reset "${labelText}" to default?`
+                            : `Save changes to "${labelText}"?`
                 }
                 intent={previewState?.kind === 'delete' ? 'destructive' : 'caution'}
                 confirmLabel={
-                    previewState?.kind === 'delete' ? 'Delete role' : 'Save changes'
+                    previewState?.kind === 'delete'
+                        ? 'Delete role'
+                        : previewState?.kind === 'reset'
+                            ? 'Reset to default'
+                            : 'Save changes'
                 }
                 preview={previewState?.preview ?? null}
                 loading={previewState?.loading ?? false}
@@ -2020,6 +2098,7 @@ function RoleEditorDrawer({
                 onCancel={() => setPreviewState(null)}
                 onConfirm={() => {
                     if (previewState?.kind === 'delete') void commitDelete()
+                    else if (previewState?.kind === 'reset') void commitReset()
                     else if (previewState?.kind === 'save') void commitSave()
                 }}
             />

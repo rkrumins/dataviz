@@ -53,10 +53,10 @@ export function PullBeforeMergeBanner({
         </span>
         <div className="min-w-0">
           <p className="text-xs font-semibold text-ink leading-tight">
-            Main was updated in the background — {aheadBy} new {aheadBy === 1 ? 'change' : 'changes'}
+            Updates available — {aheadBy} new {aheadBy === 1 ? 'change' : 'changes'} on the Published version
           </p>
           <p className="text-[11px] text-ink-muted leading-tight">
-            Pull the latest into your draft and confirm it’s reflected before raising a merge request.
+            Get the latest updates into your draft and confirm they’re reflected before submitting for review.
           </p>
         </div>
         <div className="flex-1" />
@@ -74,7 +74,7 @@ export function PullBeforeMergeBanner({
         <div className="px-3 pb-2.5 pt-0.5">
           <div className="max-h-48 overflow-y-auto custom-scrollbar rounded-lg border border-amber-500/20 bg-canvas/60 divide-y divide-amber-500/10">
             {logQ.isLoading ? (
-              <p className="px-3 py-2 text-[11px] text-ink-muted">Loading main’s recent changes…</p>
+              <p className="px-3 py-2 text-[11px] text-ink-muted">Loading recent updates…</p>
             ) : newCommits.length === 0 ? (
               <p className="px-3 py-2 text-[11px] text-ink-muted">No commit details available.</p>
             ) : (

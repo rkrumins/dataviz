@@ -419,12 +419,18 @@ async def test_update_and_delete_lifecycle_guards(
 ):
     await _seed_perms(db_session)
 
-    # System role rejects edit
+    # System roles are now editable (description / permissions); the edit
+    # succeeds. The protected floor and undeletability are covered in
+    # test_system_role_editing.py.
     r = await test_client.put(
         "/api/v1/admin/roles/super_admin",
-        json={"description": "tampered"},
+        json={"description": "tailored"},
     )
-    assert r.status_code == 409
+    assert r.status_code == 200, r.text
+
+    # Deleting a system role is still refused.
+    nodel = await test_client.delete("/api/v1/admin/roles/super_admin")
+    assert nodel.status_code == 409
 
     # Custom role can be created and updated
     create = await test_client.post(

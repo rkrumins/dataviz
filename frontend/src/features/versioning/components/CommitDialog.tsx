@@ -56,7 +56,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, title: message || undefined, description: description || undefined },
       {
         onSuccess: (res) => {
-          showToast('success', 'Merge request opened for review.')
+          showToast('success', 'Sent for review.')
           onClose()
           navigate(`/workspaces/${workspaceId}/reviews?pr=${res.prId}`)
         },
@@ -72,7 +72,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, message: message || 'Publish draft' },
       {
         onSuccess: () => {
-          showToast('success', 'Published to main.')
+          showToast('success', 'Published to the live version.')
           switchToMain()
           onClose()
         },
@@ -90,8 +90,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             <GitPullRequest className="w-5 h-5 text-accent-lineage" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="text-base font-semibold text-ink tracking-tight">Publish draft</h3>
-            <p className="text-[11px] text-ink-muted mt-0.5">Take your changes to main.</p>
+            <h3 className="text-base font-semibold text-ink tracking-tight">Publish your draft</h3>
+            <p className="text-[11px] text-ink-muted mt-0.5">Send your changes to the Published version.</p>
           </div>
           <button onClick={onClose} disabled={busy} className="p-1.5 rounded-lg hover:bg-canvas-overlay transition-colors disabled:opacity-50">
             <X className="w-4 h-4 text-ink-muted" />
@@ -134,8 +134,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
               <div className="text-[11px] text-ink-muted">
-                <span className="font-medium text-amber-500">Main has moved — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
-                Open a merge request to resolve them, or abandon this draft and re-open it from the latest main.
+                <span className="font-medium text-amber-500">The Published version changed — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
+                Submit for review to resolve them, or archive this draft and start again from the latest.
               </div>
             </div>
           )}
@@ -144,8 +144,8 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
               <div className="text-[11px] text-ink-muted">
-                <span className="font-medium text-amber-500">This draft is behind main.</span>{' '}
-                Use “Pull latest” on the toolbar to bring in the newest changes, then publish.
+                <span className="font-medium text-amber-500">Updates are available for this draft.</span>{' '}
+                Use “Get latest updates” on the toolbar to bring in the newest changes, then publish.
               </div>
             </div>
           )}
@@ -157,10 +157,10 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
               onClick={handlePublish}
               disabled={busy || !hasChanges}
               className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-ink hover:bg-canvas-overlay transition-colors disabled:opacity-50"
-              title="Publish straight to main"
+              title="Publish straight to the live version, skipping review"
             >
               {publish.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
-              Publish directly
+              Publish now
             </button>
           )}
           <button
@@ -173,7 +173,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
             )}
           >
             {openMr.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitPullRequest className="w-4 h-4" />}
-            Open merge request
+            Submit for review
           </button>
         </div>
       </div>

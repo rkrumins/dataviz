@@ -20,7 +20,11 @@ import { useDiffVsMain, usePullLatestDraft } from '../hooks/useVersioning'
 const VARIANTS = {
   row: 'shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage hover:bg-canvas-base disabled:opacity-50',
   bar: 'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-amber-600 bg-amber-500/10 hover:bg-amber-500/20 transition-colors disabled:opacity-50',
+  manager: 'shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors disabled:opacity-50',
 } as const
+
+// Plain-language labels (see branchVocab): "pull/rebase" reads as "get the latest updates".
+const IDLE_LABEL = { row: 'Update', bar: 'Get latest updates', manager: 'Get latest' } as const
 
 export function PullLatestButton({
   wsId, graphId, branchId, behind, variant = 'row', className,
@@ -74,11 +78,11 @@ export function PullLatestButton({
       <button
         onClick={() => run()}
         disabled={pull.isPending}
-        title="Pull the latest changes from main into this draft"
+        title="Get the latest updates from the published version into this draft"
         className={cn(VARIANTS[variant], className)}
       >
         {pull.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowDownToLine className="w-3.5 h-3.5" />}
-        {variant === 'bar' ? (pull.isPending ? 'Pulling…' : 'Pull latest') : 'Pull'}
+        {pull.isPending ? (variant === 'row' ? 'Updating' : 'Updating…') : IDLE_LABEL[variant]}
       </button>
 
       {conflicts && (

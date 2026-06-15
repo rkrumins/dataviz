@@ -60,7 +60,7 @@ export function BranchSettingsModal({
     update.mutate(
       { branchId: branch.branchId, name: name.trim(), description: description.trim(), isShared },
       {
-        onSuccess: () => { showToast('success', 'Branch updated.'); onClose() },
+        onSuccess: () => { showToast('success', 'Draft updated.'); onClose() },
         onError: (e) => showToast('error', (e as Error).message),
       },
     )
@@ -85,7 +85,7 @@ export function BranchSettingsModal({
                 <GitBranch className="w-4 h-4 text-amber-500" />
               </span>
               <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-ink">Branch settings</h3>
+                <h3 className="text-sm font-semibold text-ink">Draft settings</h3>
                 <p className="text-[11px] text-ink-muted truncate">{branch.name || 'Untitled draft'}</p>
               </div>
             </div>
