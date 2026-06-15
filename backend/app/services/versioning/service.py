@@ -803,6 +803,32 @@ class GraphVersioningService:
             branch.updated_at = _now()
             return self._branch_meta(branch)
 
+    async def update_branch(
+        self, *, graph_id: str, branch_id: str, actor: str, actor_groups: Sequence[str] = (),
+        name: Optional[str] = None, description: Optional[str] = None,
+        is_shared: Optional[bool] = None,
+    ) -> dict:
+        """Edit a draft's metadata — display ``name``, optional ``description``, and shared/private
+        visibility. The owner may always edit their own draft; otherwise maintainer access is
+        required (workspace managers + maintainers of a shared draft). ``main`` is immutable and a
+        terminal (merged/abandoned) branch is read-only. Only the fields passed are changed (``None``
+        = leave as-is; pass ``""`` to clear name/description). Returns the updated branch meta."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise ValueError("cannot edit the main branch")
+            self._require_open(branch)
+            if branch.owner != actor:
+                await self._require_manage(s, branch, actor, actor_groups)   # raises AccessDenied
+            if name is not None:
+                branch.name = name.strip() or None
+            if description is not None:
+                branch.description = description.strip() or None
+            if is_shared is not None:
+                branch.is_shared = bool(is_shared)
+            branch.updated_at = _now()
+            return self._branch_meta(branch)
+
     async def sweep_idle_drafts(
         self, *, now: Optional[datetime] = None, ttl_days: Optional[int] = None,
     ) -> List[str]:
@@ -2870,7 +2896,8 @@ class GraphVersioningService:
     @staticmethod
     def _branch_meta(b: BranchORM) -> dict:
         return {
-            "branch_id": b.id, "kind": b.kind, "name": b.name, "owner": b.owner,
+            "branch_id": b.id, "kind": b.kind, "name": b.name, "description": b.description,
+            "owner": b.owner, "is_shared": b.is_shared,
             "status": b.status, "base_commit_seq": b.base_commit_seq,
             "head_commit_id": b.head_commit_id, "originating_view_id": b.originating_view_id,
             "created_by": b.created_by, "created_at": b.created_at, "updated_at": b.updated_at,
@@ -4479,19 +4506,23 @@ def _build_diff_hierarchy(
     for eid in relevant:
         if parent_of.get(eid) in relevant:
             continue                                     # nested under a relevant container
-        # Every top-level changed entity is its OWN named row — whether or not it has changed
-        # descendants. (Previously a top-level change WITHOUT changed children was hidden in a
-        # "type:<entityType>" bucket, so e.g. a renamed domain with changed children showed by name
-        # while a renamed domain without changed children showed under a generic "domain" bucket —
-        # the same entity kind grouped two different ways. Naming both is consistent and, since
-        # parent-less changes are roots/orphans (rare), doesn't flood the tree; volume is handled by
-        # the summary-collapse + the group limit.)
-        roots.append(eid)
+        if eid in children_of:
+            roots.append(eid)                            # top-level container w/ changed descendants
+        else:                                            # parent-less changed leaf → type bucket (scale)
+            buckets.setdefault("type:" + (payload_of(eid).get("entityType") or "Other"), []).append(eid)
     for eid in changed_edges:
         p = payload_of(eid)
         if (p.get("edgeType") or "").upper() in cset:
             continue                                     # structural containment edge — suppressed
         buckets.setdefault("edge:" + (p.get("edgeType") or "Relationship"), []).append(eid)
+
+    # A SINGLE-member bucket reads better as that entity by name — so a lone changed domain shows
+    # by name (consistent with a changed container that has children), while only genuinely large
+    # same-type groups stay bucketed. This also bounds the top level: a flat graph with no
+    # containment would otherwise promote every changed node to its own (truncatable) root.
+    for key in list(buckets):
+        if len(buckets[key]) == 1:
+            roots.append(buckets.pop(key)[0])
 
     # per-container rollup of changed-node counts (memoised DFS over the forest)
     subtree: Dict[str, dict] = {}

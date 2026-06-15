@@ -125,6 +125,7 @@ class BranchORM(VersioningBase):
     )
     kind = Column(Text, nullable=False)                    # main|draft|fork_draft
     name = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)              # optional, user-editable
     owner = Column(Text, nullable=True)                    # actor (per-user draft)
     is_shared = Column(Boolean, nullable=False, default=False)
     base_commit_seq = Column(BigInteger, nullable=True)    # main seq branched from

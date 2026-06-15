@@ -38,7 +38,9 @@ export interface Branch {
   branchId: string
   kind: BranchKind
   name?: string | null
+  description?: string | null
   owner?: string | null
+  isShared?: boolean
   status: string
   baseCommitSeq?: number | null
   headCommitId?: string | null
@@ -376,6 +378,20 @@ export function getWatermark(wsId: string, graphId: string): Promise<Watermark> 
 
 export function abandonDraft(wsId: string, graphId: string, branchId: string): Promise<Branch> {
   return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/abandon`, jsonBody({}))
+}
+
+/** Edit a draft's name / description / shared-visibility. PATCH: omitted fields are untouched;
+ *  pass `''` to clear name/description. */
+export function updateBranch(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  data: { name?: string; description?: string; isShared?: boolean },
+): Promise<Branch> {
+  return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
 }
 
 // ============================================

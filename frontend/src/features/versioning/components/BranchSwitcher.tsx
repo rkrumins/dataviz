@@ -8,15 +8,17 @@
  * no versioned graph (the common case until a graph is created).
  */
 import { useEffect, useRef, useState } from 'react'
-import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal } from 'lucide-react'
+import { GitBranch, Check, Plus, ChevronDown, Loader2, GitCommitHorizontal, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useActiveView } from '@/store/schema'
 import { useBranches, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
+import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
 import { PullLatestButton } from './PullLatestButton'
+import { BranchSettingsModal } from './BranchSettingsModal'
 
 interface BranchSwitcherProps {
   workspaceId: string
@@ -28,6 +30,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  const [settingsBranch, setSettingsBranch] = useState<Branch | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
@@ -52,6 +55,15 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
       setResolved({ workspaceId, dataSourceId }, resolve.data)
     }
   }, [resolve.data, workspaceId, dataSourceId, setResolved])
+
+  // Deep-link: apply ?branch=<id> on load (permission-gated) + keep the URL in step with the
+  // active branch, so a view+branch is a shareable link.
+  useBranchDeepLink({
+    enabled: !!graphId && !!dataSourceId,
+    branches: branchesQ.data,
+    currentBranchId,
+    switchToDraft,
+  })
 
   // Close on outside click.
   useEffect(() => {
@@ -142,6 +154,15 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                       branchId={b.branchId} behind={behind}
                     />
                   ) : undefined}
+                  settingsSlot={canManage ? (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setSettingsBranch(b); setOpen(false) }}
+                      title="Branch settings — rename, describe, share link"
+                      className="shrink-0 p-1 rounded-md text-ink-muted/70 hover:text-ink hover:bg-canvas-base transition-colors"
+                    >
+                      <Settings2 className="w-3.5 h-3.5" />
+                    </button>
+                  ) : undefined}
                   onClick={() => {
                     switchToDraft(b.branchId, b.originatingViewId ?? null)
                     setOpen(false)
@@ -189,6 +210,16 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           )}
         </div>
       )}
+
+      {settingsBranch && graphId && (
+        <BranchSettingsModal
+          wsId={workspaceId}
+          graphId={graphId}
+          viewId={originatingViewId}
+          branch={settingsBranch}
+          onClose={() => setSettingsBranch(null)}
+        />
+      )}
     </div>
   )
 }
@@ -205,6 +236,7 @@ function BranchRow({
   active,
   status,
   pullSlot,
+  settingsSlot,
   onClick,
 }: {
   icon: React.ReactNode
@@ -213,6 +245,7 @@ function BranchRow({
   active: boolean
   status?: 'behind' | 'up-to-date'
   pullSlot?: React.ReactNode
+  settingsSlot?: React.ReactNode
   onClick: () => void
 }) {
   return (
@@ -229,6 +262,7 @@ function BranchRow({
         {active && <Check className="w-4 h-4 text-accent-lineage shrink-0" />}
       </button>
       {pullSlot}
+      {settingsSlot}
     </div>
   )
 }

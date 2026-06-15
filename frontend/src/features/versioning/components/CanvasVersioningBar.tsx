@@ -261,7 +261,7 @@ function ChangeHighlightControl({
           !committedHidden && hasCommitted ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
         )}
       >
-        {committedHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+        {committedHidden && hasCommitted ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
         Committed
       </button>
       <div className="absolute right-0 top-full mt-1.5 w-64 p-3 rounded-xl bg-canvas border border-glass-border shadow-xl text-[11px] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">

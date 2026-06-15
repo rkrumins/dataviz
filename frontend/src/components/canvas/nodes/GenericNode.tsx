@@ -257,7 +257,12 @@ export const GenericNode = memo(function GenericNode({
                   ? '0 0 20px rgba(192,132,252,0.4)'
                   : selected
                     ? `0 0 20px ${visual.color}40`
-                    : '0 4px 12px rgba(0,0,0,0.1)',
+                    : changeDeco
+                      // Decorated + default state: defer to the Tailwind ring+glow from
+                      // nodeDecorationClass (an inline boxShadow would override the box-shadow-based
+                      // ring, hiding the committed/staged colour highlight on the graph).
+                      ? undefined
+                      : '0 4px 12px rgba(0,0,0,0.1)',
           ['--ring-color' as string]: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
         }}
         // Add data attributes for testing/debugging

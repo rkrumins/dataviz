@@ -307,6 +307,13 @@ class BranchMemberRequest(_ApiModel):
     role: str = Field(description="viewer | editor | maintainer")
 
 
+class UpdateBranchRequest(_ApiModel):
+    """Patch a draft's metadata. Omitted fields are left unchanged; ``""`` clears name/description."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_shared: Optional[bool] = Field(default=None, alias="isShared")
+
+
 class StageOp(_ApiModel):
     op: str = Field(description="create | update | delete")
     entity_kind: str = Field(alias="entityKind", description="node | edge")
@@ -388,7 +395,9 @@ class BranchResponse(_ApiModel):
     branch_id: str = Field(alias="branchId")
     kind: str
     name: Optional[str] = None
+    description: Optional[str] = None
     owner: Optional[str] = None
+    is_shared: bool = Field(default=False, alias="isShared")
     status: str
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
     head_commit_id: Optional[str] = Field(default=None, alias="headCommitId")
@@ -795,6 +804,21 @@ async def abandon_draft(
 ):
     with _domain_errors():
         return await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+
+
+@router.patch("/graphs/{graph_id}/branches/{branch_id}", response_model=BranchResponse)
+async def update_branch(
+    ws_id: str, graph_id: str, branch_id: str, body: UpdateBranchRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Edit a draft's name / description / shared-visibility (owner or maintainer)."""
+    with _domain_errors():
+        return await svc.update_branch(
+            graph_id=graph_id, branch_id=branch_id, actor=user.id,
+            name=body.name, description=body.description, is_shared=body.is_shared,
+        )
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/rebase")

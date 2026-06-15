@@ -1,0 +1,61 @@
+/**
+ * useBranchDeepLink — two-way sync between the URL `?branch=<id>` query param and the active branch
+ * in the branch store, so a view+branch is a shareable, bookmarkable link
+ * (e.g. /views/view_abc?branch=br_123).
+ *
+ *   • URL → store: on load, if `?branch=<id>` names an OPEN draft the viewer may access (it appears
+ *     in the permission-gated branches list), switch to it. If it's missing / not accessible, drop
+ *     the param, stay on main, and toast — so a shared link only works for permitted users.
+ *   • store → URL: reflect the active branch as `?branch=<id>` (replace, no history spam); main
+ *     clears the param. So switching branches updates the link, and "Copy link" is always current.
+ */
+import { useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { useToast } from '@/components/ui/toast'
+import type { Branch } from '@/services/versioningApiService'
+
+export function useBranchDeepLink({
+  enabled,
+  branches,
+  currentBranchId,
+  switchToDraft,
+}: {
+  enabled: boolean
+  branches: Branch[] | undefined
+  currentBranchId: string | null
+  switchToDraft: (branchId: string, originatingViewId?: string | null) => void
+}) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { showToast } = useToast()
+  const urlBranch = searchParams.get('branch')
+  const handledRef = useRef<string | null>(null) // a branch param we've already resolved (apply/reject)
+
+  // URL → store: apply the deep-linked branch once the (permission-gated) branch list is loaded.
+  useEffect(() => {
+    if (!enabled || !branches || !urlBranch) return
+    if (urlBranch === currentBranchId) { handledRef.current = urlBranch; return }
+    if (handledRef.current === urlBranch) return
+    handledRef.current = urlBranch
+    const target = branches.find((b) => b.branchId === urlBranch && b.kind !== 'main' && b.status === 'open')
+    if (target) {
+      switchToDraft(target.branchId, target.originatingViewId ?? null)
+    } else {
+      // Not accessible / not found → drop the param and stay on main.
+      setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('branch'); return n }, { replace: true })
+      showToast('error', "That branch isn't available — you may not have access, or it was merged/discarded.")
+    }
+  }, [enabled, branches, urlBranch, currentBranchId, switchToDraft, setSearchParams, showToast])
+
+  // store → URL: keep the param in step with the active branch (idempotent; guarded against loops).
+  useEffect(() => {
+    if (!enabled) return
+    const cur = searchParams.get('branch')
+    if (currentBranchId) {
+      if (cur !== currentBranchId) {
+        setSearchParams((prev) => { const n = new URLSearchParams(prev); n.set('branch', currentBranchId); return n }, { replace: true })
+      }
+    } else if (cur) {
+      setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('branch'); return n }, { replace: true })
+    }
+  }, [enabled, currentBranchId, searchParams, setSearchParams])
+}

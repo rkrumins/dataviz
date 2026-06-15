@@ -281,6 +281,19 @@ export function useAbandonDraft(wsId: string, graphId: string) {
   })
 }
 
+/** Edit a draft's name / description / shared-visibility. Refreshes the branch list + resolve. */
+export function useUpdateBranch(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { branchId: string; name?: string; description?: string; isShared?: boolean }) =>
+      api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description, isShared: v.isShared }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+    },
+  })
+}
+
 /** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can
  *  open the conflict resolver when `clean === false`; on a clean pull it refreshes the draft views. */
 export function usePullLatestDraft(wsId: string, graphId: string) {
