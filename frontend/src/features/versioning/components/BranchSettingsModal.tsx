@@ -33,8 +33,11 @@ export function BranchSettingsModal({
   const [isShared, setIsShared] = useState(!!branch.isShared)
   const [copied, setCopied] = useState(false)
 
-  const link = viewId
-    ? `${window.location.origin}/views/${viewId}?branch=${branch.branchId}`
+  // Prefer the view the branch was created from so the link lands on its home context; fall back to
+  // the view in hand. Both resolve to the same data source, so the branch is accessible either way.
+  const linkViewId = branch.originatingViewId ?? viewId
+  const link = linkViewId
+    ? `${window.location.origin}/views/${linkViewId}?branch=${branch.branchId}`
     : null
 
   const dirty =

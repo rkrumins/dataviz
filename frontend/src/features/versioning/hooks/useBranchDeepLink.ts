@@ -29,6 +29,7 @@ export function useBranchDeepLink({
   const { showToast } = useToast()
   const urlBranch = searchParams.get('branch')
   const handledRef = useRef<string | null>(null) // a branch param we've already resolved (apply/reject)
+  const wasActiveRef = useRef(false) // have we ever held a non-null branch? distinguishes "left a branch" from a fresh deep-link still mid-apply
 
   // URL → store: apply the deep-linked branch once the (permission-gated) branch list is loaded.
   useEffect(() => {
@@ -49,12 +50,16 @@ export function useBranchDeepLink({
   // store → URL: keep the param in step with the active branch (idempotent; guarded against loops).
   useEffect(() => {
     if (!enabled) return
+    if (currentBranchId) wasActiveRef.current = true
     const cur = searchParams.get('branch')
     if (currentBranchId) {
       if (cur !== currentBranchId) {
         setSearchParams((prev) => { const n = new URLSearchParams(prev); n.set('branch', currentBranchId); return n }, { replace: true })
       }
-    } else if (cur) {
+    } else if (cur && wasActiveRef.current) {
+      // Only clear once we've genuinely LEFT a branch. Never strip a deep-link param that URL→store
+      // hasn't applied yet — on a fresh load `currentBranchId` is null while branches load, and this
+      // effect runs first; without the guard it would erase `?branch=` before the link is honoured.
       setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('branch'); return n }, { replace: true })
     }
   }, [enabled, currentBranchId, searchParams, setSearchParams])
