@@ -48,7 +48,10 @@ describe('useBranchDeepLink', () => {
     const { rerender } = renderHook(
       ({ branches }: { branches: ReturnType<typeof draft>[] | undefined }) =>
         useBranchDeepLink({ enabled: true, branches, currentBranchId: null, switchToDraft }),
-      { wrapper: wrap('/views/v1?branch=br_1'), initialProps: { branches: undefined } },
+      {
+        wrapper: wrap('/views/v1?branch=br_1'),
+        initialProps: { branches: undefined as ReturnType<typeof draft>[] | undefined },
+      },
     )
     // Branches not loaded yet → must not act, and crucially must NOT strip ?branch=.
     expect(switchToDraft).not.toHaveBeenCalled()
