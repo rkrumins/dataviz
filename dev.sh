@@ -68,11 +68,35 @@ pg_repair_replorigin() {
     ' 2>&1
 }
 
+# ── Docker disk guard ──────────────────────────────────────────────
+# Repeated rebuilds pile up dangling images + build cache on the ~40G
+# Docker VM disk. When it fills, an in-flight write to a stateful service
+# gets truncated and corrupts its on-disk state (redis RDB/AOF, postgres
+# pid/WAL) — producing crash-loops on next start. Reclaim the *safe*
+# churn (dangling images + build cache; never volumes) before it crosses
+# the danger line. `df -P /` inside a throwaway container reports the VM's
+# overlay disk.
+reclaim_docker_disk() {
+    local pct
+    pct=$(docker run --rm alpine df -P / 2>/dev/null \
+            | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+    [ -n "$pct" ] || return 0
+    if [ "$pct" -ge 80 ]; then
+        echo "[dev] Docker disk at ${pct}% — pruning dangling images + build cache" >&2
+        docker image prune -f   >/dev/null 2>&1 || true
+        docker builder prune -f >/dev/null 2>&1 || true
+        pct=$(docker run --rm alpine df -P / 2>/dev/null \
+                | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+        echo "[dev] reclaimed — Docker disk now at ${pct}%" >&2
+    fi
+}
+
 cmd="${1:-up}"
 shift || true
 
 case "$cmd" in
     up)
+        reclaim_docker_disk
         pg_repair_replorigin
         "${COMPOSE[@]}" up -d "$@"
         echo ""
@@ -82,6 +106,7 @@ case "$cmd" in
         echo "  Status:      ./dev.sh ps"
         ;;
     infra)
+        reclaim_docker_disk
         pg_repair_replorigin
         "${COMPOSE[@]}" up -d postgres redis falkordb
         set -a; source "$ENV_FILE"; set +a
@@ -109,6 +134,7 @@ case "$cmd" in
         "${COMPOSE[@]}" build "$@"
         ;;
     rebuild)
+        reclaim_docker_disk
         "${COMPOSE[@]}" up -d --build "$@"
         ;;
     logs)
