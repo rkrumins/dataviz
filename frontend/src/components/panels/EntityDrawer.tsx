@@ -31,7 +31,19 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore, useActiveView } from '@/store/schema'
+import {
+  useSchemaStore,
+  useActiveView,
+  useEntityTypes,
+  useRootEntityTypes,
+  useEntityTypeHierarchyMap,
+  useRelationshipTypes,
+  useContainmentEdgeTypes,
+  normalizeEdgeType,
+  isContainmentEdgeType,
+} from '@/store/schema'
+import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -789,6 +801,159 @@ function DetailsList({ formData }: { formData: Record<string, any> }) {
   )
 }
 
+/**
+ * RelationshipSection — view-mode editor for a node's containment placement.
+ * Lets the user, after creation, (a) switch the relationship type to its current
+ * parent and (b) move it under a different parent. Both go through
+ * useReparentNode, which ontology-validates and stages the change like every
+ * other edit. Uses plain, non-technical language.
+ */
+function RelationshipSection({ nodeId }: { nodeId: string }) {
+  const { reparent, retypeContainment } = useReparentNode()
+  const entityTypes = useEntityTypes()
+  const rootEntityTypes = useRootEntityTypes()
+  const hierarchyMap = useEntityTypeHierarchyMap()
+  const relationshipTypes = useRelationshipTypes()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+
+  // Subscribe narrowly so this section re-renders when the graph topology changes
+  // (e.g. after a move restages edges) but not on unrelated canvas mutations.
+  const nodes = useCanvasStore((s) => s.nodes)
+  const edges = useCanvasStore((s) => s.edges)
+
+  const node = useMemo(() => nodes.find((n) => n.id === nodeId), [nodes, nodeId])
+  const childType = (node?.data.type as string) ?? ''
+
+  const isContainment = useCallback(
+    (e: { data?: { edgeType?: string; relationship?: string } }) =>
+      isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes),
+    [containmentEdgeTypes],
+  )
+
+  // Current containment parent edge (stored parent→child, so target===nodeId).
+  const parentEdge = useMemo(
+    () => edges.find((e) => e.target === nodeId && isContainment(e)),
+    [edges, nodeId, isContainment],
+  )
+  const parentNode = useMemo(
+    () => (parentEdge ? nodes.find((n) => n.id === parentEdge.source) : undefined),
+    [parentEdge, nodes],
+  )
+  const parentType = (parentNode?.data.type as string) ?? ''
+  const parentName = (parentNode?.data.label as string) || parentEdge?.source
+  const currentEdgeType = parentEdge ? normalizeEdgeType(parentEdge) : ''
+
+  // Allowed relationship types for the CURRENT parent→child pair (human labels).
+  const relTypeOptions = useMemo(
+    () =>
+      parentNode
+        ? deriveContainmentEdges(parentType, childType, relationshipTypes, containmentEdgeTypes).filter((o) => o.allowed)
+        : [],
+    [parentNode, parentType, childType, relationshipTypes, containmentEdgeTypes],
+  )
+
+  // Descendants of this node — excluded from the move list (can't move under self/child).
+  const descendants = useMemo(() => {
+    const childrenOf = new Map<string, string[]>()
+    for (const e of edges) {
+      if (!e.source || !e.target || !isContainment(e)) continue
+      const arr = childrenOf.get(e.source)
+      if (arr) arr.push(e.target)
+      else childrenOf.set(e.source, [e.target])
+    }
+    const out = new Set<string>([nodeId])
+    const stack = [nodeId]
+    while (stack.length) {
+      const id = stack.pop()!
+      for (const c of childrenOf.get(id) ?? []) {
+        if (!out.has(c)) { out.add(c); stack.push(c) }
+      }
+    }
+    return out
+  }, [edges, nodeId, isContainment])
+
+  // Candidate parents: canvas nodes whose type can contain this node's type,
+  // excluding self, descendants, and the current parent.
+  const moveTargets = useMemo(() => {
+    if (!node) return []
+    return nodes
+      .filter((n) => {
+        if (descendants.has(n.id)) return false
+        if (n.id === parentNode?.id) return false
+        const candidateType = n.data.type as string
+        return allowedChildTypeIds(candidateType, entityTypes, rootEntityTypes, hierarchyMap).has(childType)
+      })
+      .map((n) => ({
+        id: n.id,
+        label: (n.data.label as string) || n.id,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [node, nodes, descendants, parentNode?.id, entityTypes, rootEntityTypes, hierarchyMap, childType])
+
+  if (!node) return null
+
+  return (
+    <Section title="Relationship" icon={LucideIcons.Network}>
+      <div className="space-y-4">
+        {/* Current placement */}
+        <div className="flex items-start justify-between gap-4">
+          <span className="text-xs text-ink-muted min-w-[110px]">Part of</span>
+          <span className="text-xs text-ink text-right break-words font-medium">
+            {parentNode ? parentName : 'Top level'}
+          </span>
+        </div>
+
+        {/* Relationship type — only when the node has a parent. */}
+        {parentNode && (
+          <div className="space-y-1.5">
+            <label className="text-xs text-ink-muted">How it relates</label>
+            <select
+              value={currentEdgeType}
+              onChange={(e) => retypeContainment(nodeId, e.target.value)}
+              className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
+            >
+              {/* Keep the current type selectable even if no longer ontology-allowed. */}
+              {!relTypeOptions.some((o) => o.edgeType === currentEdgeType) && (
+                <option value={currentEdgeType}>{currentEdgeType}</option>
+              )}
+              {relTypeOptions.map((o) => (
+                <option key={o.edgeType} value={o.edgeType}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Move to a different parent. */}
+        <div className="space-y-1.5">
+          <label className="text-xs text-ink-muted">Move to</label>
+          {moveTargets.length > 0 ? (
+            <select
+              value=""
+              onChange={(e) => { if (e.target.value) reparent(nodeId, e.target.value) }}
+              className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
+            >
+              <option value="" disabled>
+                Choose a new parent…
+              </option>
+              {moveTargets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p className="text-xs text-ink-muted italic">
+              No other entity here can contain this one.
+            </p>
+          )}
+        </div>
+      </div>
+    </Section>
+  )
+}
+
 // ============================================
 // View Mode Content
 // ============================================
@@ -852,6 +1017,11 @@ function ViewModeContent({
       {/* Details — first-class descriptive fields carried from the backend
           GraphNode. Only rendered when at least one has a real value. */}
       <DetailsList formData={formData} />
+
+      {/* Relationship — view-mode editor for where this entity sits in the
+          hierarchy: switch how it relates to its parent, or move it under a
+          different parent. Both ontology-validated and staged for review. */}
+      <RelationshipSection nodeId={nodeId} />
 
       {/* Properties — nested-JSON tree rendered read-only via PropertyEditor.
           `readOnly` keeps the recursive UI navigable (expand, search, copy,

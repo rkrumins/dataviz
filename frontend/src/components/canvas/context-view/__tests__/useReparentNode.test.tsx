@@ -17,7 +17,11 @@ const ENTITY_TYPES = [
   { id: 'dataset', name: 'Dataset', hierarchy: { canContain: ['column'], canBeContainedBy: ['system'] } },
   { id: 'column', name: 'Column', hierarchy: { canContain: [], canBeContainedBy: ['dataset'] } },
 ]
-const REL_TYPES = [{ id: 'CONTAINS', name: 'Contains', sourceTypes: ['system'], targetTypes: ['dataset'], isContainment: true }]
+// Two valid containment types between system→dataset, so a dataset's relationship can be re-typed.
+const REL_TYPES = [
+  { id: 'CONTAINS', name: 'Contains', sourceTypes: ['system'], targetTypes: ['dataset'], isContainment: true },
+  { id: 'HOLDS', name: 'Holds', sourceTypes: ['system'], targetTypes: ['dataset'], isContainment: true },
+]
 
 vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
 vi.mock('@/store/schema', async (importOriginal) => {
@@ -28,7 +32,7 @@ vi.mock('@/store/schema', async (importOriginal) => {
     useRootEntityTypes: () => ['system'],
     useEntityTypeHierarchyMap: () => ({ system: { canContain: ['dataset'] }, dataset: { canContain: ['column'] }, column: { canContain: [] } }),
     useRelationshipTypes: () => REL_TYPES,
-    useContainmentEdgeTypes: () => ['CONTAINS'],
+    useContainmentEdgeTypes: () => ['CONTAINS', 'HOLDS'],
   }
 })
 
@@ -109,5 +113,36 @@ describe('useReparentNode', () => {
     result.current.reparent('S', 'D')
     expect(staged().some((c) => c.type === 'create_edge')).toBe(false)
     expect(showToast).toHaveBeenCalledWith('error', expect.stringMatching(/descendant|contain/i))
+  })
+
+  it('retypeContainment switches the relationship (delete real old + create new, same parent)', () => {
+    setCanvas(
+      [node('S', 'system'), node('D', 'dataset')],
+      [{ id: 'E0', source: 'S', target: 'D', data: { edgeType: 'CONTAINS' } }],   // real saved edge
+    )
+    const { result } = renderHook(() => useReparentNode())
+    result.current.retypeContainment('D', 'HOLDS')
+    const del = staged().find((c) => c.type === 'delete_edge')
+    const create = staged().find((c) => c.type === 'create_edge')
+    expect(del?.targetId).toBe('E0')                       // deletes the REAL old edge
+    expect((create!.after as any).edgeType).toBe('HOLDS')
+    expect((create!.after as any).source).toBe('S')        // same parent
+  })
+
+  it('collapses repeated retypes — never a temp-id delete, never a double parent', () => {
+    setCanvas(
+      [node('S', 'system'), node('D', 'dataset')],
+      [{ id: 'E0', source: 'S', target: 'D', data: { edgeType: 'CONTAINS' } }],
+    )
+    const { result } = renderHook(() => useReparentNode())
+    result.current.retypeContainment('D', 'HOLDS')     // E0(real) deleted + temp create(HOLDS)
+    result.current.retypeContainment('D', 'CONTAINS')  // must collapse the temp create, not delete a temp id
+
+    const deletes = staged().filter((c) => c.type === 'delete_edge')
+    const creates = staged().filter((c) => c.type === 'create_edge')
+    expect(deletes).toHaveLength(1)                     // only the ONE real edge delete
+    expect(deletes[0].targetId).toBe('E0')             // a REAL id, never a temp 'staged-edge-…'
+    expect(creates).toHaveLength(1)                     // exactly one surviving parent edge (no double parent)
+    expect((creates[0].after as any).edgeType).toBe('CONTAINS')
   })
 })

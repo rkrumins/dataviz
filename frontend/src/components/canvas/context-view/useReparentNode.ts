@@ -1,7 +1,10 @@
 /**
- * useReparentNode — drag-to-reparent on the Context View. Dropping entity A onto node B
- * nests A under B by restaging containment: it removes A's current containment edge and
- * adds a new ontology-typed one (B→A), all reviewed-before-save like every other edit.
+ * useReparentNode — restage a node's containment so it lands under a different
+ * parent (drag-to-reparent on the Context View, or "Move to…" in the entity
+ * drawer) or keeps the same parent under a different relationship type ("Part of"
+ * type switch in the drawer). Both restage containment the same way every other
+ * edit is: remove the current containment edge and add a new ontology-typed one,
+ * reviewed-before-save.
  *
  * Guards (fail with a clear toast, never a silent illegal move):
  *   • no self-drop, and no dropping a node into one of its own descendants (cycle);
@@ -10,6 +13,9 @@
  *     the new edge is stored parent→child and the backend validates it that way);
  *   • an UNSAVED (just-created) node can't be moved yet — its parent is fixed by its
  *     staged create — so we ask the user to save first.
+ *   • re-typing/moving REMOVES an existing parent edge, which only persists inside a
+ *     draft (main-mode applyAll drops the hookless delete → double parent), so we
+ *     gate those on an active draft with an 'info' toast.
  */
 import { useCallback } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
@@ -26,7 +32,7 @@ import {
   normalizeEdgeType,
   isContainmentEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, isContainmentRelType } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, isContainmentRelType, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 
 const endpointOk = (t: string | undefined, allowed: string[] | undefined): boolean =>
   !t || !allowed?.length || allowed.includes('*') || allowed.includes(t)
@@ -38,6 +44,74 @@ export function useReparentNode() {
   const hierarchyMap = useEntityTypeHierarchyMap()
   const relationshipTypes = useRelationshipTypes()
   const containmentEdgeTypes = useContainmentEdgeTypes()
+
+  const isContainment = useCallback(
+    (e: LineageEdge) => isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes),
+    [containmentEdgeTypes],
+  )
+
+  // Shared restage: remove the child's current containment edge (if any) and add a
+  // new parent→child one of `containmentType`, optimistically + as staged changes.
+  // Assumes the caller has already validated ontology / cycle / draft gating.
+  const restageContainment = useCallback(
+    (childKey: string, parentKey: string, parentLabel: string, containmentType: string) => {
+      const canvas = useCanvasStore.getState()
+      const staged = useStagedChangesStore.getState()
+      const { edges } = canvas
+      const oldEdge = edges.find((e) => e.target === childKey && isContainment(e))
+
+      if (oldEdge) {
+        // If the current containment edge is itself an UNSAVED staged create from an
+        // earlier restage this session, collapse it: discard that staged create (its
+        // discard hook removes the canvas edge) instead of staging a delete of a temp
+        // id — the backend can't match a temp-id delete, so it would NOT cancel the
+        // earlier create and we'd persist a DUPLICATE (double-parent) edge. Only a
+        // REAL (already-saved) edge gets a delete_edge.
+        const priorStagedCreate = staged.changes.find(
+          (c) => c.type === 'create_edge' && c.targetId === oldEdge.id,
+        )
+        if (priorStagedCreate) {
+          staged.discard(priorStagedCreate.id)   // removes the staged create + its optimistic edge
+        } else {
+          canvas.removeEdge(oldEdge.id)
+          // No apply hook (mirrors the existing delete-edge flow): in DRAFT mode the
+          // delete is folded into /graph/changes via stagedChangesToOps; there is no
+          // provider edge-delete method for main mode.
+          staged.stage({
+            type: 'delete_edge',
+            targetId: oldEdge.id,
+            before: { edge: { id: oldEdge.id, source: oldEdge.source, target: oldEdge.target, edgeType: oldEdge.data?.edgeType } },
+            after: null,
+            summary: `Unnest from ${oldEdge.source}`,
+            discard: () => canvas.addEdges([oldEdge]),
+          })
+        }
+      }
+
+      // Add the new containment edge (optimistic, marked pending so collapse never drops it).
+      const tempId = generateId('staged-edge')
+      const newEdge: LineageEdge = {
+        id: tempId, source: parentKey, target: childKey, type: 'containment',
+        data: { edgeType: containmentType, relationship: containmentType.toLowerCase(), isPending: 'create' },
+      }
+      canvas.addEdges([newEdge])
+      useStagedChangesStore.getState().stage({
+        type: 'create_edge',
+        targetId: tempId,
+        after: { edgeType: containmentType, source: parentKey, target: childKey },
+        summary: `Move under ${parentLabel} (${containmentType})`,
+        apply: async ({ provider, resolveTempId }) => {
+          if (!provider) return
+          const src = resolveTempId(parentKey) ?? parentKey
+          const tgt = resolveTempId(childKey) ?? childKey
+          const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType: containmentType })
+          if (!res.success) throw new Error(res.error || 'Failed to move entity')
+        },
+        discard: () => canvas.removeEdge(tempId),
+      })
+    },
+    [isContainment],
+  )
 
   const reparent = useCallback((draggedId: string, newParentId: string) => {
     if (!draggedId || !newParentId || draggedId === newParentId) return
@@ -53,8 +127,6 @@ export function useReparentNode() {
       showToast('info', 'Save this new entity before moving it to a different parent.')
       return
     }
-
-    const isContainment = (e: LineageEdge) => isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
 
     // Containment topology (for cycle detection + finding the current parent edge).
     const childrenOf = new Map<string, string[]>()
@@ -100,57 +172,63 @@ export function useReparentNode() {
       return
     }
 
-    const canvas = useCanvasStore.getState()
-    const staged = useStagedChangesStore.getState()
-
-    // Remove the current containment edge (if any) — optimistically + as a staged delete.
-    const oldEdge = edges.find((e) => e.target === childKey && isContainment(e))
     // Un-nesting only persists inside a draft: main-mode applyAll drops the hookless
     // delete (there is no provider edge-delete), which would leave a DOUBLE parent on
     // the server (old edge kept + new edge added). Require a draft for such a move.
+    const oldEdge = edges.find((e) => e.target === childKey && isContainment(e))
     if (oldEdge && !useBranchStore.getState().currentBranchId) {
       showToast('info', 'Switch to a draft to move an entity to a different parent.')
       return
     }
-    if (oldEdge) {
-      canvas.removeEdge(oldEdge.id)
-      // No apply hook (mirrors the existing delete-edge flow): in DRAFT mode the
-      // delete is folded into /graph/changes via stagedChangesToOps; there is no
-      // provider edge-delete method for main mode.
-      staged.stage({
-        type: 'delete_edge',
-        targetId: oldEdge.id,
-        before: { edge: { id: oldEdge.id, source: oldEdge.source, target: oldEdge.target, edgeType: oldEdge.data?.edgeType } },
-        after: null,
-        summary: `Unnest from ${oldEdge.source}`,
-        discard: () => canvas.addEdges([oldEdge]),
-      })
-    }
 
-    // Add the new containment edge (optimistic, marked pending so collapse never drops it).
-    const tempId = generateId('staged-edge')
-    const newEdge: LineageEdge = {
-      id: tempId, source: parentKey, target: childKey, type: 'containment',
-      data: { edgeType: containmentType, relationship: containmentType.toLowerCase(), isPending: 'create' },
-    }
-    canvas.addEdges([newEdge])
-    staged.stage({
-      type: 'create_edge',
-      targetId: tempId,
-      after: { edgeType: containmentType, source: parentKey, target: childKey },
-      summary: `Move under ${(newParent.data?.label as string) || parentKey} (${containmentType})`,
-      apply: async ({ provider, resolveTempId }) => {
-        if (!provider) return
-        const src = resolveTempId(parentKey) ?? parentKey
-        const tgt = resolveTempId(childKey) ?? childKey
-        const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType: containmentType })
-        if (!res.success) throw new Error(res.error || 'Failed to move entity')
-      },
-      discard: () => canvas.removeEdge(tempId),
-    })
-
+    restageContainment(childKey, parentKey, (newParent.data?.label as string) || parentKey, containmentType)
     showToast('success', `Moved under ${(newParent.data?.label as string) || parentKey}.`)
-  }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, showToast])
+  }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, showToast, isContainment, restageContainment])
 
-  return { reparent }
+  // retypeContainment — keep the SAME parent, switch the containment relationship
+  // TYPE. The backend edge_type is immutable, so this is a delete-old + create-new
+  // (NOT an update). No-op when the type is unchanged.
+  const retypeContainment = useCallback((childId: string, newEdgeType: string) => {
+    if (!childId || !newEdgeType) return
+    const { nodes, edges } = useCanvasStore.getState()
+    const child = nodes.find((n) => n.id === childId || (n.data?.urn as string) === childId)
+    if (!child) return
+    const childKey = child.id
+
+    if (child.data?.isPending === 'create') {
+      showToast('info', 'Save this new entity before changing how it relates to its parent.')
+      return
+    }
+
+    const oldEdge = edges.find((e) => e.target === childKey && isContainment(e))
+    if (!oldEdge) {
+      showToast('info', "This entity has no parent yet, so there's no relationship to change.")
+      return
+    }
+    if (normalizeEdgeType(oldEdge) === newEdgeType.toUpperCase()) return  // unchanged — no-op
+
+    const parentKey = oldEdge.source
+    const parent = nodes.find((n) => n.id === parentKey)
+    const childType = child.data?.type as string
+    const parentType = parent?.data?.type as string
+
+    // Validate the requested type is an ALLOWED containment option for this pair.
+    const allowed = deriveContainmentEdges(parentType, childType, relationshipTypes, containmentEdgeTypes)
+      .filter((o) => o.allowed)
+    if (!allowed.some((o) => o.edgeType === newEdgeType)) {
+      showToast('error', "That relationship isn't allowed between these entities.")
+      return
+    }
+
+    // Switching the type removes the old edge, which only persists inside a draft.
+    if (!useBranchStore.getState().currentBranchId) {
+      showToast('info', 'Switch to a draft to change how this entity relates to its parent.')
+      return
+    }
+
+    restageContainment(childKey, parentKey, (parent?.data?.label as string) || parentKey, newEdgeType)
+    showToast('success', 'Relationship updated.')
+  }, [relationshipTypes, containmentEdgeTypes, showToast, isContainment, restageContainment])
+
+  return { reparent, retypeContainment }
 }

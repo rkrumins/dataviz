@@ -20,14 +20,21 @@ import {
   useContainmentEdgeTypes,
 } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { useStagedChanges, useStagedChangesStore } from '@/store/stagedChangesStore'
+import { allowedChildTypeIds, deriveContainmentEdges, type AllowedEdgeOption } from '@/services/ontologyPreflightService'
 import { useStageEntityCreation } from './useStageEntityCreation'
 import type { EntityTypeSchema } from '@/types/schema'
 
-/** Friendly label for a containment relationship id (e.g. `partOf` → "part of"). */
+/** Friendly label for a containment relationship id (e.g. `partOf` → "Part of"). */
 function relationshipLabel(id: string): string {
   const spaced = id.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2')
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase()
+}
+
+/** Prefer the ontology's human label; fall back to a humanized id. Never show a raw ID. */
+function relationshipText(o: AllowedEdgeOption): string {
+  const label = o.label && o.label !== o.edgeType ? o.label : relationshipLabel(o.edgeType)
+  return label
 }
 
 function DynamicIcon({ name, className, style }: { name?: string; className?: string; style?: React.CSSProperties }) {
@@ -174,7 +181,7 @@ export function UnifiedCreatePanel({
     if (!selectedTypeId) { setError('Select an entity type'); return }
     if (!displayName.trim()) { setError('Enter a display name'); return }
     if (noValidContainment) {
-      setError(`The ontology has no containment relationship that nests a '${selectedType?.name ?? selectedTypeId}' under '${parentNode?.data?.label as string ?? parentType}'. Pick a different type or parent.`)
+      setError(`A ${parentNode?.data?.label as string ?? parentType} can’t contain a ${selectedType?.name ?? selectedTypeId}. Pick a different type or parent.`)
       return
     }
 
@@ -194,7 +201,7 @@ export function UnifiedCreatePanel({
 
     onEntityCreated?.(tempUrn, effectiveParentUrn ?? undefined)
     setError(null)   // clear any stale validation error from a prior attempt
-    setSuccess(`Staged '${displayName.trim()}' — click Save to commit`)
+    setSuccess(`Added '${displayName.trim()}' — Save when you’re done`)
     // Keep the type + parent for rapid sibling creation; clear the rest.
     setDisplayName('')
     setDescription('')
@@ -214,6 +221,36 @@ export function UnifiedCreatePanel({
     setTypeQuery('')
     setTimeout(() => typeSearchRef.current?.focus(), 50)
   }, [doStage])
+
+  // Live outline of everything being added this session (staged create_entity changes).
+  const allStaged = useStagedChanges()
+  const discardStaged = useStagedChangesStore((s) => s.discard)
+  const stagedCreates = useMemo(
+    () =>
+      allStaged
+        .filter((c) => c.type === 'create_entity')
+        .map((c) => {
+          const a = (c.after ?? {}) as { displayName?: string; entityType?: string; parentUrn?: string }
+          return { id: c.id, tempUrn: c.targetUrn ?? c.targetId, name: a.displayName || 'Untitled', entityType: a.entityType || '', parentUrn: a.parentUrn }
+        }),
+    [allStaged],
+  )
+
+  /** Re-scope so the next entity nests under `tempUrn` (clears type, focuses the picker). */
+  const targetChild = useCallback((tempUrn: string) => {
+    setParentSel(tempUrn)
+    setSelectedTypeId('')
+    setTypeQuery('')
+    setTimeout(() => typeSearchRef.current?.focus(), 50)
+  }, [])
+
+  // If the targeted parent vanishes (its staged entity was removed/cascaded), fall back to
+  // top level — otherwise the "Creating inside" banner would show a dead raw urn.
+  useEffect(() => {
+    if (effectiveParentUrn && !parentNode && !stagedCreates.some((c) => c.tempUrn === effectiveParentUrn)) {
+      setParentSel('')
+    }
+  }, [effectiveParentUrn, parentNode, stagedCreates])
 
   const onTypeSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setHighlighted((i) => Math.min(i + 1, filteredTypes.length - 1)) }
@@ -251,8 +288,8 @@ export function UnifiedCreatePanel({
                   <LucideIcons.Plus className="w-5 h-5 text-green-500" />
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold text-ink">Create Entity</h3>
-                  <p className="text-xs text-ink-muted">Staged into the draft — Save to commit</p>
+                  <h3 className="text-base font-semibold text-ink">Add entities</h3>
+                  <p className="text-xs text-ink-muted">Build entities &amp; their children — Save when you’re done</p>
                 </div>
               </div>
               <button onClick={onClose} className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
@@ -287,6 +324,16 @@ export function UnifiedCreatePanel({
                 </motion.div>
               )}
             </AnimatePresence>
+
+            {/* Live outline of what's being added — click a row to add the next entity under it. */}
+            <StagedOutline
+              creates={stagedCreates}
+              entityTypes={entityTypes}
+              activeTargetUrn={effectiveParentUrn}
+              onSelectTarget={setParentSel}
+              onAddChild={targetChild}
+              onRemove={discardStaged}
+            />
 
             {/* Parent — editable in detailed, shown as context in quick */}
             {mode === 'detailed' ? (
@@ -364,24 +411,29 @@ export function UnifiedCreatePanel({
               )}
             </div>
 
-            {/* Relationship to parent — only when nesting and a child type is chosen */}
+            {/* How it relates to its parent. Hidden when there's nothing to decide:
+                · 0 valid → a plain "can't go here" note;
+                · 1 valid → a soft "Part of <Parent>" line (no jargon, no choice);
+                · 2+ valid → a friendly question with human-labelled options. */}
             {effectiveParentUrn && selectedTypeId && (
-              <div className="space-y-2">
-                <label className="text-xs font-medium text-ink-muted uppercase tracking-wider">Relationship to parent</label>
-                {noValidContainment ? (
-                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
-                    <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                    <span>No containment relationship in the ontology nests a <span className="font-medium">{selectedType?.name ?? selectedTypeId}</span> under <span className="font-medium">{parentNode?.data?.label as string ?? parentType}</span>. Choose a different type or parent.</span>
-                  </div>
-                ) : containmentOptions.length === 1 ? (
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-canvas-elevated border border-glass-border text-xs text-ink">
-                    <LucideIcons.Link2 className="w-3.5 h-3.5 text-accent-primary flex-shrink-0" />
-                    <span>
-                      Added as <span className="font-semibold">{relationshipLabel(containmentOptions[0].edgeType)}</span>
-                      {' '}<span className="text-ink-muted">{parentNode?.data?.label as string ? `(${parentNode?.data?.label as string})` : ''}</span>
-                    </span>
-                  </div>
-                ) : (
+              noValidContainment ? (
+                <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
+                  <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <span>
+                    A <span className="font-medium">{parentNode?.data?.label as string ?? parentType}</span> can’t contain a{' '}
+                    <span className="font-medium">{selectedType?.name ?? selectedTypeId}</span>. Pick a different type or parent.
+                  </span>
+                </div>
+              ) : containmentOptions.length === 1 ? (
+                <div className="flex items-center gap-1.5 px-1 text-[11px] text-ink-muted">
+                  <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-accent-primary/70" />
+                  <span>{relationshipText(containmentOptions[0])} <span className="text-ink">{parentNode?.data?.label as string ?? ''}</span></span>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-ink-muted">
+                    How is this related to <span className="text-ink">{parentNode?.data?.label as string ?? 'its parent'}</span>?
+                  </label>
                   <div className="space-y-1.5">
                     {containmentOptions.map((o) => (
                       <button
@@ -394,14 +446,14 @@ export function UnifiedCreatePanel({
                           {containmentType === o.edgeType && <span className="w-1.5 h-1.5 rounded-full bg-accent-primary" />}
                         </span>
                         <span className="min-w-0">
-                          <span className="block text-sm font-medium text-ink truncate">{relationshipLabel(o.edgeType)}</span>
+                          <span className="block text-sm font-medium text-ink truncate">{relationshipText(o)}</span>
                           {o.description && <span className="block text-[10px] text-ink-muted truncate">{o.description}</span>}
                         </span>
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
+                </div>
+              )
             )}
 
             {/* Name */}
@@ -461,13 +513,90 @@ export function UnifiedCreatePanel({
               <button type="button" onClick={doStage} disabled={!canSubmit}
                 className={cn('px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2',
                   canSubmit ? 'bg-green-500 text-white hover:bg-green-600 shadow-sm' : 'bg-gray-300 dark:bg-gray-700 text-gray-500 cursor-not-allowed')}>
-                <LucideIcons.Plus className="w-4 h-4" />Stage Entity
+                <LucideIcons.Plus className="w-4 h-4" />Add
               </button>
             </div>
           </div>
         </div>
       </motion.div>
     </AnimatePresence>
+  )
+}
+
+/**
+ * StagedOutline — a live tree of the entities being added this session (the staged
+ * create_entity changes), so the user can see the hierarchy take shape, retarget where
+ * the next entity lands, add a child, or remove a branch. Lets you build many nested
+ * entities and Save once.
+ */
+interface StagedCreate {
+  id: string
+  tempUrn: string
+  name: string
+  entityType: string
+  parentUrn?: string
+}
+function StagedOutline({
+  creates, entityTypes, activeTargetUrn, onSelectTarget, onAddChild, onRemove,
+}: {
+  creates: StagedCreate[]
+  entityTypes: EntityTypeSchema[]
+  activeTargetUrn: string | null
+  onSelectTarget: (tempUrn: string) => void
+  onAddChild: (tempUrn: string) => void
+  onRemove: (changeId: string) => void
+}) {
+  const byTemp = new Map(creates.map((c) => [c.tempUrn, c]))
+  const childrenOf = new Map<string, StagedCreate[]>()
+  const roots: StagedCreate[] = []
+  for (const c of creates) {
+    if (c.parentUrn && byTemp.has(c.parentUrn)) {
+      const arr = childrenOf.get(c.parentUrn) ?? []
+      arr.push(c)
+      childrenOf.set(c.parentUrn, arr)
+    } else {
+      roots.push(c)
+    }
+  }
+
+  const renderRow = (c: StagedCreate, depth: number): React.ReactNode => {
+    const t = entityTypes.find((et) => et.id === c.entityType)
+    const isTarget = activeTargetUrn === c.tempUrn
+    const kids = childrenOf.get(c.tempUrn) ?? []
+    return (
+      <div key={c.id}>
+        <div
+          className={cn('group/row flex items-center gap-1.5 rounded-md pr-1 py-1 transition-colors',
+            isTarget ? 'bg-accent-primary/10 ring-1 ring-accent-primary/40' : 'hover:bg-black/5 dark:hover:bg-white/5')}
+          style={{ paddingLeft: 6 + depth * 14 }}
+        >
+          <span className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${t?.visual?.color}22`, color: t?.visual?.color }}>
+            <DynamicIcon name={t?.visual?.icon} className="w-2.5 h-2.5" />
+          </span>
+          <button onClick={() => onSelectTarget(c.tempUrn)} title="Add the next entity under this one" className="flex-1 min-w-0 text-left">
+            <span className="block text-[12px] text-ink truncate">{c.name}</span>
+          </button>
+          <button onClick={() => onAddChild(c.tempUrn)} title="Add a child" className="opacity-0 group-hover/row:opacity-100 p-0.5 rounded text-ink-muted hover:text-accent-primary transition-all">
+            <LucideIcons.Plus className="w-3.5 h-3.5" />
+          </button>
+          <button onClick={() => onRemove(c.id)} title="Remove" className="opacity-0 group-hover/row:opacity-100 p-0.5 rounded text-ink-muted hover:text-rose-500 transition-all">
+            <LucideIcons.X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        {kids.map((k) => renderRow(k, depth + 1))}
+      </div>
+    )
+  }
+
+  if (creates.length === 0) return null
+  return (
+    <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-2">
+      <div className="flex items-center justify-between px-1 pb-1.5">
+        <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Adding ({creates.length})</span>
+        <span className="text-[10px] text-ink-muted/70">Save to keep</span>
+      </div>
+      <div className="max-h-44 overflow-y-auto custom-scrollbar">{roots.map((r) => renderRow(r, 0))}</div>
+    </div>
   )
 }
 

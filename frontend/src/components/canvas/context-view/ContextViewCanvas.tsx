@@ -402,6 +402,7 @@ export function ContextViewCanvas({
   const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
   const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
+  const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // Step 1: Sync view layers to store when activeView changes
@@ -2078,6 +2079,10 @@ export function ContextViewCanvas({
                 dataSourceId: bs.dataSourceId,
                 branchId: bs.currentBranchId,
                 provider,
+                // Re-key each new entity's layer assignment temp→real as its create resolves,
+                // so a node created in a layer keeps its layer column after Save — and survives
+                // any later create/commit failure without flashing out of the view.
+                remapEntityId,
                 message: `Canvas edits (${stagedChangeList.length})`,
               })
               // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).

@@ -21,6 +21,13 @@ export interface DraftSaveTarget {
   branchId: string
   provider: GraphDataProvider
   message?: string
+  /**
+   * Re-key view-config (layer) assignments from a created entity's temp urn onto its
+   * real urn. Called the instant each create resolves in Phase 1 — coupled to the
+   * optimistic node swap — so the assignment is never lost if a later create or the
+   * Phase-2 commit throws, and the node never flashes out of its layer mid-save.
+   */
+  remapEntityId?: (oldId: string, newId: string) => void
 }
 
 export async function saveStagedChangesToDraft(
@@ -60,6 +67,11 @@ export async function saveStagedChangesToDraft(
     try {
       await c.apply(ctx)
       succeeded.push(c.id)
+      // Re-key this entity's layer assignment temp→real NOW, in the same tick as the
+      // apply hook's node swap — so it survives a later create/Phase-2 failure and the
+      // node never drops out of its layer column during the save. (No-op if unassigned.)
+      const realUrn = c.targetUrn ? tempIdMap.get(c.targetUrn) : undefined
+      if (c.targetUrn && realUrn) target.remapEntityId?.(c.targetUrn, realUrn)
     } catch (e) {
       failures.push({ id: c.id, name, message: (e as Error).message })
       if (c.targetUrn) blockedParentUrns.add(c.targetUrn)
