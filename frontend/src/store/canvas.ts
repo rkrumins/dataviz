@@ -42,6 +42,8 @@ export interface LineageEdge extends Edge {
     sourceEdges?: string[]
     /** OCC token (content hash) the edge was read at — echoed as baseVersion on an edit. */
     version?: string
+    /** Pending change marker — an unsaved (optimistic) edge has no server re-fetch path. */
+    isPending?: 'create' | 'delete' | 'modify'
   }
 }
 
@@ -429,6 +431,15 @@ export const useCanvasStore = create<CanvasState>()(
       removeEdgesByNodeIds: (nodeIds, preserveEdgeIds) => set((state) => {
         const nodeIdSet = nodeIds instanceof Set ? nodeIds : new Set(nodeIds)
         if (nodeIdSet.size === 0) return state
+        // Unsaved (optimistic) nodes have no server record, so an edge attached to one
+        // has NO re-fetch path. The collapse cleanup drops subtree edges expecting
+        // `loadChildren` to re-fetch them on re-expand — true for saved data, but an
+        // unsaved child's containment edge would be lost forever, flattening the
+        // hierarchy. Collapse is a visibility op; it must never destroy unsaved work.
+        const pendingNodeIds = new Set<string>()
+        for (const n of state.nodes) {
+          if (n.data?.isPending === 'create') pendingNodeIds.add(n.id)
+        }
         const nextEdgeIndex = new Set(state._edgeIndex)
         const remainingEdges: LineageEdge[] = []
         for (const e of state.edges) {
@@ -437,7 +448,13 @@ export const useCanvasStore = create<CanvasState>()(
           // endpoint is inside the subtree — see the type definition
           // for the trace-mode rationale.
           const isPreserved = preserveEdgeIds?.has(e.id) === true
-          if (touchesSubtree && !isPreserved) {
+          // An optimistic edge — itself pending, or touching an unsaved node — can't
+          // be re-fetched, so it is preserved unconditionally.
+          const isUnsaved =
+            e.data?.isPending === 'create' ||
+            pendingNodeIds.has(e.source) ||
+            pendingNodeIds.has(e.target)
+          if (touchesSubtree && !isPreserved && !isUnsaved) {
             nextEdgeIndex.delete(e.id)
           } else {
             remainingEdges.push(e)

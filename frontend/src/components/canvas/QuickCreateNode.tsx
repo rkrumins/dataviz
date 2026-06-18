@@ -12,10 +12,23 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useViewEntityTypes } from '@/hooks/useViewSchema'
+import {
+    useEntityTypes,
+    useRootEntityTypes,
+    useEntityTypeHierarchyMap,
+    useRelationshipTypes,
+    useContainmentEdgeTypes,
+} from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
+import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { EntityTypeSchema } from '@/types/schema'
+
+/** Friendly label for a containment relationship id (e.g. `partOf` → "Part of"). */
+function relationshipLabel(id: string): string {
+    const spaced = id.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2')
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase()
+}
 
 // ============================================
 // Types
@@ -54,8 +67,13 @@ export function QuickCreateNode({
     
     const provider = useGraphProvider()
     const { addNodes, addEdges } = useCanvasStore()
-    const entityTypes = useViewEntityTypes()
-    
+    const nodes = useCanvasStore((s) => s.nodes)
+    const entityTypes = useEntityTypes()
+    const rootEntityTypes = useRootEntityTypes()
+    const hierarchyMap = useEntityTypeHierarchyMap()
+    const relationshipTypes = useRelationshipTypes()
+    const containmentEdgeTypes = useContainmentEdgeTypes()
+
     // State
     const [step, setStep] = useState<'type' | 'name'>('type')
     const [typeQuery, setTypeQuery] = useState('')
@@ -64,18 +82,50 @@ export function QuickCreateNode({
     const [isCreating, setIsCreating] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [highlightedIndex, setHighlightedIndex] = useState(0)
-    
+    const [containmentType, setContainmentType] = useState<string>('')
+
+    // Resolve the parent node + its entity type (mirrors UnifiedCreatePanel).
+    const parentNode = useMemo(
+        () => (parentUrn ? nodes.find((n) => n.id === parentUrn || (n.data?.urn as string) === parentUrn) : null),
+        [nodes, parentUrn],
+    )
+    const parentType = (parentNode?.data?.type as string) || null
+
+    // Ontology-allowed child types for the current parent (or roots when no parent).
+    const availableTypes = useMemo<EntityTypeSchema[]>(() => {
+        const allowed = allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap)
+        return entityTypes.filter((et) => allowed.has(et.id))
+    }, [entityTypes, parentType, rootEntityTypes, hierarchyMap])
+
     // Filter entity types based on query
     const filteredTypes = useMemo(() => {
-        if (!typeQuery.trim()) return entityTypes.slice(0, 8)
-        
+        if (!typeQuery.trim()) return availableTypes.slice(0, 8)
+
         const query = typeQuery.toLowerCase()
-        return entityTypes.filter(t => 
+        return availableTypes.filter(t =>
             t.name.toLowerCase().includes(query) ||
             t.id.toLowerCase().includes(query)
         ).slice(0, 8)
-    }, [entityTypes, typeQuery])
-    
+    }, [availableTypes, typeQuery])
+
+    // Ontology-allowed containment relationship types for parent→selected child.
+    const containmentOptions = useMemo(() => {
+        if (!parentUrn || !parentType || !selectedType) return []
+        return deriveContainmentEdges(parentType, selectedType.id, relationshipTypes, containmentEdgeTypes)
+            .filter((o) => o.allowed)
+    }, [parentUrn, parentType, selectedType, relationshipTypes, containmentEdgeTypes])
+
+    // Auto-select when exactly one relationship is valid (or the current pick became invalid).
+    useEffect(() => {
+        if (containmentOptions.length === 0) { setContainmentType(''); return }
+        setContainmentType((prev) =>
+            prev && containmentOptions.some((o) => o.edgeType === prev) ? prev : containmentOptions[0].edgeType,
+        )
+    }, [containmentOptions])
+
+    // True when nesting is requested but the ontology permits no containment relationship.
+    const noValidContainment = Boolean(parentUrn && selectedType && containmentOptions.length === 0)
+
     // Reset state when opened
     useEffect(() => {
         if (isOpen) {
@@ -85,6 +135,7 @@ export function QuickCreateNode({
             setEntityName('')
             setError(null)
             setHighlightedIndex(0)
+            setContainmentType('')
             setTimeout(() => typeInputRef.current?.focus(), 50)
         }
     }, [isOpen])
@@ -122,17 +173,24 @@ export function QuickCreateNode({
     // Handle creation
     const handleCreate = useCallback(async () => {
         if (!selectedType || !entityName.trim() || isCreating) return
-        
+
+        if (noValidContainment) {
+            setError(`No containment relationship nests a ${selectedType.name} under ${(parentNode?.data?.label as string) ?? parentType}`)
+            return
+        }
+
         setIsCreating(true)
         setError(null)
-        
+
         try {
             if (provider) {
                 const result = await provider.createNode({
                     entityType: selectedType.id as any,
                     displayName: entityName.trim(),
                     parentUrn: parentUrn,
+                    containmentEdgeType: parentUrn ? (containmentType || undefined) : undefined,
                     properties: {},
+                    tags: [],
                 })
                 
                 if (!result.success) {
@@ -151,7 +209,6 @@ export function QuickCreateNode({
                             label: result.node.displayName,
                             type: result.node.entityType,
                             urn: result.node.urn,
-                            description: result.node.description,
                             classifications: result.node.tags,
                             ...result.node.properties,
                         },
@@ -195,7 +252,7 @@ export function QuickCreateNode({
         } finally {
             setIsCreating(false)
         }
-    }, [selectedType, entityName, parentUrn, provider, addNodes, addEdges, position, onClose, onCreated, isCreating])
+    }, [selectedType, entityName, parentUrn, containmentType, noValidContainment, parentNode, parentType, provider, addNodes, addEdges, position, onClose, onCreated, isCreating])
     
     // Keyboard navigation
     const handleTypeKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -399,7 +456,49 @@ export function QuickCreateNode({
                                 {parentUrn && (
                                     <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs">
                                         <LucideIcons.GitFork className="w-3.5 h-3.5" />
-                                        Creating as child of selected entity
+                                        Creating inside <span className="font-medium">{(parentNode?.data?.label as string) ?? parentUrn}</span>
+                                    </div>
+                                )}
+
+                                {/* Relationship to parent — only when nesting under a parent */}
+                                {parentUrn && selectedType && (
+                                    <div>
+                                        <label className="text-xs font-medium text-ink-muted mb-1 block">Relationship to parent</label>
+                                        {noValidContainment ? (
+                                            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs">
+                                                <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                                                <span>No containment relationship nests a <span className="font-medium">{selectedType.name}</span> under <span className="font-medium">{(parentNode?.data?.label as string) ?? parentType}</span>.</span>
+                                            </div>
+                                        ) : containmentOptions.length === 1 ? (
+                                            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-black/5 dark:bg-white/5 border border-glass-border text-xs text-ink">
+                                                <LucideIcons.Link2 className="w-3.5 h-3.5 text-accent-lineage flex-shrink-0" />
+                                                Added as <span className="font-semibold">{relationshipLabel(containmentOptions[0].edgeType)}</span>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-1">
+                                                {containmentOptions.map((o) => (
+                                                    <button
+                                                        key={o.edgeType}
+                                                        type="button"
+                                                        onClick={() => setContainmentType(o.edgeType)}
+                                                        className={cn(
+                                                            'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-colors',
+                                                            containmentType === o.edgeType
+                                                                ? 'border-accent-lineage bg-accent-lineage/5'
+                                                                : 'border-glass-border hover:border-ink-muted/50',
+                                                        )}
+                                                    >
+                                                        <span className={cn(
+                                                            'w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 grid place-items-center',
+                                                            containmentType === o.edgeType ? 'border-accent-lineage' : 'border-ink-muted/40',
+                                                        )}>
+                                                            {containmentType === o.edgeType && <span className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />}
+                                                        </span>
+                                                        <span className="text-sm font-medium text-ink truncate">{relationshipLabel(o.edgeType)}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -415,7 +514,7 @@ export function QuickCreateNode({
                         </span>
                         <button
                             onClick={handleCreate}
-                            disabled={!entityName.trim() || isCreating}
+                            disabled={!entityName.trim() || isCreating || noValidContainment}
                             className={cn(
                                 "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors duration-150",
                                 "bg-gradient-to-r from-accent-lineage to-accent-lineage-hover text-white",

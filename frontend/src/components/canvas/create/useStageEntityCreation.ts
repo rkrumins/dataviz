@@ -28,6 +28,12 @@ export interface StageEntityInput {
   tags?: string[]
   /** Free-form properties (description, custom schema fields, etc.). */
   properties?: Record<string, unknown>
+  /**
+   * The ontology containment relationship to use for the parent→child edge
+   * (e.g. CONTAINS / partOf / belongsTo). When omitted, falls back to the first
+   * resolved containment type. Ignored when there is no parent.
+   */
+  containmentEdgeType?: string
 }
 
 export function useStageEntityCreation() {
@@ -50,16 +56,20 @@ export function useStageEntityCreation() {
       // the hierarchy. When the parent isn't a node, create at the root and let
       // layer assignment place it.
       const parentUrnRaw = input.parentUrn || undefined
-      const parentIsNode = parentUrnRaw
-        ? useCanvasStore.getState().nodes.some(
+      const parentNode = parentUrnRaw
+        ? useCanvasStore.getState().nodes.find(
             (n) => n.id === parentUrnRaw || (n.data?.urn as string) === parentUrnRaw,
           )
-        : false
-      const parentUrn = parentIsNode ? parentUrnRaw : undefined
+        : undefined
+      const parentUrn = parentNode ? parentUrnRaw : undefined
+      const parentLabel = (parentNode?.data?.label as string) || undefined
 
       const tempUrn = `urn:staged:${input.entityType}:${generateId('new')}`
       const containmentEdgeId = parentUrn ? `contains-${parentUrn}-${tempUrn}` : null
-      const containmentEdgeType = containmentEdgeTypes[0] ?? 'CONTAINS'
+      // Prefer the caller's ontology-chosen relationship; fall back to the first
+      // resolved containment type (then the literal CONTAINS) for callers that
+      // don't pick one.
+      const containmentEdgeType = input.containmentEdgeType || containmentEdgeTypes[0] || 'CONTAINS'
 
       addNodes([{
         id: tempUrn,
@@ -81,7 +91,10 @@ export function useStageEntityCreation() {
           source: parentUrn,
           target: tempUrn,
           type: 'containment',
-          data: { edgeType: containmentEdgeType, relationship: containmentEdgeType.toLowerCase() },
+          // `isPending:'create'` marks this as optimistic/unsaved so the collapse
+          // cleanup never drops it (no server re-fetch path) — keeps the hierarchy
+          // intact through collapse/expand before Save.
+          data: { edgeType: containmentEdgeType, relationship: containmentEdgeType.toLowerCase(), isPending: 'create' },
         }])
       }
 
@@ -89,8 +102,14 @@ export function useStageEntityCreation() {
         type: 'create_entity',
         targetId: tempUrn,
         targetUrn: tempUrn,
-        after: { entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties },
-        summary: `Create ${input.entityType}: '${input.displayName}'`,
+        after: {
+          entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties,
+          // Recorded so the staged-changes review can show how the child is related to its parent.
+          ...(parentUrn ? { containmentEdgeType, parentLabel } : {}),
+        },
+        summary: parentUrn
+          ? `Create ${input.entityType}: '${input.displayName}' · ${containmentEdgeType}${parentLabel ? ` ${parentLabel}` : ''}`
+          : `Create ${input.entityType}: '${input.displayName}'`,
         apply: async ({ provider, registerTempIdResolution, resolveTempId }) => {
           if (!provider) {
             // No provider — accept the local-only creation by clearing the pending flag.
@@ -104,6 +123,7 @@ export function useStageEntityCreation() {
             entityType: input.entityType as never,
             displayName: input.displayName,
             parentUrn: resolvedParent,
+            containmentEdgeType: parentUrn ? containmentEdgeType : undefined,
             properties,
             tags,
           })

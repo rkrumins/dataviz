@@ -1664,6 +1664,41 @@ class ContextEngine:
             if resolved and resolved.containment_edge_types:
                 containment_type = resolved.containment_edge_types[0]
 
+            # Honour a client-chosen containment relationship, validated against the
+            # resolved ontology: it must be a real containment type, and (when the
+            # relationship declares endpoint constraints) compatible with the parent/
+            # child entity types in the FORWARD orientation. The edge is always stored
+            # parent→child (source=parent), so the parent must be an allowed source and
+            # the child an allowed target — a predicate authored child→parent would be
+            # persisted against its own constraints. Reject an invalid choice rather
+            # than silently substituting.
+            requested = request.containment_edge_type
+            if requested:
+                ct_by_upper = {t.upper(): t for t in (resolved.containment_edge_types if resolved else [])}
+                canonical = ct_by_upper.get(requested.upper())
+                if not canonical:
+                    return CreateNodeResult(
+                        node=None, containmentEdge=None, success=False,
+                        error=f"'{requested}' is not a containment relationship type",
+                    )
+                rel_def = (resolved.relationship_type_definitions.get(canonical) if resolved else None)
+                if rel_def is not None:
+                    src = list(getattr(rel_def, "source_types", None) or [])
+                    tgt = list(getattr(rel_def, "target_types", None) or [])
+
+                    def _ok(entity: str, allowed: List[str]) -> bool:
+                        return (not allowed) or ("*" in allowed) or (entity in allowed)
+
+                    if not (_ok(parent_entity_type, src) and _ok(str(request.entity_type), tgt)):
+                        return CreateNodeResult(
+                            node=None, containmentEdge=None, success=False,
+                            error=(
+                                f"'{canonical}' can't nest a '{request.entity_type}' under a "
+                                f"'{parent_entity_type}'"
+                            ),
+                        )
+                containment_type = canonical
+
             containment_edge = GraphEdge(
                 id=f"contains-{request.parent_urn}-{urn}",
                 sourceUrn=request.parent_urn,

@@ -524,11 +524,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (childCount === 0) return
 
         const existingNodeIds = new Set(nodes.map(n => n.id))
+        // Optimistic, unsaved children aren't part of the backend's `childCount` and have no
+        // server page — counting them would skew the pagination offset (skipping a real child)
+        // and trip the "all loaded" short-circuit. Tally only SAVED children here.
+        const pendingNodeIds = new Set(
+            nodes.filter(n => (n.data as any)?.isPending === 'create').map(n => n.id),
+        )
 
-        // Count loaded children via containment edges (ontology-driven)
+        // Count loaded SAVED children via containment edges (ontology-driven)
         const currentChildrenCount = edges.filter(e => {
             if (e.source !== parentId) return false
             if (!existingNodeIds.has(e.target)) return false
+            if (e.data?.isPending === 'create' || pendingNodeIds.has(e.target)) return false
             return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         }).length
 

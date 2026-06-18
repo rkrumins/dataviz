@@ -16,11 +16,19 @@ import {
   useEntityTypes,
   useRootEntityTypes,
   useEntityTypeHierarchyMap,
+  useRelationshipTypes,
+  useContainmentEdgeTypes,
 } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
-import { allowedChildTypeIds } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 import { useStageEntityCreation } from './useStageEntityCreation'
 import type { EntityTypeSchema } from '@/types/schema'
+
+/** Friendly label for a containment relationship id (e.g. `partOf` → "part of"). */
+function relationshipLabel(id: string): string {
+  const spaced = id.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2')
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase()
+}
 
 function DynamicIcon({ name, className, style }: { name?: string; className?: string; style?: React.CSSProperties }) {
   const Icon = name
@@ -55,6 +63,8 @@ export function UnifiedCreatePanel({
   const entityTypes = useEntityTypes()
   const rootEntityTypes = useRootEntityTypes()
   const hierarchyMap = useEntityTypeHierarchyMap()
+  const relationshipTypes = useRelationshipTypes()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
   const nodes = useCanvasStore((s) => s.nodes)
   const { stageEntity } = useStageEntityCreation()
 
@@ -70,6 +80,7 @@ export function UnifiedCreatePanel({
   const [parentSel, setParentSel] = useState<string>(parentUrn || '')
   const [typeQuery, setTypeQuery] = useState('')
   const [highlighted, setHighlighted] = useState(0)
+  const [containmentType, setContainmentType] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
@@ -85,6 +96,7 @@ export function UnifiedCreatePanel({
     setParentSel(parentUrn || '')
     setTypeQuery('')
     setHighlighted(0)
+    setContainmentType('')
     setError(null)
     setSuccess(null)
     setTimeout(() => typeSearchRef.current?.focus(), 60)
@@ -111,6 +123,27 @@ export function UnifiedCreatePanel({
   }, [availableTypes, typeQuery])
 
   const selectedType = useMemo(() => entityTypes.find((et) => et.id === selectedTypeId), [entityTypes, selectedTypeId])
+
+  // Ontology-allowed containment relationship types for parent→child. Only meaningful
+  // when nesting under a parent and a child type is chosen.
+  const containmentOptions = useMemo(() => {
+    if (!effectiveParentUrn || !parentType || !selectedTypeId) return []
+    return deriveContainmentEdges(parentType, selectedTypeId, relationshipTypes, containmentEdgeTypes)
+      .filter((o) => o.allowed)
+  }, [effectiveParentUrn, parentType, selectedTypeId, relationshipTypes, containmentEdgeTypes])
+
+  // Auto-select when exactly one relationship is valid (or the current pick became invalid).
+  useEffect(() => {
+    if (containmentOptions.length === 0) { setContainmentType(''); return }
+    setContainmentType((prev) =>
+      prev && containmentOptions.some((o) => o.edgeType === prev) ? prev : containmentOptions[0].edgeType,
+    )
+  }, [containmentOptions])
+
+  // True when nesting is requested but the ontology permits no containment relationship.
+  const noValidContainment = Boolean(effectiveParentUrn && selectedTypeId && containmentOptions.length === 0)
+
+  const canSubmit = Boolean(selectedTypeId && displayName.trim() && !noValidContainment)
 
   // Potential parents = existing nodes whose type can contain something.
   const potentialParents = useMemo(() => {
@@ -140,6 +173,10 @@ export function UnifiedCreatePanel({
   const doStage = useCallback(() => {
     if (!selectedTypeId) { setError('Select an entity type'); return }
     if (!displayName.trim()) { setError('Enter a display name'); return }
+    if (noValidContainment) {
+      setError(`The ontology has no containment relationship that nests a '${selectedType?.name ?? selectedTypeId}' under '${parentNode?.data?.label as string ?? parentType}'. Pick a different type or parent.`)
+      return
+    }
 
     const tags = tagsInput.split(',').map((t) => t.trim()).filter(Boolean)
     const properties: Record<string, unknown> = { ...fieldValues }
@@ -150,11 +187,13 @@ export function UnifiedCreatePanel({
       entityType: selectedTypeId,
       displayName: displayName.trim(),
       parentUrn: effectiveParentUrn,
+      containmentEdgeType: effectiveParentUrn ? (containmentType || undefined) : undefined,
       tags,
       properties,
     })
 
     onEntityCreated?.(tempUrn, effectiveParentUrn ?? undefined)
+    setError(null)   // clear any stale validation error from a prior attempt
     setSuccess(`Staged '${displayName.trim()}' — click Save to commit`)
     // Keep the type + parent for rapid sibling creation; clear the rest.
     setDisplayName('')
@@ -163,7 +202,18 @@ export function UnifiedCreatePanel({
     setFieldValues({})
     setTimeout(() => setSuccess(null), 1600)
     if (mode === 'quick') setTimeout(() => nameRef.current?.focus(), 50)
-  }, [selectedTypeId, displayName, tagsInput, fieldValues, description, layerId, effectiveParentUrn, stageEntity, onEntityCreated, mode])
+    return tempUrn
+  }, [selectedTypeId, displayName, tagsInput, fieldValues, description, layerId, effectiveParentUrn, containmentType, noValidContainment, selectedType, parentNode, parentType, stageEntity, onEntityCreated, mode])
+
+  /** Outliner move: stage, then re-scope so the NEXT entity nests under the one just created. */
+  const doStageThenNest = useCallback(() => {
+    const tempUrn = doStage()
+    if (!tempUrn) return
+    setParentSel(tempUrn)
+    setSelectedTypeId('')
+    setTypeQuery('')
+    setTimeout(() => typeSearchRef.current?.focus(), 50)
+  }, [doStage])
 
   const onTypeSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setHighlighted((i) => Math.min(i + 1, filteredTypes.length - 1)) }
@@ -173,13 +223,15 @@ export function UnifiedCreatePanel({
   }, [filteredTypes, highlighted, selectType, onClose])
 
   const onNameKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') { e.preventDefault(); doStage() }
+    // Outliner-style: Enter stages a sibling (keeps the parent); Shift+Enter or Tab
+    // stages and nests — the next entity becomes a child of the one just created.
+    if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); doStageThenNest() }
+    else if (e.key === 'Enter') { e.preventDefault(); doStage() }
+    else if (e.key === 'Tab' && !e.shiftKey && canSubmit) { e.preventDefault(); doStageThenNest() }
     else if (e.key === 'Escape') { e.preventDefault(); onClose() }
-  }, [doStage, onClose])
+  }, [doStage, doStageThenNest, canSubmit, onClose])
 
   if (!isOpen) return null
-
-  const canSubmit = Boolean(selectedTypeId && displayName.trim())
 
   return (
     <AnimatePresence>
@@ -312,6 +364,46 @@ export function UnifiedCreatePanel({
               )}
             </div>
 
+            {/* Relationship to parent — only when nesting and a child type is chosen */}
+            {effectiveParentUrn && selectedTypeId && (
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-ink-muted uppercase tracking-wider">Relationship to parent</label>
+                {noValidContainment ? (
+                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
+                    <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                    <span>No containment relationship in the ontology nests a <span className="font-medium">{selectedType?.name ?? selectedTypeId}</span> under <span className="font-medium">{parentNode?.data?.label as string ?? parentType}</span>. Choose a different type or parent.</span>
+                  </div>
+                ) : containmentOptions.length === 1 ? (
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-canvas-elevated border border-glass-border text-xs text-ink">
+                    <LucideIcons.Link2 className="w-3.5 h-3.5 text-accent-primary flex-shrink-0" />
+                    <span>
+                      Added as <span className="font-semibold">{relationshipLabel(containmentOptions[0].edgeType)}</span>
+                      {' '}<span className="text-ink-muted">{parentNode?.data?.label as string ? `(${parentNode?.data?.label as string})` : ''}</span>
+                    </span>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {containmentOptions.map((o) => (
+                      <button
+                        key={o.edgeType} type="button" onClick={() => setContainmentType(o.edgeType)}
+                        className={cn('w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-colors',
+                          containmentType === o.edgeType ? 'border-accent-primary bg-accent-primary/5' : 'border-glass-border hover:border-ink-muted/50')}
+                      >
+                        <span className={cn('w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 grid place-items-center',
+                          containmentType === o.edgeType ? 'border-accent-primary' : 'border-ink-muted/40')}>
+                          {containmentType === o.edgeType && <span className="w-1.5 h-1.5 rounded-full bg-accent-primary" />}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-sm font-medium text-ink truncate">{relationshipLabel(o.edgeType)}</span>
+                          {o.description && <span className="block text-[10px] text-ink-muted truncate">{o.description}</span>}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Name */}
             <div className="space-y-2">
               <label className="text-xs font-medium text-ink-muted uppercase tracking-wider">Display Name <span className="text-red-400">*</span></label>
@@ -361,7 +453,8 @@ export function UnifiedCreatePanel({
           {/* Footer */}
           <div className="flex-shrink-0 px-5 py-4 border-t border-glass-border bg-canvas-elevated/95 flex items-center justify-between gap-3">
             <span className="text-[10px] text-ink-muted">
-              Press <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">↵</kbd> to stage another
+              <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">↵</kbd> sibling ·{' '}
+              <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">⇥</kbd> child
             </span>
             <div className="flex items-center gap-2">
               <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-medium bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/20 transition-colors">Done</button>

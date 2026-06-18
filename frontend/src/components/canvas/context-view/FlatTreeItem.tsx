@@ -16,6 +16,7 @@ import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
+import { useReparentNode } from './useReparentNode'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -235,12 +236,33 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     }
   }, [node.id, node.name, isLayerDraggable])
 
+  const { reparent } = useReparentNode()
+  const [dropHover, setDropHover] = useState(false)
+
   return (
     <div
       ref={itemRef}
       id={`layer-node-${node.id}`}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
+      onDragOver={(e) => {
+        // Accept a node drag (reparent). The id can't be read during dragover, so we
+        // can't exclude self here — `reparent` guards self/cycles on drop.
+        if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.dataTransfer.dropEffect = 'move'
+        if (!dropHover) setDropHover(true)
+      }}
+      onDragLeave={() => { if (dropHover) setDropHover(false) }}
+      onDrop={(e) => {
+        const draggedId = e.dataTransfer.getData('text/x-entity-id')
+        if (!draggedId) return
+        e.preventDefault()
+        e.stopPropagation()   // take precedence over the layer-column drop (move-to-layer)
+        setDropHover(false)
+        if (draggedId !== node.id) reparent(draggedId, node.id)
+      }}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative z-[2]",
         paddingClass,
@@ -288,7 +310,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40",
         // Jump-to-node arrival pulse — one-shot ring animation
-        isPulsing && "lineage-pulse"
+        isPulsing && "lineage-pulse",
+        // Reparent drop target — a node drag is hovering over this row
+        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20"
       )}
       style={{
         paddingLeft: 12 + indentWidth,

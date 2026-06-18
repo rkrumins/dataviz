@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   isDrawableLineageType,
   deriveConnectableEdges,
+  deriveContainmentEdges,
+  isContainmentRelType,
   allowedChildTypeIds,
   NON_DRAWABLE_EDGE_TYPES,
 } from '../ontologyPreflightService'
@@ -77,6 +79,55 @@ describe('deriveConnectableEdges', () => {
     const out = deriveConnectableEdges('anything', 'whatever', wild, [])
     expect(out.every((o) => o.allowed)).toBe(true)
     expect(out.map((o) => o.edgeType).sort()).toEqual(['LINKS', 'STAR'])
+  })
+})
+
+describe('isContainmentRelType', () => {
+  it('uses the explicit flag when present', () => {
+    expect(isContainmentRelType(rt('CONTAINS', [], [], { isContainment: true }), [])).toBe(true)
+    expect(isContainmentRelType(rt('FLOWS_TO', [], [], { isContainment: false }), ['FLOWS_TO'])).toBe(false)
+  })
+  it('falls back to containmentEdgeTypes membership (case-insensitive)', () => {
+    expect(isContainmentRelType(rt('part_of', [], []), ['PART_OF'])).toBe(true)
+    expect(isContainmentRelType(rt('UNRELATED', [], []), ['CONTAINS'])).toBe(false)
+  })
+})
+
+describe('deriveContainmentEdges', () => {
+  const rels = [
+    rt('CONTAINS', ['system'], ['dataset'], { isContainment: true }),  // parent→child (system contains dataset)
+    rt('PART_OF', ['dataset'], ['system'], { isContainment: true }),   // authored child→parent
+    rt('FLOWS_TO', ['dataset'], ['dataset'], { isLineage: true }),     // not containment
+  ]
+
+  it('offers only containment types, never lineage', () => {
+    const out = deriveContainmentEdges('system', 'dataset', rels, [])
+    expect(out.find((o) => o.edgeType === 'FLOWS_TO')).toBeUndefined()
+  })
+
+  it('allows CONTAINS in the parent→child (forward) orientation', () => {
+    const out = deriveContainmentEdges('system', 'dataset', rels, [])
+    expect(out.find((o) => o.edgeType === 'CONTAINS')?.allowed).toBe(true)
+  })
+
+  it('rejects a child→parent predicate (forward-only): the edge is stored parent→child', () => {
+    // parent=system, child=dataset; PART_OF is authored source=dataset(child), target=system(parent),
+    // so the parent 'system' is not an allowed source → not offered for nesting.
+    const out = deriveContainmentEdges('system', 'dataset', rels, [])
+    expect(out.find((o) => o.edgeType === 'PART_OF')?.allowed).toBe(false)
+  })
+
+  it('disallows when the forward orientation fails, with a reason', () => {
+    const out = deriveContainmentEdges('system', 'system', rels, [])
+    const contains = out.find((o) => o.edgeType === 'CONTAINS')
+    expect(contains?.allowed).toBe(false)
+    expect(contains?.reason).toBeTruthy()
+  })
+
+  it('treats membership-only containment types (no flag) as containment', () => {
+    const out = deriveContainmentEdges('a', 'b', [rt('OWNS', [], [])], ['OWNS'])
+    expect(out.map((o) => o.edgeType)).toEqual(['OWNS'])
+    expect(out[0].allowed).toBe(true) // wildcard endpoints
   })
 })
 

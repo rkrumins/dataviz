@@ -73,6 +73,47 @@ function endpointOk(type: string | null, allowedTypes: string[] | undefined): bo
   return !type || !allowedTypes?.length || allowedTypes.includes('*') || allowedTypes.includes(type)
 }
 
+/** Whether a relationship type is a containment edge (explicit flag, or membership fallback). */
+export function isContainmentRelType(
+  rt: RelationshipTypeSchema,
+  containmentEdgeTypes: string[],
+): boolean {
+  if (rt.isContainment != null) return rt.isContainment
+  const set = new Set(containmentEdgeTypes.map((t) => t.toUpperCase()))
+  return set.has(rt.id.toUpperCase())
+}
+
+/**
+ * The containment relationship types that may nest a `childType` under a
+ * `parentType`. A containment edge is ALWAYS stored parent→child (source=parent,
+ * target=child), so a type is only valid when the pair satisfies its endpoint
+ * constraints in that FORWARD orientation — i.e. the parent type is an allowed
+ * source and the child type an allowed target. (A predicate authored child→parent,
+ * such as a restrictively-typed `partOf`, would be stored against its own
+ * constraints, so it is correctly excluded; model it as parent→child in the
+ * ontology to use it for nesting.) Empty / '*' endpoint lists mean unrestricted.
+ * A type failing forward is returned `allowed:false` with a reason. The server
+ * re-validates authoritatively on save.
+ */
+export function deriveContainmentEdges(
+  parentType: string | null,
+  childType: string | null,
+  relationshipTypes: RelationshipTypeSchema[],
+  containmentEdgeTypes: string[],
+): AllowedEdgeOption[] {
+  return relationshipTypes
+    .filter((rt) => isContainmentRelType(rt, containmentEdgeTypes))
+    .map((rt) => {
+      const srcOk = endpointOk(parentType, rt.sourceTypes)   // parent must be an allowed source
+      const tgtOk = endpointOk(childType, rt.targetTypes)    // child must be an allowed target
+      const allowed = srcOk && tgtOk
+      let reason: string | undefined
+      if (!srcOk) reason = `'${parentType ?? '(root)'}' can't be the parent for '${rt.id}'`
+      else if (!tgtOk) reason = `'${childType ?? '?'}' can't be nested under '${parentType ?? '(root)'}' via '${rt.id}'`
+      return { edgeType: rt.id, label: rt.name ?? rt.id, description: rt.description, allowed, reason }
+    })
+}
+
 /**
  * The raw lineage edge types that may connect `sourceType` → `targetType`,
  * checking BOTH endpoints against the ontology (the connect flow knows both

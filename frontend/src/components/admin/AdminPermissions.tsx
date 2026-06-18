@@ -1695,7 +1695,7 @@ function WorkspaceMembersDetail({
 // Role editor (read-only for system roles, editable for custom roles)
 // ─────────────────────────────────────────────────────────────────────
 
-function RoleEditorDrawer({
+export function RoleEditorDrawer({
     role, permissions, onClose, onChanged,
 }: {
     role: RoleDefinitionResponse

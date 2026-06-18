@@ -130,6 +130,40 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
 
 const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
 
+/**
+ * The `root` change plus every staged `create_entity` descendant of it, found by
+ * walking the temp-urn → `after.parentUrn` linkage. Returned LEAF-FIRST (deepest
+ * descendants before their ancestors) so discard hooks restore children before
+ * parents, regardless of staging order or same-millisecond timestamps. Used so
+ * discarding a staged parent also discards the children created under it (no orphans).
+ */
+function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedChange[] {
+  const victims: StagedChange[] = [root]
+  const victimIds = new Set<string>([root.id])
+  const depthById = new Map<string, number>([[root.id, 0]])
+  // temp urn → depth, so a child can resolve its depth from its parentUrn.
+  const urnDepth = new Map<string, number>()
+  if (root.type === 'create_entity' && root.targetUrn) urnDepth.set(root.targetUrn, 0)
+  let grew = urnDepth.size > 0
+  while (grew) {
+    grew = false
+    for (const c of all) {
+      if (c.type !== 'create_entity' || victimIds.has(c.id)) continue
+      const pu = (c.after as { parentUrn?: string } | undefined)?.parentUrn
+      if (pu && urnDepth.has(pu)) {
+        const d = (urnDepth.get(pu) ?? 0) + 1
+        depthById.set(c.id, d)
+        victims.push(c)
+        victimIds.add(c.id)
+        if (c.targetUrn) urnDepth.set(c.targetUrn, d)
+        grew = true
+      }
+    }
+  }
+  // Deepest first; stable sort keeps siblings in their original (creation) order.
+  return [...victims].sort((a, b) => (depthById.get(b.id) ?? 0) - (depthById.get(a.id) ?? 0))
+}
+
 export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   changes: [],
   isReviewPanelOpen: false,
@@ -188,16 +222,30 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   },
 
   discard: (changeId) => {
-    const change = get().changes.find((c) => c.id === changeId)
-    if (!change) return
-    try {
-      change.discard?.()
-    } catch (err) {
-      console.error('[StagedChanges] discard hook failed', err)
+    const all = get().changes
+    const root = all.find((c) => c.id === changeId)
+    if (!root) return
+    // Cascade: discarding a staged parent entity must also discard its staged
+    // children (and their descendants). Otherwise the child's parent would never
+    // exist on save and it would surface orphaned at the top level. Match by the
+    // temp-urn → after.parentUrn linkage of staged create_entity changes; the
+    // result is leaf-first so each discard hook restores children before parents.
+    const ordered = collectStagedSubtree(all, root)
+    for (const v of ordered) {
+      try {
+        v.discard?.()
+      } catch (err) {
+        console.error('[StagedChanges] discard hook failed', err)
+      }
     }
+    const victimIds = new Set(ordered.map((v) => v.id))
     set((s) => ({
-      changes: s.changes.filter((c) => c.id !== changeId),
-      redoStack: [...s.redoStack, change],
+      changes: s.changes.filter((c) => !victimIds.has(c.id)),
+      // `redo` only re-stages the change record; it cannot re-create the optimistic
+      // canvas node/edge a create's discard hook removed. Re-staging a create would
+      // leave a phantom entry pointing at a node that no longer exists, so creates are
+      // not redoable — only non-create changes (delete/rename/edge edits) go on the stack.
+      redoStack: [...s.redoStack, ...ordered.filter((c) => c.type !== 'create_entity')],
     }))
   },
 

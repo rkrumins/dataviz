@@ -291,6 +291,13 @@ export interface CreateNodeRequest {
     entityType: EntityType
     displayName: string
     parentUrn?: string
+    /**
+     * Ontology containment relationship for the auto-created parent→child edge
+     * (e.g. CONTAINS / partOf / belongsTo). The server validates it is a containment
+     * type allowed between the parent and child entity types. Omit to let the server
+     * pick the default. Ignored when there is no parentUrn.
+     */
+    containmentEdgeType?: string
     properties: Record<string, unknown>
     tags: string[]
 }

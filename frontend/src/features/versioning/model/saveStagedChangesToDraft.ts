@@ -11,7 +11,7 @@
  * no working apply hook (or hit the unscoped endpoint) and so never persisted.
  */
 import { applyGraphChanges, type GraphChangeOp } from '@/services/versioningApiService'
-import type { ApplyContext, StagedChange } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type ApplyContext, type StagedChange } from '@/store/stagedChangesStore'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { stagedChangesToOps } from './stagedChangesToOps'
 
@@ -35,11 +35,55 @@ export async function saveStagedChangesToDraft(
     registerTempIdResolution: (t, r) => tempIdMap.set(t, r),
   }
 
-  // Phase 1 — creates via the proven branch-scoped provider path.
+  // Phase 1 — creates via the proven branch-scoped provider path. Each create is
+  // attempted independently so an ontology rejection (e.g. an illegal containment
+  // relationship) is attributed to its specific entity rather than aborting the
+  // batch opaquely. If ANY create fails we drop the ones that already persisted
+  // (so a retry can't duplicate them), skip children of a failed parent, flag the
+  // failures, and stop before the mutation commit — never persist a partial hierarchy.
+  const succeeded: string[] = []
+  const failures: { id: string; name: string; message: string }[] = []
+  // Temp urns of creates that failed or were skipped — their descendants can't resolve a parent.
+  const blockedParentUrns = new Set<string>()
   for (const c of changes) {
-    if (c.type === 'create_entity' && c.apply) {
-      await c.apply(ctx)
+    if (c.type !== 'create_entity' || !c.apply) continue
+    const after = c.after as { displayName?: string; parentUrn?: string } | undefined
+    const name = after?.displayName || c.targetId
+    const parentUrn = after?.parentUrn
+    // A child of a staged parent that already failed can never resolve its parent —
+    // skip it with a clear message instead of a raw backend "Parent not found".
+    if (parentUrn && parentUrn.startsWith('urn:staged:') && blockedParentUrns.has(parentUrn)) {
+      failures.push({ id: c.id, name, message: 'Skipped — its parent could not be created.' })
+      if (c.targetUrn) blockedParentUrns.add(c.targetUrn)
+      continue
     }
+    try {
+      await c.apply(ctx)
+      succeeded.push(c.id)
+    } catch (e) {
+      failures.push({ id: c.id, name, message: (e as Error).message })
+      if (c.targetUrn) blockedParentUrns.add(c.targetUrn)
+    }
+  }
+  if (failures.length > 0) {
+    const succeededSet = new Set(succeeded)
+    const failedIds = new Set(failures.map((f) => f.id))
+    const msgById = new Map(failures.map((f) => [f.id, f.message]))
+    useStagedChangesStore.setState((s) => ({
+      // Drop already-persisted creates (retry-safe) and flag the failures so the
+      // review panel highlights exactly the offending entities.
+      changes: s.changes
+        .filter((c) => !succeededSet.has(c.id))
+        .map((c) => (failedIds.has(c.id) ? { ...c, error: msgById.get(c.id) } : c)),
+      applyStatus: 'partial-error',
+      lastApplyResult: { ok: succeeded.length, failed: failures.length },
+    }))
+    const summary =
+      failures.length === 1
+        ? failures[0].message
+        : `${failures.length} entities couldn't be created:\n` +
+          failures.map((f) => `• ${f.name}: ${f.message}`).join('\n')
+    throw new Error(summary)
   }
 
   // Phase 2 — mutations + user-drawn edges as one atomic, server-merged commit.
