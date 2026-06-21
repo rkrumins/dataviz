@@ -678,17 +678,3 @@
 .search-match-pulse {
   animation: search-match-pulse 1.6s ease-in-out 4;
 }
-
-/* === Explicit reduce-motion preference ===
-   Set via the View menu's Appearance section (preferences.reduceMotion ->
-   `.reduce-motion` on <html>). Neutralises CSS keyframe animations (spinners,
-   pulses, shimmer) without touching transitions, which framer-motion's
-   MotionConfig already minimises. Mirrors the OS `prefers-reduced-motion`
-   handling but is user-controllable in-app. */
-html.reduce-motion *,
-html.reduce-motion *::before,
-html.reduce-motion *::after {
-  animation-duration: 0.001ms !important;
-  animation-iteration-count: 1 !important;
-  scroll-behavior: auto !important;
-}

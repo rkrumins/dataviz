@@ -482,9 +482,3 @@ export const useSelectedNodes = () => useCanvasStore((s) => s.selectedNodeIds)
 export const useIsLoading = () => useCanvasStore((s) => s.isLoading)
 export const useCanvasVersion = () => useCanvasStore((s) => s._version)
 
-// Edit-mode selectors — the canonical Explore↔Edit switch. `isEditing` is
-// deliberately NOT persisted (see partialize above), so every reload lands the
-// user back in read-only Explore mode. Canvases read these to gate authoring UI.
-export const useIsEditing = () => useCanvasStore((s) => s.isEditing)
-export const useSetEditing = () => useCanvasStore((s) => s.setEditing)
-

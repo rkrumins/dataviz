@@ -47,11 +47,6 @@ interface PreferencesState {
   setTheme: (theme: ThemeMode) => void
   setAccentColor: (color: string) => void
 
-  // Accessibility — when on, animations are minimised app-wide (framer-motion
-  // via MotionConfig + a `.reduce-motion` root class for CSS keyframes).
-  reduceMotion: boolean
-  toggleReduceMotion: () => void
-
   // Node Styling
   nodeStyles: Record<string, NodeStyleConfig>
   setNodeStyle: (nodeType: string, config: Partial<NodeStyleConfig>) => void
@@ -157,10 +152,6 @@ export const usePreferencesStore = create<PreferencesState>()(
       accentColor: '#6366f1',
       setTheme: (theme) => set({ theme }),
       setAccentColor: (accentColor) => set({ accentColor }),
-
-      // Accessibility
-      reduceMotion: false,
-      toggleReduceMotion: () => set((s) => ({ reduceMotion: !s.reduceMotion })),
 
       // Node Styling — now driven by ontology definitions; empty defaults here.
       nodeStyles: {},

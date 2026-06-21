@@ -16,6 +16,7 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
+import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
   useSchemaStore,
   normalizeEdgeType,
@@ -115,9 +116,6 @@ export function ContextViewCanvas({
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const closeNodeDrawer = useCanvasStore((s) => s.closeNodeDrawer)
-  // Explore ↔ Edit mode. Authoring controls stay hidden until the user opts in.
-  const isEditing = useCanvasStore((s) => s.isEditing)
-  const setEditing = useCanvasStore((s) => s.setEditing)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
@@ -585,6 +583,22 @@ export function ContextViewCanvas({
     }
   }, [lineageGranularity, granularityOptions, setLineageGranularity])
 
+  // Handle save graph
+  const handleSave = useCallback(async () => {
+    try {
+      const response = await fetchWithTimeout('/api/v1/graph/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes, edges })
+      })
+      if (!response.ok) throw new Error('Failed to save graph')
+      alert('Graph saved successfully!')
+    } catch (error) {
+      console.error('Error saving graph:', error)
+      alert('Failed to save graph')
+    }
+  }, [nodes, edges])
+
   // Handle right click - now uses unified CanvasContextMenu
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
     e.preventDefault()
@@ -788,17 +802,6 @@ export function ContextViewCanvas({
     if (!activeWorkspaceId) return
     openStagedChangesPanel()
   }, [activeWorkspaceId, openStagedChangesPanel])
-
-  // Leaving Edit mode with unsaved staged changes surfaces the review panel
-  // instead of silently dropping to Explore. Explore is read-only so nothing is
-  // lost — this just nudges the user to save (or discard) before they leave.
-  const handleExitEdit = useCallback(() => {
-    if (stagedChangeList.length > 0) {
-      openStagedChangesPanel()
-      return
-    }
-    setEditing(false)
-  }, [stagedChangeList.length, openStagedChangesPanel, setEditing])
 
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
@@ -1923,6 +1926,7 @@ export function ContextViewCanvas({
       <div className="absolute top-4 left-4 z-30">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
+          onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
@@ -1930,9 +1934,6 @@ export function ContextViewCanvas({
       </div>
 
       <ContextViewHeader
-        isEditing={isEditing}
-        onEnterEdit={() => setEditing(true)}
-        onExitEdit={handleExitEdit}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         searchResults={searchResults}
@@ -1981,6 +1982,7 @@ export function ContextViewCanvas({
           // the right.
           setAdvancedSearchOpen((open) => !open)
         }}
+        advancedSearchOpen={advancedSearchOpen}
         onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
         propertyManagerOpen={propertyManagerOpen}
         viewName={activeView?.name}
