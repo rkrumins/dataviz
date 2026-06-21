@@ -598,8 +598,6 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             >
                 <ScopeStep
                     availableWorkspaces={scopeData.workspaces}
-                    statsMap={scopeData.statsMap}
-                    statsLoading={scopeData.isLoading}
                     schemaAvailability={scopeData.schemaAvailability}
                     selectedWorkspaceId={selectedWsId}
                     selectedDataSourceId={selectedDsId}
