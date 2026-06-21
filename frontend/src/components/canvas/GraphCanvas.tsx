@@ -60,6 +60,7 @@ import { InlineNodeEditor } from './InlineNodeEditor'
 import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
+import { EditModeButton } from './EditModeButton'
 import { TraceToolbar } from './TraceToolbar'
 import { NodePalette } from './NodePalette'
 
@@ -90,7 +91,6 @@ import {
 } from '@/hooks/useViewSchema'
 import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType } from '@/store/canvas'
 import { useSearchStore } from '@/store/searchStore'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
 
 // Types
@@ -122,6 +122,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
+  const isEditing = useCanvasStore((s) => s.isEditing)
+  const setEditing = useCanvasStore((s) => s.setEditing)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   // 3. Schema / ontology
@@ -1185,22 +1187,6 @@ export function GraphCanvas({ className }: { className?: string }) {
     [rfInstance, addNodes],
   )
 
-  // Save graph to backend
-  const handleSave = useCallback(async () => {
-    try {
-      const response = await fetchWithTimeout('/api/v1/graph/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: rawNodes, edges: rawEdges }),
-      })
-      if (!response.ok) throw new Error('Failed to save graph')
-      alert('Graph saved successfully!')
-    } catch (error) {
-      console.error('Error saving graph:', error)
-      alert('Failed to save graph')
-    }
-  }, [rawNodes, rawEdges])
-
   // ESC-driven trace exit. Mirrors ContextViewCanvas: purges the edges the
   // trace merged into the canvas store, clears trace state, and reverts
   // ancestor-chain auto-expansion. Without this, ESC fell through to plain
@@ -1278,11 +1264,13 @@ export function GraphCanvas({ className }: { className?: string }) {
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
-          onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
         />
+        {/* Edit-mode entry — deliberate hand-off into authoring. Hidden while
+            editing, when the EditorToolbar (with its own Done) takes over. */}
+        {!isEditing && <EditModeButton onClick={() => setEditing(true)} />}
         {/* Property Manager toggle — browse properties + author
             display-rule tags. Mirrors the Context View affordance. */}
         {activeView?.id && (

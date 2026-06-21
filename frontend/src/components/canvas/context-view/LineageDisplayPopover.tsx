@@ -186,127 +186,151 @@ export function LineageDisplayPopover({
                 <div className="text-[12px] font-semibold text-ink tracking-tight">Lineage Settings</div>
               </div>
 
-              {/* Edge Density */}
-              <div className="px-3 pt-2.5 pb-2">
-                <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-                  <Layers className="w-3 h-3" />
-                  <span>Edge Density</span>
-                </div>
-                <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
-                  How many edges materialise on the canvas at once.
-                </p>
-                <div
-                  role="radiogroup"
-                  aria-label="Edge density"
-                  className="flex flex-col gap-1"
-                >
-                  {DENSITY_OPTIONS.map(opt => {
-                    const active = lineageRenderMode === opt.mode
-                    return (
-                      <button
-                        key={opt.mode}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        onClick={() => onSetLineageRenderMode(opt.mode)}
-                        className={cn(
-                          'flex items-start gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors',
-                          active
-                            ? 'bg-accent-lineage/15 border-accent-lineage/40 shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
-                            : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
-                        )}
-                      >
-                        <div
-                          className={cn(
-                            'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
-                            active ? 'border-accent-lineage' : 'border-ink-muted/40',
-                          )}
-                        >
-                          {active && (
-                            <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className={cn(
-                              'text-[12px] font-medium leading-tight flex items-baseline gap-1.5',
-                              active ? 'text-accent-lineage' : 'text-ink',
-                            )}
-                          >
-                            <span>{opt.label}</span>
-                            <span className="text-[10px] text-ink-muted/60 font-normal">
-                              ({opt.technical})
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
-                            {opt.description}
-                          </div>
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
-
-              {/* Direction */}
-              <div className="px-3 pt-2.5 pb-3">
-                <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-                  <MoveRight className="w-3 h-3" />
-                  <span>Direction</span>
-                </div>
-                <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
-                  Show arrow markers on edges to indicate flow direction.
-                </p>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={showEdgeDirection}
-                  onClick={onToggleEdgeDirection}
-                  className={cn(
-                    'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
-                    showEdgeDirection
-                      ? 'bg-cyan-500/12 border-cyan-500/35 shadow-sm shadow-cyan-500/10 dark:bg-cyan-400/15 dark:border-cyan-400/30'
-                      : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
-                  )}
-                >
-                  <div
-                    className={cn(
-                      'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
-                      showEdgeDirection
-                        ? 'bg-cyan-500/85 dark:bg-cyan-400/80'
-                        : 'bg-ink-muted/25 dark:bg-white/15',
-                    )}
-                  >
-                    <div
-                      className={cn(
-                        'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
-                        showEdgeDirection ? 'left-[15px]' : 'left-[2px]',
-                      )}
-                    />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className={cn(
-                        'text-[12px] font-medium leading-tight flex items-center gap-1.5',
-                        showEdgeDirection ? 'text-cyan-700 dark:text-cyan-300' : 'text-ink',
-                      )}
-                    >
-                      <MoveRight className="w-3.5 h-3.5" strokeWidth={2.2} />
-                      <span>Arrow markers</span>
-                    </div>
-                    <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
-                      {showEdgeDirection ? 'Currently visible' : 'Currently hidden'}
-                    </div>
-                  </div>
-                </button>
-              </div>
+              <LineageDisplaySections
+                lineageRenderMode={lineageRenderMode}
+                onSetLineageRenderMode={onSetLineageRenderMode}
+                showEdgeDirection={showEdgeDirection}
+                onToggleEdgeDirection={onToggleEdgeDirection}
+              />
             </motion.div>
           )}
         </AnimatePresence>,
         document.body,
       )}
+    </>
+  )
+}
+
+/**
+ * The body sections of the lineage popover (Edge Density + Direction),
+ * extracted so the consolidated `ViewControlsMenu` can render them inline
+ * without the standalone trigger/portal chrome. The standalone popover above
+ * and `LayerColumn` both keep their own framing; this only owns the controls.
+ */
+export function LineageDisplaySections({
+  lineageRenderMode,
+  onSetLineageRenderMode,
+  showEdgeDirection,
+  onToggleEdgeDirection,
+}: LineageDisplayPopoverProps) {
+  return (
+    <>
+      {/* Edge Density */}
+      <div className="px-3 pt-2.5 pb-2">
+        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+          <Layers className="w-3 h-3" />
+          <span>Edge Density</span>
+        </div>
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          How many edges materialise on the canvas at once.
+        </p>
+        <div
+          role="radiogroup"
+          aria-label="Edge density"
+          className="flex flex-col gap-1"
+        >
+          {DENSITY_OPTIONS.map(opt => {
+            const active = lineageRenderMode === opt.mode
+            return (
+              <button
+                key={opt.mode}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => onSetLineageRenderMode(opt.mode)}
+                className={cn(
+                  'flex items-start gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors',
+                  active
+                    ? 'bg-accent-lineage/15 border-accent-lineage/40 shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                    : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+                )}
+              >
+                <div
+                  className={cn(
+                    'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                    active ? 'border-accent-lineage' : 'border-ink-muted/40',
+                  )}
+                >
+                  {active && (
+                    <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div
+                    className={cn(
+                      'text-[12px] font-medium leading-tight flex items-baseline gap-1.5',
+                      active ? 'text-accent-lineage' : 'text-ink',
+                    )}
+                  >
+                    <span>{opt.label}</span>
+                    <span className="text-[10px] text-ink-muted/60 font-normal">
+                      ({opt.technical})
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+                    {opt.description}
+                  </div>
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Direction */}
+      <div className="px-3 pt-2.5 pb-3">
+        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+          <MoveRight className="w-3 h-3" />
+          <span>Direction</span>
+        </div>
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          Show arrow markers on edges to indicate flow direction.
+        </p>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={showEdgeDirection}
+          onClick={onToggleEdgeDirection}
+          className={cn(
+            'w-full flex items-center gap-3 px-2.5 py-2 rounded-lg border text-left transition-colors',
+            showEdgeDirection
+              ? 'bg-cyan-500/12 border-cyan-500/35 shadow-sm shadow-cyan-500/10 dark:bg-cyan-400/15 dark:border-cyan-400/30'
+              : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+          )}
+        >
+          <div
+            className={cn(
+              'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+              showEdgeDirection
+                ? 'bg-cyan-500/85 dark:bg-cyan-400/80'
+                : 'bg-ink-muted/25 dark:bg-white/15',
+            )}
+          >
+            <div
+              className={cn(
+                'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+                showEdgeDirection ? 'left-[15px]' : 'left-[2px]',
+              )}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div
+              className={cn(
+                'text-[12px] font-medium leading-tight flex items-center gap-1.5',
+                showEdgeDirection ? 'text-cyan-700 dark:text-cyan-300' : 'text-ink',
+              )}
+            >
+              <MoveRight className="w-3.5 h-3.5" strokeWidth={2.2} />
+              <span>Arrow markers</span>
+            </div>
+            <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
+              {showEdgeDirection ? 'Currently visible' : 'Currently hidden'}
+            </div>
+          </div>
+        </button>
+      </div>
     </>
   )
 }
