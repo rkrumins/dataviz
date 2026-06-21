@@ -63,7 +63,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
     {
         "key": "allowedViewModes",
         "name": "View modes",
-        "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Reference Model, Layered Lineage).",
+        "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Context View, Layered Lineage).",
         "category_id": "views",
         "type": "string[]",
         "default_value": json.dumps(["graph", "hierarchy", "reference", "layered-lineage"]),
@@ -71,7 +71,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "options": json.dumps([
             {"id": "graph", "label": "Graph"},
             {"id": "hierarchy", "label": "Hierarchy"},
-            {"id": "reference", "label": "Reference Model"},
+            {"id": "reference", "label": "Context View"},
             {"id": "layered-lineage", "label": "Layered Lineage"},
         ]),
         "help_url": None,

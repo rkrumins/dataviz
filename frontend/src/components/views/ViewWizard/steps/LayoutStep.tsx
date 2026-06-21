@@ -274,7 +274,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                     Configure Layers
                                 </h4>
                                 <p className="text-sm text-slate-500">
-                                    Define the horizontal layers for your reference model
+                                    Define the horizontal layers for your context view
                                 </p>
                             </div>
                             <button

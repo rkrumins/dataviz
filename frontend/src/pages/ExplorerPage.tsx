@@ -43,6 +43,7 @@ import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { updateViewVisibility, restoreView as restoreViewApi, type View } from '@/services/viewApiService'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useToast } from '@/components/ui/toast'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 
@@ -252,6 +253,10 @@ export function ExplorerPage() {
   // needs-attention filter itself runs server-side now, so the Explorer
   // no longer post-filters the loaded page.
   const healthMap = useViewHealth(views)
+
+  // Resolves the provider (e.g. falkordb/neo4j) behind each view's data source
+  // so cards can surface what the view is built from.
+  const { resolve: resolveProvider } = useDataSourceProviderMap()
 
   const pinnedViews = useMemo(() => views.filter(v => v.isPinned), [views])
 
@@ -682,6 +687,7 @@ export function ExplorerPage() {
                     onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
                     density={density}
+                    providerInfo={resolveProvider(v.dataSourceId)}
                   />
                 </div>
               ))}
@@ -769,6 +775,7 @@ export function ExplorerPage() {
                       healthStatus={healthMap.get(v.id)?.status}
                       isSelected={selectedIds.has(v.id)}
                       density={density}
+                      providerInfo={resolveProvider(v.dataSourceId)}
                       onToggleSelect={() => setSelectedIds(prev => {
                         const next = new Set(prev)
                         if (next.has(v.id)) next.delete(v.id)
@@ -808,6 +815,7 @@ export function ExplorerPage() {
                   healthStatus={healthMap.get(v.id)?.status}
                   isSelected={selectedIds.has(v.id)}
                   density={density}
+                  providerInfo={resolveProvider(v.dataSourceId)}
                   onToggleSelect={() => setSelectedIds(prev => {
                     const next = new Set(prev)
                     if (next.has(v.id)) next.delete(v.id)
@@ -838,6 +846,7 @@ export function ExplorerPage() {
           ? () => handleDeleteRequest(previewView)
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
+        providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}

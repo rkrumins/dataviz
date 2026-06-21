@@ -28,6 +28,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
+import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
@@ -80,7 +81,7 @@ const VIEW_TYPE_META: Record<
   },
   reference: {
     icon: Layout,
-    label: 'Reference',
+    label: 'Context View',
     iconBg: 'bg-rose-500/10 border-rose-500/20 text-rose-500',
     hoverBorder: 'group-hover:border-rose-500/30',
     gradient: 'bg-gradient-to-br from-rose-500/[0.04] via-transparent to-transparent',
@@ -205,6 +206,8 @@ export interface ExplorerViewCardProps {
   onToggleSelect?: () => void
   /** Visual density — collapses padding, preview, and ancillary sections. */
   density?: 'compact' | 'comfortable' | 'spacious'
+  /** Provider the view's data source is built from (shown as a scope pill). */
+  providerInfo?: DataSourceProviderInfo
 }
 
 function initials(name?: string): string {
@@ -228,6 +231,7 @@ export function ExplorerViewCard({
   isSelected,
   onToggleSelect,
   density = 'comfortable',
+  providerInfo,
 }: ExplorerViewCardProps) {
   // Density-derived classes. Compact noticeably reduces vertical rhythm
   // (padding, section margins, suppressed mini preview) so a dense grid
@@ -422,7 +426,7 @@ export function ExplorerViewCard({
                 {meta.label}
               </span>
             )}
-            <h3 className="truncate text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight">
+            <h3 className="line-clamp-2 text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight">
               {view.name}
             </h3>
           </div>
@@ -435,6 +439,8 @@ export function ExplorerViewCard({
             workspaceName={view.workspaceName}
             dataSourceId={view.dataSourceId}
             dataSourceName={view.dataSourceName}
+            providerName={providerInfo?.providerName}
+            providerType={providerInfo?.providerType}
           />
           <span className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium">
             <VisIcon className="h-2.5 w-2.5" />

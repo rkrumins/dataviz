@@ -139,7 +139,7 @@ const LAYOUT_TYPES = [
     },
     {
         id: 'reference' as const,
-        label: 'Reference Model',
+        label: 'Context View',
         icon: <LayoutTemplate className="w-8 h-8" />,
         description: 'Horizontal layer columns',
         features: ['Layer-based organization', 'Rule-driven entity assignment', 'Best for data pipelines'],
@@ -598,8 +598,6 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
             >
                 <ScopeStep
                     availableWorkspaces={scopeData.workspaces}
-                    statsMap={scopeData.statsMap}
-                    statsLoading={scopeData.isLoading}
                     schemaAvailability={scopeData.schemaAvailability}
                     selectedWorkspaceId={selectedWsId}
                     selectedDataSourceId={selectedDsId}
