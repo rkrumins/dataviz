@@ -13,7 +13,6 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
@@ -35,6 +34,7 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 // Editor components (shared across canvases)
 import { EditorToolbar } from './EditorToolbar'
+import { EditModeButton } from './EditModeButton'
 import { NodePalette } from './NodePalette'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
@@ -74,6 +74,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const edges = useCanvasStore(s => s.edges)
   const selectNode = useCanvasStore(s => s.selectNode)
   const selectedNodeIds = useCanvasStore(s => s.selectedNodeIds)
+  const isEditing = useCanvasStore(s => s.isEditing)
+  const setEditing = useCanvasStore(s => s.setEditing)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
@@ -169,22 +171,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
     enabled: true,
     handlers: interactions.keyboardHandlers,
   })
-
-  // Handle save graph
-  const handleSave = useCallback(async () => {
-    try {
-      const response = await fetchWithTimeout('/api/v1/graph/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
-      })
-      if (!response.ok) throw new Error('Failed to save graph')
-      alert('Graph saved successfully!')
-    } catch (error) {
-      console.error('Error saving graph:', error)
-      alert('Failed to save graph')
-    }
-  }, [nodes, edges])
 
   // Build hierarchy tree from the shared containment maps
   const hierarchyTree = useMemo(() => {
@@ -348,11 +334,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => setPaletteOpen(true)}
-          onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
           onSelectEdgeType={setActiveEdgeType}
         />
+        {/* Edit-mode entry — deliberate hand-off into authoring. Hidden while
+            editing, when the EditorToolbar (with its own Done) takes over. */}
+        {!isEditing && <EditModeButton onClick={() => setEditing(true)} />}
         {/* Property Manager toggle — browse properties + author
             display-rule tags. Mirrors the Context View affordance. */}
         {activeView?.id && (

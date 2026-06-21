@@ -146,8 +146,6 @@ export function DisplaySettingsPopover({
 
   const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines })
   const zoomPct = formatZoom(canvasZoom)
-  const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
-  const canZoomIn = canvasZoom < CANVAS_ZOOM_MAX - 0.001
 
   return (
     <>
@@ -217,126 +215,188 @@ export function DisplaySettingsPopover({
                 )}
               </div>
 
-              {/* Zoom */}
-              <div className="px-3 pt-2.5 pb-2">
-                <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-                  <ZoomIn className="w-3 h-3" />
-                  <span>Zoom</span>
-                  <span className="ml-auto tabular-nums text-accent-lineage/80">{zoomPct}</span>
-                </div>
-                <div className="flex items-center gap-2 px-1 pt-2 pb-1">
-                  <button
-                    type="button"
-                    onClick={() => onSetCanvasZoom(canvasZoom - CANVAS_ZOOM_STEP)}
-                    disabled={!canZoomOut}
-                    className={cn(
-                      'flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center border transition-colors',
-                      canZoomOut
-                        ? 'bg-black/[0.04] border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08]'
-                        : 'bg-black/[0.02] border-black/[0.06] text-ink-muted/30 cursor-not-allowed dark:bg-white/[0.02] dark:border-white/[0.04]',
-                    )}
-                    aria-label="Zoom out"
-                  >
-                    <Minus className="w-3.5 h-3.5" />
-                  </button>
-                  <input
-                    type="range"
-                    min={CANVAS_ZOOM_MIN}
-                    max={CANVAS_ZOOM_MAX}
-                    step={CANVAS_ZOOM_STEP}
-                    value={canvasZoom}
-                    onChange={(e) => onSetCanvasZoom(parseFloat(e.target.value))}
-                    className="flex-1 accent-accent-lineage"
-                    aria-label="Canvas zoom"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onSetCanvasZoom(canvasZoom + CANVAS_ZOOM_STEP)}
-                    disabled={!canZoomIn}
-                    className={cn(
-                      'flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center border transition-colors',
-                      canZoomIn
-                        ? 'bg-black/[0.04] border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08]'
-                        : 'bg-black/[0.02] border-black/[0.06] text-ink-muted/30 cursor-not-allowed dark:bg-white/[0.02] dark:border-white/[0.04]',
-                    )}
-                    aria-label="Zoom in"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onSetCanvasZoom(1)}
-                    className="flex-shrink-0 px-2 h-7 rounded-lg text-[10.5px] font-semibold text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
-                  >
-                    100%
-                  </button>
-                </div>
-              </div>
-
-              <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
-
-              {/* Density */}
-              <div className="px-3 pt-2.5 pb-2">
-                <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
-                  <Rows3 className="w-3 h-3" />
-                  <span>Density</span>
-                </div>
-                <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
-                  Row height, padding, and icon size in every layer column.
-                </p>
-                <div role="radiogroup" aria-label="Canvas density" className="grid grid-cols-3 gap-1.5">
-                  {DENSITY_OPTIONS.map(opt => {
-                    const active = canvasDensity === opt.mode
-                    const Icon = opt.icon
-                    return (
-                      <button
-                        key={opt.mode}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        onClick={() => onSetCanvasDensity(opt.mode)}
-                        title={opt.description}
-                        className={cn(
-                          'flex flex-col items-center gap-1 px-2 py-2 rounded-lg border text-[11px] font-medium transition-colors',
-                          active
-                            ? 'bg-accent-lineage/15 border-accent-lineage/40 text-accent-lineage shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
-                            : 'bg-black/[0.02] border-transparent text-ink-muted hover:bg-black/[0.05] hover:border-black/[0.08] hover:text-ink dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
-                        )}
-                      >
-                        <Icon className="w-3.5 h-3.5" strokeWidth={2.2} />
-                        <span>{opt.label}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
-
-              {/* Toggles */}
-              <div className="px-3 pt-2.5 pb-3 space-y-1.5">
-                <ToggleRow
-                  label="Show entity type badge"
-                  description={showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
-                  icon={showTypeBadge ? Eye : EyeOff}
-                  active={showTypeBadge}
-                  onClick={onToggleTypeBadge}
-                  accent="cyan"
-                />
-                <ToggleRow
-                  label="Subtle tree lines"
-                  description={subtleTreeLines ? 'Connectors dimmed' : 'Connectors at full intensity'}
-                  icon={Rows3}
-                  active={subtleTreeLines}
-                  onClick={onToggleSubtleTreeLines}
-                  accent="purple"
-                />
-              </div>
+              <DisplaySettingsSections
+                canvasZoom={canvasZoom}
+                onSetCanvasZoom={onSetCanvasZoom}
+                canvasDensity={canvasDensity}
+                onSetCanvasDensity={onSetCanvasDensity}
+                showTypeBadge={showTypeBadge}
+                onToggleTypeBadge={onToggleTypeBadge}
+                subtleTreeLines={subtleTreeLines}
+                onToggleSubtleTreeLines={onToggleSubtleTreeLines}
+              />
             </motion.div>
           )}
         </AnimatePresence>,
         document.body,
       )}
+    </>
+  )
+}
+
+/** Whether the four canvas-display settings are all at their defaults — used to
+ *  surface a "Reset" affordance only when something has been customised. */
+export function isDisplaySettingsDefault(props: {
+  canvasZoom: number | undefined
+  canvasDensity: CanvasDensity | undefined
+  showTypeBadge: boolean | undefined
+  subtleTreeLines: boolean | undefined
+}): boolean {
+  return isDefaultState({
+    canvasZoom: props.canvasZoom ?? 1,
+    canvasDensity: props.canvasDensity ?? 'spacious',
+    showTypeBadge: props.showTypeBadge ?? true,
+    subtleTreeLines: props.subtleTreeLines ?? false,
+  })
+}
+
+interface DisplaySettingsSectionsProps {
+  canvasZoom: number
+  onSetCanvasZoom: (n: number) => void
+  canvasDensity: CanvasDensity
+  onSetCanvasDensity: (density: CanvasDensity) => void
+  showTypeBadge: boolean
+  onToggleTypeBadge: () => void
+  subtleTreeLines: boolean
+  onToggleSubtleTreeLines: () => void
+}
+
+/**
+ * The body sections of the display popover (Zoom + Density + Toggles),
+ * extracted so the consolidated `ViewControlsMenu` can render them inline
+ * without the standalone trigger/portal chrome. Values are pre-resolved by the
+ * caller (no `undefined`).
+ */
+export function DisplaySettingsSections({
+  canvasZoom,
+  onSetCanvasZoom,
+  canvasDensity,
+  onSetCanvasDensity,
+  showTypeBadge,
+  onToggleTypeBadge,
+  subtleTreeLines,
+  onToggleSubtleTreeLines,
+}: DisplaySettingsSectionsProps) {
+  const zoomPct = formatZoom(canvasZoom)
+  const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
+  const canZoomIn = canvasZoom < CANVAS_ZOOM_MAX - 0.001
+  return (
+    <>
+      {/* Zoom */}
+      <div className="px-3 pt-2.5 pb-2">
+        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+          <ZoomIn className="w-3 h-3" />
+          <span>Zoom</span>
+          <span className="ml-auto tabular-nums text-accent-lineage/80">{zoomPct}</span>
+        </div>
+        <div className="flex items-center gap-2 px-1 pt-2 pb-1">
+          <button
+            type="button"
+            onClick={() => onSetCanvasZoom(canvasZoom - CANVAS_ZOOM_STEP)}
+            disabled={!canZoomOut}
+            className={cn(
+              'flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center border transition-colors',
+              canZoomOut
+                ? 'bg-black/[0.04] border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08]'
+                : 'bg-black/[0.02] border-black/[0.06] text-ink-muted/30 cursor-not-allowed dark:bg-white/[0.02] dark:border-white/[0.04]',
+            )}
+            aria-label="Zoom out"
+          >
+            <Minus className="w-3.5 h-3.5" />
+          </button>
+          <input
+            type="range"
+            min={CANVAS_ZOOM_MIN}
+            max={CANVAS_ZOOM_MAX}
+            step={CANVAS_ZOOM_STEP}
+            value={canvasZoom}
+            onChange={(e) => onSetCanvasZoom(parseFloat(e.target.value))}
+            className="flex-1 accent-accent-lineage"
+            aria-label="Canvas zoom"
+          />
+          <button
+            type="button"
+            onClick={() => onSetCanvasZoom(canvasZoom + CANVAS_ZOOM_STEP)}
+            disabled={!canZoomIn}
+            className={cn(
+              'flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center border transition-colors',
+              canZoomIn
+                ? 'bg-black/[0.04] border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08]'
+                : 'bg-black/[0.02] border-black/[0.06] text-ink-muted/30 cursor-not-allowed dark:bg-white/[0.02] dark:border-white/[0.04]',
+            )}
+            aria-label="Zoom in"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetCanvasZoom(1)}
+            className="flex-shrink-0 px-2 h-7 rounded-lg text-[10.5px] font-semibold text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
+          >
+            100%
+          </button>
+        </div>
+      </div>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Density */}
+      <div className="px-3 pt-2.5 pb-2">
+        <div className="flex items-center gap-1.5 px-1 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+          <Rows3 className="w-3 h-3" />
+          <span>Density</span>
+        </div>
+        <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
+          Row height, padding, and icon size in every layer column.
+        </p>
+        <div role="radiogroup" aria-label="Canvas density" className="grid grid-cols-3 gap-1.5">
+          {DENSITY_OPTIONS.map(opt => {
+            const active = canvasDensity === opt.mode
+            const Icon = opt.icon
+            return (
+              <button
+                key={opt.mode}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => onSetCanvasDensity(opt.mode)}
+                title={opt.description}
+                className={cn(
+                  'flex flex-col items-center gap-1 px-2 py-2 rounded-lg border text-[11px] font-medium transition-colors',
+                  active
+                    ? 'bg-accent-lineage/15 border-accent-lineage/40 text-accent-lineage shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
+                    : 'bg-black/[0.02] border-transparent text-ink-muted hover:bg-black/[0.05] hover:border-black/[0.08] hover:text-ink dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
+                )}
+              >
+                <Icon className="w-3.5 h-3.5" strokeWidth={2.2} />
+                <span>{opt.label}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      {/* Toggles */}
+      <div className="px-3 pt-2.5 pb-3 space-y-1.5">
+        <ToggleRow
+          label="Show entity type badge"
+          description={showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
+          icon={showTypeBadge ? Eye : EyeOff}
+          active={showTypeBadge}
+          onClick={onToggleTypeBadge}
+          accent="cyan"
+        />
+        <ToggleRow
+          label="Subtle tree lines"
+          description={subtleTreeLines ? 'Connectors dimmed' : 'Connectors at full intensity'}
+          icon={Rows3}
+          active={subtleTreeLines}
+          onClick={onToggleSubtleTreeLines}
+          accent="purple"
+        />
+      </div>
     </>
   )
 }

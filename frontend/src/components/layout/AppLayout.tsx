@@ -8,6 +8,7 @@
  * Refactored from AppShell + App.tsx to support route-based navigation.
  */
 import { useEffect, useState } from 'react'
+import { MotionConfig } from 'framer-motion'
 import { Outlet, Navigate, useNavigate } from 'react-router-dom'
 import { AlertTriangle, Home } from 'lucide-react'
 import { TopBar } from './TopBar'
@@ -33,6 +34,7 @@ export function AppLayout() {
   const status = useAuthStore((s) => s.status)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const { theme } = usePreferencesStore()
+  const reduceMotion = usePreferencesStore((s) => s.reduceMotion)
 
   // View editor state
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
@@ -92,6 +94,13 @@ export function AppLayout() {
     }
   }, [theme])
 
+  // Apply the explicit reduce-motion preference as a root class. CSS keyframe
+  // animations (spinners, pulses, shimmer) key off `.reduce-motion`; framer-
+  // motion is handled by the MotionConfig wrapper below.
+  useEffect(() => {
+    document.documentElement.classList.toggle('reduce-motion', reduceMotion)
+  }, [reduceMotion])
+
   // While the cookie is being validated against the server, render a
   // neutral loader. This prevents a flash of /login on cold reload when
   // the user is in fact authenticated.
@@ -104,6 +113,7 @@ export function AppLayout() {
   }
 
   return (
+    <MotionConfig reducedMotion={reduceMotion ? 'always' : 'user'}>
     <ViewEditorContext.Provider value={{ openViewEditor, closeViewEditor }}>
       <div className="h-full w-full flex flex-col overflow-hidden bg-canvas">
         <GlobalAnnouncementBanner />
@@ -145,6 +155,7 @@ export function AppLayout() {
         <AccessDeniedModal />
       </div>
     </ViewEditorContext.Provider>
+    </MotionConfig>
   )
 }
 
