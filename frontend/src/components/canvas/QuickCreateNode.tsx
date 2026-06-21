@@ -21,14 +21,9 @@ import {
 } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { relationshipLabel } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { EntityTypeSchema } from '@/types/schema'
-
-/** Friendly label for a containment relationship id (e.g. `partOf` → "Part of"). */
-function relationshipLabel(id: string): string {
-    const spaced = id.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2')
-    return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase()
-}
 
 // ============================================
 // Types

@@ -43,6 +43,7 @@ import {
   isContainmentEdgeType,
 } from '@/store/schema'
 import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { relationshipLabel, parentPlacementPhrase } from '@/lib/relationshipLabel'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
@@ -51,7 +52,7 @@ import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
-import { useEffectiveBranchId } from '@/store/branchStore'
+import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { cn } from '@/lib/utils'
 
@@ -601,6 +602,7 @@ export function EntityDrawer({
 
           {viewMode === 'edit' && (
             <EditModeContent
+              nodeId={selectedNode.id}
               formData={formData}
               entityType={entityType}
               urn={urn}
@@ -783,9 +785,7 @@ function DetailsList({ formData }: { formData: Record<string, any> }) {
   push('sourceSystem', 'Source system', formData.sourceSystem)
   push('layerAssignment', 'Layer', formData.layerAssignment)
   push('lastSyncedAt', 'Last synced', formData.lastSyncedAt)
-  if (typeof formData.childCount === 'number' && formData.childCount > 0) {
-    rows.push({ key: 'childCount', label: 'Children', value: String(formData.childCount) })
-  }
+  // Child count lives in the Relationship summary ("Contains N items") — not duplicated here.
   if (rows.length === 0) return null
   return (
     <Section title="Details" icon={LucideIcons.Info}>
@@ -802,22 +802,20 @@ function DetailsList({ formData }: { formData: Record<string, any> }) {
 }
 
 /**
- * RelationshipSection — view-mode editor for a node's containment placement.
- * Lets the user, after creation, (a) switch the relationship type to its current
- * parent and (b) move it under a different parent. Both go through
- * useReparentNode, which ontology-validates and stages the change like every
- * other edit. Uses plain, non-technical language.
+ * useContainmentPlacement — derives a node's place in the containment hierarchy from the live canvas
+ * graph: its parent (+ the friendly relationship), the ontology-allowed relationship types for the
+ * current parent→child pair, valid move targets, and its loaded children. Shared by the read-only
+ * view summary and the edit-mode editor so both read the topology identically.
  */
-function RelationshipSection({ nodeId }: { nodeId: string }) {
-  const { reparent, retypeContainment } = useReparentNode()
+function useContainmentPlacement(nodeId: string) {
   const entityTypes = useEntityTypes()
   const rootEntityTypes = useRootEntityTypes()
   const hierarchyMap = useEntityTypeHierarchyMap()
   const relationshipTypes = useRelationshipTypes()
   const containmentEdgeTypes = useContainmentEdgeTypes()
 
-  // Subscribe narrowly so this section re-renders when the graph topology changes
-  // (e.g. after a move restages edges) but not on unrelated canvas mutations.
+  // Subscribe narrowly so this re-derives when the graph topology changes (e.g. after a move
+  // restages edges) but not on unrelated canvas mutations.
   const nodes = useCanvasStore((s) => s.nodes)
   const edges = useCanvasStore((s) => s.edges)
 
@@ -842,6 +840,12 @@ function RelationshipSection({ nodeId }: { nodeId: string }) {
   const parentType = (parentNode?.data.type as string) ?? ''
   const parentName = (parentNode?.data.label as string) || parentEdge?.source
   const currentEdgeType = parentEdge ? normalizeEdgeType(parentEdge) : ''
+
+  // Loaded children (containment edges leaving this node).
+  const childCountLoaded = useMemo(
+    () => edges.filter((e) => e.source === nodeId && isContainment(e)).length,
+    [edges, nodeId, isContainment],
+  )
 
   // Allowed relationship types for the CURRENT parent→child pair (human labels).
   const relTypeOptions = useMemo(
@@ -890,67 +894,165 @@ function RelationshipSection({ nodeId }: { nodeId: string }) {
       .sort((a, b) => a.label.localeCompare(b.label))
   }, [node, nodes, descendants, parentNode?.id, entityTypes, rootEntityTypes, hierarchyMap, childType])
 
+  return { node, parentNode, parentName, currentEdgeType, relTypeOptions, moveTargets, childCountLoaded }
+}
+
+/**
+ * RelationshipSummary — the READ-ONLY, plain-language view of where an entity sits in the
+ * hierarchy. No jargon, no controls: "Part of <Parent>" (tap to jump to it) and "Contains N items".
+ * The actual editing (change relationship / move) lives in Edit mode — see {@link RelationshipEditor}.
+ */
+function RelationshipSummary({
+  nodeId,
+  childCount,
+  onFocusNode,
+}: {
+  nodeId: string
+  childCount: number
+  onFocusNode?: (nodeId: string) => void | Promise<void>
+}) {
+  const { node, parentNode, parentName, currentEdgeType, childCountLoaded } = useContainmentPlacement(nodeId)
+  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  const selectNode = useCanvasStore((s) => s.selectNode)
   if (!node) return null
+
+  const childrenTotal = Math.max(childCount ?? 0, childCountLoaded)
+  const placement = parentPlacementPhrase(currentEdgeType)
+
+  // Mirror LineageNeighbors: swap the drawer + selection to the parent first (instant), then pan.
+  const goToParent = () => {
+    if (!parentNode) return
+    openNodeDrawer(parentNode.id)
+    selectNode(parentNode.id)
+    onFocusNode?.(parentNode.id)
+  }
 
   return (
     <Section title="Relationship" icon={LucideIcons.Network}>
-      <div className="space-y-4">
-        {/* Current placement */}
-        <div className="flex items-start justify-between gap-4">
-          <span className="text-xs text-ink-muted min-w-[110px]">Part of</span>
-          <span className="text-xs text-ink text-right break-words font-medium">
-            {parentNode ? parentName : 'Top level'}
-          </span>
-        </div>
-
-        {/* Relationship type — only when the node has a parent. */}
-        {parentNode && (
-          <div className="space-y-1.5">
-            <label className="text-xs text-ink-muted">How it relates</label>
-            <select
-              value={currentEdgeType}
-              onChange={(e) => retypeContainment(nodeId, e.target.value)}
-              className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
-            >
-              {/* Keep the current type selectable even if no longer ontology-allowed. */}
-              {!relTypeOptions.some((o) => o.edgeType === currentEdgeType) && (
-                <option value={currentEdgeType}>{currentEdgeType}</option>
-              )}
-              {relTypeOptions.map((o) => (
-                <option key={o.edgeType} value={o.edgeType}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+      <div className="space-y-2">
+        {parentNode ? (
+          <button
+            onClick={goToParent}
+            className="group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/[0.07] dark:hover:bg-white/[0.08] transition-colors duration-150 text-left"
+            title={`Go to ${parentName}`}
+          >
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-accent-lineage/10 text-accent-lineage shrink-0">
+              <LucideIcons.CornerLeftUp className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11px] text-ink-muted">{placement}</span>
+              <span className="block text-sm font-medium text-ink truncate">{parentName}</span>
+            </span>
+            <LucideIcons.ArrowUpRight className="w-3.5 h-3.5 text-ink-muted opacity-0 group-hover:opacity-100 transition-opacity duration-150 shrink-0" />
+          </button>
+        ) : (
+          <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-black/5 dark:bg-white/10 text-ink-muted shrink-0">
+              <LucideIcons.Home className="w-4 h-4" />
+            </span>
+            <span className="text-sm text-ink-muted">Top-level item</span>
           </div>
         )}
 
-        {/* Move to a different parent. */}
-        <div className="space-y-1.5">
-          <label className="text-xs text-ink-muted">Move to</label>
-          {moveTargets.length > 0 ? (
-            <select
-              value=""
-              onChange={(e) => { if (e.target.value) reparent(nodeId, e.target.value) }}
-              className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
-            >
-              <option value="" disabled>
-                Choose a new parent…
-              </option>
-              {moveTargets.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <p className="text-xs text-ink-muted italic">
-              No other entity here can contain this one.
-            </p>
-          )}
-        </div>
+        {childrenTotal > 0 && (
+          <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-500 shrink-0">
+              <LucideIcons.CornerRightDown className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11px] text-ink-muted">Contains</span>
+              <span className="block text-sm font-medium text-ink">
+                {childrenTotal} {childrenTotal === 1 ? 'item' : 'items'}
+              </span>
+            </span>
+          </div>
+        )}
       </div>
     </Section>
+  )
+}
+
+/**
+ * RelationshipEditor — the EDIT-mode controls for an entity's placement: switch how it relates to
+ * its parent, or move it under a different parent. Both go through useReparentNode (ontology-
+ * validated, staged for review). Containment edits only persist inside a draft, so outside one we
+ * show a clear note instead of dead controls.
+ */
+function RelationshipEditor({ nodeId }: { nodeId: string }) {
+  const { reparent, retypeContainment } = useReparentNode()
+  const { node, parentNode, parentName, currentEdgeType, relTypeOptions, moveTargets } = useContainmentPlacement(nodeId)
+  const inDraft = useBranchStore((s) => !!s.currentBranchId)
+  if (!node) return null
+
+  return (
+    <div className="pt-5 border-t border-glass-border/30">
+      <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4 flex items-center gap-2">
+        <LucideIcons.Network className="w-3.5 h-3.5" />
+        Relationship
+      </h4>
+
+      {!inDraft ? (
+        <div className="px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
+          <LucideIcons.Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>Switch to a draft to change where this entity sits or how it relates to its parent.</span>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <span className="text-xs text-ink-muted">Currently</span>
+            <span className="text-xs text-ink text-right font-medium break-words">
+              {parentNode ? `${parentPlacementPhrase(currentEdgeType)} ${parentName}` : 'Top-level item'}
+            </span>
+          </div>
+
+          {parentNode && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-ink-muted">How it relates</label>
+              <select
+                value={currentEdgeType}
+                onChange={(e) => retypeContainment(nodeId, e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
+              >
+                {/* Keep the current type selectable even if no longer ontology-allowed. */}
+                {!relTypeOptions.some((o) => o.edgeType === currentEdgeType) && (
+                  <option value={currentEdgeType}>{relationshipLabel(currentEdgeType)}</option>
+                )}
+                {relTypeOptions.map((o) => (
+                  <option key={o.edgeType} value={o.edgeType}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-ink-muted">How this entity belongs to {parentName}.</p>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-ink-muted">Move to a different parent</label>
+            {moveTargets.length > 0 ? (
+              <select
+                value=""
+                onChange={(e) => { if (e.target.value) reparent(nodeId, e.target.value) }}
+                className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
+              >
+                <option value="" disabled>
+                  Choose a new parent…
+                </option>
+                {moveTargets.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-xs text-ink-muted italic">
+                No other entity here can contain this one.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -980,6 +1082,7 @@ function ViewModeContent({
   nodeId,
   formData,
   urn,
+  childCount,
   colors,
   propertiesBag,
   onCopyUrn,
@@ -1018,10 +1121,10 @@ function ViewModeContent({
           GraphNode. Only rendered when at least one has a real value. */}
       <DetailsList formData={formData} />
 
-      {/* Relationship — view-mode editor for where this entity sits in the
-          hierarchy: switch how it relates to its parent, or move it under a
-          different parent. Both ontology-validated and staged for review. */}
-      <RelationshipSection nodeId={nodeId} />
+      {/* Relationship — read-only, plain-language summary of where this entity sits in the
+          hierarchy ("Part of <Parent>", "Contains N"). Editing (change relationship / move) lives
+          in Edit mode so the view stays calm and non-technical. */}
+      <RelationshipSummary nodeId={nodeId} childCount={childCount} onFocusNode={onFocusNode} />
 
       {/* Properties — nested-JSON tree rendered read-only via PropertyEditor.
           `readOnly` keeps the recursive UI navigable (expand, search, copy,
@@ -1078,6 +1181,7 @@ function ViewModeContent({
 // ============================================
 
 interface EditModeContentProps {
+  nodeId: string
   formData: Record<string, any>
   entityType: any
   urn: string
@@ -1088,6 +1192,7 @@ interface EditModeContentProps {
 }
 
 function EditModeContent({
+  nodeId,
   formData,
   entityType,
   urn,
@@ -1168,6 +1273,10 @@ function EditModeContent({
           </div>
         </div>
       </div>
+
+      {/* Relationship — where this entity sits in the hierarchy. The editing controls live in
+          Edit mode (not the calm read-only View) and persist inside a draft. */}
+      <RelationshipEditor nodeId={nodeId} />
 
       {/* Metadata — first-class descriptive fields carried from the backend
           GraphNode. lastSyncedAt and childCount are backend-managed and

@@ -22,14 +22,9 @@ import {
 import { useCanvasStore } from '@/store/canvas'
 import { useStagedChanges, useStagedChangesStore } from '@/store/stagedChangesStore'
 import { allowedChildTypeIds, deriveContainmentEdges, type AllowedEdgeOption } from '@/services/ontologyPreflightService'
+import { relationshipLabel } from '@/lib/relationshipLabel'
 import { useStageEntityCreation } from './useStageEntityCreation'
 import type { EntityTypeSchema } from '@/types/schema'
-
-/** Friendly label for a containment relationship id (e.g. `partOf` → "Part of"). */
-function relationshipLabel(id: string): string {
-  const spaced = id.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2')
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase()
-}
 
 /** Prefer the ontology's human label; fall back to a humanized id. Never show a raw ID. */
 function relationshipText(o: AllowedEdgeOption): string {
