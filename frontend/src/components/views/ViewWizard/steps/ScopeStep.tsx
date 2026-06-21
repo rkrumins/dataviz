@@ -9,7 +9,7 @@
  * only requires changing the data source, not this component.
  */
 
-import { useState, useMemo, useCallback, useEffect } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database,
@@ -27,18 +27,23 @@ import {
     ShieldAlert,
     Inbox,
     ExternalLink,
+    Server,
+    ArrowUpDown,
+    ChevronDown,
+    X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
-import type { DataSourceStats, SchemaAvailability } from '@/hooks/useWizardScope'
+import type { SchemaAvailability } from '@/hooks/useWizardScope'
+import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
+import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 
 // ─── Types ─────────────────────────────────────────────────────────
 
 export interface ScopeStepProps {
     availableWorkspaces: WorkspaceResponse[]
-    statsMap: Record<string, DataSourceStats>
-    statsLoading: boolean
     /** Schema availability for the currently selected data source (authoritative). */
     schemaAvailability: SchemaAvailability
     selectedWorkspaceId: string | null
@@ -67,6 +72,125 @@ const AGG_STATUS_META: Record<string, { dot: string; label: string }> = {
 
 function isRecommended(ds: DataSourceResponse): boolean {
     return ds.isPrimary && !!ds.ontologyId && ds.aggregationStatus === 'ready'
+}
+
+// ─── Data source sort ──────────────────────────────────────────────
+
+type DsSort = 'recommended' | 'az' | 'za' | 'added' | 'updated'
+
+const DS_SORT_OPTIONS: { key: DsSort; label: string }[] = [
+    { key: 'recommended', label: 'Recommended' },
+    { key: 'az', label: 'Name A → Z' },
+    { key: 'za', label: 'Name Z → A' },
+    { key: 'added', label: 'Last added' },
+    { key: 'updated', label: 'Last updated' },
+]
+
+function dsName(ds: DataSourceResponse): string {
+    return ds.label || ds.catalogItemId || ''
+}
+
+function DataSourceSortControl({
+    sort,
+    onSortChange,
+}: {
+    sort: DsSort
+    onSortChange: (sort: DsSort) => void
+}) {
+    const [open, setOpen] = useState(false)
+    const ref = useRef<HTMLDivElement>(null)
+
+    useEffect(() => {
+        function handler(e: MouseEvent) {
+            if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+        }
+        document.addEventListener('mousedown', handler)
+        return () => document.removeEventListener('mousedown', handler)
+    }, [])
+
+    useEffect(() => {
+        if (!open) return
+        function handler(e: KeyboardEvent) {
+            if (e.key === 'Escape') setOpen(false)
+        }
+        document.addEventListener('keydown', handler)
+        return () => document.removeEventListener('keydown', handler)
+    }, [open])
+
+    const current = DS_SORT_OPTIONS.find(o => o.key === sort) ?? DS_SORT_OPTIONS[0]
+
+    return (
+        <div ref={ref} className="relative">
+            <button
+                type="button"
+                onClick={() => setOpen(p => !p)}
+                className={cn(
+                    'flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors',
+                    'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300',
+                    'hover:bg-slate-50 dark:hover:bg-slate-800',
+                    open && 'ring-1 ring-blue-500/30',
+                )}
+            >
+                <ArrowUpDown className="w-3.5 h-3.5" />
+                {current.label}
+                <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
+            </button>
+            {open && (
+                <div className="absolute right-0 top-full z-50 mt-1.5 w-44 p-1 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
+                    {DS_SORT_OPTIONS.map(opt => {
+                        const active = sort === opt.key
+                        return (
+                            <button
+                                key={opt.key}
+                                type="button"
+                                onClick={() => {
+                                    onSortChange(opt.key)
+                                    setOpen(false)
+                                }}
+                                className={cn(
+                                    'flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs transition-colors',
+                                    active
+                                        ? 'text-blue-600 dark:text-blue-400 font-semibold bg-blue-500/5'
+                                        : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700/60',
+                                )}
+                            >
+                                <span>{opt.label}</span>
+                                {active && <Check className="w-3.5 h-3.5" />}
+                            </button>
+                        )
+                    })}
+                </div>
+            )}
+        </div>
+    )
+}
+
+function FilterChip({
+    active,
+    onClick,
+    icon,
+    label,
+}: {
+    active: boolean
+    onClick: () => void
+    icon: ReactNode
+    label: string
+}) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className={cn(
+                'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
+                active
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                    : 'border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800',
+            )}
+        >
+            {icon}
+            {label}
+        </button>
+    )
 }
 
 // ─── Workspace List Item ───────────────────────────────────────────
@@ -142,12 +266,14 @@ function DataSourceCard({
     stats,
     statsLoading,
     isSelected,
+    providerInfo,
     onClick,
 }: {
     ds: DataSourceResponse
     stats?: DataSourceStats
     statsLoading: boolean
     isSelected: boolean
+    providerInfo?: DataSourceProviderInfo
     onClick: () => void
 }) {
     const aggMeta = AGG_STATUS_META[ds.aggregationStatus] ?? AGG_STATUS_META.none
@@ -182,9 +308,18 @@ function DataSourceCard({
                     <Database className="w-4 h-4" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
-                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">
+                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 break-words">
                         {ds.label || ds.catalogItemId || 'Unnamed'}
                     </h4>
+                    {providerInfo && (
+                        <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                            <Server className="w-3 h-3 shrink-0 text-sky-500" />
+                            <span className="break-words">
+                                {providerInfo.providerName}
+                                <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
+                            </span>
+                        </div>
+                    )}
                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                         {ds.isPrimary && (
                             <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
@@ -408,10 +543,10 @@ function NoDataSourcesState({ workspaceName }: { workspaceName: string }) {
 
 // ─── Main Component ────────────────────────────────────────────────
 
+const NO_FILTERS = { primary: false, ontology: false, ready: false }
+
 export function ScopeStep({
     availableWorkspaces,
-    statsMap,
-    statsLoading,
     schemaAvailability,
     selectedWorkspaceId,
     selectedDataSourceId,
@@ -420,6 +555,20 @@ export function ScopeStep({
     onSelectDataSource,
 }: ScopeStepProps) {
     const [wsSearch, setWsSearch] = useState('')
+    const [dsSearch, setDsSearch] = useState('')
+    const [dsSort, setDsSort] = useState<DsSort>('recommended')
+    const [dsFilters, setDsFilters] = useState(NO_FILTERS)
+
+    // Resolves the provider (e.g. falkordb/neo4j) each data source is built on.
+    const { resolve: resolveProvider } = useDataSourceProviderMap()
+
+    // Reset data-source search/sort/filters when the workspace changes so
+    // filters don't leak across workspaces.
+    useEffect(() => {
+        setDsSearch('')
+        setDsSort('recommended')
+        setDsFilters(NO_FILTERS)
+    }, [selectedWorkspaceId])
 
     // Single-workspace fast path: auto-select if only one exists
     const singleWorkspace = availableWorkspaces.length === 1
@@ -435,7 +584,7 @@ export function ScopeStep({
         [availableWorkspaces, selectedWorkspaceId],
     )
 
-    const dataSources = selectedWorkspace?.dataSources ?? []
+    const dataSources = useMemo(() => selectedWorkspace?.dataSources ?? [], [selectedWorkspace])
 
     // Single-data-source fast path: auto-select if only one exists
     useEffect(() => {
@@ -457,15 +606,57 @@ export function ScopeStep({
         return availableWorkspaces.filter(ws => ws.name.toLowerCase().includes(q))
     }, [availableWorkspaces, wsSearch])
 
-    // Sort data sources: recommended first, then primary, then alphabetical
-    const sortedDataSources = useMemo(() => {
-        return [...dataSources].sort((a, b) => {
-            const aRec = isRecommended(a) ? -2 : a.isPrimary ? -1 : 0
-            const bRec = isRecommended(b) ? -2 : b.isPrimary ? -1 : 0
-            if (aRec !== bRec) return aRec - bRec
-            return (a.label || a.catalogItemId || '').localeCompare(b.label || b.catalogItemId || '')
+    // Filter + sort the data sources for display.
+    const visibleDataSources = useMemo(() => {
+        const q = dsSearch.trim().toLowerCase()
+        const filtered = dataSources.filter(ds => {
+            if (dsFilters.primary && !ds.isPrimary) return false
+            if (dsFilters.ontology && !ds.ontologyId) return false
+            if (dsFilters.ready && ds.aggregationStatus !== 'ready') return false
+            if (q) {
+                const prov = resolveProvider(ds.id)
+                const haystack = [
+                    ds.label,
+                    ds.catalogItemId,
+                    prov?.providerName,
+                    prov?.providerType,
+                ].filter(Boolean).join(' ').toLowerCase()
+                if (!haystack.includes(q)) return false
+            }
+            return true
         })
-    }, [dataSources])
+
+        return filtered.sort((a, b) => {
+            switch (dsSort) {
+                case 'az':
+                    return dsName(a).localeCompare(dsName(b))
+                case 'za':
+                    return dsName(b).localeCompare(dsName(a))
+                case 'added':
+                    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+                case 'updated':
+                    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+                case 'recommended':
+                default: {
+                    const aRec = isRecommended(a) ? -2 : a.isPrimary ? -1 : 0
+                    const bRec = isRecommended(b) ? -2 : b.isPrimary ? -1 : 0
+                    if (aRec !== bRec) return aRec - bRec
+                    return dsName(a).localeCompare(dsName(b))
+                }
+            }
+        })
+    }, [dataSources, dsSearch, dsSort, dsFilters, resolveProvider])
+
+    // Fetch cached stats only for the visible sources of the selected workspace
+    // (not eagerly for every source across every workspace).
+    const visibleDsIds = useMemo(() => visibleDataSources.map(ds => ds.id), [visibleDataSources])
+    const { statsMap, isLoading: statsLoading } = useDataSourceStats(selectedWorkspaceId, visibleDsIds)
+
+    const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.primary || dsFilters.ontology || dsFilters.ready
+    const clearDsFilters = useCallback(() => {
+        setDsSearch('')
+        setDsFilters(NO_FILTERS)
+    }, [])
 
     const handleSelectWorkspace = useCallback((wsId: string) => {
         onSelectWorkspace(wsId)
@@ -553,32 +744,88 @@ export function ScopeStep({
                 <div className="flex-1 flex flex-col min-w-0">
                     {selectedWorkspace ? (
                         <>
-                            {/* Right header */}
-                            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 flex items-center gap-2">
-                                <GitBranch className="w-3.5 h-3.5 text-slate-400" />
-                                <span className="text-xs text-slate-400">
-                                    {singleWorkspace ? 'Data sources in' : 'Data sources in'}
-                                </span>
-                                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                                    {selectedWorkspace.name}
-                                </span>
-                                <span className="text-xs text-slate-400 ml-auto">
-                                    {dataSources.length} available
-                                </span>
+                            {/* Right header + toolbar */}
+                            <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 space-y-2.5">
+                                <div className="flex items-center gap-2">
+                                    <GitBranch className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                    <span className="text-xs text-slate-400">Data sources in</span>
+                                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 truncate">
+                                        {selectedWorkspace.name}
+                                    </span>
+                                    <span className="text-xs text-slate-400 ml-auto shrink-0">
+                                        {visibleDataSources.length === dataSources.length
+                                            ? `${dataSources.length} source${dataSources.length !== 1 ? 's' : ''}`
+                                            : `${visibleDataSources.length} of ${dataSources.length} sources`}
+                                    </span>
+                                </div>
+
+                                {dataSources.length > 0 && (
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        {/* Search */}
+                                        <div className="relative flex-1 min-w-[160px]">
+                                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                                            <input
+                                                type="text"
+                                                placeholder="Search data sources..."
+                                                value={dsSearch}
+                                                onChange={e => setDsSearch(e.target.value)}
+                                                onKeyDown={e => e.stopPropagation()}
+                                                className="w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500/40"
+                                            />
+                                            {dsSearch && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setDsSearch('')}
+                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                                                >
+                                                    <X className="w-3.5 h-3.5" />
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {/* Sort */}
+                                        <DataSourceSortControl sort={dsSort} onSortChange={setDsSort} />
+                                    </div>
+                                )}
+
+                                {dataSources.length > 0 && (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                        <FilterChip
+                                            active={dsFilters.primary}
+                                            onClick={() => setDsFilters(f => ({ ...f, primary: !f.primary }))}
+                                            icon={<Star className="w-3 h-3" />}
+                                            label="Primary"
+                                        />
+                                        <FilterChip
+                                            active={dsFilters.ontology}
+                                            onClick={() => setDsFilters(f => ({ ...f, ontology: !f.ontology }))}
+                                            icon={<ShieldCheck className="w-3 h-3" />}
+                                            label="Semantic layer"
+                                        />
+                                        <FilterChip
+                                            active={dsFilters.ready}
+                                            onClick={() => setDsFilters(f => ({ ...f, ready: !f.ready }))}
+                                            icon={<span className="w-2 h-2 rounded-full bg-emerald-500" />}
+                                            label="Ready"
+                                        />
+                                    </div>
+                                )}
                             </div>
 
                             {/* Data source grid */}
-                            {sortedDataSources.length > 0 ? (
+                            {dataSources.length === 0 ? (
+                                <NoDataSourcesState workspaceName={selectedWorkspace.name} />
+                            ) : visibleDataSources.length > 0 ? (
                                 <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
                                     <div className={cn(
                                         'grid gap-3',
-                                        sortedDataSources.length === 1
+                                        visibleDataSources.length === 1
                                             ? 'grid-cols-1 max-w-md'
-                                            : sortedDataSources.length === 2
+                                            : visibleDataSources.length === 2
                                                 ? 'grid-cols-1 sm:grid-cols-2'
                                                 : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
                                     )}>
-                                        {sortedDataSources.map((ds, i) => (
+                                        {visibleDataSources.map((ds, i) => (
                                             <motion.div
                                                 key={ds.id}
                                                 initial={{ opacity: 0, y: 8 }}
@@ -590,6 +837,7 @@ export function ScopeStep({
                                                     stats={statsMap[`${selectedWorkspaceId}/${ds.id}`]}
                                                     statsLoading={statsLoading}
                                                     isSelected={ds.id === selectedDataSourceId}
+                                                    providerInfo={resolveProvider(ds.id)}
                                                     onClick={() => onSelectDataSource(ds.id)}
                                                 />
                                             </motion.div>
@@ -597,7 +845,25 @@ export function ScopeStep({
                                     </div>
                                 </div>
                             ) : (
-                                <NoDataSourcesState workspaceName={selectedWorkspace.name} />
+                                <div className="flex-1 flex items-center justify-center p-6">
+                                    <div className="text-center">
+                                        <div className="w-12 h-12 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mx-auto mb-3">
+                                            <Search className="w-6 h-6 text-slate-300 dark:text-slate-600" />
+                                        </div>
+                                        <p className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">
+                                            No data sources match your filters
+                                        </p>
+                                        {hasActiveDsFilter && (
+                                            <button
+                                                type="button"
+                                                onClick={clearDsFilters}
+                                                className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                                            >
+                                                Clear filters
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
                             )}
                         </>
                     ) : (

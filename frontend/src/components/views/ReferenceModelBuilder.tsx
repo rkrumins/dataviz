@@ -442,7 +442,7 @@ export function ReferenceModelBuilder({
                             <LayoutTemplate className="w-6 h-6 text-blue-600 dark:text-blue-400" />
                         </div>
                         <div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">Reference Model Builder</h2>
+                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">Context View Builder</h2>
                             <p className="text-sm text-slate-500">Configure layers for your data architecture</p>
                         </div>
                     </div>

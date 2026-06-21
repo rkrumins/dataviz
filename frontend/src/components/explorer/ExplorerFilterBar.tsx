@@ -92,7 +92,7 @@ const VIEW_TYPE_META: Record<string, { icon: typeof Network; iconClass: string; 
   hierarchy: { icon: GitBranch, iconClass: 'text-violet-500', label: 'Hierarchy' },
   table: { icon: Table2, iconClass: 'text-emerald-500', label: 'Table' },
   'layered-lineage': { icon: LayersIcon, iconClass: 'text-amber-500', label: 'Lineage' },
-  reference: { icon: LayoutIcon, iconClass: 'text-rose-500', label: 'Reference' },
+  reference: { icon: LayoutIcon, iconClass: 'text-rose-500', label: 'Context View' },
 }
 
 /* ------------------------------------------------------------------ */

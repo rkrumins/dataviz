@@ -599,7 +599,7 @@ export function WorkspaceDetailPage() {
                     <div className="flex items-start gap-3 py-4 mb-2">
                         <Info className="w-4 h-4 text-cyan-500 shrink-0 mt-0.5" />
                         <p className="text-sm text-ink-secondary leading-relaxed">
-                            Views are saved visual perspectives on your graph data — like dashboards for your knowledge graph. Each view can display data as a hierarchy, lineage map, reference model, or table.
+                            Views are saved visual perspectives on your graph data — like dashboards for your knowledge graph. Each view can display data as a hierarchy, lineage map, context view, or table.
                             <span className="text-ink-muted"> Filter by data source or search to find specific views. Click any view to open it.</span>
                         </p>
                     </div>

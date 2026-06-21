@@ -38,6 +38,7 @@ import {
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { View } from '@/services/viewApiService'
+import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -54,6 +55,8 @@ interface ExplorerPreviewDrawerProps {
   editDisabled?: boolean
   onDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  /** Provider the view's data source is built from (shown as a scope pill). */
+  providerInfo?: DataSourceProviderInfo
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -69,7 +72,7 @@ const VIEW_TYPE_META: Record<string, { label: string; icon: React.ComponentType<
   hierarchy: { label: 'Hierarchy', icon: GitBranch, color: 'bg-violet-500/10 border-violet-500/20 text-violet-500' },
   'layered-lineage': { label: 'Lineage', icon: Layers, color: 'bg-amber-500/10 border-amber-500/20 text-amber-500' },
   table: { label: 'Table', icon: Table2, color: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500' },
-  reference: { label: 'Reference', icon: Layout, color: 'bg-rose-500/10 border-rose-500/20 text-rose-500' },
+  reference: { label: 'Context View', icon: Layout, color: 'bg-rose-500/10 border-rose-500/20 text-rose-500' },
 }
 
 const DEFAULT_TYPE = { label: 'View', icon: Layout, color: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500' }
@@ -320,6 +323,7 @@ export function ExplorerPreviewDrawer({
   editDisabled,
   onDelete,
   healthStatus,
+  providerInfo,
 }: ExplorerPreviewDrawerProps) {
   const content = (
     <>
@@ -412,6 +416,8 @@ export function ExplorerPreviewDrawer({
                   workspaceName={view.workspaceName}
                   dataSourceId={view.dataSourceId}
                   dataSourceName={view.dataSourceName}
+                  providerName={providerInfo?.providerName}
+                  providerType={providerInfo?.providerType}
                   size="md"
                 />
                 {(() => {

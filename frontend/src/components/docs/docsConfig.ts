@@ -200,7 +200,7 @@ export const faqEntries: FAQEntry[] = [
     category: 'Concepts',
     question: 'What are Projection Modes?',
     answer:
-      'Projection modes control how lineage data is visualized: **Graph** (free-form force-directed), **Hierarchy** (tree layout), **Reference** (dependency matrix), and **Layered Lineage** (horizontal flow by data tier). Each mode offers a different perspective on the same underlying data.',
+      'Projection modes control how lineage data is visualized: **Graph** (free-form force-directed), **Hierarchy** (tree layout), **Context View** (dependency matrix), and **Layered Lineage** (horizontal flow by data tier). Each mode offers a different perspective on the same underlying data.',
   },
   {
     category: 'Concepts',
