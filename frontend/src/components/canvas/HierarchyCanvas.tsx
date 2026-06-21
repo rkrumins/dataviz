@@ -377,7 +377,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-display font-semibold text-ink">Physical Fabric</h2>
           <span className="px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage text-xs font-medium">
-            Reference Model View
+            Context View
           </span>
           <div className="flex-1" />
 

@@ -73,7 +73,7 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
     const layoutLabel = {
         graph: 'Graph Layout',
         hierarchy: 'Hierarchy Layout',
-        reference: 'Reference Model Layout'
+        reference: 'Context View Layout'
     }[formData.layoutType]
 
     return (

@@ -18,7 +18,7 @@
     {
       "key": "allowedViewModes",
       "name": "View modes",
-      "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Reference Model, Layered Lineage).",
+      "description": "Choose which layout types can be created when building views (Graph, Hierarchy, Context View, Layered Lineage).",
       "category": "views",
       "type": "string[]",
       "default": [
@@ -39,7 +39,7 @@
         },
         {
           "id": "reference",
-          "label": "Reference Model"
+          "label": "Context View"
         },
         {
           "id": "layered-lineage",

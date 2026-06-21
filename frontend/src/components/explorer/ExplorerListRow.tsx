@@ -18,6 +18,7 @@ import {
   RotateCcw,
 } from 'lucide-react'
 import type { View } from '@/services/viewApiService'
+import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
@@ -62,7 +63,7 @@ const VIEW_TYPE_META: Record<
   },
   reference: {
     icon: Layout,
-    label: 'Reference',
+    label: 'Context View',
     bg: 'bg-rose-500/10',
     border: 'border-rose-500/20',
     text: 'text-rose-500',
@@ -102,6 +103,8 @@ export interface ExplorerListRowProps {
   onToggleSelect?: () => void
   /** Visual density — controls vertical padding. */
   density?: 'compact' | 'comfortable' | 'spacious'
+  /** Provider the view's data source is built from (shown as a scope pill). */
+  providerInfo?: DataSourceProviderInfo
 }
 
 /* ------------------------------------------------------------------ */
@@ -121,6 +124,7 @@ export function ExplorerListRow({
   isSelected,
   onToggleSelect,
   density = 'comfortable',
+  providerInfo,
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
   const TypeIcon = typeMeta.icon
@@ -203,6 +207,8 @@ export function ExplorerListRow({
             workspaceName={view.workspaceName}
             dataSourceId={view.dataSourceId}
             dataSourceName={view.dataSourceName}
+            providerName={providerInfo?.providerName}
+            providerType={providerInfo?.providerType}
           />
         </div>
 

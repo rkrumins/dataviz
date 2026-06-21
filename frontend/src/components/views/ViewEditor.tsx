@@ -45,7 +45,7 @@ const GRANULARITY_LEVELS = [
 const LAYOUT_TYPES = [
   { value: 'graph', label: 'Graph', icon: 'Network', description: 'Force-directed or DAG layout' },
   { value: 'hierarchy', label: 'Hierarchy', icon: 'ListTree', description: 'Nested tree view' },
-  { value: 'reference', label: 'Reference Model', icon: 'LayoutTemplate', description: 'Horizontal layer columns' },
+  { value: 'reference', label: 'Context View', icon: 'LayoutTemplate', description: 'Horizontal layer columns' },
 ]
 
 export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {

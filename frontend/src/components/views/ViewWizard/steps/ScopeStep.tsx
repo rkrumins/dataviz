@@ -27,11 +27,14 @@ import {
     ShieldAlert,
     Inbox,
     ExternalLink,
+    Server,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats, SchemaAvailability } from '@/hooks/useWizardScope'
+import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -142,12 +145,14 @@ function DataSourceCard({
     stats,
     statsLoading,
     isSelected,
+    providerInfo,
     onClick,
 }: {
     ds: DataSourceResponse
     stats?: DataSourceStats
     statsLoading: boolean
     isSelected: boolean
+    providerInfo?: DataSourceProviderInfo
     onClick: () => void
 }) {
     const aggMeta = AGG_STATUS_META[ds.aggregationStatus] ?? AGG_STATUS_META.none
@@ -182,9 +187,18 @@ function DataSourceCard({
                     <Database className="w-4 h-4" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
-                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">
+                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 break-words">
                         {ds.label || ds.catalogItemId || 'Unnamed'}
                     </h4>
+                    {providerInfo && (
+                        <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                            <Server className="w-3 h-3 shrink-0 text-sky-500" />
+                            <span className="break-words">
+                                {providerInfo.providerName}
+                                <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
+                            </span>
+                        </div>
+                    )}
                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                         {ds.isPrimary && (
                             <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
@@ -421,6 +435,9 @@ export function ScopeStep({
 }: ScopeStepProps) {
     const [wsSearch, setWsSearch] = useState('')
 
+    // Resolves the provider (e.g. falkordb/neo4j) each data source is built on.
+    const { resolve: resolveProvider } = useDataSourceProviderMap()
+
     // Single-workspace fast path: auto-select if only one exists
     const singleWorkspace = availableWorkspaces.length === 1
     useEffect(() => {
@@ -590,6 +607,7 @@ export function ScopeStep({
                                                     stats={statsMap[`${selectedWorkspaceId}/${ds.id}`]}
                                                     statsLoading={statsLoading}
                                                     isSelected={ds.id === selectedDataSourceId}
+                                                    providerInfo={resolveProvider(ds.id)}
                                                     onClick={() => onSelectDataSource(ds.id)}
                                                 />
                                             </motion.div>
