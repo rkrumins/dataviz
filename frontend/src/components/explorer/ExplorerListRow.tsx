@@ -221,10 +221,10 @@ export function ExplorerListRow({
         <VisIcon className="h-3.5 w-3.5 text-ink-muted" />
 
         {/* ── Owner ──
-             Prefer the server-resolved display name; fall back to the raw
-             user id (legacy rows). The CreatorHoverCard shows full name +
-             email on hover so power users can disambiguate without taking
-             a round-trip to the view detail drawer. */}
+             Prefer the server-resolved display name; fall back to "Unknown"
+             when unresolvable — never the raw user id. The CreatorHoverCard
+             shows full name + email on hover so power users can disambiguate
+             without taking a round-trip to the view detail drawer. */}
         {(view.createdByName || view.createdBy) ? (
           <CreatorHoverCard
             userId={view.createdBy ?? null}
@@ -232,7 +232,7 @@ export function ExplorerListRow({
             email={view.createdByEmail ?? null}
           >
             <span className="truncate text-xs text-ink-muted cursor-default" tabIndex={0}>
-              {view.createdByName ?? view.createdBy}
+              {view.createdByName ?? 'Unknown'}
             </span>
           </CreatorHoverCard>
         ) : (

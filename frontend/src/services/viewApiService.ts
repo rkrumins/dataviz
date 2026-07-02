@@ -37,6 +37,12 @@ export interface View {
     createdByName?: string
     /** Creator's email, surfaced for tooltip / hover detail. */
     createdByEmail?: string
+    /** Id of the user who last edited the view. Null until the first post-migration edit. */
+    updatedBy?: string | null
+    /** Human-readable editor name resolved server-side from the users table. */
+    updatedByName?: string | null
+    /** Editor's email, surfaced for tooltip / hover detail. */
+    updatedByEmail?: string | null
     tags?: string[]
     isPinned: boolean
     favouriteCount: number
@@ -415,7 +421,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         grouping: cfg.grouping,
         isDefault: false,
         isPublic: view.visibility !== 'private',
-        createdBy: view.createdBy ?? 'user',
+        createdBy: view.createdBy ?? '',
         createdAt: view.createdAt,
         updatedAt: view.updatedAt,
     }

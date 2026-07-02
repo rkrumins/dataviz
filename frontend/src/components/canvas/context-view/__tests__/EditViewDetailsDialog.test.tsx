@@ -127,3 +127,61 @@ describe('EditViewDetailsDialog — save', () => {
     expect(updateViewMock).not.toHaveBeenCalled()
   })
 })
+
+describe('EditViewDetailsDialog — provenance footer', () => {
+  it('shows the resolved creator name and omits the last-edited line when the view has never been edited', async () => {
+    getViewMock.mockResolvedValue({
+      ...seededView,
+      createdByName: 'Ada Lovelace',
+      updatedBy: null,
+      updatedByName: null,
+    })
+
+    render(<EditViewDetailsDialog open viewId="v1" onClose={vi.fn()} onSaved={vi.fn()} />)
+
+    await screen.findByLabelText('Name')
+    expect(screen.getByText(/Created by Ada Lovelace/)).toBeInTheDocument()
+    expect(screen.queryByText(/Last edited by/)).not.toBeInTheDocument()
+  })
+
+  it('falls back to "Unknown" for an unresolvable creator name — never the raw id', async () => {
+    getViewMock.mockResolvedValue({
+      ...seededView,
+      createdByName: null,
+      updatedBy: null,
+    })
+
+    render(<EditViewDetailsDialog open viewId="v1" onClose={vi.fn()} onSaved={vi.fn()} />)
+
+    await screen.findByLabelText('Name')
+    expect(screen.getByText(/Created by Unknown/)).toBeInTheDocument()
+  })
+
+  it('shows a resolved last-edited name and date once the view has been edited', async () => {
+    getViewMock.mockResolvedValue({
+      ...seededView,
+      createdByName: 'Ada Lovelace',
+      updatedBy: 'usr_2',
+      updatedByName: 'Grace Hopper',
+      updatedAt: '2026-02-01T00:00:00Z',
+    })
+
+    render(<EditViewDetailsDialog open viewId="v1" onClose={vi.fn()} onSaved={vi.fn()} />)
+
+    await screen.findByLabelText('Name')
+    expect(screen.getByText(/Last edited by Grace Hopper/)).toBeInTheDocument()
+  })
+
+  it('falls back to "Unknown" for an unresolvable editor name — never the raw id', async () => {
+    getViewMock.mockResolvedValue({
+      ...seededView,
+      updatedBy: 'usr_2',
+      updatedByName: null,
+    })
+
+    render(<EditViewDetailsDialog open viewId="v1" onClose={vi.fn()} onSaved={vi.fn()} />)
+
+    await screen.findByLabelText('Name')
+    expect(screen.getByText(/Last edited by Unknown/)).toBeInTheDocument()
+  })
+})

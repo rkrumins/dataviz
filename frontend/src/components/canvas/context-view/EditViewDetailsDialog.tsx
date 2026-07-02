@@ -18,8 +18,15 @@ import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, PenLine, Loader2, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { getView, updateView } from '@/services/viewApiService'
+import { getView, updateView, type View } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
+
+/** Provenance fields shown in the dialog's quiet footer. */
+type ViewProvenance = Pick<View, 'createdByName' | 'createdAt' | 'updatedBy' | 'updatedByName' | 'updatedAt'>
+
+function formatViewDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString()
+}
 
 export interface EditViewDetailsDialogProps {
   open: boolean
@@ -39,6 +46,7 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [tags, setTags] = useState('')
+  const [provenance, setProvenance] = useState<ViewProvenance | null>(null)
 
   // Seed from a fresh fetch each time the dialog opens — the in-store view
   // lacks tags, and a re-open should reflect any changes made elsewhere.
@@ -52,6 +60,13 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
         setName(view.name ?? '')
         setDescription(view.description ?? '')
         setTags((view.tags ?? []).join(', '))
+        setProvenance({
+          createdByName: view.createdByName,
+          createdAt: view.createdAt,
+          updatedBy: view.updatedBy,
+          updatedByName: view.updatedByName,
+          updatedAt: view.updatedAt,
+        })
         setLoading(false)
       })
       .catch(err => {
@@ -171,6 +186,15 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
                   />
                   <p className="text-[11px] text-ink-muted mt-1.5">Separate tags with commas.</p>
                 </div>
+
+                {provenance && (
+                  <div className="pt-3 border-t border-glass-border/60 text-[11px] text-ink-muted">
+                    Created by {provenance.createdByName ?? 'Unknown'} · {formatViewDate(provenance.createdAt)}
+                    {provenance.updatedBy && (
+                      <> · Last edited by {provenance.updatedByName ?? 'Unknown'} · {formatViewDate(provenance.updatedAt)}</>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
