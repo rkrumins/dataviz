@@ -55,16 +55,18 @@ const AVATAR_SIZE = {
 
 export function OwnerAvatar({
   owner,
+  userNames,
   size = 'sm',
   className,
 }: {
   owner?: string | null
+  userNames?: Record<string, string>
   size?: keyof typeof AVATAR_SIZE
   className?: string
 }) {
   return (
     <span
-      title={ownerName(owner)}
+      title={ownerName(owner, userNames)}
       className={cn(
         'inline-flex items-center justify-center rounded-full font-semibold text-white shrink-0 shadow-sm ring-1 ring-white/15',
         AVATAR_SIZE[size],
@@ -72,7 +74,7 @@ export function OwnerAvatar({
         className,
       )}
     >
-      {ownerInitials(owner)}
+      {ownerInitials(owner, userNames)}
     </span>
   )
 }

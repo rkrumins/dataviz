@@ -68,4 +68,14 @@ describe('BranchManager', () => {
     renderManager()
     expect(screen.getByText(/Create a draft to edit safely/i)).toBeInTheDocument()
   })
+
+  it('resolves the owner id via userNames and searches by the resolved name', () => {
+    branchesData = [draft({ branchId: 'br_1', name: 'Q3 pricing', owner: 'usr_abc123', userNames: { usr_abc123: 'Ana Lee' } })]
+    renderManager()
+    expect(screen.getByText('Ana Lee')).toBeInTheDocument()
+    expect(screen.queryByText('usr_abc123')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('Search drafts…'), { target: { value: 'ana lee' } })
+    expect(screen.getByText('Q3 pricing')).toBeInTheDocument()
+  })
 })

@@ -24,7 +24,10 @@ const useCommitDiffSummary = vi.fn((_ws?: string, _gid?: string | null, cid?: st
 vi.mock('../../hooks/useVersioning', () => ({
   useCommitLog: () => ({ data: { commits: [] }, isLoading: false }),
   useViewCommitLog: () => ({
-    data: { commits: [{ commit_id: 'cmt_1', commit_seq: 2, message: 'Add Sales dataset', actor: 'u@x', created_at: '2024-01-01T00:00:00Z', stats: { create: 1 } }] },
+    data: {
+      commits: [{ commit_id: 'cmt_1', commit_seq: 2, message: 'Add Sales dataset', actor: 'usr_abc123', created_at: '2024-01-01T00:00:00Z', stats: { create: 1 } }],
+      userNames: { usr_abc123: 'Ana Lee' },
+    },
     isLoading: false,
   }),
   useCommitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) => useCommitDiffSummary(ws, gid, cid),
@@ -49,5 +52,12 @@ describe('ViewHistoryTimeline drill-down', () => {
     expect(useCommitDiffSummary).toHaveBeenCalledWith('ws1', 'g1', 'cmt_1')
     expect(await screen.findByText(/1 change/i)).toBeInTheDocument()
     expect(screen.getByText('Sales')).toBeInTheDocument()
+  })
+
+  it('resolves the commit actor to its userNames display name, never the raw id', () => {
+    render(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} />)
+
+    expect(screen.getByText('Ana Lee')).toBeInTheDocument()
+    expect(screen.queryByText('usr_abc123')).not.toBeInTheDocument()
   })
 })

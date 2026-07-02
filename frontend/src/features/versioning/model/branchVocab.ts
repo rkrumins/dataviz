@@ -55,19 +55,33 @@ export function draftStatus(
     : { behind, label: BRANCH_VOCAB.upToDate, tone: 'ok' }
 }
 
-/** Human owner name: `ana.lee@acme.com` → `Ana lee`. Falls back gracefully. */
-export function ownerName(owner?: string | null): string {
+/**
+ * Human display name for an actor id/owner. Precedence: the resolved `userNames` map entry
+ * (id → display name, attached by the API) → an email-munge for legacy email-shaped actors
+ * (`ana.lee@acme.com` → `Ana lee`) → `'Unknown'`. A raw `usr_*` id is never shown as a label.
+ */
+export function ownerName(owner?: string | null, userNames?: Record<string, string>): string {
   if (!owner) return 'Unknown'
-  const handle = owner.includes('@') ? owner.split('@')[0] : owner
+  const resolved = userNames?.[owner]
+  if (resolved) return resolved
+  if (!owner.includes('@')) return 'Unknown'
+  const handle = owner.split('@')[0]
   const cleaned = handle.replace(/[._-]+/g, ' ').trim()
   if (!cleaned) return owner
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1)
 }
 
-/** Two-letter initials for an avatar chip. */
-export function ownerInitials(owner?: string | null): string {
+/** Two-letter initials for an avatar chip — same source precedence as {@link ownerName}. */
+export function ownerInitials(owner?: string | null, userNames?: Record<string, string>): string {
   if (!owner) return '?'
-  const handle = owner.includes('@') ? owner.split('@')[0] : owner
+  const resolved = userNames?.[owner]
+  if (resolved) {
+    const parts = resolved.trim().split(/\s+/).filter(Boolean)
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
+    return resolved.slice(0, 2).toUpperCase()
+  }
+  if (!owner.includes('@')) return '?'
+  const handle = owner.split('@')[0]
   const parts = handle.split(/[._\-\s]+/).filter(Boolean)
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase()
   return handle.slice(0, 2).toUpperCase()

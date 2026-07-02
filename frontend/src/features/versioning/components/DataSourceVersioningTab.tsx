@@ -15,6 +15,12 @@ import type { Branch } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { kindMeta } from '../model/commitKind'
+import { ownerName } from '../model/branchVocab'
+
+// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
+// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
+const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
+  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 
 function timeAgo(iso?: string): string {
   if (!iso) return ''
@@ -164,7 +170,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
                   <p className="text-[11px] text-ink-muted flex items-center gap-2 mt-0.5">
                     <span className="inline-flex items-center gap-1">
                       <User className="w-3 h-3" />
-                      {((c.actor as string) ?? 'system').split('@')[0]}
+                      {actorLabel(c.actor, commitsQ.data?.userNames)}
                     </span>
                     <span>·</span>
                     <span>{timeAgo(c.created_at as string)}</span>
@@ -202,7 +208,7 @@ function BranchRow({ branch }: { branch: Branch }) {
           {isMain
             ? 'The published graph'
             : [
-                branch.owner ? `by ${branch.owner.split('@')[0]}` : null,
+                branch.owner ? `by ${ownerName(branch.owner, branch.userNames)}` : null,
                 branch.originatingViewId ? 'from a view' : null,
               ]
                 .filter(Boolean)

@@ -153,7 +153,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
               return (
                 <BranchRow
                   key={b.branchId}
-                  icon={<OwnerAvatar owner={b.owner} size="sm" />}
+                  icon={<OwnerAvatar owner={b.owner} userNames={b.userNames} size="sm" />}
                   title={b.name || BRANCH_VOCAB.untitled}
                   subtitle={draftSubtitle(b)}
                   active={b.branchId === currentBranchId}
@@ -257,7 +257,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
 }
 
 function draftSubtitle(b: Branch): string {
-  return [ownerName(b.owner), `edited ${timeAgo(b.updatedAt)}`].join(' · ')
+  return [ownerName(b.owner, b.userNames), `edited ${timeAgo(b.updatedAt)}`].join(' · ')
 }
 
 function BranchRow({

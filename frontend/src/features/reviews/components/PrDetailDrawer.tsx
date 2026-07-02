@@ -23,13 +23,12 @@ import {
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { CommitRow } from '../../versioning/components/CommitRow'
+import { ownerName } from '../../versioning/model/branchVocab'
 import { usePermission, useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useToast } from '@/components/ui/toast'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
-
-const who = (actor?: string | null) => (actor ?? 'someone').split('@')[0]
 
 function Section({ icon: Icon, title, right, children }: {
   icon: React.ComponentType<{ className?: string }>; title: string; right?: React.ReactNode; children: React.ReactNode
@@ -170,10 +169,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const events = useMemo(() => {
     type Ev = { Icon: React.ComponentType<{ className?: string }>; text: string; time?: string; tint: string }
     if (!pr) return [] as Ev[]
-    const evs: Ev[] = [{ Icon: GitPullRequestArrow, text: `Opened by ${who(pr.actor)}`, time: pr.createdAt, tint: 'bg-accent-lineage' }]
-    for (const a of pr.approvedBy ?? []) evs.push({ Icon: CheckCircle2, text: `Approved by ${who(a)}`, time: pr.updatedAt, tint: 'bg-emerald-500' })
-    if (pr.status === 'merged') evs.push({ Icon: GitMerge, text: `Merged by ${who(pr.mergedBy)}${pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''}`, time: pr.mergedAt ?? pr.updatedAt, tint: 'bg-violet-500' })
-    if (pr.status === 'closed') evs.push({ Icon: XCircle, text: `Closed by ${who(pr.closedBy)}`, time: pr.closedAt ?? pr.updatedAt, tint: 'bg-ink-muted' })
+    const evs: Ev[] = [{ Icon: GitPullRequestArrow, text: `Opened by ${ownerName(pr.actor, pr.userNames)}`, time: pr.createdAt, tint: 'bg-accent-lineage' }]
+    for (const a of pr.approvedBy ?? []) evs.push({ Icon: CheckCircle2, text: `Approved by ${ownerName(a, pr.userNames)}`, time: pr.updatedAt, tint: 'bg-emerald-500' })
+    if (pr.status === 'merged') evs.push({ Icon: GitMerge, text: `Merged by ${ownerName(pr.mergedBy, pr.userNames)}${pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''}`, time: pr.mergedAt ?? pr.updatedAt, tint: 'bg-violet-500' })
+    if (pr.status === 'closed') evs.push({ Icon: XCircle, text: `Closed by ${ownerName(pr.closedBy, pr.userNames)}`, time: pr.closedAt ?? pr.updatedAt, tint: 'bg-ink-muted' })
     return evs
   }, [pr])
 
@@ -274,13 +273,13 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                     <span className="font-mono text-[12px]">{pr.targetBranch}</span>
                   </div>
                   <p className="text-[12px] text-ink-muted flex items-center gap-1.5">
-                    <User className="w-3.5 h-3.5" /> {who(pr.actor)}
+                    <User className="w-3.5 h-3.5" /> {ownerName(pr.actor, pr.userNames)}
                     <span>·</span>
                     <Clock className="w-3.5 h-3.5" /> opened {timeAgo(pr.createdAt)}
                   </p>
                   {pr.sourceBranchOwner && (
                     <p className="text-[12px] text-ink-muted flex items-center gap-1.5">
-                      <GitBranch className="w-3.5 h-3.5" /> Draft owner: <span className="text-ink">{who(pr.sourceBranchOwner)}</span>
+                      <GitBranch className="w-3.5 h-3.5" /> Draft owner: <span className="text-ink">{ownerName(pr.sourceBranchOwner, pr.userNames)}</span>
                     </p>
                   )}
                   {hasReviewers && (
@@ -288,7 +287,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                       <ShieldCheck className="w-3.5 h-3.5" /> Reviewers:
                       {pr.reviewers!.map((r) => (
                         <span key={r} className={cn('px-1.5 py-0.5 rounded text-[11px]', (pr.approvedBy ?? []).includes(r) ? 'bg-emerald-500/10 text-emerald-600' : 'bg-ink/5 text-ink-muted')}>
-                          {who(r)}{(pr.approvedBy ?? []).includes(r) ? ' ✓' : ''}
+                          {ownerName(r, pr.userNames)}{(pr.approvedBy ?? []).includes(r) ? ' ✓' : ''}
                         </span>
                       ))}
                     </p>
@@ -314,6 +313,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                             commit={c}
                             wsId={wsId}
                             graphId={pr.graphId}
+                            userNames={commitsQ.data?.userNames}
                             expanded={expandedCommit === cid}
                             onToggle={toggleCommit}
                           />

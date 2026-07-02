@@ -95,6 +95,7 @@ export function ViewHistoryTimeline({
                   wsId={wsId}
                   graphId={graphId}
                   originatingViewLabel={originatingViewLabel}
+                  userNames={q.data?.userNames}
                   expanded={expandedId === cid}
                   onToggle={toggle}
                 />

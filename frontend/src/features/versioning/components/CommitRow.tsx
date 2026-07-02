@@ -11,10 +11,14 @@ import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
 import { useCommitDiffSummary } from '../hooks/useVersioning'
 import { kindMeta } from '../model/commitKind'
+import { ownerName } from '../model/branchVocab'
 import { NodeDiffBadge } from './NodeDiffBadge'
 import { ChangeTreePanel } from './ChangeTreePanel'
 
-const who = (a?: unknown) => (typeof a === 'string' && a ? a.split('@')[0] : 'system')
+// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
+// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
+const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
+  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 const num = (v: unknown) => (typeof v === 'number' ? v : 0)
 
 function StatChips({ stats }: { stats: Record<string, unknown> }) {
@@ -36,6 +40,7 @@ export function CommitRow({
   wsId,
   graphId,
   originatingViewLabel = null,
+  userNames,
   expanded,
   onToggle,
 }: {
@@ -43,6 +48,8 @@ export function CommitRow({
   wsId: string
   graphId: string
   originatingViewLabel?: string | null
+  /** actor/contributor id → resolved display name (the commit log wrapper's map). */
+  userNames?: Record<string, string>
   expanded: boolean
   onToggle: (commitId: string) => void
 }) {
@@ -78,9 +85,11 @@ export function CommitRow({
           <StatChips stats={stats} />
         </div>
         <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5 flex-wrap pl-5">
-          <User className="w-3 h-3" /> {who(commit.actor)}
+          <User className="w-3 h-3" /> {actorLabel(commit.actor, userNames)}
           {others.length > 0 && (
-            <span title="Everyone who edited this revision">· edits by {others.map(who).join(', ')}</span>
+            <span title="Everyone who edited this revision">
+              · edits by {others.map((o) => ownerName(o, userNames)).join(', ')}
+            </span>
           )}
           <span>·</span>
           <span>{timeAgo(commit.created_at as string)}</span>

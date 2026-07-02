@@ -48,6 +48,8 @@ export interface Branch {
   createdBy?: string | null
   createdAt: string
   updatedAt: string
+  /** owner/createdBy id → resolved display name; unresolvable ids are absent. */
+  userNames?: Record<string, string>
 }
 
 export interface Graph {
@@ -61,6 +63,8 @@ export interface Graph {
   mainHeadCommitSeq: number
   createdBy?: string | null
   createdAt: string
+  /** createdBy id → resolved display name; unresolvable ids are absent. */
+  userNames?: Record<string, string>
 }
 
 /** One normalized op for the staging buffer — `entityKind`/`entityId` mirror the wire. */
@@ -215,6 +219,8 @@ export interface ViewPrCounts {
 
 export interface CommitLogResponse {
   commits: Array<Record<string, unknown>>
+  /** actor/contributor id → resolved display name, covering every commit in this response. */
+  userNames?: Record<string, string>
 }
 
 export interface EntityHistoryResponse {
@@ -265,6 +271,9 @@ export interface PullRequest {
   mergedBy?: string | null
   closedAt?: string | null       // when + who closed
   closedBy?: string | null
+  /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
+   *  sourceBranchOwner) → resolved display name; unresolvable ids are absent. */
+  userNames?: Record<string, string>
 }
 
 /** Map of entityId → resolved payload (or `null` to delete) for conflict resolution. */

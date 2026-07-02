@@ -67,7 +67,7 @@ export function BranchManager({
     const q = query.trim().toLowerCase()
     const filtered = q
       ? all.filter((b) =>
-          [b.name, b.description, ownerName(b.owner)].some((v) => (v ?? '').toLowerCase().includes(q)),
+          [b.name, b.description, ownerName(b.owner, b.userNames)].some((v) => (v ?? '').toLowerCase().includes(q)),
         )
       : all
     return [...filtered].sort((a, b) =>
@@ -264,7 +264,7 @@ function DraftCard({
       )}
     >
       <div className="flex items-start gap-3">
-        <OwnerAvatar owner={branch.owner} size="md" className="mt-0.5" />
+        <OwnerAvatar owner={branch.owner} userNames={branch.userNames} size="md" className="mt-0.5" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-ink truncate">{branch.name || BRANCH_VOCAB.untitled}</h3>
@@ -279,7 +279,7 @@ function DraftCard({
           )}
           <div className="flex items-center flex-wrap gap-x-2 gap-y-1 mt-2">
             <DraftStatusPill status={status} />
-            <span className="text-[11px] text-ink-muted">{ownerName(branch.owner)}</span>
+            <span className="text-[11px] text-ink-muted">{ownerName(branch.owner, branch.userNames)}</span>
             <span className="text-ink-muted/40">·</span>
             <span className="text-[11px] text-ink-muted">edited {timeAgo(branch.updatedAt)}</span>
           </div>
