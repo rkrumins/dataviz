@@ -554,17 +554,18 @@ export function ExplorerPreviewDrawer({
                   )}
 
                   {/* Created by — prefer the server-resolved display name;
-                      fall back to the raw id for legacy rows. Email renders
-                      as a subtle secondary line so operators can reach out
-                      without leaving the drawer. */}
+                      fall back to "Unknown" when unresolvable — never the
+                      raw id (kept in a title attr for debugging). Email
+                      renders as a subtle secondary line so operators can
+                      reach out without leaving the drawer. */}
                   {(view.createdByName || view.createdBy) && (
                     <DetailRow
                       icon={User}
                       label="Created By"
                       value={
                         <span className="flex flex-col min-w-0">
-                          <span className="font-medium text-ink truncate">
-                            {view.createdByName ?? view.createdBy}
+                          <span className="font-medium text-ink truncate" title={view.createdBy}>
+                            {view.createdByName ?? 'Unknown'}
                           </span>
                           {view.createdByEmail && (
                             <a

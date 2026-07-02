@@ -563,7 +563,7 @@ export function ExplorerViewCard({
               card footer stays uncluttered next to favourite / sync
               indicators. */}
           {(view.createdByName || view.createdBy) && (() => {
-            const displayName = view.createdByName ?? view.createdBy ?? ''
+            const displayName = view.createdByName ?? 'Unknown'
             return (
               <CreatorHoverCard
                 userId={view.createdBy ?? null}
