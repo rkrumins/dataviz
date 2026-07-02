@@ -360,8 +360,12 @@ services:
       # (deep schema scans), purge. One slow large-graph scan can never
       # occupy the slots that keep counts fresh.
       STATS_WORKER_CONCURRENCY: "${STATS_WORKER_CONCURRENCY:-4}"
+      STATS_SWEEP_CONCURRENCY: "${STATS_SWEEP_CONCURRENCY:-2}"
       STATS_HEAVY_CONCURRENCY: "${STATS_HEAVY_CONCURRENCY:-1}"
       STATS_PURGE_CONCURRENCY: "${STATS_PURGE_CONCURRENCY:-1}"
+      # Background sweep refreshes only REGISTERED assets by default;
+      # unregistered ones refresh on demand (hot lane) when viewed.
+      DISCOVERY_SWEEP_REGISTERED_ONLY: "${DISCOVERY_SWEEP_REGISTERED_ONLY:-true}"
       STATS_MAX_CONCURRENT_PER_GRAPH: "${STATS_MAX_CONCURRENT_PER_GRAPH:-1}"
       # 900s idle interval: counts freshness is event-driven (app write
       # paths enqueue a counts poll within seconds) and the read path

@@ -7318,10 +7318,13 @@ class FalkorDBProvider(GraphDataProvider):
                 entityTypeStats=[], edgeTypeStats=[], tagStats=[],
             )
 
-        # Tag stats - kept as is for now, but ensured safe execution
+        # Tag stats — a full node scan like the two above; give it the
+        # same generous stats budget (it previously ran on the default
+        # connection timeout and was the silent killer on large graphs).
         try:
             tag_res = await self._ro_query(
-                "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags"
+                "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags",
+                timeout=_stats_q_timeout,
             )
             tag_counts: Dict[str, int] = {}
             tag_types: Dict[str, Set[str]] = {}

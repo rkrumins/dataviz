@@ -34,7 +34,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
-import { usePermission } from '@/store/auth'
+import { usePermission, useAuthStore } from '@/store/auth'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
@@ -80,6 +80,9 @@ import { LayerColumn } from './LayerColumn'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
+import { EditViewDetailsDialog } from './EditViewDetailsDialog'
+import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { getView, updateView } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -419,6 +422,18 @@ export function ContextViewCanvas({
   const graphId = useGraphId()
   const canEnterEdit = !!graphId
 
+  // View-level rights for the title menu — deliberately independent of the
+  // canvas Edit cluster (view metadata is not graph data). Scoped to the
+  // canvas workspace (scopeWsId) so they line up with the rest of the view
+  // state. Both mirror the backend enforcers (see the header design spec):
+  //   • edit details  = workspace:view:edit OR creator
+  //   • manage sharing = workspace:admin (system:admin folds in) OR creator
+  //     (view_grants.py::can_manage_view_grants)
+  const currentUserId = useAuthStore(s => s.user?.id) ?? null
+  const isViewCreator = !!activeView?.createdBy && activeView.createdBy === currentUserId
+  const canEditView = usePermission('workspace:view:edit', scopeWsId ?? undefined) || isViewCreator
+  const canShareView = usePermission('workspace:admin', scopeWsId ?? undefined) || isViewCreator
+
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
@@ -592,6 +607,17 @@ export function ContextViewCanvas({
   // rule matches and publishes them so FlatTreeItem can render chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   useDisplayRuleEngine(activeView?.id ?? null)
+
+  // View-metadata dialogs (title menu). EditViewDetailsDialog is prop-driven
+  // (open flag); Share mirrors ExplorerPage — mounted while shareSeed is set,
+  // seeded from a fresh getView. viewVisibility feeds the menu's read-only
+  // row and is only ever populated from that fetch (undefined until first
+  // Share open — the menu hides the row while unknown).
+  const [viewDetailsOpen, setViewDetailsOpen] = useState(false)
+  const [shareSeed, setShareSeed] = useState<
+    { id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null
+  >(null)
+  const [viewVisibility, setViewVisibility] = useState<'private' | 'workspace' | 'enterprise' | undefined>(undefined)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -1354,6 +1380,54 @@ export function ContextViewCanvas({
     useBranchStore.getState().switchToMain()
   }, [stagedChangeList.length, openStagedChangesPanel, showToast])
 
+  // ── View-metadata actions (title menu) ──────────────────────────────
+  // All read the live view from the store at call time so they carry no
+  // stale-closure risk and keep their dep lists minimal.
+
+  // Inline rename — optimistic: patch the store immediately (header updates
+  // instantly), persist, and on failure revert to the previous name + toast.
+  const handleRenameView = useCallback((name: string) => {
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    const viewId = view.id
+    const previousName = view.name
+    useSchemaStore.getState().updateView(viewId, { name })
+    updateView(viewId, { name }).catch(err => {
+      useSchemaStore.getState().updateView(viewId, { name: previousName })
+      showToast('error', err instanceof Error ? err.message : 'Failed to rename view')
+    })
+  }, [showToast])
+
+  const handleEditViewDetails = useCallback(() => setViewDetailsOpen(true), [])
+
+  // The dialog persists to the backend itself; here we mirror the fields the
+  // store knows (name/description) so the header reflects the edit at once.
+  const handleViewDetailsSaved = useCallback(
+    (updated: { name: string; description?: string; tags?: string[] }) => {
+      const viewId = useSchemaStore.getState().getActiveView()?.id
+      if (!viewId) return
+      useSchemaStore.getState().updateView(viewId, {
+        name: updated.name,
+        description: updated.description,
+      })
+    },
+    [],
+  )
+
+  // Share — the in-store view lacks visibility, so fetch it fresh to seed
+  // both the dialog and the menu's read-only visibility row.
+  const handleShareView = useCallback(async () => {
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    try {
+      const full = await getView(view.id)
+      setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
+      setViewVisibility(full.visibility)
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Failed to open sharing')
+    }
+  }, [showToast])
+
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
   const pendingLoadRef = useRef<Set<string>>(new Set())
@@ -1995,6 +2069,12 @@ export function ContextViewCanvas({
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
         activeContextModelName={activeContextModelName}
+        canEditView={canEditView}
+        canShareView={canShareView}
+        viewVisibility={viewVisibility}
+        onRenameView={handleRenameView}
+        onEditViewDetails={handleEditViewDetails}
+        onShareView={() => void handleShareView()}
         syncStatus={syncStatus}
         onRetrySync={() => { if (scopeWsId) void saveToBackend(scopeWsId) }}
         isDraft={isDraft}
@@ -2428,6 +2508,27 @@ export function ContextViewCanvas({
           position={edgeConnect.state.pickerPos}
           onPick={edgeConnect.confirm}
           onCancel={edgeConnect.cancel}
+        />
+      )}
+
+      {/* View-metadata dialogs (title menu). EditViewDetailsDialog is
+          prop-driven; Share is reused unchanged from the Explorer, mounted
+          while shareSeed holds its fetched identity + visibility. */}
+      {activeView?.id && (
+        <EditViewDetailsDialog
+          open={viewDetailsOpen}
+          viewId={activeView.id}
+          onClose={() => setViewDetailsOpen(false)}
+          onSaved={handleViewDetailsSaved}
+        />
+      )}
+      {shareSeed && (
+        <ShareViewDialog
+          viewId={shareSeed.id}
+          viewName={shareSeed.name}
+          currentVisibility={shareSeed.visibility}
+          isOpen={true}
+          onClose={() => setShareSeed(null)}
         />
       )}
     </div>

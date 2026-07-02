@@ -40,6 +40,7 @@ def _config() -> StatsServiceConfig:
         default_interval_secs=900,
         min_interval_secs=60,
         worker_concurrency=4,
+        sweep_concurrency=2,
         heavy_concurrency=1,
         purge_concurrency=1,
         max_per_graph=1,
@@ -305,7 +306,7 @@ async def test_lane_accounting_spawn_and_reap(monkeypatch) -> None:
     consumer._spawn(STATS_STREAM, "1-1", fields)
     consumer._spawn(STATS_DEEP_STREAM, "1-2", deep_fields)
     assert consumer.lane_active_snapshot() == {"fast": 1, "heavy": 1}
-    assert consumer._lane_free_slots() == {"fast": 3, "heavy": 0, "purge": 1}
+    assert consumer._lane_free_slots() == {"fast": 3, "sweep": 2, "heavy": 0, "purge": 1}
     assert PURGE_STREAM.lane == "purge"
 
     # Cancel the spawned tasks and reap — counters must return to zero.
@@ -317,7 +318,7 @@ async def test_lane_accounting_spawn_and_reap(monkeypatch) -> None:
     consumer._reap_done_tasks()
 
     assert consumer.lane_active_snapshot() == {"fast": 0, "heavy": 0}
-    assert consumer._lane_free_slots() == {"fast": 4, "heavy": 1, "purge": 1}
+    assert consumer._lane_free_slots() == {"fast": 4, "sweep": 2, "heavy": 1, "purge": 1}
     consumer._scope_key_cache.clear()
 
 

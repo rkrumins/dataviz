@@ -482,17 +482,33 @@ _DISCOVERY_BOOTSTRAP_DELAY_SECS = float(
 )
 
 
+# When true (default), the background sweep's per-asset stats refresh
+# is limited to REGISTERED assets (those with a catalog entry) — the
+# ones users actually monitor. Unregistered assets refresh on demand
+# only: their rows serve from cache while stale and self-heal (hot
+# lane) when someone views them past the 7-day absolute expiry. Cuts
+# the sweep's standing provider load from every-cached-asset to
+# what's-actually-in-use.
+_SWEEP_REGISTERED_ONLY = (
+    os.getenv("DISCOVERY_SWEEP_REGISTERED_ONLY", "true").lower()
+    in ("1", "true", "yes", "on")
+)
+
+
 async def _discovery_tick() -> DiscoveryTickSummary:
     """Single discovery scheduler pass.
 
-    Reads active providers + every cached row and enqueues a discovery
-    refresh for each. Dedup is naturally handled by the SET NX claim
-    inside ``enqueue_discovery_job_safe``; if a worker is already
-    mid-job for ``(provider_id, asset_name)`` the call returns ``None``
-    and we count it as ``dedup_skipped``.
+    Enqueues a list-all refresh per active provider, plus per-asset
+    stats refreshes for registered assets (all cached assets when
+    ``DISCOVERY_SWEEP_REGISTERED_ONLY=false``). Dedup is naturally
+    handled by the SET NX claim inside ``enqueue_discovery_job_safe``;
+    if a worker is already mid-job for ``(provider_id, asset_name)``
+    the call returns ``None`` and we count it as ``dedup_skipped``.
     """
     # Lazy import: avoid circular module-graph at process start.
     from .enqueue import enqueue_discovery_job_safe
+
+    from backend.app.db.models import CatalogItemORM
 
     async with get_readonly_session() as session:
         provider_rows = await session.execute(
@@ -510,6 +526,15 @@ async def _discovery_tick() -> DiscoveryTickSummary:
             (row[0], row[1]) for row in cached_rows.all()
         ]
 
+        registered: set[tuple[str, str]] | None = None
+        if _SWEEP_REGISTERED_ONLY:
+            reg_rows = await session.execute(
+                select(CatalogItemORM.provider_id, CatalogItemORM.source_identifier)
+            )
+            registered = {
+                (row[0], row[1]) for row in reg_rows.all() if row[1]
+            }
+
     list_jobs = asset_jobs = dedup_skipped = 0
 
     # 1. List-all sentinel for every active provider — refreshes the
@@ -521,10 +546,12 @@ async def _discovery_tick() -> DiscoveryTickSummary:
         else:
             dedup_skipped += 1
 
-    # 2. Per-asset stats refresh for every row already in the cache.
-    #    Skip the empty-string sentinel (already enqueued above).
+    # 2. Per-asset stats refresh. Skip the empty-string sentinel
+    #    (already enqueued above) and, by default, unregistered assets.
     for provider_id, asset_name in cached_pairs:
         if not asset_name:
+            continue
+        if registered is not None and (provider_id, asset_name) not in registered:
             continue
         msg_id = await enqueue_discovery_job_safe(provider_id, asset_name)
         if msg_id is not None:

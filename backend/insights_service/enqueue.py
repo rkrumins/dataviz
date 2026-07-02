@@ -26,7 +26,9 @@ from backend.app.config import resilience
 from backend.app.services.aggregation.redis_client import get_redis
 
 from .redis_streams import (
+    DISCOVERY_HOT_STREAM,
     DISCOVERY_STREAM,
+    StreamConfig,
     enqueue,
     get_stream,
     release_claim,
@@ -72,15 +74,17 @@ async def enqueue_job(
     envelope: JobEnvelope,
     *,
     dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+    stream: Optional[StreamConfig] = None,
 ) -> Optional[str]:
     """Atomic claim → XADD. Returns the stream message ID, or ``None``
     when another job for the same scope is already in flight.
 
-    The envelope's ``kind`` selects the target stream + consumer group;
-    its ``scope_key`` namespaces the SET NX dedup claim so two different
-    kinds never collide on the same Redis key.
+    The envelope's ``kind`` selects the target stream + consumer group
+    unless ``stream`` overrides it (user-initiated discovery rides the
+    hot stream); the ``scope_key`` namespaces the SET NX dedup claim so
+    two different kinds never collide on the same Redis key.
     """
-    cfg = get_stream(envelope.kind)
+    cfg = stream or get_stream(envelope.kind)
 
     claimed = await try_claim(
         envelope.scope_key, ttl_secs=dedup_ttl_secs, stream=cfg
@@ -111,6 +115,7 @@ async def enqueue_job_safe_ex(
     envelope: JobEnvelope,
     *,
     dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+    stream: Optional[StreamConfig] = None,
 ) -> tuple[Optional[str], EnqueueOutcome]:
     """Redis-tolerant enqueue that also reports *why* no message landed.
 
@@ -121,7 +126,9 @@ async def enqueue_job_safe_ex(
     means the dedup claim was already held.
     """
     try:
-        msg_id = await enqueue_job(envelope, dedup_ttl_secs=dedup_ttl_secs)
+        msg_id = await enqueue_job(
+            envelope, dedup_ttl_secs=dedup_ttl_secs, stream=stream,
+        )
     except _REDIS_BENIGN_ERRORS as exc:
         logger.warning(
             "Redis unavailable for %s enqueue scope=%s: %s — handler will return cache-only without refresh",
@@ -141,6 +148,7 @@ async def enqueue_job_safe(
     envelope: JobEnvelope,
     *,
     dedup_ttl_secs: int = _DEFAULT_DEDUP_TTL_SECS,
+    stream: Optional[StreamConfig] = None,
 ) -> Optional[str]:
     """Redis-tolerant variant of :func:`enqueue_job`.
 
@@ -149,7 +157,9 @@ async def enqueue_job_safe(
     is unreachable, otherwise a Redis outage cascades into 5xx errors
     on the web tier.
     """
-    msg_id, _ = await enqueue_job_safe_ex(envelope, dedup_ttl_secs=dedup_ttl_secs)
+    msg_id, _ = await enqueue_job_safe_ex(
+        envelope, dedup_ttl_secs=dedup_ttl_secs, stream=stream,
+    )
     return msg_id
 
 
@@ -291,11 +301,16 @@ async def enqueue_discovery_job_safe(
     asset_name: str = "",
     *,
     dedup_ttl_secs: int = _DISCOVERY_DEDUP_TTL_SECS,
+    priority: bool = False,
 ) -> Optional[str]:
     """Redis-tolerant enqueue for asset discovery jobs.
 
     ``asset_name=""`` is the list-all sentinel (one row per provider);
-    any other value targets a single asset's stats.
+    any other value targets a single asset's stats. ``priority=True``
+    routes to the hot stream (fast worker lane) — for user-initiated
+    work (refresh clicks, first-view self-heals) that must never queue
+    behind the background sweep. Both streams share one dedup claim
+    namespace, so a scope is never queued twice.
     """
     if not provider_id:
         return None
@@ -304,14 +319,19 @@ async def enqueue_discovery_job_safe(
         asset_name=asset_name,
         enqueued_at=datetime.now(timezone.utc),
     )
-    return await enqueue_job_safe(envelope, dedup_ttl_secs=dedup_ttl_secs)
+    return await enqueue_job_safe(
+        envelope,
+        dedup_ttl_secs=dedup_ttl_secs,
+        stream=DISCOVERY_HOT_STREAM if priority else None,
+    )
 
 
 async def enqueue_discovery_job_force(
     provider_id: str,
     asset_name: str = "",
 ) -> Optional[str]:
-    """Drop any existing dedup claim then re-enqueue a discovery job.
+    """Drop any existing dedup claim then re-enqueue a discovery job on
+    the hot (user-priority) stream.
 
     Used by the on-demand refresh endpoints (``POST .../refresh``).
     Idempotent at the cache level: the discovery handler is an UPSERT
@@ -323,7 +343,7 @@ async def enqueue_discovery_job_force(
         return None
     scope_key = f"{provider_id}:{asset_name}"
     await release_claim(scope_key, stream=DISCOVERY_STREAM)
-    return await enqueue_discovery_job_safe(provider_id, asset_name)
+    return await enqueue_discovery_job_safe(provider_id, asset_name, priority=True)
 
 
 # ── Purge: aggregation edge deletion ─────────────────────────────────

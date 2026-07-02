@@ -260,10 +260,11 @@ async def _build_response(
         )
 
     # No usable cache (true miss or past absolute expiry) — kick ONE
-    # refresh so the first-ever view self-heals. ``status=computing``
-    # when a job is in flight, or ``unavailable`` when Redis is down
-    # (job_id == None and no row).
-    job_id = await enqueue_discovery_job_safe(provider_id, asset_name)
+    # refresh so the first-ever view self-heals. Priority: a user is
+    # looking at this right now, so it rides the hot lane instead of
+    # queueing behind the background sweep. ``status=computing`` when a
+    # job is in flight, or ``unavailable`` when Redis is down.
+    job_id = await enqueue_discovery_job_safe(provider_id, asset_name, priority=True)
     status = "computing" if job_id is not None else "unavailable"
     return _build_envelope(
         payload=None,

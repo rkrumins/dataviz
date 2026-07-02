@@ -73,9 +73,22 @@ STATS_DEEP_STREAM = StreamConfig(
     lane="heavy",
 )
 
+# Background-sweep discovery (scheduler-enqueued). Own lane so the
+# twice-hourly ~200-job sweep can never queue ahead of user actions.
 DISCOVERY_STREAM = StreamConfig(
     kind="discovery",
     stream="insights.jobs.discovery",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:discovery",
+    lane="sweep",
+)
+
+# User-initiated discovery (refresh clicks, first-view self-heals).
+# Rides the fast lane; SHARES the sweep stream's dedup prefix so a
+# job for one scope is never queued twice across the two streams.
+DISCOVERY_HOT_STREAM = StreamConfig(
+    kind="discovery",
+    stream="insights.jobs.discovery.hot",
     group=SHARED_GROUP,
     dedup_prefix="insights:discovery",
 )
@@ -92,10 +105,17 @@ PURGE_STREAM = StreamConfig(
 )
 
 ALL_STREAMS: tuple[StreamConfig, ...] = (
-    STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM,
+    STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, DISCOVERY_HOT_STREAM,
+    PURGE_STREAM,
 )
 
-_BY_KIND: dict[str, StreamConfig] = {s.kind: s for s in ALL_STREAMS}
+# Kind → default producer stream. ``discovery`` deliberately maps to the
+# background sweep stream; user-facing enqueues pass
+# ``stream=DISCOVERY_HOT_STREAM`` explicitly (see enqueue.py).
+_BY_KIND: dict[str, StreamConfig] = {
+    s.kind: s
+    for s in (STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
+}
 
 DLQ_STREAM = "insights.dlq"
 
@@ -440,6 +460,8 @@ async def snapshot_stream_depths() -> StreamDepthsSnapshot:
 
     streams: dict[str, StreamDepth] = {}
     for cfg in ALL_STREAMS:
+        # Two discovery streams share a kind — key the hot one distinctly.
+        metrics_key = cfg.kind if cfg.kind not in streams else f"{cfg.kind}.hot"
         try:
             length = int(await redis.xlen(cfg.stream))
         except Exception:
@@ -462,7 +484,7 @@ async def snapshot_stream_depths() -> StreamDepthsSnapshot:
         except Exception:
             pending_count = None
 
-        streams[cfg.kind] = StreamDepth(
+        streams[metrics_key] = StreamDepth(
             length=length,
             pending=pending_count,
             oldest_pending_age_ms=oldest_pending_age_ms,

@@ -1088,13 +1088,21 @@ async def get_edges_between(
     Uses source_urns + target_urns AND-semantics in the Cypher query so only
     edges connecting nodes within the set are returned — no over-fetch or
     Python post-filter needed.
+
+    Slot-bounded: this is the heaviest hydration query (an AND-scan over
+    every edge on large graphs, ~40s budget) and it is not response-
+    cached, so concurrent cold opens must shed with 429 rather than
+    pile onto FalkorDB's single Cypher thread.
     """
-    return await engine.get_edges(EdgeQuery(
-        source_urns=query.urns,
-        target_urns=query.urns,
-        edge_types=query.edge_types,
-        limit=query.limit,
-    ))
+    async def compute() -> List[GraphEdge]:
+        return await engine.get_edges(EdgeQuery(
+            source_urns=query.urns,
+            target_urns=query.urns,
+            edge_types=query.edge_types,
+            limit=query.limit,
+        ))
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.post("/edges/query", response_model=List[GraphEdge], response_model_by_alias=True)
@@ -1111,8 +1119,12 @@ async def query_nodes(
     query: NodeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced node query (bulk fetch, complex filters)."""
-    return await engine.get_nodes_query(query)
+    """Advanced node query (bulk fetch, complex filters). Slot-bounded —
+    fired on every canvas hydration with no response cache."""
+    async def compute() -> List[GraphNode]:
+        return await engine.get_nodes_query(query)
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.get("/metadata/entity-types", response_model=List[str])

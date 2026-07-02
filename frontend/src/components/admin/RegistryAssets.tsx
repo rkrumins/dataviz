@@ -12,8 +12,8 @@ import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
-    AlertTriangle, Zap, X, ChevronLeft, ChevronRight, Plus, WifiOff,
-    ArrowUp, ArrowDown,
+    AlertTriangle, Zap, X, Check, ChevronDown, ChevronLeft, ChevronRight,
+    Plus, WifiOff, ArrowUpDown,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -37,6 +37,21 @@ import { StatusChip } from '@/components/insights/StatusChip'
 import { RefreshControl } from '@/components/insights/RefreshControl'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
 import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
+
+// Plain-language sort options — field + direction folded into one
+// control so the toolbar reads like a sentence, not a query builder.
+const SORT_OPTIONS: Array<{
+    label: string
+    by: 'name' | 'size' | 'refreshed'
+    dir: 'asc' | 'desc'
+}> = [
+    { label: 'Name A→Z', by: 'name', dir: 'asc' },
+    { label: 'Name Z→A', by: 'name', dir: 'desc' },
+    { label: 'Largest first', by: 'size', dir: 'desc' },
+    { label: 'Smallest first', by: 'size', dir: 'asc' },
+    { label: 'Recently refreshed', by: 'refreshed', dir: 'desc' },
+    { label: 'Longest since refresh', by: 'refreshed', dir: 'asc' },
+]
 import { useAssetStats, ASSET_STATS_QUERY_KEY_PREFIX } from '@/hooks/useAssetStats'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
@@ -662,6 +677,18 @@ export function RegistryAssets() {
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
     const [pageSize, setPageSize] = useState<10 | 25 | 50>(25)
     const [page, setPage] = useState(0)
+    // Sort menu (house dropdown pattern — click-outside to dismiss,
+    // same as RefreshControl's overflow menu in this toolbar).
+    const [sortMenuOpen, setSortMenuOpen] = useState(false)
+    const sortMenuRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+        if (!sortMenuOpen) return
+        const onClick = (e: MouseEvent) => {
+            if (!sortMenuRef.current?.contains(e.target as Node)) setSortMenuOpen(false)
+        }
+        document.addEventListener('mousedown', onClick)
+        return () => document.removeEventListener('mousedown', onClick)
+    }, [sortMenuOpen])
 
     // Actions
     const [showOnboarding, setShowOnboarding] = useState(false)
@@ -1273,24 +1300,55 @@ export function RegistryAssets() {
 
                                 {/* Sort + bulk actions */}
                                 <div className="flex items-center gap-1.5">
-                                    <select
-                                        value={sortBy}
-                                        onChange={e => setSortBy(e.target.value as typeof sortBy)}
-                                        aria-label="Sort assets by"
-                                        className="px-2 py-1.5 rounded-lg text-xs font-semibold bg-canvas-elevated border border-glass-border text-ink outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                    >
-                                        <option value="name">Name</option>
-                                        <option value="size">Size (nodes)</option>
-                                        <option value="refreshed">Last refreshed</option>
-                                    </select>
-                                    <button
-                                        onClick={() => setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))}
-                                        title={sortDir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending'}
-                                        aria-label="Toggle sort direction"
-                                        className="p-1.5 rounded-lg text-ink-muted bg-black/5 dark:bg-white/5 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
-                                    >
-                                        {sortDir === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
-                                    </button>
+                                    <div className="relative" ref={sortMenuRef}>
+                                        <button
+                                            onClick={() => setSortMenuOpen(o => !o)}
+                                            aria-haspopup="menu"
+                                            aria-expanded={sortMenuOpen}
+                                            aria-label="Sort assets"
+                                            className={cn(
+                                                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-glass-border bg-canvas-elevated transition-colors',
+                                                'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                                sortMenuOpen && 'text-ink bg-black/5 dark:bg-white/5',
+                                            )}
+                                        >
+                                            <ArrowUpDown className="w-3.5 h-3.5" />
+                                            {SORT_OPTIONS.find(o => o.by === sortBy && o.dir === sortDir)?.label ?? 'Sort'}
+                                            <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', sortMenuOpen && 'rotate-180')} />
+                                        </button>
+                                        {sortMenuOpen && (
+                                            <div
+                                                role="menu"
+                                                className="absolute right-0 top-full mt-1.5 z-20 w-52 p-1 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                                            >
+                                                {SORT_OPTIONS.map(opt => {
+                                                    const active = sortBy === opt.by && sortDir === opt.dir
+                                                    return (
+                                                        <button
+                                                            key={opt.label}
+                                                            role="menuitemradio"
+                                                            aria-checked={active}
+                                                            onClick={() => {
+                                                                setSortBy(opt.by)
+                                                                setSortDir(opt.dir)
+                                                                setSortMenuOpen(false)
+                                                            }}
+                                                            className={cn(
+                                                                'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
+                                                                active
+                                                                    ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                                    : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                            )}
+                                                        >
+                                                            {opt.label}
+                                                            {active && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                                        </button>
+                                                    )
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
                                     <button
                                         onClick={() => setSelected(new Set(assets.filter(a => !registeredSourceIds.has(a))))}
                                         className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-600 bg-indigo-500/10 hover:bg-indigo-500/20 transition-colors"
@@ -1385,40 +1443,51 @@ export function RegistryAssets() {
                             )}
                         </div>
 
-                        {/* Pager */}
+                        {/* Pager — matches the Job History pager conventions */}
                         {!assetsLoading && sortedAssets.length > 0 && (
                             <div className="shrink-0 mt-3 flex items-center justify-between gap-4 text-xs text-ink-muted">
                                 <div className="flex items-center gap-2">
                                     <span>Show</span>
-                                    <select
-                                        value={pageSize}
-                                        onChange={e => setPageSize(Number(e.target.value) as 10 | 25 | 50)}
-                                        aria-label="Assets per page"
-                                        className="px-1.5 py-1 rounded-lg font-semibold bg-canvas-elevated border border-glass-border text-ink outline-none focus:ring-2 focus:ring-indigo-500/50"
-                                    >
-                                        <option value={10}>10</option>
-                                        <option value={25}>25</option>
-                                        <option value={50}>50</option>
-                                    </select>
+                                    <div className="flex gap-0.5 p-0.5 bg-black/5 dark:bg-white/5 rounded-lg border border-glass-border">
+                                        {([10, 25, 50] as const).map(size => (
+                                            <button
+                                                key={size}
+                                                onClick={() => setPageSize(size)}
+                                                aria-label={`Show ${size} per page`}
+                                                aria-pressed={pageSize === size}
+                                                className={cn(
+                                                    'px-2 py-1 text-xs font-semibold rounded-md transition-colors tabular-nums',
+                                                    pageSize === size
+                                                        ? 'bg-canvas shadow text-ink'
+                                                        : 'text-ink-muted hover:text-ink',
+                                                )}
+                                            >
+                                                {size}
+                                            </button>
+                                        ))}
+                                    </div>
                                     <span>per page</span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    <span>
+                                    <span className="tabular-nums">
                                         {clampedPage * pageSize + 1}–{Math.min((clampedPage + 1) * pageSize, sortedAssets.length)} of {sortedAssets.length}
                                     </span>
                                     <button
                                         onClick={() => setPage(p => Math.max(0, p - 1))}
                                         disabled={clampedPage === 0}
                                         aria-label="Previous page"
-                                        className="p-1.5 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-40"
+                                        className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-muted bg-black/5 dark:bg-white/5 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
                                     >
                                         <ChevronLeft className="w-3.5 h-3.5" />
                                     </button>
+                                    <span className="tabular-nums font-semibold text-ink">
+                                        {clampedPage + 1} / {pageCount}
+                                    </span>
                                     <button
                                         onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
                                         disabled={clampedPage >= pageCount - 1}
                                         aria-label="Next page"
-                                        className="p-1.5 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-40"
+                                        className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-muted bg-black/5 dark:bg-white/5 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
                                     >
                                         <ChevronRight className="w-3.5 h-3.5" />
                                     </button>

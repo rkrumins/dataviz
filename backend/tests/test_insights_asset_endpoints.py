@@ -42,7 +42,7 @@ class _Session:
 def _wire_safe_enqueue(monkeypatch, *, claim_held: bool = False) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
 
-    async def fake_safe(provider_id, asset_name):
+    async def fake_safe(provider_id, asset_name, **_kw):
         calls.append((provider_id, asset_name))
         return "1-1"
 
@@ -116,6 +116,34 @@ async def test_pending_job_claim_drives_refreshing_signal(monkeypatch) -> None:
     )
     assert fresh_env["meta"]["status"] == "fresh"
     assert fresh_env["meta"]["refreshing"] is True  # forced refresh of a fresh row
+
+
+@pytest.mark.asyncio
+async def test_user_discovery_rides_hot_stream(monkeypatch) -> None:
+    """User-initiated discovery (priority=True) must land on the hot
+    stream (fast worker lane); the background sweep's default stays on
+    the sweep stream — so a refresh click never queues behind the
+    twice-hourly sweep batch."""
+    from backend.insights_service import enqueue as enqueue_mod
+    from backend.insights_service.redis_streams import (
+        DISCOVERY_HOT_STREAM, DISCOVERY_STREAM,
+    )
+
+    used_streams: list[str] = []
+
+    async def fake_enqueue_job_safe(envelope, *, dedup_ttl_secs, stream=None):
+        used_streams.append((stream or DISCOVERY_STREAM).stream)
+        return "1-1"
+
+    monkeypatch.setattr(enqueue_mod, "enqueue_job_safe", fake_enqueue_job_safe)
+
+    await enqueue_mod.enqueue_discovery_job_safe("p1", "g1", priority=True)
+    await enqueue_mod.enqueue_discovery_job_safe("p1", "g1")  # sweep default
+    assert used_streams == [DISCOVERY_HOT_STREAM.stream, DISCOVERY_STREAM.stream]
+    # Both share one dedup namespace — a scope can never be queued twice.
+    assert DISCOVERY_HOT_STREAM.dedup_prefix == DISCOVERY_STREAM.dedup_prefix
+    assert DISCOVERY_HOT_STREAM.lane == "fast"
+    assert DISCOVERY_STREAM.lane == "sweep"
 
 
 @pytest.mark.asyncio

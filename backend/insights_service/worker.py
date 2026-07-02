@@ -83,7 +83,7 @@ class InsightsJobConsumer:
     # coroutine, no lock needed.
     _SCOPE_KEY_CACHE_MAX = 1024
     _DS_META_TTL_SECS = 900.0
-    _scope_key_cache: dict[str, tuple[str | None, int, float]] = {}
+    _scope_key_cache: dict[str, tuple[str | None, int | None, float]] = {}
 
     def __init__(self, config: StatsServiceConfig) -> None:
         self._config = config
@@ -115,6 +115,7 @@ class InsightsJobConsumer:
     def _lane_budgets(self) -> dict[str, int]:
         return {
             "fast": self._config.worker_concurrency,
+            "sweep": self._config.sweep_concurrency,
             "heavy": self._config.heavy_concurrency,
             "purge": self._config.purge_concurrency,
         }
@@ -488,7 +489,7 @@ class InsightsJobConsumer:
             return 1
         return int(pending[0].get("times_delivered", 1))
 
-    async def _resolve_ds_meta(self, ds_id: str) -> tuple[str | None, int]:
+    async def _resolve_ds_meta(self, ds_id: str) -> tuple[str | None, int | None]:
         """Return ``(scope_key, node_count)`` for a data source, cached.
 
         The ``provider_id:graph_name`` identity rarely changes (set at
@@ -528,14 +529,19 @@ class InsightsJobConsumer:
             # Don't cache failures; a stale-but-known entry beats nothing.
             if cached is not None:
                 return cached[0], cached[1]
-            return None, 0
+            return None, None
 
         if not row:
             resolved: str | None = None
-            node_count = 0
+            node_count: int | None = None
         else:
             provider_id, graph_name = row[0], row[1]
-            node_count = int(row[2] or 0)
+            # None (no stats row yet — never scanned) is deliberately
+            # distinct from 0 (scanned, genuinely empty): a never-
+            # scanned source of unknown size must get the generous
+            # timeout, or the first poll of a 100k+ graph times out on
+            # the 30s small-graph budget and loops.
+            node_count = int(row[2]) if row[2] is not None else None
             if provider_id and graph_name:
                 resolved = f"{provider_id}:{graph_name}"
             else:
@@ -582,6 +588,10 @@ class InsightsJobConsumer:
         # stats / schema — node count comes from the cached ds-meta
         # lookup (the scope-key resolution already warmed it).
         _, node_count = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]
+        if node_count is None:
+            # Never scanned — size unknown. Give the first poll the
+            # large-graph budget so a genuinely big graph can complete.
+            return self._config.poll_timeout_large_secs, "unknown"
         timeout = self._config.resolve_poll_timeout(node_count)
         if node_count < 10_000:
             bucket = "small"

@@ -129,7 +129,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const seg = pathOnly.replace(/^\/api\/v\d+(\/[^/]+)?\/graph/, '')
         // Hot read paths — 30 s
         if (seg.includes('/children')) return 30_000
-        if (seg.startsWith('/edges/between') || seg.startsWith('/edges/query')) return 30_000
+        // Edge scans get 45 s: the BACKEND budget for these is 40 s
+        // (FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS) — aborting at 30 s made
+        // the client give up and retry while the server was still
+        // scanning, doubling load on large graphs. Client timeout must
+        // sit above the server's so the structured timeout surfaces.
+        if (seg.startsWith('/edges/between') || seg.startsWith('/edges/query')) return 45_000
         if (seg.startsWith('/nodes/top-level')) return 30_000
         if (seg.startsWith('/nodes/query') || seg === '/search') return 30_000
         if (seg.match(/^\/nodes\/[^/]+\/(ancestors|descendants|parent)/)) return 30_000

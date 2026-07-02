@@ -180,7 +180,7 @@ export function ViewTitleMenu({
 
         <p className="text-[10px] text-ink-muted/70 flex items-center gap-1.5 min-w-0">
           <LucideIcons.ArrowRight className="w-3 h-3 flex-shrink-0" />
-          <span className="truncate">{subline}</span>
+          <span className="truncate" title={subline}>{subline}</span>
           {syncStatus === 'saving' && (
             <LucideIcons.Loader2
               className="w-3 h-3 animate-spin flex-shrink-0"
