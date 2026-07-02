@@ -183,13 +183,15 @@ export function PropertyManagerDrawer({
                                 />
                             </div>
 
-                            {/* Unsaved-rules nudge — rules auto-dirty the
-                                blueprint; remind the user to persist them so
-                                they survive a reload. */}
+                            {/* Auto-save reassurance — display-rule edits dirty
+                                the blueprint, which is now persisted
+                                automatically (debounced), so reassure rather
+                                than nag about a Save button that no longer
+                                exists. */}
                             {syncStatus === 'dirty' && rules.length > 0 && (
                                 <div className="mt-2.5 flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200/90">
                                     <Save className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-                                    <span>Unsaved changes — use <span className="font-semibold text-amber-100">Save Blueprint</span> to keep these rules.</span>
+                                    <span>Changes to view settings are saved automatically.</span>
                                 </div>
                             )}
                         </div>

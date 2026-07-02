@@ -364,7 +364,12 @@ export function useRebuildProjection(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => api.rebuildProjection(wsId, graphId),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      // Seed the watermark cache with the response's watermark BEFORE invalidating: on an instant
+      // rebuild the refetch can come back already-fresh, so without this the progress effect never
+      // observes the 'rebuilding' state and hangs at "Rebuilding…". Seeding guarantees one
+      // 'rebuilding' observation; the (auto-polling) refetch then drives it to "Up to date".
+      qc.setQueryData(VERSIONING_KEYS.projectionWatermark(wsId, graphId), res.watermark)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
     },
   })

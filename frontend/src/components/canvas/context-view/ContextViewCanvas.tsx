@@ -33,7 +33,7 @@ import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenc
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useQueryClient } from '@tanstack/react-query'
-import { useBranchStore, useIsDraftMode, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
+import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { usePermission } from '@/store/auth'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
@@ -365,15 +365,8 @@ export function ContextViewCanvas({
     onExitTrace: exitTrace,
   })
 
-  // Keyboard shortcuts
-  useCanvasKeyboard({
-    enabled: true,
-    handlers: interactions.keyboardHandlers,
-  })
-
   // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
   // stage a RAW create_edge. Only offered in draft (authoring) mode.
-  const isDraftMode = useIsDraftMode()
   const edgeConnect = useEdgeConnect({
     onConnect: (sourceUrn, targetUrn, edgeType) =>
       interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
@@ -408,8 +401,8 @@ export function ContextViewCanvas({
 
   // View/Edit mode gates — Published is strictly read-only for everyone;
   // "edit mode" IS having a draft open (no separate flag). `isDraft` is
-  // scoped to the active view's data source (unlike the unscoped
-  // `isDraftMode` above) so the header never claims Edit for a draft that
+  // scoped to the active view's data source (unlike the unscoped store
+  // `isDraftMode()`) so the header never claims Edit for a draft that
   // belongs to a different data source.
   const dataSourceId = activeView?.dataSourceId ?? null
   const effectiveBranchId = useEffectiveBranchId(activeWorkspaceId ?? '', dataSourceId)
@@ -417,6 +410,26 @@ export function ContextViewCanvas({
   const canManage = usePermission('workspace:datasource:manage', activeWorkspaceId ?? undefined)
   const graphId = useGraphId()
   const canEnterEdit = !!graphId
+
+  // Keyboard shortcuts. Published is read-only, so the destructive Delete shortcut is neutralised
+  // there with a no-op — a bare `undefined` would fall through to useCanvasKeyboard's built-in
+  // node-removal. (The mutation entry points themselves are draft-gated on the context menu.)
+  useCanvasKeyboard({
+    enabled: true,
+    handlers: isDraft
+      ? interactions.keyboardHandlers
+      : { ...interactions.keyboardHandlers, onDelete: () => {} },
+  })
+
+  // Blueprint autosync is ambient: display-rule / layer edits dirty the reference model, but there
+  // is no Save button. Debounce-persist for managers so their changes survive a reload. saveToBackend
+  // flips syncStatus off 'dirty' (→ saving/synced/error), so this can't loop. Viewers can't save, so
+  // their edits stay session-local — firing here would only spam errors at people without permission.
+  useEffect(() => {
+    if (syncStatus !== 'dirty' || !canManage || !activeWorkspaceId) return
+    const t = setTimeout(() => { void saveToBackend(activeWorkspaceId) }, 1500)
+    return () => clearTimeout(t)
+  }, [syncStatus, canManage, activeWorkspaceId, saveToBackend])
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -767,8 +780,10 @@ export function ContextViewCanvas({
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
 
-  // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas.
+  // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas, but only in draft (edit)
+  // mode: Published is read-only, so there are no staged changes to undo/redo.
   useEffect(() => {
+    if (!isDraft) return
     const onKey = (e: KeyboardEvent) => {
       // Ignore when the user is typing in an input/textarea
       const t = e.target as HTMLElement | null
@@ -786,7 +801,7 @@ export function ContextViewCanvas({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [undoStagedChange, redoStagedChange])
+  }, [isDraft, undoStagedChange, redoStagedChange])
 
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
@@ -2229,7 +2244,7 @@ export function ContextViewCanvas({
                   setCreationParentId(null)
                   setIsCreatingEntity(true)
                 } : undefined}
-                onBeginConnect={isDraftMode ? edgeConnect.beginDrag : undefined}
+                onBeginConnect={isDraft ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
                   type: 'canvas',
                   position: { x: e.clientX, y: e.clientY },
@@ -2334,22 +2349,24 @@ export function ContextViewCanvas({
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
 
-      {/* Modern Context Menu - Full CRUD operations */}
+      {/* Modern Context Menu - Full CRUD operations. Every mutation affordance is draft-gated:
+          Published is strictly read-only, so on it the menu offers only the read affordances
+          (trace, copy URN, select all). */}
       <CanvasContextMenu
         isOpen={interactions.state.contextMenu.isOpen}
         position={interactions.state.contextMenu.position}
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
-        onEditNode={interactions.editNode}
-        onDuplicateNode={interactions.duplicateNode}
-        onDeleteNode={interactions.deleteNode}
-        onCreateChild={interactions.createChild}
-        onConnect={isDraftMode ? (id) => edgeConnect.armConnect(id) : undefined}
+        onEditNode={isDraft ? interactions.editNode : undefined}
+        onDuplicateNode={isDraft ? interactions.duplicateNode : undefined}
+        onDeleteNode={isDraft ? interactions.deleteNode : undefined}
+        onCreateChild={isDraft ? interactions.createChild : undefined}
+        onConnect={isDraft ? (id) => edgeConnect.armConnect(id) : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
-        onEditEdge={interactions.editEdge}
-        onDeleteEdge={interactions.deleteEdge}
-        onReverseEdge={interactions.reverseEdge}
+        onEditEdge={isDraft ? interactions.editEdge : undefined}
+        onDeleteEdge={isDraft ? interactions.deleteEdge : undefined}
+        onReverseEdge={isDraft ? interactions.reverseEdge : undefined}
         onCreateNode={isDraft ? (pos, layerId) => {
           void ensureDraftOpen()
           // Right-clicked an empty layer column → scope the new node to that
@@ -2359,7 +2376,7 @@ export function ContextViewCanvas({
         } : undefined}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
-        onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
+        onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
