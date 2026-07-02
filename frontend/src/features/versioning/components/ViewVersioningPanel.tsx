@@ -11,7 +11,7 @@
 import { useCallback, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, FileDiff, GitPullRequest, GitCommit, PencilLine } from 'lucide-react'
+import { X, FileDiff, GitPullRequest, GitCommit, PencilLine, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import * as api from '@/services/versioningApiService'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
@@ -19,13 +19,15 @@ import { useBranchDiffSummary } from '../hooks/useVersioning'
 import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
 import { ViewHistoryTimeline } from './ViewHistoryTimeline'
+import { DataHealthTab } from './DataHealthTab'
 
-export type ViewPanelTab = 'changes' | 'prs' | 'history'
+export type ViewPanelTab = 'changes' | 'prs' | 'history' | 'health'
 
 const TABS: Array<{ id: ViewPanelTab; label: string; Icon: React.ComponentType<{ className?: string }> }> = [
   { id: 'changes', label: 'Changes', Icon: FileDiff },
   { id: 'history', label: 'Commits', Icon: GitCommit },
   { id: 'prs', label: 'Pull Requests', Icon: GitPullRequest },
+  { id: 'health', label: 'Data health', Icon: Activity },
 ]
 
 /** Unsaved canvas edits for the active branch (from the staged store) — surfaced in the hub so the
@@ -67,6 +69,7 @@ export function ViewVersioningPanel({
   branchId,
   viewName,
   initialTab = 'changes',
+  canManage = false,
   onClose,
 }: {
   wsId: string
@@ -76,9 +79,13 @@ export function ViewVersioningPanel({
   branchId?: string | null
   viewName?: string | null
   initialTab?: ViewPanelTab
+  canManage?: boolean
   onClose: () => void
 }) {
   const [tab, setTab] = useState<ViewPanelTab>(initialTab)
+
+  // The "Data health" tab is a power-user (manager) surface — hidden entirely for everyone else.
+  const tabs = canManage ? TABS : TABS.filter((t) => t.id !== 'health')
 
   // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
@@ -119,7 +126,7 @@ export function ViewVersioningPanel({
         </div>
 
         <div className="flex items-center gap-1 px-3 pt-2 border-b border-glass-border/60">
-          {TABS.map(({ id, label, Icon }) => (
+          {tabs.map(({ id, label, Icon }) => (
             <button
               key={id}
               onClick={() => setTab(id)}
@@ -168,6 +175,8 @@ export function ViewVersioningPanel({
           {tab === 'history' && (
             <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} />
           )}
+
+          {tab === 'health' && canManage && <DataHealthTab wsId={wsId} graphId={graphId} />}
         </div>
       </motion.aside>
     </AnimatePresence>,

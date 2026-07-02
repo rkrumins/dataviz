@@ -95,6 +95,57 @@ export interface Watermark {
   status?: string   // idle | projecting | rebuilding | evicted — only projecting/rebuilding = actively catching up
 }
 
+/** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
+ *  projection/rebuild was already in flight, so this was a no-op. */
+export interface RebuildResponse {
+  started: boolean
+  alreadyRunning: boolean
+  watermark: Watermark
+}
+
+/** One node drifted between the source of truth and the fast read layer — enough to name it. */
+export interface DriftNodeSample {
+  entityId: string
+  urn?: string | null
+  displayName?: string | null
+}
+
+/** One field whose cached value diverged from the source of truth (deep check only). */
+export interface DriftMismatch {
+  entityId: string
+  field: string
+  pg?: unknown
+  falkor?: unknown
+}
+
+/**
+ * Drift report: the fast read layer compared against the source of truth. `inSync` ⇒ they match.
+ * `skippedReason` (set) ⇒ the check couldn't run (no target / a refresh in flight) and the counts
+ * are meaningless. Sample lists are bounded; `truncated` ⇒ more drift exists than is listed.
+ */
+export interface DriftReport {
+  graphId: string
+  falkorGraphName?: string | null
+  committedSeq: number
+  projectedSeq: number
+  status: string
+  fresh: boolean
+  pgNodes: number
+  pgEdges: number
+  falkorNodes: number
+  falkorEdges: number
+  missingNodes: DriftNodeSample[]
+  extraNodes: DriftNodeSample[]
+  missingEdges: string[]
+  extraEdges: string[]
+  mismatched: DriftMismatch[]
+  truncated: boolean
+  inSync: boolean
+  checkedAt: string
+  durationMs: number
+  skippedReason?: string | null
+}
+
 export interface StateResponse {
   nodes: Record<string, Record<string, unknown>>
   edges: Record<string, Record<string, unknown>>
@@ -374,6 +425,22 @@ export function rebaseDraft(
 /** Projection freshness for `main` — cheap (no state materialised); drives the "refreshing…" badge. */
 export function getWatermark(wsId: string, graphId: string): Promise<Watermark> {
   return vfetch<Watermark>(`${base(wsId)}/graphs/${graphId}/watermark`)
+}
+
+/** Rebuild the fast read layer from the source of truth (full background replay). 409 when the graph
+ *  has no fast-read-layer target. Idempotent — a rebuild already in flight returns `started:false`. */
+export function rebuildProjection(wsId: string, graphId: string): Promise<RebuildResponse> {
+  return vfetch<RebuildResponse>(`${base(wsId)}/graphs/${graphId}/projection/rebuild`, jsonBody({}))
+}
+
+/** Compare the fast read layer against the source of truth and report any drift. `deep` also
+ *  field-compares every cached node (slower). 409 when a reconcile is already running for the graph. */
+export function reconcileProjection(
+  wsId: string,
+  graphId: string,
+  opts: { deep?: boolean } = {},
+): Promise<DriftReport> {
+  return vfetch<DriftReport>(`${base(wsId)}/graphs/${graphId}/projection/reconcile`, jsonBody({ deep: !!opts.deep }))
 }
 
 export function abandonDraft(wsId: string, graphId: string, branchId: string): Promise<Branch> {

@@ -358,6 +358,26 @@ export function usePublishBranch(wsId: string, graphId: string) {
   })
 }
 
+/** Rebuild the fast read layer from the source of truth. Re-reads projection freshness on success so
+ *  the (auto-polling) watermark drives the inline "Rebuilding… → Up to date" progress. */
+export function useRebuildProjection(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.rebuildProjection(wsId, graphId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
+    },
+  })
+}
+
+/** Check the fast read layer against the source of truth (user-triggered). Returns the DriftReport;
+ *  a 409 (a check already running) surfaces as a plain error for the caller to toast. */
+export function useReconcileProjection(wsId: string, graphId: string) {
+  return useMutation({
+    mutationFn: (v: { deep?: boolean } = {}) => api.reconcileProjection(wsId, graphId, v),
+  })
+}
+
 export function useOpenMergeRequest(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({

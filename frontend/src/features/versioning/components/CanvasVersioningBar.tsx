@@ -231,6 +231,7 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
           branchId={isDraft ? branchId : null}
           viewName={viewName}
           initialTab={panelTab}
+          canManage={canManage}
           onClose={() => setPanelTab(null)}
         />
       )}
