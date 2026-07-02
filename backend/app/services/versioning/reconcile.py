@@ -84,6 +84,10 @@ async def falkor_counts(client) -> Tuple[int, int]:
 # Ordered by the stable ``entityId`` / ``r.id`` so the Postgres keyset stream (also ordered by
 # entity_id) and this scan sorted-merge without either side materialising. SKIP/LIMIT re-scans per
 # page (O(n²/batch) total) — acceptable at current scale; upgrade to keyset if a graph outgrows it.
+# The sorted-merge ASSUMES FalkorDB's string ``ORDER BY`` matches Postgres' ``COLLATE "C"`` (byte /
+# code-point) order — true for the ASCII entity ids used in practice; non-ASCII ids whose two orders
+# disagree could mis-align the merge and surface false missing/extra (re-run resolves nothing here —
+# it needs a keyset upgrade with a shared collation if such ids are ever introduced).
 _SCAN_NODES = ("MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) "
                "RETURN n.entityId, n.urn ORDER BY n.entityId SKIP $s LIMIT $l")
 _SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' "
@@ -208,7 +212,10 @@ class ProjectionReconciler:
         if not name or name == f"gv_{graph_id}":
             return _report(skipped_reason="no projection target")
         # A projection/rebuild is actively catching the cache up — a scan now would flag transient
-        # drift that the in-flight pass is about to resolve. Skip until it settles.
+        # drift that the in-flight pass is about to resolve. Skip until it settles. This guard is
+        # evaluated ONCE here, at reconcile start: a projection that begins mid-scan can still shift
+        # the SKIP/LIMIT pages under us and surface transient false missing/extra — this is a
+        # best-effort operator tool, so re-running the reconcile once the cache is fresh resolves it.
         if status in ("projecting", "rebuilding") and not fresh:
             return _report(skipped_reason="projection in flight")
 

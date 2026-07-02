@@ -974,9 +974,9 @@ async def reconcile_projection(
     try:
         from backend.app.services.versioning import db as vdb
         from backend.app.services.versioning.reconcile import ProjectionReconciler
-        proj = _get_projector()                          # same session + client factories the reader uses
-        client_factory = proj._client if proj is not None else get_falkor_read_factory()
-        reconciler = ProjectionReconciler(vdb.graphver_session, client_factory)
+        # Reconcile against the SAME FalkorDB graphs the reader reads (the projector builds its own
+        # client from this very factory), over the graphver session scope.
+        reconciler = ProjectionReconciler(vdb.graphver_session, get_falkor_read_factory())
         report = await reconciler.reconcile(graph_id, deep=body.deep)
     finally:
         _reconcile_inflight.discard(graph_id)
