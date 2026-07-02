@@ -16,7 +16,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
   useSchemaStore,
   normalizeEdgeType,
@@ -34,7 +33,8 @@ import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenc
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useQueryClient } from '@tanstack/react-query'
-import { useBranchStore, useIsDraftMode } from '@/store/branchStore'
+import { useBranchStore, useIsDraftMode, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
+import { usePermission } from '@/store/auth'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
@@ -63,10 +63,6 @@ import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
-
-// Editor components (shared across canvases)
-import { EditorToolbar } from '../EditorToolbar'
-import { NodePalette } from '../NodePalette'
 
 import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 
@@ -345,7 +341,12 @@ export function ContextViewCanvas({
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
-    onConnectMode: (nodeId) => { void ensureDraftOpen(); edgeConnectRef.current?.armConnect(nodeId) },
+    onConnectMode: (nodeId) => {
+      // Draft-gated: on Published the connect shortcut is inert — managers
+      // enter edit via the header's Edit button.
+      if (!useBranchStore.getState().isDraftMode()) return
+      edgeConnectRef.current?.armConnect(nodeId)
+    },
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
       // Implementation handled by the existing moveToLayer function
@@ -404,6 +405,18 @@ export function ContextViewCanvas({
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
   const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+
+  // View/Edit mode gates — Published is strictly read-only for everyone;
+  // "edit mode" IS having a draft open (no separate flag). `isDraft` is
+  // scoped to the active view's data source (unlike the unscoped
+  // `isDraftMode` above) so the header never claims Edit for a draft that
+  // belongs to a different data source.
+  const dataSourceId = activeView?.dataSourceId ?? null
+  const effectiveBranchId = useEffectiveBranchId(activeWorkspaceId ?? '', dataSourceId)
+  const isDraft = !!effectiveBranchId
+  const canManage = usePermission('workspace:datasource:manage', activeWorkspaceId ?? undefined)
+  const graphId = useGraphId()
+  const canEnterEdit = !!graphId
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -544,9 +557,6 @@ export function ContextViewCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView?.id])
 
-  // Edit Mode State (shared across canvases)
-  const [isPaletteOpen, setPaletteOpen] = useState(false)
-  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useViewRelationshipTypes()
 
   // Advanced Search — production panel for template-driven exploration,
@@ -582,22 +592,6 @@ export function ContextViewCanvas({
       setLineageGranularity(coarsest.id)
     }
   }, [lineageGranularity, granularityOptions, setLineageGranularity])
-
-  // Handle save graph
-  const handleSave = useCallback(async () => {
-    try {
-      const response = await fetchWithTimeout('/api/v1/graph/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
-      })
-      if (!response.ok) throw new Error('Failed to save graph')
-      alert('Graph saved successfully!')
-    } catch (error) {
-      console.error('Error saving graph:', error)
-      alert('Failed to save graph')
-    }
-  }, [nodes, edges])
 
   // Handle right click - now uses unified CanvasContextMenu
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
@@ -793,15 +787,6 @@ export function ContextViewCanvas({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [undoStagedChange, redoStagedChange])
-
-  // Save Blueprint button now OPENS the review modal first — the user
-  // confirms inside the modal which then performs the actual apply + save.
-  // This makes the save flow self-documenting: every save shows what's about
-  // to happen, and the modal doubles as a "view pending changes" panel.
-  const handleSaveAll = useCallback(() => {
-    if (!activeWorkspaceId) return
-    openStagedChangesPanel()
-  }, [activeWorkspaceId, openStagedChangesPanel])
 
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
@@ -1323,6 +1308,25 @@ export function ContextViewCanvas({
     }
     lastFailedCountRef.current = count
   }, [failedNodes, showToast])
+
+  // View/Edit mode transitions (header Edit / Done). Entering edit =
+  // opening/resuming a draft; the versioning bar tints amber and the header
+  // morphs — that IS the success feedback, so no toast on the happy path.
+  const handleEnterEdit = useCallback(async () => {
+    const id = await ensureDraftOpen()
+    if (!id) showToast('error', 'Could not open a draft — check that version control is enabled.')
+  }, [showToast])
+
+  // Done: switching branches reloads the canvas, which would silently drop
+  // staged edits — so route the user through the review panel instead.
+  const handleExitEdit = useCallback(() => {
+    if (stagedChangeList.length > 0) {
+      openStagedChangesPanel()
+      showToast('warning', 'Review your pending edits — save or discard them before leaving the draft.')
+      return
+    }
+    useBranchStore.getState().switchToMain()
+  }, [stagedChangeList.length, openStagedChangesPanel, showToast])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -1889,16 +1893,6 @@ export function ContextViewCanvas({
       data-trace-active={trace.isTracing ? 'true' : 'false'}
       className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}
     >
-      {/* Node Palette - Drag and drop entity creation */}
-      <AnimatePresence>
-        {isPaletteOpen && (
-          <NodePalette
-            isOpen={isPaletteOpen}
-            onClose={() => setPaletteOpen(false)}
-          />
-        )}
-      </AnimatePresence>
-
       {/* Row layout: [left rail SearchMapPanel] + canvas column + [right-rail panels].
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -1922,17 +1916,6 @@ export function ContextViewCanvas({
         )}
       </AnimatePresence>
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
-      {/* Editor Toolbar - Unified with LineageCanvas */}
-      <div className="absolute top-4 left-4 z-30">
-        <EditorToolbar
-          onAddNode={() => setPaletteOpen(true)}
-          onSave={handleSave}
-          edgeTypes={relationshipTypes}
-          activeEdgeType={activeEdgeType}
-          onSelectEdgeType={setActiveEdgeType}
-        />
-      </div>
-
       <ContextViewHeader
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
@@ -1960,7 +1943,6 @@ export function ContextViewCanvas({
           trace.setConfig(dir === 'upstream' ? { upstreamDepth: value } : { downstreamDepth: value })
           if (trace.isTracing) void trace.retrace()
         }}
-        onAddEntity={() => { void ensureDraftOpen(); setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
@@ -1986,10 +1968,14 @@ export function ContextViewCanvas({
         propertyManagerOpen={propertyManagerOpen}
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
-        activeWorkspaceId={activeWorkspaceId}
         activeContextModelName={activeContextModelName}
         syncStatus={syncStatus}
-        onSave={handleSaveAll}
+        onRetrySync={() => { if (activeWorkspaceId) void saveToBackend(activeWorkspaceId) }}
+        isDraft={isDraft}
+        canManage={canManage}
+        canEnterEdit={canEnterEdit}
+        onEnterEdit={handleEnterEdit}
+        onExitEdit={handleExitEdit}
         pendingChangeCount={stagedChangeList.length}
         onOpenStagedChanges={openStagedChangesPanel}
         canUndo={stagedChangeList.length > 0}
@@ -2234,13 +2220,15 @@ export function ContextViewCanvas({
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
-                onAddChild={handleAddChildEntity}
-                onAddToLayer={(layerId) => {
+                // Create affordances render only in draft (edit) mode —
+                // Published shows zero mutation entry points for anyone.
+                onAddChild={isDraft ? handleAddChildEntity : undefined}
+                onAddToLayer={isDraft ? (layerId) => {
                   void ensureDraftOpen()
                   setCreationLayerId(layerId)
                   setCreationParentId(null)
                   setIsCreatingEntity(true)
-                }}
+                } : undefined}
                 onBeginConnect={isDraftMode ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
                   type: 'canvas',
@@ -2362,13 +2350,13 @@ export function ContextViewCanvas({
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
         onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos, layerId) => {
+        onCreateNode={isDraft ? (pos, layerId) => {
           void ensureDraftOpen()
           // Right-clicked an empty layer column → scope the new node to that
           // layer so it lands there (and is assigned on create, see onEntityCreated).
           if (layerId) setCreationLayerId(layerId)
           interactions.openQuickCreate(pos)
-        }}
+        } : undefined}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
@@ -2390,11 +2378,11 @@ export function ContextViewCanvas({
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={(_typeId) => {
+        onCreateEntity={isDraft ? (_typeId) => {
           void ensureDraftOpen()
           interactions.closeCommandPalette()
           interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
-        }}
+        } : undefined}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
 

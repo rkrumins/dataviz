@@ -1,0 +1,160 @@
+/**
+ * ContextViewHeader — View/Edit mode partition tests.
+ *
+ * Published is strictly read-only for everybody; "edit mode" IS being on a
+ * draft. These specs pin the mode contract: viewers see zero mutation
+ * affordances, managers get a (gateable) Edit entry, and the draft header
+ * swaps in the authoring cluster while keeping every comprehension tool.
+ * The header is store-free, so everything renders from plain props.
+ */
+import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { ContextViewHeader, type ContextViewHeaderProps } from '../ContextViewHeader'
+
+function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextViewHeaderProps {
+  return {
+    searchQuery: '',
+    onSearchChange: vi.fn(),
+    searchResults: [],
+    onSearchResultClick: vi.fn(),
+    showLineageFlow: true,
+    onToggleLineageFlow: vi.fn(),
+    showEdgeDirection: false,
+    onToggleEdgeDirection: vi.fn(),
+    lineageRenderMode: 'stubs',
+    onSetLineageRenderMode: vi.fn(),
+    traceActive: false,
+    canTrace: false,
+    onStartTrace: vi.fn(),
+    onExitTrace: vi.fn(),
+    lineageReady: true,
+    traceUpstreamDepth: 3,
+    traceDownstreamDepth: 3,
+    onSetTraceDepth: vi.fn(),
+    isDraft: false,
+    canManage: false,
+    canEnterEdit: true,
+    onEnterEdit: vi.fn(),
+    onExitEdit: vi.fn(),
+    onTogglePropertyManager: vi.fn(),
+    propertyManagerOpen: false,
+    viewName: 'Data Landscape',
+    entityTypeCount: 4,
+    activeContextModelName: 'Enterprise Blueprint',
+    syncStatus: 'idle',
+    onRetrySync: vi.fn(),
+    pendingChangeCount: 0,
+    onOpenStagedChanges: vi.fn(),
+    canUndo: false,
+    canRedo: false,
+    onUndo: vi.fn(),
+    onRedo: vi.fn(),
+    canvasZoom: 1,
+    onSetCanvasZoom: vi.fn(),
+    canvasDensity: 'spacious',
+    onSetCanvasDensity: vi.fn(),
+    showCanvasTypeBadge: true,
+    onToggleCanvasTypeBadge: vi.fn(),
+    subtleCanvasTreeLines: false,
+    onToggleSubtleCanvasTreeLines: vi.fn(),
+    onResetCanvasDisplaySettings: vi.fn(),
+    ...overrides,
+  }
+}
+
+describe('ContextViewHeader — View mode (Published)', () => {
+  it('shows a viewer zero mutation affordances', () => {
+    render(<ContextViewHeader {...baseProps()} />)
+
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Redo' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/review & save/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/add entity/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument()
+  })
+
+  it('gives a manager the Edit entry and fires onEnterEdit on click', () => {
+    const props = baseProps({ canManage: true, canEnterEdit: true })
+    render(<ContextViewHeader {...props} />)
+
+    const edit = screen.getByRole('button', { name: 'Edit' })
+    fireEvent.click(edit)
+    expect(props.onEnterEdit).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables Edit with an explanation when version control is not set up', () => {
+    const props = baseProps({ canManage: true, canEnterEdit: false })
+    render(<ContextViewHeader {...props} />)
+
+    const edit = screen.getByRole('button', { name: 'Edit' })
+    expect(edit).toBeDisabled()
+    expect(edit).toHaveAttribute('title', "Version control isn't set up for this data source yet")
+    fireEvent.click(edit)
+    expect(props.onEnterEdit).not.toHaveBeenCalled()
+  })
+})
+
+describe('ContextViewHeader — Edit mode (on a draft)', () => {
+  it('swaps in the authoring cluster and keeps every comprehension tool', () => {
+    render(<ContextViewHeader {...baseProps({ isDraft: true, canManage: true })} />)
+
+    // Authoring cluster present
+    expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Redo' })).toBeInTheDocument()
+    expect(screen.getByText(/review & save/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument()
+    // The Edit entry belongs to View mode only
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
+
+    // Comprehension tools survive the mode switch
+    expect(screen.getByRole('button', { name: 'Lineage' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Display' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /trace lineage/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /properties/i })).toBeInTheDocument()
+  })
+
+  it('disables Review & Save at zero pending changes', () => {
+    const props = baseProps({ isDraft: true, pendingChangeCount: 0 })
+    render(<ContextViewHeader {...props} />)
+
+    const review = screen.getByRole('button', { name: /review & save/i })
+    expect(review).toBeDisabled()
+    fireEvent.click(review)
+    expect(props.onOpenStagedChanges).not.toHaveBeenCalled()
+  })
+
+  it('shows the count chip and opens the review panel when changes are pending', () => {
+    const props = baseProps({ isDraft: true, pendingChangeCount: 3 })
+    render(<ContextViewHeader {...props} />)
+
+    const review = screen.getByRole('button', { name: /review & save/i })
+    expect(review).not.toBeDisabled()
+    expect(screen.getByText('3')).toBeInTheDocument()
+    fireEvent.click(review)
+    expect(props.onOpenStagedChanges).toHaveBeenCalledTimes(1)
+  })
+
+  it('fires onExitEdit from Done (the pending-edits guard lives in the canvas wiring)', () => {
+    const props = baseProps({ isDraft: true })
+    render(<ContextViewHeader {...props} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(props.onExitEdit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ContextViewHeader — blueprint sync subline', () => {
+  it('offers a retry affordance on sync error', () => {
+    const props = baseProps({ syncStatus: 'error' })
+    render(<ContextViewHeader {...props} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /sync issue — retry/i }))
+    expect(props.onRetrySync).toHaveBeenCalledTimes(1)
+  })
+
+  it('folds the context model name into the subline', () => {
+    render(<ContextViewHeader {...baseProps()} />)
+    expect(screen.getByText('4 types · Enterprise Blueprint')).toBeInTheDocument()
+  })
+})

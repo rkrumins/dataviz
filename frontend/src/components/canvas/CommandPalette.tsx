@@ -128,21 +128,25 @@ export function CommandPalette({
             }
         })
         
-        // Create entity commands
-        entityTypes.forEach(type => {
-            items.push({
-                id: `create:${type.id}`,
-                label: `Create ${type.name}`,
-                description: type.description,
-                icon: (type.visual?.icon as keyof typeof LucideIcons) || 'Plus',
-                category: 'create',
-                keywords: ['create', 'new', type.name.toLowerCase(), type.id],
-                onSelect: () => {
-                    onCreateEntity?.(type.id)
-                    onClose()
-                }
+        // Create entity commands — only when the host wires creation (e.g.
+        // the Context View passes onCreateEntity only in draft mode, so on
+        // Published the palette offers no mutation commands).
+        if (onCreateEntity) {
+            entityTypes.forEach(type => {
+                items.push({
+                    id: `create:${type.id}`,
+                    label: `Create ${type.name}`,
+                    description: type.description,
+                    icon: (type.visual?.icon as keyof typeof LucideIcons) || 'Plus',
+                    category: 'create',
+                    keywords: ['create', 'new', type.name.toLowerCase(), type.id],
+                    onSelect: () => {
+                        onCreateEntity(type.id)
+                        onClose()
+                    }
+                })
             })
-        })
+        }
         
         // Navigation commands
         views.forEach(view => {
