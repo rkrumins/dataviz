@@ -938,7 +938,10 @@ async def rebuild_projection(
     cache — the "rebuild the cache" operator action. Pins an unpinned graph to its data source's
     real graph first; 409 if there is still no FalkorDB target (nothing to rebuild). Idempotent: a
     projection/rebuild already in flight returns ``started=false``/``alreadyRunning=true`` untouched.
-    The catch-up itself runs in-process as a background task (same path publish/merge use)."""
+    The catch-up runs in-process as a background task (same path publish/merge use) and is scheduled
+    ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding' status on a
+    worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a no-op when the
+    cache is already fresh)."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
     wm = await svc.projection_watermark(graph_id)
     name = wm.get("falkor_graph_name")
@@ -947,8 +950,9 @@ async def rebuild_projection(
     if not name or name == f"gv_{graph_id}":
         raise HTTPException(status_code=409, detail="no FalkorDB projection target for this graph")
     started = await svc.request_projection_rebuild(graph_id)
-    if started:
-        background.add_task(project_now, graph_id)       # catch the cache up in-process (async worker fallback)
+    # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
+    # project_now is an idempotent catch-up, so a status stranded by a lost worker self-heals.
+    background.add_task(project_now, graph_id)            # catch the cache up in-process (async worker fallback)
     return RebuildResponse(started=started, already_running=not started,
                            watermark=_watermark_model(await svc.projection_watermark(graph_id)))
 
@@ -977,7 +981,15 @@ async def reconcile_projection(
         # Reconcile against the SAME FalkorDB graphs the reader reads (the projector builds its own
         # client from this very factory), over the graphver session scope.
         reconciler = ProjectionReconciler(vdb.graphver_session, get_falkor_read_factory())
-        report = await reconciler.reconcile(graph_id, deep=body.deep)
+        try:
+            report = await reconciler.reconcile(graph_id, deep=body.deep)
+        except Exception as exc:
+            # The reconcile scans the FalkorDB read layer directly; a connection/query failure there
+            # is an availability blip, not a server bug — surface a clean 503 so the Data Health UI
+            # says "try again shortly" instead of showing a raw 500.
+            logger.warning("reconcile scan failed for %s: %s", graph_id, exc)
+            raise HTTPException(
+                status_code=503, detail="fast read layer is unreachable — try again shortly")
     finally:
         _reconcile_inflight.discard(graph_id)
     return DriftReportModel.model_validate(dataclasses.asdict(report))

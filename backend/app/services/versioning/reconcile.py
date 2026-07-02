@@ -88,9 +88,13 @@ async def falkor_counts(client) -> Tuple[int, int]:
 # code-point) order — true for the ASCII entity ids used in practice; non-ASCII ids whose two orders
 # disagree could mis-align the merge and surface false missing/extra (re-run resolves nothing here —
 # it needs a keyset upgrade with a shared collation if such ids are ever introduced).
-_SCAN_NODES = ("MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) "
+# The ``IS NOT NULL`` guards exclude legacy never-versioned cache entries that lack these ids: a
+# null key would break the sorted-merge's id comparison (str vs None). They still surface via count
+# drift (``falkor_counts`` counts them), which is the coherent signal for "the cache holds something
+# the SoR doesn't".
+_SCAN_NODES = ("MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) AND n.entityId IS NOT NULL "
                "RETURN n.entityId, n.urn ORDER BY n.entityId SKIP $s LIMIT $l")
-_SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' "
+_SCAN_EDGES = ("MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT NULL "
                "RETURN r.id ORDER BY r.id SKIP $s LIMIT $l")
 _DEEP_FETCH = ("UNWIND $urns AS u MATCH (n {urn: u}) "
                "RETURN n.urn, n.entityId, n.displayName, labels(n)")

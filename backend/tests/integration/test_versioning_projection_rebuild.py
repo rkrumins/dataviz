@@ -46,12 +46,16 @@ class ReconcileFakeGraph(FakeGraph):
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
         if cypher == _SCAN_NODES:
+            # Mirror the scan's `entityId IS NOT NULL` guard — legacy never-versioned cache entries
+            # carry no id and are excluded from the id-diff (they surface via count drift instead).
             rows = sorted(([n["entityId"], n.get("urn")] for n in self.nodes.values()
-                           if n.get("_label") != "_GVRollupMeta"), key=lambda r: r[0])
+                           if n.get("_label") != "_GVRollupMeta" and n.get("entityId") is not None),
+                          key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
         if cypher == _SCAN_EDGES:
             rows = sorted(([eid] for eid, e in self.edges.items()
-                           if e.get("type") != "AGGREGATED"), key=lambda r: r[0])
+                           if e.get("type") != "AGGREGATED" and eid is not None),
+                          key=lambda r: r[0])
             return _Result(rows[params["s"]: params["s"] + params["l"]])
         if cypher == _DEEP_FETCH:
             out = []
@@ -216,6 +220,33 @@ async def _run_rollup_hook() -> None:
     await db.dispose_engine()
 
 
+# --------------------------------------------------------------------------- #
+# 5. Legacy never-versioned cache entry (null entityId): reconcile must not     #
+#    500 on the sorted-merge — it surfaces via count drift instead.             #
+# --------------------------------------------------------------------------- #
+async def _run_legacy_null_id() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+    gid, proj, name = await _seed(svc, fake)
+
+    # A legacy cache node written before entity ids existed — no entityId key at all. The scan's
+    # `entityId IS NOT NULL` guard keeps it out of the sorted-merge (a null key would blow up the
+    # id comparison); it still shows in the counts, which is the coherent "extra in cache" signal.
+    fake.graphs[name].nodes["gv:LEGACY"] = {
+        "urn": "gv:LEGACY", "displayName": "legacy", "_label": "Dataset"}
+
+    rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid)
+    assert rep.in_sync is False
+    assert rep.falkor_nodes == rep.pg_nodes + 1               # counts caught the extra entity
+    assert not rep.missing_nodes                              # not mistaken for a missing SoR entity
+
+    # deep scan must also complete (the legacy node is never fetched — it's not in the SoR stream).
+    rep = await ProjectionReconciler(db.graphver_session, fake).reconcile(gid, deep=True)
+    assert rep.in_sync is False and rep.falkor_nodes == rep.pg_nodes + 1
+    await db.dispose_engine()
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
@@ -236,7 +267,12 @@ def test_projection_rebuild_fires_rollup_hook_e2e():
     asyncio.run(_run_rollup_hook())
 
 
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_reconcile_legacy_null_id_e2e():
+    asyncio.run(_run_legacy_null_id())
+
+
 if __name__ == "__main__":
-    for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook):
+    for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")
