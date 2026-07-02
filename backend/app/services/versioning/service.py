@@ -702,7 +702,8 @@ class GraphVersioningService:
         await s.flush()
 
         kind_by_entity = await self._kind_map_multi(
-            s, [(graph.id, draft.id), (graph.id, main_id)]
+            s, [(graph.id, draft.id), (graph.id, main_id)],
+            entity_ids=[d.entity_id for d in deltas],
         )
         kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
         ontology = Ontology.from_spec(graph.ontology_spec)   # PR re-validation gate (§16.5 #6)
@@ -779,7 +780,8 @@ class GraphVersioningService:
             deltas = net_delta(own, {eid: merged_state.get(eid) for eid in own})
             if deltas:
                 kind_by_entity = await self._kind_map_multi(
-                    s, [(graph_id, draft.id), (graph_id, main_id)]
+                    s, [(graph_id, draft.id), (graph_id, main_id)],
+                    entity_ids=[d.entity_id for d in deltas],
                 )
                 commit = CommitORM(
                     graph_id=graph_id, branch_id=draft.id,
@@ -950,7 +952,8 @@ class GraphVersioningService:
             )
             s.add(revert)
             await s.flush()
-            kind_by_entity = await self._kind_map_multi(s, [(graph_id, main_id)])
+            kind_by_entity = await self._kind_map_multi(
+                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
             kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
             await self._write_deltas(s, graph_id, main_id, revert, deltas, kind_by_entity, actor)
             main.head_commit_id = revert.id
@@ -1195,7 +1198,8 @@ class GraphVersioningService:
                 # ontology, then require every requested reviewer's approval — both
                 # checked before any write to main.
                 kind_by_entity = await self._kind_map_multi(
-                    s, [(fork.id, fork_main), (parent.id, parent_main)]
+                    s, [(fork.id, fork_main), (parent.id, parent_main)],
+                    entity_ids=[d.entity_id for d in deltas],
                 )
                 kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
                 checks = self._pr_ontology_check(parent, deltas, kind_by_entity)
@@ -3337,18 +3341,34 @@ class GraphVersioningService:
             merged.setdefault(eid, v)        # present as current main value (unchanged → no delta)
             theirs.setdefault(eid, v)        # mirror so net_delta nets it to zero
 
-    async def _kind_map_multi(self, s, pairs: Sequence[Tuple[str, str]]) -> Dict[str, str]:
+    async def _kind_map_multi(
+        self, s, pairs: Sequence[Tuple[str, str]],
+        entity_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, str]:
         """``entity_id → kind`` across several ``(graph_id, branch_id)`` head sets
-        (first match wins) — spans a fork and its parent for cross-graph merges."""
+        (first match wins) — spans a fork and its parent for cross-graph merges.
+
+        ``entity_ids`` bounds the lookup to those ids via chunked IN-lists on the
+        ``(graph_id, branch_id, entity_id)`` PK. The merge/rebase/revert paths only
+        need kinds for their DELTA, so resolving them stays O(delta) — a full-branch
+        head scan here ran inside the merge advisory lock and made publishing a
+        5-entity change O(entire graph)."""
         out: Dict[str, str] = {}
+        id_chunks: Optional[List[list]] = None
+        if entity_ids is not None:
+            ids = list(dict.fromkeys(entity_ids))
+            if not ids:
+                return out
+            id_chunks = list(_chunks(ids, _IN_LIST_MAX))
         for gid, bid in pairs:
-            rows = (await s.execute(
-                select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind).where(
+            for chunk in (id_chunks if id_chunks is not None else [None]):
+                stmt = select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind).where(
                     EntityHeadORM.graph_id == gid, EntityHeadORM.branch_id == bid,
                 )
-            )).all()
-            for eid, kind in rows:
-                out.setdefault(eid, kind)
+                if chunk is not None:
+                    stmt = stmt.where(EntityHeadORM.entity_id.in_(chunk))
+                for eid, kind in (await s.execute(stmt)).all():
+                    out.setdefault(eid, kind)
         return out
 
     @staticmethod

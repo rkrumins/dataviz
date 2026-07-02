@@ -7,6 +7,7 @@
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { create } from 'zustand'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { mapWithConcurrency } from '@/lib/concurrency'
 import { fnv1a64 } from './lib/lineageCache'
@@ -128,6 +129,20 @@ const aggregatedEdgeCache = new Map<string, CacheEntry>()
 const CACHE_MAX_ENTRIES = 200
 const AGGREGATED_FETCH_BATCH_SIZE = 500
 
+// Cross-canvas invalidation. A draft save changes which rollups the server reports (the
+// draft overlay adjusts main's aggregated edges by the draft's lineage delta), but the
+// visible container set — and so the cache key — doesn't change, so nothing would refetch.
+// Bumping the version gives `fetchAggregated` a new identity, re-running every canvas
+// effect that depends on it against a cleared cache.
+const useAggregatedCacheVersion = create<{ version: number }>(() => ({ version: 0 }))
+
+/** Drop all cached aggregated edges and make every mounted canvas refetch. Call after
+ *  any mutation that can change rollups (draft save, publish/merge). */
+export function invalidateAggregatedEdges(): void {
+    aggregatedEdgeCache.clear()
+    useAggregatedCacheVersion.setState((s) => ({ version: s.version + 1 }))
+}
+
 /**
  * Cap on parallel `/edges/aggregated` chunks. Aggregation is the
  * single most expensive endpoint — letting a 100k-URN canvas fire all
@@ -160,6 +175,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
     } = options
 
     const provider = useGraphProvider()
+    // Bumped by invalidateAggregatedEdges() — flows into fetchAggregated's deps so canvas
+    // effects refetch against the cleared cache after a save.
+    const cacheVersion = useAggregatedCacheVersion((s) => s.version)
 
     // State
     const [aggregatedEdges, setAggregatedEdges] = useState<Map<string, AggregatedEdgeState>>(new Map())
@@ -308,7 +326,9 @@ export function useAggregatedLineage(options: UseAggregatedLineageOptions = {}):
         } finally {
             setIsLoading(false)
         }
-    }, [provider, granularity, cacheTtl])
+        // cacheVersion: identity-busting dep — see invalidateAggregatedEdges.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [provider, granularity, cacheTtl, cacheVersion])
 
     // Expand an aggregated edge to show detailed edges
     const expandEdge = useCallback(async (aggregatedEdgeId: string) => {

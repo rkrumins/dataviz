@@ -29,7 +29,12 @@ async def _amain() -> None:
     await models.create_schema_and_partitions()
     # target_resolver self-heals the projection target (the data source's real graph the canvas reads)
     # on every projection, so the standalone worker matches the interactive project_now path.
-    projector = FalkorProjector(make_falkor_graph_factory(), target_resolver=repair_projection_target)
+    # edge_types_resolver keeps :AGGREGATED rollups maintained incrementally here too; no
+    # on_rollups_stale (no in-process aggregation service in this runtime — the viz-service's
+    # worker/interactive paths own the rebuild hand-off).
+    from backend.app.services.projection_target import resolve_aggregation_edge_types
+    projector = FalkorProjector(make_falkor_graph_factory(), target_resolver=repair_projection_target,
+                                edge_types_resolver=resolve_aggregation_edge_types)
     worker = ProjectionWorker(
         projector, consumer_name=os.getenv("HOSTNAME", "proj-1"),
         versioning=GraphVersioningService(),

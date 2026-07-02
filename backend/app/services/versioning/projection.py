@@ -152,11 +152,23 @@ class FalkorProjector:
         target_resolver: Optional[
             Callable[[GraphVersioningService, str], Awaitable[Optional[str]]]
         ] = None,
+        edge_types_resolver: Optional[
+            Callable[[GraphVersioningService, str], Awaitable[Optional[Tuple[List[str], List[str]]]]]
+        ] = None,
+        on_rollups_stale: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         self._client = graph_client_factory
         self._session = session_factory
         self._svc = GraphVersioningService(session_factory)
         self._batch = batch_size or config.PROJECTION_BATCH_SIZE
+        # Ontology (containment, lineage) edge-type sets for incremental :AGGREGATED rollup
+        # maintenance — injected from the app layer (like target_resolver) so this package
+        # stays decoupled from the management DB. None ⇒ rollups are not maintained here.
+        self._edge_types_resolver = edge_types_resolver
+        # Fired when rollups can no longer be maintained incrementally (a full-seed wipe
+        # destroyed them, or a containment move exceeded the bounded-recount cap) — the app
+        # layer queues a scoped aggregation job. None ⇒ rollups stay stale until manual rebuild.
+        self._on_rollups_stale = on_rollups_stale
         # Pins the projection to the data source's REAL graph (the one the canvas reads) on every
         # projection, so the async worker self-heals the same way the interactive `project_now` path
         # does — without it, a worker-driven projection can land in an orphan `gv_<id>` nothing reads
@@ -204,6 +216,20 @@ class FalkorProjector:
             main_id = await self._svc._main_branch_id(s, graph_id)
             is_fork = graph.fork_parent_graph_id is not None
             changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
+            # Incremental :AGGREGATED rollup maintenance (windows only — a full seed wipes
+            # rollups with the graph and is healed by the on_rollups_stale hook instead).
+            # Skipped for forks: their containment chains span the parent graph's rows, so
+            # incremental chains would under-roll; a fork's rollups come from full rebuilds.
+            # A failure here must NEVER wedge raw-edge projection — degrade to the rebuild.
+            rollup_pairs = None
+            if from_seq > 0 and not is_fork and self._edge_types_resolver is not None:
+                try:
+                    rollup_pairs = await self._compute_rollup_deltas(
+                        s, graph, main_id, from_seq, to_seq)
+                except Exception:                        # pragma: no cover - defensive
+                    logger.exception("rollup delta computation failed for %s — queuing rebuild",
+                                     graph_id)
+                    rollup_pairs = "stale"
 
         client = self._client(name)
         try:
@@ -232,6 +258,17 @@ class FalkorProjector:
                             name, graph_id, exc,
                         )
             await self._apply(client, *changes)
+            if rollup_pairs and rollup_pairs != "stale":
+                # After the raw upserts, so pair endpoints exist. Idempotent per window
+                # (gvSeq guard), so a retried window can't double-count weights. A rollup
+                # failure must NEVER hold back raw-edge projection (rollups are a derived
+                # convenience layer) — degrade to the rebuild hook instead of raising.
+                try:
+                    if not await self._apply_rollups(client, rollup_pairs, from_seq, to_seq):
+                        rollup_pairs = "stale"           # window overlapped a prior application
+                except Exception:                       # pragma: no cover - infra
+                    logger.exception("rollup apply failed for %s — queuing rebuild", graph_id)
+                    rollup_pairs = "stale"
         except Exception as exc:                       # pragma: no cover - infra
             logger.exception("projection apply failed for %s: %s", graph_id, exc)
             async with self._session() as s:
@@ -243,9 +280,9 @@ class FalkorProjector:
 
         # Reconcile PG (SoR) vs FalkorDB (cache) and bounded-heal a dropped delta before
         # the watermark advances, so the cache can't silently diverge from committed main.
-        verify_error = (
+        verify_error, heal_reseeded = (
             await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork)
-            if config.PROJECTION_VERIFY_ENABLED else None
+            if config.PROJECTION_VERIFY_ENABLED else (None, False)
         )
 
         async with self._session() as s:
@@ -261,6 +298,18 @@ class FalkorProjector:
                 await self.drop_graph(orphan)
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
+
+        # Rollups can't be maintained incrementally past this projection: a full seed (or the
+        # verify-heal reseed) WIPED them with the graph, or a containment move / bulk window /
+        # overlapping application exceeded what incremental maintenance can reconcile. Hand
+        # off to the app layer to queue a scoped aggregation rebuild (fires after the
+        # watermark is durable, so the rebuild sees the projected raw edges).
+        if self._on_rollups_stale is not None and (
+                from_seq <= 0 or rollup_pairs == "stale" or heal_reseeded):
+            try:
+                await self._on_rollups_stale(graph_id)
+            except Exception as exc:                   # pragma: no cover - infra
+                logger.warning("rollup-rebuild hook failed for %s: %s", graph_id, exc)
 
         applied = sum(len(c) for c in changes)
         return {"projected": to_seq, "applied": applied, "noop": False, "verify_error": verify_error}
@@ -365,6 +414,212 @@ class FalkorProjector:
                 edge_upserts.append((eid, su, tu, p))
         return node_upserts, edge_upserts, node_deletes, edge_deletes
 
+    # Bounded-recount cap for containment moves: above this many affected entities/edges the
+    # move can't be maintained incrementally — the on_rollups_stale hook queues a rebuild.
+    _MOVE_EDGE_CAP = 1000
+
+    async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
+        """Net ``:AGGREGATED`` rollup adjustments implied by this window's committed changes:
+        +1 over the ancestor-pair product for each created lineage edge (post-window chains),
+        -1 for each deleted one (pre-window chains), and a bounded recount for lineage edges
+        under containers that were MOVED in the window. O(window delta × chain depth²).
+
+        Returns ``{(src_urn, tgt_urn): {"dw": int, "types": set}}``, ``None`` when nothing
+        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap."""
+        try:
+            sets = await self._edge_types_resolver(self._svc, graph.id)
+        except Exception:                                # pragma: no cover - app-layer resolution
+            logger.warning("rollup maintenance skipped for %s: edge-type resolution failed",
+                           graph.id, exc_info=True)
+            return None
+        if not sets:
+            return None
+        cont_types = {t.upper() for t in (sets[0] or [])}
+        lineage_types = {t.upper() for t in (sets[1] or [])}
+        if not lineage_types:
+            return None
+
+        def _etype(p) -> str:
+            return str((p or {}).get("edgeType") or "").upper()
+
+        rows = (await s.execute(
+            select(EdgeVersionORM.entity_id, EdgeVersionORM.op, EdgeVersionORM.payload)
+            .where(EdgeVersionORM.graph_id == graph.id, EdgeVersionORM.branch_id == main_id,
+                   EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
+            .order_by(EdgeVersionORM.commit_seq)
+        )).all()
+        if not rows:
+            return None
+        final: Dict[str, Optional[dict]] = {}
+        for eid, op, payload in rows:                    # last row in window wins
+            final[eid] = None if op == "delete" else payload
+        # Net contribution per touched edge = its value BEFORE the window vs AFTER it.
+        # Op labels alone lose real cases the worker batches into one window: create+update
+        # (last op 'update' would hide the +1), delete+revert-recreate (spurious +1 for an
+        # edge that never stopped being live), and endpoint/type rewrites via update.
+        before = await self._svc._values_at(s, graph.id, main_id, list(final), from_seq)
+
+        def _sig(p: Optional[dict]):
+            return None if not p else (*_edge_endpoints(p), _etype(p))
+
+        lineage_creates: Dict[str, dict] = {}
+        lineage_deletes: Dict[str, dict] = {}
+        moved: set = set()
+        for eid, new in final.items():
+            old = before.get(eid)
+            if _sig(old) == _sig(new):
+                continue                                 # payload-only change — no rollup impact
+            if old is not None:
+                et = _etype(old)
+                if et in lineage_types:
+                    lineage_deletes[eid] = old
+                elif et in cont_types:
+                    moved.add(_edge_endpoints(old)[1])
+            if new is not None:
+                et = _etype(new)
+                if et in lineage_types:
+                    lineage_creates[eid] = new
+                elif et in cont_types:
+                    moved.add(_edge_endpoints(new)[1])
+        moved.discard("")
+        if len(lineage_creates) + len(lineage_deletes) > self._MOVE_EDGE_CAP:
+            # A bulk-sized window (import/sync commit) is the aggregation JOB's territory —
+            # doing the pair math inline would stall the projector. Hand off to the rebuild.
+            return "stale"
+        if not lineage_creates and not lineage_deletes and not moved:
+            return None
+
+        anc_cache: Dict[Tuple[str, Optional[int]], List[str]] = {}
+
+        async def chain(node_id: str, as_of: Optional[int]) -> List[str]:
+            key = (node_id, as_of)
+            if key not in anc_cache:
+                seen, _e = await self._svc._containment_ancestors(
+                    s, graph.id, main_id, {node_id}, cont_types, as_of)
+                anc_cache[key] = list(seen)              # ancestors-or-self
+            return anc_cache[key]
+
+        pairs: Dict[Tuple[str, str], Dict[str, object]] = {}
+
+        async def contribute(p: dict, sign: int, as_of: Optional[int]) -> None:
+            src, tgt = _edge_endpoints(p)
+            if not src or not tgt:
+                return
+            et = _etype(p)
+            for sx in await chain(src, as_of):
+                for tx in await chain(tgt, as_of):
+                    if sx == tx:
+                        continue
+                    e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
+                    e["dw"] += sign
+                    if sign > 0 and et:
+                        e["types"].add(et)
+
+        handled = set()
+        for eid, p in lineage_creates.items():
+            await contribute(p, +1, to_seq)
+            handled.add(eid)
+        for eid, p in lineage_deletes.items():
+            await contribute(p, -1, from_seq)
+            handled.add(eid)
+
+        if moved:
+            # Moved subtrees: every lineage edge under them changes rollup pairs. Remove the
+            # pre-window contribution, add the post-window one — bounded by _MOVE_EDGE_CAP.
+            subtree = await self._svc._containment_descendants(
+                s, graph.id, main_id, set(moved), cont_types, to_seq, cap=self._MOVE_EDGE_CAP + 1)
+            if len(subtree) > self._MOVE_EDGE_CAP:
+                return "stale"
+            # as-of to_seq (not head): a commit landing after this window must not leak in.
+            inc = await self._svc._incident_live_edges(s, graph.id, main_id, subtree, to_seq)
+            moved_edges = {eid: p for eid, p in inc.items()
+                           if eid not in handled and _etype(p) in lineage_types}
+            if len(moved_edges) > self._MOVE_EDGE_CAP:
+                return "stale"
+            for eid, p in moved_edges.items():
+                await contribute(p, -1, from_seq)
+                await contribute(p, +1, to_seq)
+
+        pairs = {k: v for k, v in pairs.items() if v["dw"] != 0}
+        if not pairs:
+            return None
+        # FalkorDB keys nodes by urn; versioned entity ids usually ARE urns, but imported
+        # entities may differ — resolve through the entities' payloads, with the SAME
+        # gv:<id> fallback the raw projection uses (_node_urn) so the MATCH always hits.
+        ids = {i for k in pairs for i in k}
+        vals = await self._svc._values_at(s, graph.id, main_id, ids, to_seq)
+        urn_of = {i: ((vals.get(i) or {}).get("urn") or f"gv:{i}") for i in ids}
+        out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        for (sx, tx), v in pairs.items():                # distinct ids can share a urn — SUM, don't overwrite
+            e = out.setdefault((urn_of[sx], urn_of[tx]), {"dw": 0, "types": set()})
+            e["dw"] += v["dw"]
+            e["types"] |= v["types"]
+        out = {k: v for k, v in out.items() if v["dw"] != 0}
+        return out or None
+
+    async def _apply_rollups(self, client, pairs: Dict, from_seq: int, to_seq: int) -> bool:
+        """Apply net rollup deltas to the FalkorDB ``:AGGREGATED`` layer, idempotently per
+        window: each pair is stamped with ``gvSeq``; a retried window skips already-stamped
+        pairs so weights never double-count. A pair stamped INSIDE this window's range
+        (from_seq < gvSeq < to_seq — e.g. a crash-retry whose window grew, or a concurrent
+        projector on a different window) can't be reconciled incrementally: returns False so
+        the caller queues a rebuild instead of guessing. Weight ≤ 0 deletes the rollup.
+        Property shape mirrors the aggregation worker (weight / sourceEdgeTypes / aggKey /
+        latestUpdate), so a later full rebuild MERGEs onto the same relationships."""
+        # Graph-level high-water mark for rollup application (a meta node, wiped with the
+        # graph on full seeds). Catches what per-pair stamps can't: a prior application
+        # whose pairs don't recur in this (grown/concurrent) window.
+        res = await client.query("MATCH (m:_GVRollupMeta) RETURN m.seq")
+        marker = int(res.result_set[0][0]) if getattr(res, "result_set", None) else 0
+        if marker >= to_seq:
+            return True                                  # whole window already applied (retry no-op)
+        if marker > from_seq:
+            return False                                 # partial/foreign overlap — rebuild, don't guess
+
+        items = [{"s": s_, "t": t_, "dw": int(v["dw"]), "et": sorted(v["types"]),
+                  "key": f"{s_}|{t_}", "seq": to_seq} for (s_, t_), v in pairs.items()]
+        for chunk in _batches(items, self._batch):
+            res = await client.query(
+                "UNWIND $batch AS item "
+                "MATCH (a {urn: item.s})-[r:AGGREGATED]->(b {urn: item.t}) "
+                "RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq",
+                params={"batch": chunk})
+            existing = {}
+            for s_, t_, w, types, gv in (getattr(res, "result_set", None) or []):
+                existing[(s_, t_)] = (int(w or 0), list(types or []), int(gv or 0))
+            upserts, deletes = [], []
+            for item in chunk:
+                k = (item["s"], item["t"])
+                w0, types0, gv = existing.get(k, (0, [], 0))
+                if gv >= item["seq"]:
+                    continue                             # already applied (same-window retry)
+                if gv > from_seq:
+                    return False                         # partial overlap — rebuild, don't guess
+                w1 = w0 + item["dw"]
+                if w1 <= 0:
+                    if k in existing:
+                        deletes.append({"s": item["s"], "t": item["t"]})
+                    continue
+                upserts.append({"s": item["s"], "t": item["t"], "w": w1, "key": item["key"],
+                                "et": sorted(set(types0) | set(item["et"])), "seq": item["seq"]})
+            if upserts:
+                await client.query(
+                    "UNWIND $batch AS item MATCH (a {urn: item.s}) MATCH (b {urn: item.t}) "
+                    "MERGE (a)-[r:AGGREGATED]->(b) "
+                    "SET r.weight = item.w, r.sourceEdgeTypes = item.et, r.aggKey = item.key, "
+                    "    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
+                    params={"batch": upserts})
+            if deletes:
+                await client.query(
+                    "UNWIND $batch AS item "
+                    "MATCH (a {urn: item.s})-[r:AGGREGATED]->(b {urn: item.t}) DELETE r",
+                    params={"batch": deletes})
+        # Marker written only after EVERY chunk landed — a mid-apply crash leaves it behind
+        # the watermark, so the retry re-applies with per-pair gvSeq stamps de-duplicating.
+        await client.query(
+            "MERGE (m:_GVRollupMeta {id: 'meta'}) SET m.seq = $seq", params={"seq": to_seq})
+        return True
+
     async def _urn_for(self, s, graph: GraphORM, main_id: str, entity_id: str) -> str:
         """Latest non-null urn for an entity on `main` (fork-aware), else gv:<eid>."""
         row = (await s.execute(
@@ -409,13 +664,19 @@ class FalkorProjector:
 
     @staticmethod
     async def _falkor_counts(client):
-        fn = await client.query("MATCH (n) RETURN count(n) AS c")
-        fe = await client.query("MATCH ()-[r]->() RETURN count(r) AS c")
+        # The :AGGREGATED rollup layer and its _GVRollupMeta marker are derived-cache
+        # artifacts (aggregation worker + this projector's incremental maintenance), not
+        # committed-main entities — exclude them or every graph with rollups reads as
+        # "extra entities vs committed main".
+        fn = await client.query(
+            "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c")
+        fe = await client.query(
+            "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
         return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
     async def _verify_and_heal(
         self, client, graph_id, main_id, from_seq, to_seq, is_fork
-    ) -> Optional[str]:
+    ) -> Tuple[Optional[str], bool]:
         """Reconcile live node/edge COUNTS between Postgres (SoR) and FalkorDB after an
         apply. Best-effort (any count failure → skip). Two mismatch directions:
 
@@ -429,17 +690,19 @@ class FalkorProjector:
           DO NOT auto-delete it (that would wipe un-versioned data); record the
           discrepancy so enablement/bootstrap reconciles.
 
-        Returns an error string (recorded on ``projection_state.last_error``) or ``None``."""
+        Returns ``(error_or_None, reseeded)`` — ``reseeded`` is True when the heal WIPED
+        and re-applied the graph (which destroys :AGGREGATED rollups; the caller must
+        queue a rollup rebuild)."""
         try:
             pg = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
             if pg is None:
-                return None                              # fork / lagging head — not applicable
+                return None, False                       # fork / lagging head — not applicable
             fk = await self._falkor_counts(client)
         except Exception:
             logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
-            return None
+            return None, False
         if pg == fk:
-            return None
+            return None, False
         pg_n, pg_e = pg
         f_n, f_e = fk
         if f_n > pg_n or f_e > pg_e:
@@ -456,14 +719,14 @@ class FalkorProjector:
                                    "lingering from FalkorDB for %s (deletes the incremental pass "
                                    "missed)", f_n - fk[0], f_e - fk[1], graph_id)
                 if pg == fk:
-                    return None
+                    return None, False
                 f_n, f_e = fk
         if f_n > pg_n or f_e > pg_e:
             msg = (f"FalkorDB has extra entities vs committed main "
                    f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}) — "
                    f"run versioning enablement/bootstrap to import them")
             logger.error("%s for %s", msg, graph_id)
-            return msg
+            return msg, False
         if from_seq > 0:                                 # missing committed data → reseed once
             logger.warning("projection verify mismatch for %s (PG n=%d,e=%d > Falkor n=%d,e=%d); "
                            "reseeding from Postgres (bounded heal)", graph_id, pg_n, pg_e, f_n, f_e)
@@ -479,10 +742,10 @@ class FalkorProjector:
                 pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
                 fk2 = await self._falkor_counts(client)
                 if pg2 is None or pg2 == fk2:
-                    return None
+                    return None, True
             except Exception:
                 logger.exception("projection heal reseed failed for %s", graph_id)
-                return f"projection heal reseed failed at seq {to_seq}"
+                return f"projection heal reseed failed at seq {to_seq}", True
         msg = f"projection verify mismatch at seq {to_seq} after heal (committed != FalkorDB)"
         logger.error("%s for %s", msg, graph_id)
         return msg

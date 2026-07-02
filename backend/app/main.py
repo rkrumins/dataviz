@@ -882,13 +882,25 @@ async def lifespan(_app: FastAPI):
             )
             from .services.versioning.worker import ProjectionWorker
             from .services.versioning.service import GraphVersioningService
-            from .services.projection_target import repair_projection_target
+            from .services.projection_target import (
+                make_rollup_rebuild_hook,
+                repair_projection_target,
+                resolve_aggregation_edge_types,
+            )
             from .providers.eviction_budget import make_registry_budget_resolver
             _vw = ProjectionWorker(
                 # Self-heal the projection target on every worker-driven projection, the same way the
                 # interactive project_now path does — else a worker-only graph projects into an orphan
                 # gv_<id> the canvas never reads and merged main never surfaces.
-                FalkorProjector(make_falkor_graph_factory(), target_resolver=repair_projection_target),
+                # edge_types_resolver + on_rollups_stale keep :AGGREGATED rollups consistent
+                # automatically: incremental per projected window; a scoped rebuild is queued when a
+                # full seed wiped them or a containment move exceeded the bounded-recount cap.
+                FalkorProjector(
+                    make_falkor_graph_factory(), target_resolver=repair_projection_target,
+                    edge_types_resolver=resolve_aggregation_edge_types,
+                    on_rollups_stale=make_rollup_rebuild_hook(
+                        lambda: getattr(_app.state, "aggregation_service", None)),
+                ),
                 versioning=GraphVersioningService(),
                 # Per-provider eviction budgets come from the provider registry
                 # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a

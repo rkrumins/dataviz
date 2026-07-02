@@ -114,7 +114,26 @@ def _get_projector():
         if factory is None:
             return None
         from backend.app.services.versioning.projection import FalkorProjector
-        _projector = FalkorProjector(factory)
+        from backend.app.services.projection_target import (
+            make_rollup_rebuild_hook, resolve_aggregation_edge_types,
+        )
+
+        def _agg_service():
+            # Lazy app.state lookup (deferred import — main imports this module at startup).
+            try:
+                from backend.app.main import app as _app
+                return getattr(_app.state, "aggregation_service", None)
+            except Exception:                            # pragma: no cover - import shape
+                return None
+
+        # edge_types_resolver: the interactive post-merge projection is usually the FIRST (and,
+        # once it advances the watermark, the ONLY) pass over a merge's window — without it the
+        # merged lineage would never reach the :AGGREGATED rollups. on_rollups_stale: an
+        # interactive FULL seed (e.g. after a repin) wipes the rollups with the graph, and the
+        # async worker won't re-walk it once the watermark advances — queue the rebuild here too.
+        _projector = FalkorProjector(
+            factory, edge_types_resolver=resolve_aggregation_edge_types,
+            on_rollups_stale=make_rollup_rebuild_hook(_agg_service))
     return _projector
 
 

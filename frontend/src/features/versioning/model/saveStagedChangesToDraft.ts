@@ -13,6 +13,7 @@
 import { applyGraphChanges, type GraphChangeOp } from '@/services/versioningApiService'
 import { useStagedChangesStore, type ApplyContext, type StagedChange } from '@/store/stagedChangesStore'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { stagedChangesToOps } from './stagedChangesToOps'
 
 export interface DraftSaveTarget {
@@ -109,5 +110,8 @@ export async function saveStagedChangesToDraft(
   )
   if (ops.length === 0) return { commitId: null }
   const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
+  // Rollups may have changed (lineage edges added/removed, containment moved): the server's
+  // draft overlay reports adjusted aggregated edges, but only a fresh fetch shows them.
+  invalidateAggregatedEdges()
   return { commitId: res.commitId }
 }

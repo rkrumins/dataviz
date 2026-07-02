@@ -6,6 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
 import type { ResolutionMap, StageOp } from '@/services/versioningApiService'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 
 export const VERSIONING_KEYS = {
@@ -348,6 +349,11 @@ export function usePublishBranch(wsId: string, graphId: string) {
       // the FalkorDB cache catches up, and force live graph reads to refetch.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
       bumpMainEpoch()
+      // Rollups changed with main. Refetch now, and once more after the post-commit
+      // projection nudge has had time to land (an immediate fetch can hit the stale
+      // window and cache an empty result for the TTL).
+      invalidateAggregatedEdges()
+      setTimeout(invalidateAggregatedEdges, 4000)
     },
   })
 }
@@ -427,6 +433,9 @@ export function useMergeMergeRequest(wsId: string) {
       // main@head moved — re-read projection freshness so the "refreshing…" badge can show if lagging.
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, v.graphId) })
       bumpMainEpoch()   // main@head moved
+      // Rollups changed with main (see usePublishBranch): refetch now + after the projection nudge.
+      invalidateAggregatedEdges()
+      setTimeout(invalidateAggregatedEdges, 4000)
     },
   })
 }
