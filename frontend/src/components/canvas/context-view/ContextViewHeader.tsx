@@ -121,6 +121,8 @@ export interface ContextViewHeaderProps {
   pendingChangeCount?: number
   /** Opens the staged-changes review panel (Review & Save click). */
   onOpenStagedChanges?: () => void
+  /** Opens the change-overview panel from the Edit-cluster "Changes" button. */
+  onOpenChangeOverview?: () => void
 
   // Undo / Redo
   canUndo?: boolean
@@ -180,6 +182,7 @@ export function ContextViewHeader({
   onRetrySync,
   pendingChangeCount = 0,
   onOpenStagedChanges,
+  onOpenChangeOverview,
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -300,6 +303,7 @@ export function ContextViewHeader({
                 onRedo={onRedo}
                 pendingChangeCount={pendingChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
+                onOpenChangeOverview={onOpenChangeOverview}
                 onExitEdit={onExitEdit}
               />
             </motion.div>

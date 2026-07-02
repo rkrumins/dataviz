@@ -45,6 +45,7 @@ function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextView
     onRetrySync: vi.fn(),
     pendingChangeCount: 0,
     onOpenStagedChanges: vi.fn(),
+    onOpenChangeOverview: vi.fn(),
     canUndo: false,
     canRedo: false,
     onUndo: vi.fn(),
@@ -72,6 +73,7 @@ describe('ContextViewHeader — View mode (Published)', () => {
     expect(screen.queryByText(/review & save/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/add entity/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Changes' })).not.toBeInTheDocument()
   })
 
   it('gives a manager the Edit entry and fires onEnterEdit on click', () => {
@@ -141,6 +143,15 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Done' }))
     expect(props.onExitEdit).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers a Changes overview button that opens the change panel', () => {
+    const props = baseProps({ isDraft: true })
+    render(<ContextViewHeader {...props} />)
+
+    const changes = screen.getByRole('button', { name: 'Changes' })
+    fireEvent.click(changes)
+    expect(props.onOpenChangeOverview).toHaveBeenCalledTimes(1)
   })
 })
 

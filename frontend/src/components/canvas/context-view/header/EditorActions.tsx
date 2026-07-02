@@ -27,6 +27,8 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   pendingChangeCount?: number
   /** Opens the staged-changes review panel (the only save path). */
   onOpenStagedChanges?: () => void
+  /** Opens the change-overview panel (pending edits + saved-to-branch changes). */
+  onOpenChangeOverview?: () => void
   onExitEdit: () => void
 }
 
@@ -37,6 +39,7 @@ export function EditorActions({
   onRedo,
   pendingChangeCount = 0,
   onOpenStagedChanges,
+  onOpenChangeOverview,
   onExitEdit,
   ...tools
 }: EditorActionsProps) {
@@ -79,6 +82,18 @@ export function EditorActions({
           <LucideIcons.Redo2 className="w-4 h-4" strokeWidth={2.4} />
         </button>
       </div>
+
+      {/* Changes — ghost overview into the versioning panel: everything changed
+          in this draft (pending edits + saved-to-branch changes). Read-only entry
+          point; the actual save stays on Review & Save. */}
+      <button
+        onClick={onOpenChangeOverview}
+        title="See everything changed in this draft — pending edits and saved changes"
+        className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-all duration-300"
+      >
+        <LucideIcons.FileDiff className="w-4 h-4" strokeWidth={2.4} />
+        <span>Changes</span>
+      </button>
 
       {/* Review & Save — THE primary action of edit mode: filled accent,
           count chip while edits are pending, muted until there's

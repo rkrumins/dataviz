@@ -15,6 +15,7 @@ import { usePermission } from '@/store/auth'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
+import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { useAbandonDraft, useBootstrapGraph, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
@@ -60,6 +61,19 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   useEffect(() => {
     if (isDraft) setActiveChangeSet(changeSet)
   }, [isDraft, changeSet, setActiveChangeSet])
+
+  // One-shot bridge: the Context View header's "Changes" button (far from this bar)
+  // asks to open the versioning panel via useVersioningPanelStore. Honour the request
+  // by opening the panel on the requested tab, then clear it. Ignored when there's no
+  // graph yet (the panel needs graphId) — harmless, since the header button only shows
+  // in a draft, where a graph necessarily exists.
+  const requestedTab = useVersioningPanelStore((s) => s.requestedTab)
+  const clearPanelRequest = useVersioningPanelStore((s) => s.clearRequest)
+  useEffect(() => {
+    if (!requestedTab) return
+    if (graphId) setPanelTab(requestedTab)
+    clearPanelRequest()
+  }, [requestedTab, graphId, clearPanelRequest])
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
