@@ -55,6 +55,15 @@ async def _run() -> None:
 
     await models.create_schema_and_partitions()
     app = _build_app()
+    # Keep the projection background task (fired by publish/merge/rebuild) hermetic — no live
+    # FalkorDB/Redis in this harness — so a rebuild's replay doesn't reach for a real socket.
+    from backend.app.api.v1.endpoints import versioning as V
+
+    async def _noop_project_now(graph_id: str) -> None:
+        return None
+
+    _orig_project_now = V.project_now
+    V.project_now = _noop_project_now
     c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
     ws1 = "/api/v1/ws1/versioning"
 
@@ -151,6 +160,45 @@ async def _run() -> None:
         resolved = await c.post(f"{ws1}/pulls/{pr2}/merge", json={"message": "resolved", "resolutions": {"A": {"displayName": "Resolved"}}}, headers=h)
         assert resolved.status_code == 200, resolved.text
 
+        # ── projection reconcile: RBAC + tenant isolation + unpinned skip ─
+        # read-only caller may not reconcile (manage-gated) → 403
+        assert (await c.post(f"{ws1}/graphs/{gid}/projection/reconcile", json={}, headers=_hdr(R))).status_code == 403
+        rc = await c.post(f"{ws1}/graphs/{gid}/projection/reconcile", json={}, headers=h)
+        assert rc.status_code == 200, rc.text
+        # this graph was created without a FalkorDB target → reconcile reports a skip, not drift
+        assert rc.json()["skippedReason"] == "no projection target" and rc.json()["inSync"] is False
+        assert rc.json()["graphId"] == gid and rc.json()["pgNodes"] >= 1
+        # cross-tenant reconcile via ws2 → 404 (graph existence not leaked)
+        assert (await c.post(f"/api/v1/ws2/versioning/graphs/{gid}/projection/reconcile", json={}, headers=h)).status_code == 404
+        # in-process concurrency guard: a reconcile already in flight for this graph → 409. (Two
+        # gathered HTTP requests don't reliably interleave in the ASGI+httpx harness, so mark the
+        # graph in-flight directly and assert the guard rejects the second call deterministically.)
+        V._reconcile_inflight.add(gid)
+        try:
+            assert (await c.post(f"{ws1}/graphs/{gid}/projection/reconcile", json={}, headers=h)).status_code == 409
+        finally:
+            V._reconcile_inflight.discard(gid)
+
+        # ── projection rebuild: RBAC + 409 when no target + 200 on a pinned graph ─
+        # read-only caller may not rebuild (manage-gated) → 403
+        assert (await c.post(f"{ws1}/graphs/{gid}/projection/rebuild", headers=_hdr(R))).status_code == 403
+        # the unpinned graph has no FalkorDB target to rebuild → 409
+        assert (await c.post(f"{ws1}/graphs/{gid}/projection/rebuild", headers=h)).status_code == 409
+        # a PINNED graph rebuilds: started, watermark flipped to rebuilding
+        pinned = (await c.post(f"{ws1}/graphs", json={
+            "dataSourceId": "ds_" + os.urandom(4).hex(), "workspaceId": "ws1",
+            "falkorGraphName": "real_" + os.urandom(3).hex()}, headers=_hdr(M))).json()["graphId"]
+        rb = await c.post(f"{ws1}/graphs/{pinned}/projection/rebuild", headers=h)
+        assert rb.status_code == 200, rb.text
+        assert rb.json()["started"] is True and rb.json()["alreadyRunning"] is False
+        assert rb.json()["watermark"]["status"] == "rebuilding"
+        # a rebuild already in flight is a no-op → started=false / alreadyRunning=true
+        rb2 = await c.post(f"{ws1}/graphs/{pinned}/projection/rebuild", headers=h)
+        assert rb2.status_code == 200 and rb2.json()["started"] is False and rb2.json()["alreadyRunning"] is True
+        # cross-tenant rebuild via ws2 → 404
+        assert (await c.post(f"/api/v1/ws2/versioning/graphs/{pinned}/projection/rebuild", headers=h)).status_code == 404
+
+    V.project_now = _orig_project_now                # restore: don't leak the no-op into other tests
     await db.dispose_engine()
 
 

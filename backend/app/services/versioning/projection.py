@@ -23,9 +23,10 @@ import json
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, literal, select
+from sqlalchemy import literal, select
 
 from . import config, db
+from .reconcile import falkor_counts, pg_live_counts
 from .models import (
     EdgeVersionORM,
     EntityHeadORM,
@@ -650,29 +651,16 @@ class FalkorProjector:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.main_head_commit_seq != to_seq:
                 return None
-            pg_nodes = (await s.execute(
-                select(func.count()).select_from(EntityHeadORM).where(
-                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
-                    EntityHeadORM.entity_kind == "node", EntityHeadORM.is_tombstone.is_(False),
-                ))).scalar_one()
-            pg_edges = (await s.execute(
-                select(func.count()).select_from(EntityHeadORM).where(
-                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
-                    EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
-                ))).scalar_one()
-        return int(pg_nodes), int(pg_edges)
+            # The count SQL lives in reconcile.pg_live_counts (single source, shared with the
+            # reconciler); the fork / lagging-head gate above is this verify path's own concern.
+            return await pg_live_counts(s, graph_id, main_id)
 
     @staticmethod
     async def _falkor_counts(client):
-        # The :AGGREGATED rollup layer and its _GVRollupMeta marker are derived-cache
-        # artifacts (aggregation worker + this projector's incremental maintenance), not
-        # committed-main entities — exclude them or every graph with rollups reads as
-        # "extra entities vs committed main".
-        fn = await client.query(
-            "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c")
-        fe = await client.query(
-            "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
-        return int(fn.result_set[0][0]), int(fe.result_set[0][0])
+        # Delegates to reconcile.falkor_counts (single source of the count cypher + its rollup
+        # exclusion, shared with the reconciler). Kept as a thin method so the verify path and
+        # its tests can monkeypatch it per-instance.
+        return await falkor_counts(client)
 
     async def _verify_and_heal(
         self, client, graph_id, main_id, from_seq, to_seq, is_fork

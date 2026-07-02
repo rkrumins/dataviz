@@ -22,10 +22,11 @@ Boundary policy
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 from contextlib import contextmanager
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -454,6 +455,54 @@ class WatermarkModel(_ApiModel):
     status: str = "idle"
 
 
+class RebuildResponse(_ApiModel):
+    started: bool                                        # a fresh full replay was requested
+    already_running: bool = Field(alias="alreadyRunning")  # a projection/rebuild was in flight (no-op)
+    watermark: WatermarkModel
+
+
+class ReconcileRequest(_ApiModel):
+    deep: bool = False           # also field-compare every cached node (full scan), not just id-sets
+
+
+class DriftNodeSample(_ApiModel):
+    entity_id: str = Field(alias="entityId")
+    urn: Optional[str] = None
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+
+
+class DriftMismatch(_ApiModel):
+    entity_id: str = Field(alias="entityId")
+    field: str
+    pg: Any = None
+    falkor: Any = None
+
+
+class DriftReportModel(_ApiModel):
+    """The reconciler's drift report — the contract the Data Health UI (PR-B3) reads. Mirrors
+    :class:`~backend.app.services.versioning.reconcile.DriftReport` field-for-field (camelCase)."""
+    graph_id: str = Field(alias="graphId")
+    falkor_graph_name: Optional[str] = Field(default=None, alias="falkorGraphName")
+    committed_seq: int = Field(alias="committedSeq")
+    projected_seq: int = Field(alias="projectedSeq")
+    status: str
+    fresh: bool
+    pg_nodes: int = Field(alias="pgNodes")
+    pg_edges: int = Field(alias="pgEdges")
+    falkor_nodes: int = Field(alias="falkorNodes")
+    falkor_edges: int = Field(alias="falkorEdges")
+    missing_nodes: List[DriftNodeSample] = Field(default_factory=list, alias="missingNodes")
+    extra_nodes: List[DriftNodeSample] = Field(default_factory=list, alias="extraNodes")
+    missing_edges: List[str] = Field(default_factory=list, alias="missingEdges")
+    extra_edges: List[str] = Field(default_factory=list, alias="extraEdges")
+    mismatched: List[DriftMismatch] = Field(default_factory=list)
+    truncated: bool = False
+    in_sync: bool = Field(alias="inSync")
+    checked_at: str = Field(alias="checkedAt")
+    duration_ms: int = Field(alias="durationMs")
+    skipped_reason: Optional[str] = Field(default=None, alias="skippedReason")
+
+
 class StateResponse(_ApiModel):
     nodes: Dict[str, dict]
     edges: Dict[str, dict]
@@ -870,6 +919,68 @@ async def get_watermark(
     wm = await svc.projection_watermark(graph_id)
     return {"committed": wm["committed"], "projected": wm["projected"],
             "fresh": wm["fresh"], "status": wm["status"]}
+
+
+def _watermark_model(wm: dict) -> WatermarkModel:
+    return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
+                          fresh=wm["fresh"], status=wm["status"])
+
+
+@router.post("/graphs/{graph_id}/projection/rebuild", response_model=RebuildResponse)
+async def rebuild_projection(
+    ws_id: str, graph_id: str,
+    background: BackgroundTasks,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Force a full replay of committed ``main`` from Postgres (the SoR) into the graph's FalkorDB
+    cache — the "rebuild the cache" operator action. Pins an unpinned graph to its data source's
+    real graph first; 409 if there is still no FalkorDB target (nothing to rebuild). Idempotent: a
+    projection/rebuild already in flight returns ``started=false``/``alreadyRunning=true`` untouched.
+    The catch-up itself runs in-process as a background task (same path publish/merge use)."""
+    await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
+    wm = await svc.projection_watermark(graph_id)
+    name = wm.get("falkor_graph_name")
+    # No real target — NULL or the synthetic ``gv_<id>`` placeholder nothing reads (mirrors the
+    # projector's unpinned skip). Nothing is cached, so there is nothing to rebuild.
+    if not name or name == f"gv_{graph_id}":
+        raise HTTPException(status_code=409, detail="no FalkorDB projection target for this graph")
+    started = await svc.request_projection_rebuild(graph_id)
+    if started:
+        background.add_task(project_now, graph_id)       # catch the cache up in-process (async worker fallback)
+    return RebuildResponse(started=started, already_running=not started,
+                           watermark=_watermark_model(await svc.projection_watermark(graph_id)))
+
+
+# Per-graph in-process guard: a reconcile is a request-scoped full scan; a second concurrent one
+# for the same graph is redundant load, so it 409s rather than double-scanning. Check + add have no
+# await between them, so they're atomic on the event loop (no lock needed).
+_reconcile_inflight: set = set()
+
+
+@router.post("/graphs/{graph_id}/projection/reconcile", response_model=DriftReportModel)
+async def reconcile_projection(
+    ws_id: str, graph_id: str, body: ReconcileRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+):
+    """Validate that ALL committed ``main`` in Postgres is present in the FalkorDB cache — a
+    streamed, full-coverage drift report (counts + id-set diff, plus a deep field check when
+    ``deep=true``). Request-scoped (no job infra); a concurrent reconcile for the same graph 409s."""
+    if graph_id in _reconcile_inflight:
+        raise HTTPException(status_code=409, detail="reconcile already running")
+    _reconcile_inflight.add(graph_id)
+    try:
+        from backend.app.services.versioning import db as vdb
+        from backend.app.services.versioning.reconcile import ProjectionReconciler
+        proj = _get_projector()                          # same session + client factories the reader uses
+        client_factory = proj._client if proj is not None else get_falkor_read_factory()
+        reconciler = ProjectionReconciler(vdb.graphver_session, client_factory)
+        report = await reconciler.reconcile(graph_id, deep=body.deep)
+    finally:
+        _reconcile_inflight.discard(graph_id)
+    return DriftReportModel.model_validate(dataclasses.asdict(report))
 
 
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)

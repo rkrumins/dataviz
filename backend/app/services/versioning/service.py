@@ -1555,6 +1555,33 @@ class GraphVersioningService:
             ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection
             return old
 
+    async def request_projection_rebuild(self, graph_id: str) -> bool:
+        """Force the next projection pass to replay ALL of committed ``main`` from Postgres —
+        the operational "rebuild the read cache from the source of truth" primitive. Resets
+        ``projected_commit_seq`` to 0 and ``target_commit_seq`` to the current committed head,
+        and flips ``status`` to ``rebuilding``; the next :meth:`FalkorProjector.project_graph`
+        then does a clean wipe + full reseed (which re-fires the ``on_rollups_stale`` hook, so
+        derived rollups rebuild too — no extra work here).
+
+        Idempotent and race-safe: returns ``False`` WITHOUT touching state when a projection or
+        rebuild is already in flight (``status in {projecting, rebuilding}`` and still behind its
+        target), so a double-click or a poll-loop overlap can't rewind an in-progress apply. Takes
+        the same per-graph advisory lock the main-advancing writes take, so two concurrent rebuild
+        requests serialise on the watermark reset."""
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            ps = await s.get(ProjectionStateORM, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            if ps is None or graph is None:
+                return False
+            if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
+                return False
+            ps.projected_commit_seq = 0
+            ps.target_commit_seq = graph.main_head_commit_seq
+            ps.status = "rebuilding"
+            ps.last_error = None
+            return True
+
     async def neighbors_from_state(
         self, *, graph_id: str, urn: str, branch_id: Optional[str] = None,
         as_of_seq: Optional[int] = None, depth: int = 1,
