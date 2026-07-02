@@ -158,3 +158,17 @@ describe('ContextViewHeader — blueprint sync subline', () => {
     expect(screen.getByText('4 types · Enterprise Blueprint')).toBeInTheDocument()
   })
 })
+
+describe('ContextViewHeader — view title (calm-view default)', () => {
+  it('renders a plain title with no view-options menu when no view capability is granted', () => {
+    render(<ContextViewHeader {...baseProps()} />)
+
+    expect(screen.getByText('Data Landscape')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'View options' })).not.toBeInTheDocument()
+  })
+
+  it('surfaces the view-options chevron once a view capability is granted', () => {
+    render(<ContextViewHeader {...baseProps({ canEditView: true })} />)
+    expect(screen.getByRole('button', { name: 'View options' })).toBeInTheDocument()
+  })
+})

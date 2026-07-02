@@ -20,12 +20,12 @@
  */
 
 import { motion, AnimatePresence } from 'framer-motion'
-import * as LucideIcons from 'lucide-react'
 import type { HierarchyNode } from './types'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { HeaderSearch, HeaderSearchResults } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import { EditorActions } from './header/EditorActions'
+import { ViewTitleMenu } from './header/ViewTitleMenu'
 
 export interface ContextViewHeaderProps {
   // Search
@@ -101,6 +101,17 @@ export interface ContextViewHeaderProps {
   /** Folded into the title subline ({N} types · {model name}). */
   activeContextModelName: string | null
 
+  // View-level capabilities + metadata actions. Independent of
+  // isDraft/canManage — view metadata is not graph data, so the title menu
+  // behaves identically on Published and drafts (see the header design spec).
+  // With neither capability, the title stays a plain label (calm-view rule).
+  canEditView?: boolean
+  canShareView?: boolean
+  viewVisibility?: 'private' | 'workspace' | 'enterprise'
+  onRenameView?: (name: string) => void
+  onEditViewDetails?: () => void
+  onShareView?: () => void
+
   // Blueprint sync — surfaces only as a tiny subline spinner ('saving')
   // or a "Sync issue — retry" text button ('error' → onRetrySync).
   syncStatus: 'idle' | 'dirty' | 'saving' | 'synced' | 'error'
@@ -159,6 +170,12 @@ export function ContextViewHeader({
   viewName,
   entityTypeCount,
   activeContextModelName,
+  canEditView = false,
+  canShareView = false,
+  viewVisibility,
+  onRenameView,
+  onEditViewDetails,
+  onShareView,
   syncStatus,
   onRetrySync,
   pendingChangeCount = 0,
@@ -237,35 +254,22 @@ export function ContextViewHeader({
       </AnimatePresence>
 
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 relative">
-        {/* Title */}
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent-lineage/20 to-purple-500/20 flex items-center justify-center shadow-lg shadow-accent-lineage/10">
-            <LucideIcons.Network className="w-5 h-5 text-accent-lineage" />
-          </div>
-          <div className="min-w-0">
-            <h2 className="text-base font-display font-semibold text-ink tracking-tight truncate" title={viewName ?? 'Context View'}>
-              {viewName ?? 'Context View'}
-            </h2>
-            <p className="text-[10px] text-ink-muted/70 flex items-center gap-1.5 min-w-0">
-              <LucideIcons.ArrowRight className="w-3 h-3 flex-shrink-0" />
-              <span className="truncate" title={activeContextModelName ?? undefined}>{subline}</span>
-              {syncStatus === 'saving' && (
-                <LucideIcons.Loader2
-                  className="w-3 h-3 animate-spin flex-shrink-0"
-                  aria-label="Saving changes"
-                />
-              )}
-              {syncStatus === 'error' && onRetrySync && (
-                <button
-                  onClick={onRetrySync}
-                  className="flex-shrink-0 font-semibold text-amber-600 dark:text-amber-400 hover:underline underline-offset-2 transition-colors"
-                >
-                  Sync issue — retry
-                </button>
-              )}
-            </p>
-          </div>
-        </div>
+        {/* Zone 1 — Title. The whole title block (icon, name, subline with
+            its sync spinner/retry) plus the view-metadata affordances (rename,
+            Edit details, Share) live in ViewTitleMenu. The chevron/menu appear
+            only when the user holds a view-level capability. */}
+        <ViewTitleMenu
+          viewName={viewName ?? 'Context View'}
+          subline={subline}
+          canEditView={canEditView}
+          canShareView={canShareView}
+          viewVisibility={viewVisibility}
+          onRenameView={onRenameView}
+          onEditViewDetails={onEditViewDetails}
+          onShareView={onShareView}
+          syncStatus={syncStatus}
+          onRetrySync={onRetrySync}
+        />
 
         {/* Zone 2 — Search. See header/HeaderSearch.tsx for the field +
             helper-row implementation. */}
