@@ -38,8 +38,9 @@ describe('useUnsavedChangesWarning', () => {
 
   it('cancels the unload event so the browser shows its confirm dialog', () => {
     renderHook(() => useUnsavedChangesWarning(true))
-    const handler = beforeUnloadCalls(addSpy)[0][1] as EventListener
-    const event = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent
+    // The hook's listener is live on window, so dispatching the event invokes
+    // it; preventDefault() makes dispatchEvent report the event as cancelled.
+    const event = new Event('beforeunload', { cancelable: true })
     const prevented = !window.dispatchEvent(event)
     expect(prevented).toBe(true)
   })
