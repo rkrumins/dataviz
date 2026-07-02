@@ -821,6 +821,12 @@ class ViewResponse(BaseModel):
     # deleted — callers fall back to ``created_by`` in that case.
     created_by_name: Optional[str] = Field(None, alias="createdByName")
     created_by_email: Optional[str] = Field(None, alias="createdByEmail")
+    # Who last edited the view. NULL until the first edit after the
+    # updated_by migration; names NULL whenever the user can't be resolved
+    # (deleted record / anonymous), resolved server-side like created_by.
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    updated_by_name: Optional[str] = Field(None, alias="updatedByName")
+    updated_by_email: Optional[str] = Field(None, alias="updatedByEmail")
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
     favourite_count: int = Field(0, alias="favouriteCount")

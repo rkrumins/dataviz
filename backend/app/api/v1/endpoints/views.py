@@ -443,7 +443,9 @@ async def update_view(
     digest = await _compute_ontology_digest(
         session, existing.workspace_id, existing.data_source_id,
     )
-    view = await view_repo.update_view(session, view_id, req, ontology_digest=digest)
+    view = await view_repo.update_view(
+        session, view_id, req, ontology_digest=digest, user_id=_user_id(user),
+    )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return view

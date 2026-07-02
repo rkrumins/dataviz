@@ -645,6 +645,10 @@ class ViewORM(Base):
     # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")
     created_by = Column(Text, nullable=True)
+    # Principal id of whoever last edited the view (same convention as
+    # created_by). NULL on legacy rows and until the first edit after the
+    # updated_by migration; the API resolves it to a display name.
+    updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)

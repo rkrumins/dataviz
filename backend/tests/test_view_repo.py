@@ -377,3 +377,104 @@ async def test_list_popular_views_query_count_is_bounded(db_session: AsyncSessio
         f"list_popular_views issued {counter['n']} queries for 8 rows; "
         f"expected <=8 with batched enrichment. N+1 regression?"
     )
+
+
+# ---------------------------------------------------------------------------
+# Provenance: updated_by capture + creator/modifier name resolution
+# ---------------------------------------------------------------------------
+
+async def _seed_user(
+    session: AsyncSession, user_id: str, first: str = "Test", last: str = "User"
+) -> None:
+    """Insert a users row so the name-resolution lookup has something to find."""
+    session.add(UserORM(
+        id=user_id,
+        email=f"{user_id}@example.com",
+        password_hash="x",
+        first_name=first,
+        last_name=last,
+        status="active",
+    ))
+    await session.flush()
+
+
+async def test_update_view_stamps_and_resolves_modifier(db_session: AsyncSession):
+    """PUT-path edit records the actor in updated_by and resolves their name."""
+    ws = await _create_workspace(db_session)
+    await _seed_user(db_session, "usr_editor", first="Ed", last="Itor")
+    created = await view_repo.create_view(db_session, _make_create_req(ws.id))
+
+    updated = await view_repo.update_view(
+        db_session, created.id, ViewUpdateRequest(name="Edited"),
+        user_id="usr_editor",
+    )
+
+    assert updated is not None
+    assert updated.updated_by == "usr_editor"
+    assert updated.updated_by_name == "Ed Itor"
+    assert updated.updated_by_email == "usr_editor@example.com"
+
+
+async def test_update_visibility_stamps_modifier(db_session: AsyncSession):
+    """Visibility change also records who made the change."""
+    ws = await _create_workspace(db_session)
+    await _seed_user(db_session, "usr_vis", first="Vis", last="Or")
+    created = await view_repo.create_view(db_session, _make_create_req(ws.id))
+
+    updated = await view_repo.update_visibility(
+        db_session, created.id, "enterprise", user_id="usr_vis",
+    )
+
+    assert updated is not None
+    assert updated.updated_by == "usr_vis"
+    assert updated.updated_by_name == "Vis Or"
+
+
+async def test_fresh_view_has_no_modifier(db_session: AsyncSession):
+    """A view that was never edited carries no updated_by / modifier name."""
+    ws = await _create_workspace(db_session)
+    created = await view_repo.create_view(
+        db_session, _make_create_req(ws.id), user_id="usr_creator",
+    )
+
+    assert created.updated_by is None
+    assert created.updated_by_name is None
+    assert created.updated_by_email is None
+
+
+async def test_unresolvable_modifier_echoes_id_without_name(db_session: AsyncSession):
+    """An updated_by with no matching user row echoes the id, names stay None."""
+    ws = await _create_workspace(db_session)
+    created = await view_repo.create_view(db_session, _make_create_req(ws.id))
+
+    updated = await view_repo.update_view(
+        db_session, created.id, ViewUpdateRequest(name="Edited"),
+        user_id="usr_ghost",  # deliberately not seeded into users
+    )
+
+    assert updated is not None
+    assert updated.updated_by == "usr_ghost"
+    assert updated.updated_by_name is None
+    assert updated.updated_by_email is None
+
+
+async def test_batch_list_resolves_creator_and_modifier(db_session: AsyncSession):
+    """The batched list path resolves BOTH the creator and the modifier name."""
+    ws = await _create_workspace(db_session)
+    await _seed_user(db_session, "usr_author", first="Aut", last="Hor")
+    await _seed_user(db_session, "usr_editor2", first="Ed", last="Two")
+    created = await view_repo.create_view(
+        db_session, _make_create_req(ws.id, visibility="workspace"),
+        user_id="usr_author",
+    )
+    await view_repo.update_view(
+        db_session, created.id, ViewUpdateRequest(name="Edited"),
+        user_id="usr_editor2",
+    )
+    await db_session.commit()
+
+    listed = await view_repo.list_views_filtered(db_session, limit=10)
+    item = next(v for v in listed.items if v.id == created.id)
+
+    assert item.created_by_name == "Aut Hor"
+    assert item.updated_by_name == "Ed Two"
