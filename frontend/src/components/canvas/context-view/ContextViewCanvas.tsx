@@ -1982,7 +1982,6 @@ export function ContextViewCanvas({
           // the right.
           setAdvancedSearchOpen((open) => !open)
         }}
-        advancedSearchOpen={advancedSearchOpen}
         onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
         propertyManagerOpen={propertyManagerOpen}
         viewName={activeView?.name}
