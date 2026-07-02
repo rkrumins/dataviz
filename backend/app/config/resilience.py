@@ -160,6 +160,15 @@ DISCOVERY_REFRESH_INTERVAL_SECS: int = int(os.getenv("DISCOVERY_REFRESH_INTERVAL
 # legitimately slow provider call but recovers fast on stalls.
 DISCOVERY_DEDUP_TTL_SECS: int = int(os.getenv("DISCOVERY_DEDUP_TTL_SECS", "90"))
 
+# Inner budget for one live discovery provider call (list_graphs or a
+# per-asset stats scan). Must sit ABOVE the provider's stats-query
+# timeout (FALKORDB_STATS_QUERY_TIMEOUT_SECS, default 30s) so a
+# large-graph count scan can finish. Single source of truth: the worker
+# derives its OUTER per-job timeout from this (+ headroom) — previously
+# both read the same env var with divergent defaults (35s inner vs 10s
+# outer) and the worker killed discovery jobs before their inner budget.
+DISCOVERY_LIVE_TIMEOUT_SECS: int = int(os.getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "35"))
+
 # ── Insights frontend / job-poll knobs (surfaced via /admin/insights/config) ─
 # Frontend reads these once at app mount via ``useInsightsConfig``;
 # all values are env-driven on the backend. Changing requires a

@@ -344,6 +344,13 @@ class AggregationWorker:
                         completed_at=job.completed_at,
                     )
 
+                # Aggregated-edge materialization changed the graph's edge
+                # counts — nudge the insights counts poll (cooldown-
+                # throttled, never raises).
+                if job.workspace_id:
+                    from backend.insights_service.enqueue import mark_stats_changed
+                    await mark_stats_changed(job.data_source_id, job.workspace_id)
+
                 logger.info(
                     "Aggregation job %s completed: %d edges processed, %d AGGREGATED created",
                     job_id, job.processed_edges, job.created_edges,

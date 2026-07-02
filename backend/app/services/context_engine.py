@@ -1231,16 +1231,33 @@ class ContextEngine:
                     levels.append(lvl)
         return max(levels) if levels else None
 
-    # Per-instance semaphore — cap concurrent trace queries per engine
-    # (i.e. per workspace, since for_workspace returns a per-workspace engine).
-    # Lazily initialised on first call. Override limit via TRACE_CONCURRENCY.
+    # PROCESS-WIDE trace semaphores, keyed by the provider's manager
+    # identity (fallback: (workspace, data_source)). Engines are
+    # constructed per request, so a per-instance semaphore capped
+    # nothing — 100 concurrent trace requests each got their own
+    # fresh Semaphore(4). Module-level registry gives a real per-
+    # (provider, graph) × per-process cap, backstopped by the
+    # provider's own _query_semaphore. FIFO-bounded like the worker's
+    # ds-meta cache so deleted graphs don't accumulate entries.
+    _TRACE_SEMAPHORES: Dict[Any, asyncio.Semaphore] = {}
+    _TRACE_SEMAPHORES_MAX = 256
+
     def _trace_semaphore(self) -> asyncio.Semaphore:
-        sem = getattr(self, "_trace_sem", None)
+        key = getattr(getattr(self, "provider", None), "manager_cache_key", None)
+        if key is None:
+            key = (
+                getattr(self, "_workspace_id", None),
+                getattr(self, "_data_source_id", None),
+            )
+        sem = self._TRACE_SEMAPHORES.get(key)
         if sem is None:
             import os
             limit = int(os.getenv("TRACE_CONCURRENCY", "4"))
+            if len(self._TRACE_SEMAPHORES) >= self._TRACE_SEMAPHORES_MAX:
+                oldest = next(iter(self._TRACE_SEMAPHORES))
+                self._TRACE_SEMAPHORES.pop(oldest, None)
             sem = asyncio.Semaphore(limit)
-            self._trace_sem = sem
+            self._TRACE_SEMAPHORES[key] = sem
         return sem
 
     # Hard caps for trace v2. TRACE_MAX_NODES still env-var driven here
@@ -1271,15 +1288,28 @@ class ContextEngine:
     async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         return await self.provider.get_nodes_by_layer(layer_id, limit=limit, offset=offset)
 
-    async def get_graph_schema(self) -> GraphSchema:
+    async def get_graph_schema(
+        self,
+        stats: Optional[GraphSchemaStats] = None,
+        ontology: Optional[OntologyMetadata] = None,
+    ) -> GraphSchema:
         """
         Build a complete graph schema from resolved ontology definitions and introspection stats.
         Uses the rich entity/relationship definitions from the OntologyService when available;
         falls back to generating definitions from introspection stats + minimal defaults.
+
+        ``stats`` / ``ontology`` may be passed pre-fetched so a caller
+        that already ran ``get_schema_stats()`` / ``get_ontology_metadata()``
+        (the insights collector) doesn't trigger the full-graph scans a
+        second time. When passing ``ontology``, call
+        ``get_ontology_metadata()`` on THIS engine first — the rich path
+        below reads ``_resolved_ontology_cache``, which that call populates.
         """
-        stats = await self.provider.get_schema_stats()
-        # Calling get_ontology_metadata() will also populate _resolved_ontology_cache
-        ontology = await self.get_ontology_metadata()
+        if stats is None:
+            stats = await self.provider.get_schema_stats()
+        if ontology is None:
+            # Calling get_ontology_metadata() will also populate _resolved_ontology_cache
+            ontology = await self.get_ontology_metadata()
 
         resolved = self._resolved_ontology_cache
         entity_types: List[EntityTypeDefinition] = []

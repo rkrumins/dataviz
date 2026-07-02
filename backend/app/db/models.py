@@ -692,6 +692,12 @@ class DataSourceStatsORM(Base):
     ontology_metadata = Column(Text, nullable=False, default="{}")   # JSON
     graph_schema = Column(Text, nullable=False, default="{}")        # JSON
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # Deep-facet freshness marker (schema_stats / ontology_metadata /
+    # graph_schema columns). ``updated_at`` tracks the cheap counts facet
+    # and keeps driving the read path's fresh/stale classification; this
+    # drives the scheduler's deep-poll due-ness. NULL until the first
+    # deep poll lands.
+    schema_updated_at = Column(Text, nullable=True)
 
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")

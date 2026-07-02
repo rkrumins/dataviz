@@ -356,9 +356,18 @@ services:
 
       # ── Stats tunables (see .env.example for full docs) ─────────
       STATS_SCHEDULER_TICK_SECS: "${STATS_SCHEDULER_TICK_SECS:-30}"
-      STATS_WORKER_CONCURRENCY: "${STATS_WORKER_CONCURRENCY:-2}"
+      # Per-lane worker budgets: fast (counts polls + discovery), heavy
+      # (deep schema scans), purge. One slow large-graph scan can never
+      # occupy the slots that keep counts fresh.
+      STATS_WORKER_CONCURRENCY: "${STATS_WORKER_CONCURRENCY:-4}"
+      STATS_HEAVY_CONCURRENCY: "${STATS_HEAVY_CONCURRENCY:-1}"
+      STATS_PURGE_CONCURRENCY: "${STATS_PURGE_CONCURRENCY:-1}"
       STATS_MAX_CONCURRENT_PER_GRAPH: "${STATS_MAX_CONCURRENT_PER_GRAPH:-1}"
-      STATS_DEFAULT_INTERVAL_SECS: "${STATS_DEFAULT_INTERVAL_SECS:-300}"
+      # 900s idle interval: counts freshness is event-driven (app write
+      # paths enqueue a counts poll within seconds) and the read path
+      # enqueues on stale for actively-viewed sources — the interval is
+      # the reconcile safety net, not the freshness mechanism.
+      STATS_DEFAULT_INTERVAL_SECS: "${STATS_DEFAULT_INTERVAL_SECS:-900}"
       STATS_MIN_INTERVAL_SECS: "${STATS_MIN_INTERVAL_SECS:-60}"
       STATS_MAX_DELIVERY_ATTEMPTS: "${STATS_MAX_DELIVERY_ATTEMPTS:-3}"
       STATS_DRAIN_TIMEOUT_SECS: "${STATS_DRAIN_TIMEOUT_SECS:-60}"
@@ -368,6 +377,14 @@ services:
       STATS_POLL_TIMEOUT_SECS: "${STATS_POLL_TIMEOUT_SECS:-30}"
       STATS_POLL_TIMEOUT_LARGE_SECS: "${STATS_POLL_TIMEOUT_LARGE_SECS:-600}"
       STATS_POLL_LARGE_THRESHOLD: "${STATS_POLL_LARGE_THRESHOLD:-100000}"
+
+      # Postgres pool sizing — the engine defaults (backend/app/db/engine.py)
+      # are tuned for the web tier (~27 peak conns); a concurrency-2 worker
+      # plus scheduler + admission flush fits comfortably in ~11.
+      DB_JOBS_POOL_SIZE: "${STATS_DB_JOBS_POOL_SIZE:-4}"
+      DB_JOBS_POOL_MAX_OVERFLOW: "${STATS_DB_JOBS_POOL_MAX_OVERFLOW:-2}"
+      DB_READONLY_POOL_SIZE: "${STATS_DB_READONLY_POOL_SIZE:-3}"
+      DB_READONLY_POOL_MAX_OVERFLOW: "${STATS_DB_READONLY_POOL_MAX_OVERFLOW:-2}"
 
       SYNODIC_ROLE: stats
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

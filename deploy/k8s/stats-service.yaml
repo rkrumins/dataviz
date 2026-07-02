@@ -47,6 +47,16 @@ spec:
           env:
             - name: SYNODIC_ROLE
               value: "stats"
+            # Right-size the Postgres pools for a concurrency-2 worker —
+            # the engine defaults are web-tier-tuned (~27 peak conns).
+            - name: DB_JOBS_POOL_SIZE
+              value: "4"
+            - name: DB_JOBS_POOL_MAX_OVERFLOW
+              value: "2"
+            - name: DB_READONLY_POOL_SIZE
+              value: "3"
+            - name: DB_READONLY_POOL_MAX_OVERFLOW
+              value: "2"
           startupProbe:
             httpGet:
               path: /health

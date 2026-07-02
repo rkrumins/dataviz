@@ -157,6 +157,7 @@ class FalkorProjector:
             Callable[[GraphVersioningService, str], Awaitable[Optional[Tuple[List[str], List[str]]]]]
         ] = None,
         on_rollups_stale: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_projected: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         self._client = graph_client_factory
         self._session = session_factory
@@ -170,6 +171,11 @@ class FalkorProjector:
         # destroyed them, or a containment move exceeded the bounded-recount cap) — the app
         # layer queues a scoped aggregation job. None ⇒ rollups stay stale until manual rebuild.
         self._on_rollups_stale = on_rollups_stale
+        # Fired with the graph's data_source_id after a non-noop projection advanced the
+        # watermark — the app layer nudges the insights counts poll so stats reflect
+        # published/merged changes within seconds. Injected (like target_resolver) so this
+        # package stays decoupled from the insights service. None ⇒ no nudge.
+        self._on_projected = on_projected
         # Pins the projection to the data source's REAL graph (the one the canvas reads) on every
         # projection, so the async worker self-heals the same way the interactive `project_now` path
         # does — without it, a worker-driven projection can land in an orphan `gv_<id>` nothing reads
@@ -200,6 +206,7 @@ class FalkorProjector:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
+            data_source_id = graph.data_source_id
             from_seq, to_seq = ps.projected_commit_seq, ps.target_commit_seq
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             if from_seq >= to_seq:
@@ -311,6 +318,15 @@ class FalkorProjector:
                 await self._on_rollups_stale(graph_id)
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("rollup-rebuild hook failed for %s: %s", graph_id, exc)
+
+        # Committed main just landed in the real FalkorDB graph — let the
+        # app layer nudge the insights counts poll (after the watermark is
+        # durable, so the poll observes the projected state).
+        if self._on_projected is not None and data_source_id:
+            try:
+                await self._on_projected(data_source_id)
+            except Exception as exc:                   # pragma: no cover - infra
+                logger.warning("on_projected hook failed for %s: %s", graph_id, exc)
 
         applied = sum(len(c) for c in changes)
         return {"projected": to_seq, "applied": applied, "noop": False, "verify_error": verify_error}

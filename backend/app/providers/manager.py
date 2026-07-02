@@ -261,7 +261,13 @@ class ProviderManager:
                     reason=f"Instantiation failed: {exc}",
                 ) from exc
 
-            # Success: wrap in circuit breaker and cache.
+            # Success: wrap in circuit breaker and cache. Expose the
+            # manager identity on the raw provider first so app-layer
+            # guards (graph.py ``_bounded_compute``, the ContextEngine
+            # trace semaphore) can key per-(provider, graph) concurrency
+            # without re-deriving it — CircuitBreakerProxy passes plain
+            # attributes through to the wrapped instance.
+            raw_provider.manager_cache_key = cache_key
             breaker_name = f"{ds.provider_id}:{ds.graph_name or ''}"
             self._providers[cache_key] = _wrap_in_breaker(raw_provider, breaker_name)
             state_after, _ = await breaker._record_success()

@@ -116,7 +116,8 @@ def _get_projector():
             return None
         from backend.app.services.versioning.projection import FalkorProjector
         from backend.app.services.projection_target import (
-            make_rollup_rebuild_hook, resolve_aggregation_edge_types,
+            make_rollup_rebuild_hook, nudge_stats_after_projection,
+            resolve_aggregation_edge_types,
         )
 
         def _agg_service():
@@ -134,7 +135,8 @@ def _get_projector():
         # async worker won't re-walk it once the watermark advances — queue the rebuild here too.
         _projector = FalkorProjector(
             factory, edge_types_resolver=resolve_aggregation_edge_types,
-            on_rollups_stale=make_rollup_rebuild_hook(_agg_service))
+            on_rollups_stale=make_rollup_rebuild_hook(_agg_service),
+            on_projected=nudge_stats_after_projection)
     return _projector
 
 

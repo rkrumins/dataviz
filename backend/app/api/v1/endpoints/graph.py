@@ -43,7 +43,11 @@ from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
 from backend.app.auth.dependencies import get_optional_user
-from backend.insights_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import (
+    enqueue_stats_job_force,
+    enqueue_stats_job_safe,
+    mark_stats_changed,
+)
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 router = APIRouter()
@@ -192,6 +196,41 @@ async def _invalidate_cache(engine: ContextEngine) -> None:
     if scope is None:
         return
     await get_graph_cache().bump_generation(scope)
+    # Graph content changed — nudge the insights counts poll so stats
+    # reflect the write within seconds (cooldown-throttled, never
+    # raises). Draft-branch writes are skipped: they don't touch the
+    # main graph's stats until publish, which the versioning projection
+    # covers with its own mark.
+    if not getattr(scope, "branch_id", ""):
+        await mark_stats_changed(scope.data_source_id, scope.workspace_id)
+
+
+def _bounded_compute(engine: ContextEngine, compute):
+    """Wrap a GraphCache ``compute`` callable in the per-(provider, graph)
+    concurrency slot (``ProviderManager.acquire_provider_slot``, cap
+    ``PROVIDER_MAX_CONCURRENCY``, default 8). Saturation raises
+    ``ProviderBusy`` → 429 + Retry-After via the handler in main.py, so
+    a burst of cache misses sheds load instead of pegging FalkorDB's
+    single Cypher thread.
+
+    Cache hits never touch the semaphore — only singleflight-leader
+    misses do actual provider work. Engines whose provider doesn't
+    expose ``manager_cache_key`` (draft/versioned wrappers that don't
+    delegate attributes) degrade to unbounded — those paths are
+    Postgres-overlay-heavy, not FalkorDB fan-out.
+    """
+    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
+    if key is None:
+        return compute
+
+    async def _run():
+        sem = await provider_manager.acquire_provider_slot(*key)
+        try:
+            return await compute()
+        finally:
+            sem.release()
+
+    return _run
 
 
 async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
@@ -326,7 +365,7 @@ async def trace_v2(
         # name; the cache layer hashes it with ``sort_keys=True`` so
         # alias order / dict ordering can't shift the key.
         params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -358,7 +397,7 @@ async def trace_expand(
         scope=scope,
         endpoint=ENDPOINT_TRACE_EXPAND,
         params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -559,7 +598,7 @@ async def get_top_level_nodes(
                 "cursor": cursor,
                 "includeChildCount": includeChildCount,
             },
-            compute=compute,
+            compute=_bounded_compute(engine, compute),
             model_cls=TopLevelNodesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
@@ -659,7 +698,7 @@ async def get_children_with_edges(
             "cursor": cursor,
             "includeLineageEdges": include_lineage_edges,
         },
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=ChildrenWithEdgesResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -1350,7 +1389,10 @@ async def refresh_introspection(
     if not ds_id or not ws_id:
         raise HTTPException(status_code=400, detail="ws_id and dataSourceId required")
 
-    msg_id = await enqueue_stats_job_safe(ds_id, ws_id)
+    # Force path: the user explicitly clicked Refresh — a stale dedup
+    # claim from a crashed worker must not turn that into a silent no-op
+    # for up to the claim TTL.
+    msg_id = await enqueue_stats_job_force(ds_id, ws_id)
     logger.info(
         "stats_cache.refresh_trigger ds_id=%s msg_id=%s outcome=%s",
         ds_id, msg_id, "enqueued" if msg_id else "dedup_or_redis_down",
@@ -1478,7 +1520,7 @@ async def get_aggregated_edges(
             "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
         },
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -1834,6 +1876,13 @@ async def batch_commands(
                     error="Skipped: batch aborted due to earlier failure (fail_fast=true)",
                 ))
             break
+
+    # Batch mutations change graph content just like the single-command
+    # endpoints — invalidate the response cache + nudge the counts poll.
+    # (This call was missing entirely: batch writes previously left the
+    # browse caches serving pre-mutation entries until TTL.)
+    if succeeded > 0:
+        await _invalidate_cache(engine)
 
     return BatchResponse(
         results=results,

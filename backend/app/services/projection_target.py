@@ -98,6 +98,25 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     return _hook
 
 
+async def nudge_stats_after_projection(data_source_id: str) -> None:
+    """The projector's ``on_projected`` hook: committed main state just
+    landed in the data source's real FalkorDB graph (publish / merge /
+    revert / bootstrap / resync), so nudge the insights counts poll —
+    stats reflect the change within seconds instead of the idle poll
+    interval. Cooldown-throttled and never raises (stats freshness is
+    best-effort from the projection's perspective; the interval poll
+    heals anything missed here)."""
+    try:
+        async with get_async_session() as s:
+            ds_row = await data_source_repo.get_data_source_orm(s, data_source_id)
+        if ds_row is None or not getattr(ds_row, "workspace_id", None):
+            return
+        from backend.insights_service.enqueue import mark_stats_changed
+        await mark_stats_changed(data_source_id, ds_row.workspace_id)
+    except Exception as exc:                             # pragma: no cover - infra
+        logger.debug("stats nudge for ds=%s skipped: %s", data_source_id, exc)
+
+
 async def repair_projection_target(svc: GraphVersioningService, graph_id: str) -> Optional[str]:
     """Ensure ``graph_id`` projects into its data source's real FalkorDB graph, not an orphan
     ``gv_<id>`` that nothing reads. Returns a now-orphaned ``gv_*`` name safe to drop (else

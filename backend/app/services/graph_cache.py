@@ -25,10 +25,13 @@ GraphCache wraps the provider call with two layers of protection:
 
 Cross-process singleflight via Redis lease is a Phase 1 spike and
 NOT included here. The in-process variant covers same-pod fan-out;
-cross-pod fan-out is bounded by the per-(provider, graph) semaphore
-in the ProviderManager (default 8). The combination is sufficient for
-the multi-tenant 100-user target without paying the 1-2 RTT cost of a
-distributed lock on every cache miss.
+cache-miss compute fan-out is additionally bounded per (provider,
+graph) by ``ProviderManager.acquire_provider_slot`` (default 8),
+wired around the ``compute`` callables at the endpoint layer in
+``graph.py::_bounded_compute`` — per pod, not cross-pod. The
+combination is sufficient for the multi-tenant 100-user target
+without paying the 1-2 RTT cost of a distributed lock on every
+cache miss.
 """
 from __future__ import annotations
 

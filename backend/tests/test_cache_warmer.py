@@ -11,6 +11,7 @@ per-step error isolation) is testable through these three seams.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -208,3 +209,37 @@ async def test_warm_empty_top_level_short_circuits(monkeypatch) -> None:
     assert result.aggregated_filled is False
     assert result.children_filled == 0
     assert result.one_down_filled == 0
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_inflight_and_refuses_new_warms(monkeypatch) -> None:
+    """Shutdown must cancel tracked warm tasks (they hold READONLY-pool
+    sessions that must be released before engine disposal) and refuse
+    any warm scheduled afterwards."""
+    monkeypatch.setattr(cache_warmer, "CACHE_PREWARM_ENABLED", True)
+    monkeypatch.setattr(cache_warmer, "_shutting_down", False)
+    monkeypatch.setattr(cache_warmer, "JITTER_SECS", 0.0)
+
+    started = asyncio.Event()
+
+    async def hang(**_kw):
+        started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(cache_warmer, "warm_data_source", hang)
+
+    task = cache_warmer.schedule_warm(ws_id="ws1", ds_id="ds1")
+    assert task is not None
+    await started.wait()
+
+    await cache_warmer.shutdown(timeout=1.0)
+
+    assert task.cancelled()
+    # New warms are refused post-shutdown.
+    assert cache_warmer.schedule_warm(ws_id="ws1", ds_id="ds2") is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_with_no_inflight_tasks_is_a_noop(monkeypatch) -> None:
+    monkeypatch.setattr(cache_warmer, "_shutting_down", False)
+    await cache_warmer.shutdown(timeout=0.1)  # must not raise or hang

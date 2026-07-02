@@ -27,8 +27,13 @@ def _wire(monkeypatch, *, preflight_ok, get_stats):
         return {}
 
     class _Inst:
+        closed = 0
+
         async def preflight(self, deadline_s=2.0):
             return SimpleNamespace(ok=preflight_ok, reason="ok" if preflight_ok else "tcp_refused", elapsed_ms=1)
+
+        async def close(self):
+            self.closed += 1
 
     inst = _Inst()
     inst.get_stats = get_stats
@@ -48,10 +53,17 @@ def _wire(monkeypatch, *, preflight_ok, get_stats):
 
     monkeypatch.setattr(discovery.admission, "gate", _noop_gate)
 
+    # The handler owns its sessions now — keep unit tests DB-free.
+    @asynccontextmanager
+    async def _fake_session():
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(discovery, "get_jobs_session", _fake_session)
+
     rec = []
     ups = []
 
-    async def fake_record_failure(session, provider_id, asset_name, error):
+    async def fake_record_failure(provider_id, asset_name, error):
         rec.append((provider_id, asset_name, error))
 
     async def fake_upsert(session, **kw):
@@ -59,7 +71,7 @@ def _wire(monkeypatch, *, preflight_ok, get_stats):
 
     monkeypatch.setattr(discovery, "record_failure", fake_record_failure)
     monkeypatch.setattr(discovery, "_upsert_cache", fake_upsert)
-    return rec, ups
+    return rec, ups, inst
 
 
 @pytest.mark.asyncio
@@ -67,17 +79,18 @@ async def test_stats_timeout_does_not_raise_and_records_asset(monkeypatch):
     async def slow_stats():
         raise asyncio.TimeoutError()
 
-    rec, ups = _wire(monkeypatch, preflight_ok=True, get_stats=slow_stats)
+    rec, ups, inst = _wire(monkeypatch, preflight_ok=True, get_stats=slow_stats)
     env = SimpleNamespace(provider_id="p1", asset_name="big_graph")
 
     # Must NOT raise — returning normally lets the admission gate record the
     # provider as reachable rather than failed.
-    await discovery.collect(object(), env)
+    await discovery.collect(env)
 
     assert len(rec) == 1
     assert rec[0][0] == "p1" and rec[0][1] == "big_graph"
     assert "last known counts" in rec[0][2]  # asset-level stale note
     assert ups == []  # early return: no fresh upsert
+    assert inst.closed == 1  # transient pool released on the early-return path
 
 
 @pytest.mark.asyncio
@@ -85,11 +98,34 @@ async def test_preflight_failure_still_records_asset(monkeypatch):
     async def stats_ok():
         return {"nodeCount": 1}
 
-    rec, ups = _wire(monkeypatch, preflight_ok=False, get_stats=stats_ok)
+    rec, ups, inst = _wire(monkeypatch, preflight_ok=False, get_stats=stats_ok)
     env = SimpleNamespace(provider_id="p2", asset_name="g")
-    await discovery.collect(object(), env)
+    await discovery.collect(env)
     assert len(rec) == 1
     assert "tcp_refused" in rec[0][2]
+    assert inst.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_closed_on_success_and_raise(monkeypatch):
+    async def stats_ok():
+        return {"nodeCount": 1}
+
+    # Success path: stats land, cache upserted, instance closed.
+    rec, ups, inst = _wire(monkeypatch, preflight_ok=True, get_stats=stats_ok)
+    await discovery.collect(SimpleNamespace(provider_id="p3", asset_name="g"))
+    assert len(ups) == 1 and inst.closed == 1
+
+    # Hard-raise path (list-all blowing up) must still close the instance.
+    rec, ups, inst = _wire(monkeypatch, preflight_ok=True, get_stats=stats_ok)
+
+    async def boom():
+        raise RuntimeError("driver exploded")
+
+    inst.list_graphs = boom
+    with pytest.raises(RuntimeError):
+        await discovery.collect(SimpleNamespace(provider_id="p4", asset_name=""))
+    assert inst.closed == 1
 
 
 # ── admission: timeout is not a hard provider failure ───────────────

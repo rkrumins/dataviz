@@ -7172,12 +7172,19 @@ class FalkorDBProvider(GraphDataProvider):
     # matches the stats service poll interval. Set to 0 to disable.
     _SCHEMA_CACHE_TTL = int(os.getenv("FALKORDB_SCHEMA_CACHE_TTL", "300"))
 
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
+        """Node/edge counts + per-type breakdowns (two grouped scans).
+
+        ``bypass_cache=True`` skips the Redis cache READ but still
+        writes-through on success — for refresh paths (the insights
+        counts poll) that must never persist pre-aged cached counts as
+        fresh, while still priming the cache for other callers.
+        """
         await self._ensure_connected()
 
         # Check Redis cache (best-effort; Postgres is the source of truth)
         cache_key = f"{self._graph_name}:stats_cache"
-        if self._SCHEMA_CACHE_TTL > 0:
+        if self._SCHEMA_CACHE_TTL > 0 and not bypass_cache:
             try:
                 cached = await self._redis.get(cache_key)
                 if cached:
@@ -7244,6 +7251,26 @@ class FalkorDBProvider(GraphDataProvider):
                 pass
 
         return result
+
+    async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:
+        """Write-through prime of the ``{graph}:stats_cache`` Redis key.
+
+        Called by the insights collector after a poll derives fresh
+        counts (from ``get_schema_stats``), so subsequent ``get_stats``
+        callers — per-asset discovery, web-tier data-source stats —
+        serve poll-fresh values instead of re-scanning. Best-effort.
+        """
+        if self._SCHEMA_CACHE_TTL <= 0:
+            return
+        await self._ensure_connected()
+        try:
+            await self._redis.setex(
+                f"{self._graph_name}:stats_cache",
+                self._SCHEMA_CACHE_TTL,
+                json.dumps(stats),
+            )
+        except Exception:
+            pass
 
     async def get_schema_stats(self) -> GraphSchemaStats:
         await self._ensure_connected()

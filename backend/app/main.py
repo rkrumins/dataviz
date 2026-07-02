@@ -884,6 +884,7 @@ async def lifespan(_app: FastAPI):
             from .services.versioning.service import GraphVersioningService
             from .services.projection_target import (
                 make_rollup_rebuild_hook,
+                nudge_stats_after_projection,
                 repair_projection_target,
                 resolve_aggregation_edge_types,
             )
@@ -900,6 +901,7 @@ async def lifespan(_app: FastAPI):
                     edge_types_resolver=resolve_aggregation_edge_types,
                     on_rollups_stale=make_rollup_rebuild_hook(
                         lambda: getattr(_app.state, "aggregation_service", None)),
+                    on_projected=nudge_stats_after_projection,
                 ),
                 versioning=GraphVersioningService(),
                 # Per-provider eviction budgets come from the provider registry
