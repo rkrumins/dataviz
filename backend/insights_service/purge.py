@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.engine import get_jobs_session
 from backend.app.db.models import WorkspaceDataSourceORM
 from backend.app.jobs import JobScope as PlatformJobScope, get_emitter
 from backend.app.jobs.audit import record_terminal
@@ -46,7 +47,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
+async def collect(envelope: PurgeJobEnvelope) -> None:
     """Run a purge for one data source.
 
     Updates the pre-existing ``AggregationJobORM`` row through the
@@ -56,10 +57,25 @@ async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
     the worker to handle; the job stays ``running`` and will be picked
     up again on the next dispatch (delivery-count is not bumped).
 
+    Session discipline: purge is the DOCUMENTED EXCEPTION to the
+    "handlers open short sessions around DB phases" rule — it holds one
+    JOBS session for its whole run because the ORM job/state rows carry
+    a mid-run commit (the ``running`` flip at the COUNT step) and the
+    cancel path re-reads them (``session.refresh``). Restructuring that
+    lifecycle isn't worth the blast radius; revisit only if JOBS-pool
+    pressure is observed.
+
     Idempotency: ``MATCH ... DELETE`` is safe to repeat — already-
     deleted edges are no-ops, and the data_source_state reset only
     needs to land once.
     """
+    async with get_jobs_session() as session:
+        await _collect_in_session(session, envelope)
+
+
+async def _collect_in_session(
+    session: AsyncSession, envelope: PurgeJobEnvelope,
+) -> None:
     job = await session.get(AggregationJobORM, envelope.job_id)
     if job is None:
         # Producer raced a job-deletion. Nothing to update; let the
@@ -248,6 +264,11 @@ async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
             job.id, job.data_source_id, deleted, duration,
         )
 
+        # Edge counts just changed — nudge the insights counts poll
+        # (cooldown-throttled, never raises).
+        from .enqueue import mark_stats_changed
+        await mark_stats_changed(envelope.data_source_id, envelope.workspace_id)
+
     except JobCancelled as cancel_exc:
         # Cooperative cancel observed between DELETE batches. The
         # previous batch's MATCH ... DELETE landed cleanly in
@@ -302,6 +323,11 @@ async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
             job.processed_edges, job.total_edges, duration,
         )
 
+        # A cancelled purge still deleted the batches that completed
+        # before the cancel — counts changed, nudge the poll.
+        from .enqueue import mark_stats_changed
+        await mark_stats_changed(envelope.data_source_id, envelope.workspace_id)
+
     finally:
         # Always unregister the cancel event so a future job re-using
         # this id (cancellation + retrigger) starts with a fresh event.
@@ -309,20 +335,20 @@ async def collect(session: AsyncSession, envelope: PurgeJobEnvelope) -> None:
 
 
 async def record_failure(
-    session: AsyncSession,
     job_id: str,
     error: str,
 ) -> None:
     """Mark a purge job as ``failed`` with an error message. Called by
     the worker after delivery attempts exhaust — see
-    ``worker._handle_failure``."""
-    job = await session.get(AggregationJobORM, job_id)
-    if job is None:
-        return
-    job.status = "failed"
-    job.error_message = error[:2000]
-    job.completed_at = _now()
-    job.updated_at = _now()
+    ``worker._handle_failure``. Opens its own short JOBS session."""
+    async with get_jobs_session() as session:
+        job = await session.get(AggregationJobORM, job_id)
+        if job is None:
+            return
+        job.status = "failed"
+        job.error_message = error[:2000]
+        job.completed_at = _now()
+        job.updated_at = _now()
 
 
 # Self-register with the dispatcher.

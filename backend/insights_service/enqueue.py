@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from backend.app.config import resilience
+from backend.app.services.aggregation.redis_client import get_redis
 
 from .redis_streams import (
     DISCOVERY_STREAM,
@@ -216,6 +217,64 @@ async def enqueue_stats_job_safe(
     return msg_id
 
 
+# Write-burst throttle for event-driven counts refreshes. The first
+# mutation in a window enqueues immediately (~seconds to fresh counts);
+# subsequent writes in the same window coalesce into that poll or wait
+# for the next window. Replica-safe via SET NX.
+_STATS_CHANGED_COOLDOWN_SECS = int(os.getenv("STATS_CHANGED_COOLDOWN_SECS", "60"))
+
+
+async def mark_stats_changed(data_source_id: str, workspace_id: str) -> None:
+    """App write paths call this after a graph mutation so counts refresh
+    within seconds instead of waiting for the idle poll interval.
+
+    NEVER raises — stats freshness is best-effort from the write path's
+    perspective, and the scheduler's interval poll heals anything lost
+    here (Redis blip, cooldown key wiped, worker down). Advisory Redis
+    state only; Postgres remains authoritative.
+    """
+    if not data_source_id or not workspace_id:
+        return
+    try:
+        won = await get_redis().set(
+            f"insights:stats:cooldown:{data_source_id}",
+            "1",
+            nx=True,
+            ex=_STATS_CHANGED_COOLDOWN_SECS,
+        )
+    except Exception as exc:
+        logger.debug(
+            "mark_stats_changed: cooldown check failed for ds=%s (%s) — skipping",
+            data_source_id, exc,
+        )
+        return
+    if not won:
+        return
+    await enqueue_stats_job_safe(data_source_id, workspace_id)
+
+
+async def enqueue_stats_job_force(
+    data_source_id: str,
+    workspace_id: str,
+) -> Optional[str]:
+    """Drop any existing dedup claim then re-enqueue a stats poll.
+
+    For the explicit user-driven refresh endpoint only — a stale claim
+    from a crashed worker must not make "Refresh" a silent no-op for up
+    to the claim TTL. Duplicate-poll cost on the race window is one
+    idempotent upsert (same justification as the discovery force path).
+    """
+    if not data_source_id or not workspace_id:
+        return None
+    try:
+        await release_claim(data_source_id)
+    except _REDIS_BENIGN_ERRORS as exc:
+        logger.warning(
+            "stats force-release failed (continuing to enqueue): %s", exc,
+        )
+    return await enqueue_stats_job_safe(data_source_id, workspace_id)
+
+
 # ── Discovery: pre-registration asset cache miss ─────────────────────
 
 # Discovery jobs complete in seconds (list_graphs / get_stats), unlike
@@ -338,6 +397,8 @@ __all__ = [
     "enqueue_job_safe",
     "enqueue_stats_job",
     "enqueue_stats_job_safe",
+    "enqueue_stats_job_force",
+    "mark_stats_changed",
     "enqueue_discovery_job_safe",
     "enqueue_discovery_job_force",
     "enqueue_purge_job_safe",

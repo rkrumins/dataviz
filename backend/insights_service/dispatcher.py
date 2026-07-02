@@ -1,9 +1,13 @@
 """Kind → handler registry for the insights-service worker.
 
-A handler is an async callable ``(session, envelope) -> None`` that runs
-inside the worker's per-job DB transaction. Each collector module
-(``collector.py``, ``discovery.py``, ``schema.py``) calls
-:func:`register_handler` at import time to wire its kind into the map.
+A handler is an async callable ``(envelope) -> None`` that OWNS its DB
+sessions: open short JOBS-pool sessions (``get_jobs_session``) around
+the DB phases and never hold one across outbound provider IO (the rule
+documented in ``backend/app/db/engine.py``). ``purge.py`` is the one
+documented exception — its checkpointed ORM lifecycle needs a single
+long session. Each collector module (``collector.py``, ``discovery.py``,
+``purge.py``) calls :func:`register_handler` at import time to wire its
+kind into the map.
 
 The worker calls :func:`get_handler(envelope.kind)` to dispatch each
 incoming message. Unknown kinds raise ``ValueError``; the worker treats
@@ -15,14 +19,12 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from .schemas import JobEnvelope
 
 logger = logging.getLogger(__name__)
 
 
-JobHandler = Callable[[AsyncSession, JobEnvelope], Awaitable[None]]
+JobHandler = Callable[[JobEnvelope], Awaitable[None]]
 
 
 _HANDLERS: dict[str, JobHandler] = {}

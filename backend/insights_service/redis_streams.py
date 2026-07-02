@@ -35,11 +35,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StreamConfig:
-    """Identity of one Redis Stream + its consumer group + dedup namespace."""
-    kind: str            # 'stats_poll' | 'discovery' | 'purge'
+    """Identity of one Redis Stream + its consumer group + dedup namespace.
+
+    ``lane`` groups streams into worker concurrency budgets: ``fast``
+    (cheap counts polls + discovery), ``heavy`` (full schema-stats scan
+    sets), ``purge`` (long-running deletes). One slow heavy job can then
+    never occupy the slots that keep counts fresh — see worker.run.
+    """
+    kind: str            # 'stats_poll' | 'stats_deep' | 'discovery' | 'purge'
     stream: str          # Redis stream key
     group: str           # XREADGROUP consumer group
     dedup_prefix: str    # SET NX key prefix for the producer-side claim
+    lane: str = "fast"   # worker concurrency lane: 'fast' | 'heavy' | 'purge'
 
 
 # All streams use one consumer group so a single XREADGROUP call can
@@ -52,6 +59,18 @@ STATS_STREAM = StreamConfig(
     stream="insights.jobs.stats",
     group=SHARED_GROUP,
     dedup_prefix="insights:stats",
+)
+
+# Deep stats facet — full schema-stats scan set + ontology + graph
+# schema. Separate stream + heavy lane so a 600s large-graph scan never
+# blocks the cheap counts polls. Dedup prefix is distinct from the
+# counts claim so a deep job in flight doesn't block a counts refresh.
+STATS_DEEP_STREAM = StreamConfig(
+    kind="stats_deep",
+    stream="insights.jobs.stats.deep",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:stats:deep",
+    lane="heavy",
 )
 
 DISCOVERY_STREAM = StreamConfig(
@@ -69,9 +88,12 @@ PURGE_STREAM = StreamConfig(
     stream="insights.jobs.purge",
     group=SHARED_GROUP,
     dedup_prefix="insights:purge",
+    lane="purge",
 )
 
-ALL_STREAMS: tuple[StreamConfig, ...] = (STATS_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
+ALL_STREAMS: tuple[StreamConfig, ...] = (
+    STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM,
+)
 
 _BY_KIND: dict[str, StreamConfig] = {s.kind: s for s in ALL_STREAMS}
 

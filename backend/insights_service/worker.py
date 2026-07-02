@@ -32,7 +32,7 @@ import platform
 
 import redis.asyncio as aioredis
 
-from backend.app.db.engine import PoolRole, get_session_factory
+from backend.app.db.engine import get_readonly_session
 from backend.app.services.aggregation.redis_client import get_redis
 from backend.common.adapters.circuit import ProviderUnavailable
 
@@ -56,7 +56,6 @@ from .schemas import (
     StatsJobEnvelope,
     parse_envelope,
 )
-from .scheduler import get_known_node_counts
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +72,18 @@ class InsightsJobConsumer:
     re-exported below so :mod:`__main__` keeps working without edits.
     """
 
-    # Per-data-source graph-key cache (data_source_id → "provider:graph").
-    # Bounded so a long-lived worker doesn't accumulate stale rows for
-    # deleted data sources; the LRU eviction path keeps memory flat at
-    # high churn. Mutated only from the worker coroutine, no lock needed.
+    # Per-data-source metadata cache:
+    #   data_source_id → (scope_key "provider:graph", node_count, fetched_at).
+    # One outer-joined single-row query serves both the per-scope lock
+    # key and the timeout-sizing node count. Bounded so a long-lived
+    # worker doesn't accumulate stale rows for deleted data sources;
+    # FIFO eviction keeps memory flat at high churn. node_count only
+    # needs to be size-bucket-accurate (10k/100k/1M pivots), so entries
+    # refresh after _DS_META_TTL_SECS. Mutated only from the worker
+    # coroutine, no lock needed.
     _SCOPE_KEY_CACHE_MAX = 1024
-    _scope_key_cache: dict[str, str | None] = {}
+    _DS_META_TTL_SECS = 900.0
+    _scope_key_cache: dict[str, tuple[str | None, int, float]] = {}
 
     def __init__(self, config: StatsServiceConfig) -> None:
         self._config = config
@@ -90,6 +95,9 @@ class InsightsJobConsumer:
         self._message_meta: dict[str, tuple[StreamConfig, str, JobEnvelope]] = {}
         # scope_key → Semaphore for per-scope contention control.
         self._scope_semaphores: dict[str, asyncio.Semaphore] = {}
+        # lane → number of in-flight tasks; enforced by only including
+        # streams with free lane slots in the XREADGROUP call.
+        self._lane_active: dict[str, int] = {}
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -104,12 +112,34 @@ class InsightsJobConsumer:
     def request_shutdown(self) -> None:
         self._shutdown.set()
 
+    def _lane_budgets(self) -> dict[str, int]:
+        return {
+            "fast": self._config.worker_concurrency,
+            "heavy": self._config.heavy_concurrency,
+            "purge": self._config.purge_concurrency,
+        }
+
+    def _lane_free_slots(self) -> dict[str, int]:
+        return {
+            lane: budget - self._lane_active.get(lane, 0)
+            for lane, budget in self._lane_budgets().items()
+        }
+
+    def lane_active_snapshot(self) -> dict[str, int]:
+        """Read-only copy for the /health payload — lane-accounting bugs
+        (a leaked slot silently halving throughput) are invisible
+        without this."""
+        return dict(self._lane_active)
+
     async def run(self) -> None:
         kinds = ", ".join(s.kind for s in ALL_STREAMS)
         logger.info(
-            "Insights worker started (consumer=%s, concurrency=%d, per_scope=%d, kinds=[%s])",
+            "Insights worker started (consumer=%s, lanes fast=%d heavy=%d purge=%d, "
+            "per_scope=%d, kinds=[%s])",
             self._consumer_name,
             self._config.worker_concurrency,
+            self._config.heavy_concurrency,
+            self._config.purge_concurrency,
             self._config.max_per_graph,
             kinds,
         )
@@ -118,24 +148,28 @@ class InsightsJobConsumer:
         for cfg in ALL_STREAMS:
             await self._recover_pending(cfg)
 
-        # Pre-build the multi-stream descriptor; XREADGROUP can take all
-        # three streams in one call so we don't have to round-robin.
-        streams_dict = {s.stream: ">" for s in ALL_STREAMS}
-
         while not self._shutdown.is_set():
             self._reap_done_tasks()
 
-            slots = self._config.worker_concurrency - len(self._active_tasks)
-            if slots <= 0:
+            free = self._lane_free_slots()
+            eligible = [s for s in ALL_STREAMS if free.get(s.lane, 0) > 0]
+            if not eligible:
                 await asyncio.sleep(0.25)
                 continue
+
+            # COUNT is per-stream in XREADGROUP, so cap it at the most
+            # constrained eligible lane's headroom. The fast lane spans
+            # two streams, so one read may overshoot its budget by at
+            # most COUNT tasks for a single iteration — bounded, and the
+            # per-scope semaphore still serializes same-graph work.
+            count = max(1, min(free[s.lane] for s in eligible))
 
             try:
                 entries = await self._redis.xreadgroup(
                     SHARED_GROUP,
                     self._consumer_name,
-                    streams_dict,
-                    count=slots,
+                    {s.stream: ">" for s in eligible},
+                    count=count,
                     block=5000,
                 )
             except asyncio.CancelledError:
@@ -202,6 +236,9 @@ class InsightsJobConsumer:
             name=f"{envelope.kind}-{scope_key}",
         )
         self._active_tasks[msg_id] = task
+        self._lane_active[stream_cfg.lane] = (
+            self._lane_active.get(stream_cfg.lane, 0) + 1
+        )
 
     async def _execute(
         self,
@@ -233,7 +270,6 @@ class InsightsJobConsumer:
         envelope: JobEnvelope,
     ) -> None:
         timeout, size_bucket = await self._resolve_timeout_and_bucket(envelope)
-        factory = get_session_factory(PoolRole.JOBS)
 
         logger.info(
             "%s.start scope=%s timeout_secs=%.0f size_bucket=%s",
@@ -248,17 +284,9 @@ class InsightsJobConsumer:
             return
 
         try:
-            async with factory() as session:
-                await asyncio.wait_for(handler(session, envelope), timeout=timeout)
-                await session.commit()
-            # Post-commit hook: handlers (currently just stats collector)
-            # can stash a deferred cache-warm request via
-            # ``cache_warmer.defer_warm`` during their run. The warm fires
-            # AFTER commit so it sees the freshly-written
-            # ``data_source_stats`` row (especially important against a
-            # read replica). No-op when nothing was deferred.
-            from . import cache_warmer
-            cache_warmer.fire_deferred_warm()
+            # Handlers own their DB sessions (short sessions around the
+            # DB phases, none held across provider IO) — see dispatcher.py.
+            await asyncio.wait_for(handler(envelope), timeout=timeout)
         except asyncio.TimeoutError:
             duration = asyncio.get_event_loop().time() - start_ts
             logger.warning(
@@ -347,19 +375,17 @@ class InsightsJobConsumer:
         delivery_count = await self._delivery_count(stream_cfg, msg_id)
         max_attempts = self._config.max_delivery_attempts
 
-        # Best-effort per-kind error persistence — never fatal.
+        # Best-effort per-kind error persistence — never fatal. The
+        # record_failure helpers open their own short JOBS sessions.
         try:
-            factory = get_session_factory(PoolRole.JOBS)
-            async with factory() as session:
-                if isinstance(envelope, StatsJobEnvelope):
-                    await stats_record_failure(session, envelope.data_source_id, error)
-                elif isinstance(envelope, DiscoveryJobEnvelope):
-                    await discovery_record_failure(
-                        session, envelope.provider_id, envelope.asset_name, error
-                    )
-                elif isinstance(envelope, PurgeJobEnvelope):
-                    await purge_record_failure(session, envelope.job_id, error)
-                await session.commit()
+            if isinstance(envelope, StatsJobEnvelope):
+                await stats_record_failure(envelope.data_source_id, error)
+            elif isinstance(envelope, DiscoveryJobEnvelope):
+                await discovery_record_failure(
+                    envelope.provider_id, envelope.asset_name, error
+                )
+            elif isinstance(envelope, PurgeJobEnvelope):
+                await purge_record_failure(envelope.job_id, error)
         except Exception as exc:
             logger.warning(
                 "Failed to persist last_error kind=%s scope=%s: %s",
@@ -399,7 +425,9 @@ class InsightsJobConsumer:
                 self._consumer_name,
                 min_idle_time=60_000,
                 start_id="0-0",
-                count=self._config.worker_concurrency,
+                # Cap recovery by the stream's lane budget so a restart
+                # can't flood the heavy lane past its concurrency.
+                count=max(1, self._lane_budgets().get(stream_cfg.lane, 1)),
             )
         except Exception as exc:
             logger.warning(
@@ -460,53 +488,58 @@ class InsightsJobConsumer:
             return 1
         return int(pending[0].get("times_delivered", 1))
 
-    async def _resolve_scope_lock_key(self, envelope: JobEnvelope) -> str | None:
-        """Return the asyncio.Semaphore key for this envelope.
+    async def _resolve_ds_meta(self, ds_id: str) -> tuple[str | None, int]:
+        """Return ``(scope_key, node_count)`` for a data source, cached.
 
-        For stats/schema jobs the ``provider_id:graph_name`` identity
-        rarely changes — the data source's provider and graph are set
-        at registration and only mutate via explicit edit flows. So
-        results are cached per-process to avoid a DB round-trip on
-        every dispatch. For discovery, the envelope already carries
-        ``provider_id:asset_name``, no DB hit needed.
+        The ``provider_id:graph_name`` identity rarely changes (set at
+        registration, mutated only via explicit edit flows) and
+        node_count only needs to be size-bucket-accurate, so one
+        outer-joined single-row query serves both, refreshed after
+        ``_DS_META_TTL_SECS``. Replaces the old full-table
+        ``data_source_stats`` scan that ran on every job.
         """
-        if isinstance(envelope, DiscoveryJobEnvelope):
-            return envelope.scope_key
-
-        ds_id = envelope.data_source_id  # type: ignore[attr-defined]
-
+        now = asyncio.get_event_loop().time()
         cached = self._scope_key_cache.get(ds_id)
-        # ``None`` is a valid cached value ("we looked this up and found
-        # nothing"). Use ``in`` rather than truthiness to distinguish
-        # cache-miss from cache-hit-with-None.
-        if ds_id in self._scope_key_cache:
-            return cached
+        if cached is not None and (now - cached[2]) < self._DS_META_TTL_SECS:
+            return cached[0], cached[1]
 
-        from backend.app.db.models import WorkspaceDataSourceORM
+        from backend.app.db.models import DataSourceStatsORM, WorkspaceDataSourceORM
         from sqlalchemy import select
 
         try:
-            factory = get_session_factory(PoolRole.READONLY)
-            async with factory() as session:
+            async with get_readonly_session() as session:
                 row = (
                     await session.execute(
                         select(
                             WorkspaceDataSourceORM.provider_id,
                             WorkspaceDataSourceORM.graph_name,
-                        ).where(WorkspaceDataSourceORM.id == ds_id)
+                            DataSourceStatsORM.node_count,
+                        )
+                        .outerjoin(
+                            DataSourceStatsORM,
+                            DataSourceStatsORM.data_source_id
+                            == WorkspaceDataSourceORM.id,
+                        )
+                        .where(WorkspaceDataSourceORM.id == ds_id)
                     )
                 ).first()
-                if not row:
-                    resolved: str | None = None
-                else:
-                    provider_id, graph_name = row[0], row[1]
-                    if provider_id and graph_name:
-                        resolved = f"{provider_id}:{graph_name}"
-                    else:
-                        resolved = provider_id or ds_id
         except Exception as exc:
-            logger.warning("Failed to resolve scope key for ds=%s: %s", ds_id, exc)
-            return None
+            logger.warning("Failed to resolve ds meta for ds=%s: %s", ds_id, exc)
+            # Don't cache failures; a stale-but-known entry beats nothing.
+            if cached is not None:
+                return cached[0], cached[1]
+            return None, 0
+
+        if not row:
+            resolved: str | None = None
+            node_count = 0
+        else:
+            provider_id, graph_name = row[0], row[1]
+            node_count = int(row[2] or 0)
+            if provider_id and graph_name:
+                resolved = f"{provider_id}:{graph_name}"
+            else:
+                resolved = provider_id or ds_id
 
         # Bound the cache. FIFO-eviction is fine for our access pattern
         # (recent data sources dominate); a true LRU is overkill for
@@ -514,8 +547,17 @@ class InsightsJobConsumer:
         if len(self._scope_key_cache) >= self._SCOPE_KEY_CACHE_MAX:
             oldest = next(iter(self._scope_key_cache))
             self._scope_key_cache.pop(oldest, None)
-        self._scope_key_cache[ds_id] = resolved
-        return resolved
+        self._scope_key_cache[ds_id] = (resolved, node_count, now)
+        return resolved, node_count
+
+    async def _resolve_scope_lock_key(self, envelope: JobEnvelope) -> str | None:
+        """Return the asyncio.Semaphore key for this envelope. For
+        discovery, the envelope already carries ``provider_id:asset_name``,
+        no DB hit needed."""
+        if isinstance(envelope, DiscoveryJobEnvelope):
+            return envelope.scope_key
+        scope_key, _ = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]
+        return scope_key
 
     async def _resolve_timeout_and_bucket(
         self, envelope: JobEnvelope,
@@ -529,13 +571,17 @@ class InsightsJobConsumer:
         keyspace beyond a list-graphs call here.
         """
         if isinstance(envelope, DiscoveryJobEnvelope):
+            # Outer budget = the handler's inner live-call budget plus
+            # headroom for preflight + session churn. Derived from the
+            # same resilience constant so the two can't diverge.
+            from backend.app.config import resilience
             return (
-                float(os.getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "10")),
+                float(resilience.DISCOVERY_LIVE_TIMEOUT_SECS) + 10.0,
                 "n/a",
             )
-        # stats / schema
-        node_counts = await get_known_node_counts()
-        node_count = node_counts.get(envelope.data_source_id, 0)  # type: ignore[attr-defined]
+        # stats / schema — node count comes from the cached ds-meta
+        # lookup (the scope-key resolution already warmed it).
+        _, node_count = await self._resolve_ds_meta(envelope.data_source_id)  # type: ignore[attr-defined]
         timeout = self._config.resolve_poll_timeout(node_count)
         if node_count < 10_000:
             bucket = "small"
@@ -557,7 +603,10 @@ class InsightsJobConsumer:
         done = [mid for mid, t in self._active_tasks.items() if t.done()]
         for mid in done:
             task = self._active_tasks.pop(mid)
-            self._message_meta.pop(mid, None)
+            meta = self._message_meta.pop(mid, None)
+            if meta is not None:
+                lane = meta[0].lane
+                self._lane_active[lane] = max(0, self._lane_active.get(lane, 0) - 1)
             if not task.cancelled():
                 exc = task.exception()
                 if exc:
