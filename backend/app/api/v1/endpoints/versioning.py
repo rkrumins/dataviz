@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import data_source_repo
+from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
 from backend.app.services.permission_service import PermissionClaims, has_permission
@@ -411,6 +412,8 @@ class GraphResponse(_ApiModel):
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     created_by: Optional[str] = Field(default=None, alias="createdBy")
     created_at: str = Field(alias="createdAt")
+    # id → display name for every actor id this item references (see _attach_user_names).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class BranchResponse(_ApiModel):
@@ -427,6 +430,8 @@ class BranchResponse(_ApiModel):
     created_by: Optional[str] = Field(default=None, alias="createdBy")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
+    # id → display name for every actor id this item references (see _attach_user_names).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class OpenDraftResponse(_ApiModel):
@@ -531,6 +536,9 @@ class EntityHistoryResponse(_ApiModel):
 
 class CommitLogResponse(_ApiModel):
     commits: List[dict]
+    # ONE wrapper-level map covering every commit's actor + contributors (this
+    # response wraps a list, so the map hangs here rather than per commit dict).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class DiffResponse(_ApiModel):
@@ -656,6 +664,56 @@ class PrResponse(_ApiModel):
     merged_by: Optional[str] = Field(default=None, alias="mergedBy")
     closed_at: Optional[str] = Field(default=None, alias="closedAt")  # when + who closed
     closed_by: Optional[str] = Field(default=None, alias="closedBy")
+    # id → display name for every actor id this item references (see _attach_user_names).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
+# --------------------------------------------------------------------------- #
+# Actor-name resolution (endpoint-layer only)                                  #
+# --------------------------------------------------------------------------- #
+# The graphver store records actors as raw user ids; a SEPARATE management DB
+# owns the ``users`` table (they may be different databases in prod), so ids are
+# resolved to names HERE — one batched, deduped lookup per request over the
+# request's management session — never as a cross-store join inside the service.
+_ACTOR_ID_FIELDS = (
+    "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner",
+)
+_ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by")
+
+
+def _collect_actor_ids(item: dict) -> set:
+    """Every user id an item references, across its scalar (owner/actor/mergedBy/…)
+    and list (contributors/reviewers/approvedBy) actor fields."""
+    ids: set = set()
+    for f in _ACTOR_ID_FIELDS:
+        v = item.get(f)
+        if v:
+            ids.add(v)
+    for f in _ACTOR_ID_LIST_FIELDS:
+        for v in item.get(f) or ():
+            if v:
+                ids.add(v)
+    return ids
+
+
+async def _attach_user_names(
+    session: AsyncSession, items: List[dict], *, wrapper: Optional[dict] = None,
+) -> None:
+    """Resolve the actor ids carried by ``items`` to display names and hang the
+    result under ``user_names`` (wire ``userNames``): once on ``wrapper`` for the
+    list-wrapping ``CommitLogResponse``, else per item for wrapper-less lists
+    (branches, PRs). ONE batched lookup resolves every id across all items;
+    ids that don't resolve are simply absent from the map(s)."""
+    all_ids: set = set()
+    for it in items:
+        all_ids |= _collect_actor_ids(it)
+    resolved = await resolve_user_ids(session, all_ids) if all_ids else {}
+    names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
+    if wrapper is not None:
+        wrapper["user_names"] = names
+        return
+    for it in items:
+        it["user_names"] = {uid: names[uid] for uid in _collect_actor_ids(it) if uid in names}
 
 
 # --------------------------------------------------------------------------- #
@@ -708,8 +766,11 @@ async def list_branches(
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    return await svc.list_branches(graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    branches = await svc.list_branches(graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    await _attach_user_names(session, branches)
+    return branches
 
 
 @router.get("/resolve", response_model=ResolveResponse)
@@ -1072,13 +1133,17 @@ async def get_commit_log(
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Commit log for a branch (default ``main``), or — with ``originatingViewId`` — the
     change history attributed to one view across branches."""
     with _domain_errors():
-        return {"commits": await svc.commit_log(
+        commits = await svc.commit_log(
             graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
-            limit=limit, offset=offset, viewer=viewer)}
+            limit=limit, offset=offset, viewer=viewer)
+    payload = {"commits": commits}
+    await _attach_user_names(session, commits, wrapper=payload)
+    return payload
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/diff", response_model=DiffResponse)
@@ -1415,8 +1480,11 @@ async def list_pull_requests(
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    prs = await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    await _attach_user_names(session, prs)
+    return prs
 
 
 @router.get("/pulls/{pr_id}", response_model=PrResponse)
@@ -1424,7 +1492,9 @@ async def get_pull_request(
     ws_id: str, pr_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    await _attach_user_names(session, [pr])
     return pr
 
 
@@ -1568,9 +1638,12 @@ async def list_merge_requests(
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """All merge requests targeting this graph's ``main`` (draft MRs + incoming fork PRs)."""
-    return await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    prs = await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    await _attach_user_names(session, prs)
+    return prs
 
 
 # --------------------------------------------------------------------------- #
@@ -1586,10 +1659,13 @@ async def list_view_pull_requests(
     _view: dict = Depends(view_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """PRs raised from this view (matched via the source branch's ``originating_view_id``)."""
-    return await svc.list_pulls(
+    prs = await svc.list_pulls(
         originating_view_id=view_id, status=pr_status, limit=limit, offset=offset, viewer=viewer)
+    await _attach_user_names(session, prs)
+    return prs
 
 
 @router.get("/views/{view_id}/pull-requests/count", response_model=ViewPrCountResponse)
@@ -1619,14 +1695,17 @@ async def list_data_source_pull_requests(
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """All PRs against a data source (every view on it). Tenant-isolated: the data source's
     graph must live in ``ws_id``."""
     g = await svc.get_graph_by_data_source(data_source_id)
     if g is None or g["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="data source not found in workspace")
-    return await svc.list_pulls(
+    prs = await svc.list_pulls(
         data_source_id=data_source_id, status=pr_status, limit=limit, offset=offset, viewer=viewer)
+    await _attach_user_names(session, prs)
+    return prs
 
 
 @router.get("/merge-requests/{pr_id}", response_model=PrResponse)
@@ -1634,7 +1713,9 @@ async def get_merge_request(
     ws_id: str, pr_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    await _attach_user_names(session, [pr])
     return pr
 
 

@@ -98,7 +98,7 @@ async def _is_favourited(
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
-async def _resolve_user_ids(
+async def resolve_user_ids(
     session: AsyncSession, user_ids: Set[Optional[str]],
 ) -> Dict[str, tuple[Optional[str], Optional[str]]]:
     """Resolve a set of user ids to ``{id: (display_name, email)}`` in one query.
@@ -106,6 +106,8 @@ async def _resolve_user_ids(
     Shared by the single-row (:func:`_to_enriched_response`) and batched
     (:func:`_batch_enrich_rows`) paths so both resolve a view's creator AND
     its last modifier from the SAME lookup — no N+1, no second query per row.
+    Exported (not underscored) so the versioning API boundary can reuse the
+    exact same display-name formula when resolving commit/branch/PR actors.
 
     Ids that are NULL, the legacy ``"anonymous"`` sentinel, or reference a
     user record that no longer exists are simply absent from the result;
@@ -123,6 +125,11 @@ async def _resolve_user_ids(
         display = f"{first or ''} {last or ''}".strip() or email
         resolved[uid] = (display, email)
     return resolved
+
+
+# Backward-compatible private alias — internal callers below reference the
+# original underscored name; keep it so this diff stays surgical.
+_resolve_user_ids = resolve_user_ids
 
 
 def _to_response(

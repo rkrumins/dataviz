@@ -546,7 +546,7 @@ class GraphVersioningService:
                 commit_seq=commit_seq,
                 parent_commit_id=branch.head_commit_id,
                 kind="checkpoint" if branch.head_commit_id else "edit",
-                message=message or f"checkpoint by {actor}",
+                message=message or "checkpoint",
                 actor=actor,
                 originating_view_id=branch.originating_view_id,   # attribute to the draft's view
             )

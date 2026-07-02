@@ -50,10 +50,41 @@ def _build_app():
     return app
 
 
+async def _seed_management_user() -> None:
+    """Seed management-DB ``users`` rows for the harness's principals — the acting
+    ``u_test`` and a second ``u_rev`` (a reviewer who can approve, since authors
+    can't approve their own PR) — so the versioning endpoints can resolve their
+    ids → display names. The management ``users`` table lives in the SAME Postgres
+    as the graphver store here; create it (plus the ``idp_providers`` its FK
+    references) if absent, then upsert the actors. Idempotent across runs."""
+    from backend.app.db.engine import PoolRole, get_engine, get_session_factory
+    from backend.app.db.models import Base as MgmtBase, IdpProviderORM, UserORM
+
+    eng = get_engine(PoolRole.WEB)
+    async with eng.begin() as conn:
+        await conn.run_sync(
+            MgmtBase.metadata.create_all,
+            tables=[IdpProviderORM.__table__, UserORM.__table__],
+        )
+    seed = {
+        "u_test": ("t@example.com", "Test", "Actor"),
+        "u_rev": ("rev@example.com", "Reviewer", "Person"),
+    }
+    async with get_session_factory(PoolRole.WEB)() as s:
+        for uid, (email, first, last) in seed.items():
+            if await s.get(UserORM, uid) is None:
+                s.add(UserORM(
+                    id=uid, email=email, password_hash="x",
+                    first_name=first, last_name=last, status="active",
+                ))
+        await s.commit()
+
+
 async def _run() -> None:
     from httpx import ASGITransport, AsyncClient
 
     await models.create_schema_and_partitions()
+    await _seed_management_user()
     app = _build_app()
     # Keep the projection background task (fired by publish/merge/rebuild) hermetic — no live
     # FalkorDB/Redis in this harness — so a rebuild's replay doesn't reach for a real socket.
@@ -159,6 +190,40 @@ async def _run() -> None:
         assert conflict.status_code == 409 and conflict.json()["detail"]["type"] == "merge_conflict", conflict.text
         resolved = await c.post(f"{ws1}/pulls/{pr2}/merge", json={"message": "resolved", "resolutions": {"A": {"displayName": "Resolved"}}}, headers=h)
         assert resolved.status_code == 200, resolved.text
+
+        # ── actor id → display-name resolution (userNames maps) ──────────
+        # branches list: each item carries a userNames map covering its owner.
+        brs = (await c.get(f"{ws1}/graphs/{gid}/branches", headers=h)).json()
+        owned = [b for b in brs if b.get("owner") == "u_test"]
+        assert owned and all(b["userNames"].get("u_test") == "Test Actor" for b in owned), brs
+        # commit log: ONE wrapper-level map covers every commit's actor/contributors.
+        cl = (await c.get(f"{ws1}/graphs/{gid}/commits", params={"branchId": mid}, headers=h)).json()
+        assert cl["userNames"].get("u_test") == "Test Actor", cl
+        # a checkpoint with no message no longer bakes the actor id into the stored message.
+        mdb = (await c.post(f"{ws1}/graphs/{gid}/branches", json={}, headers=h)).json()["branchId"]
+        await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/changes", headers=h, json={"ops": [
+            {"op": "create", "entityKind": "node", "entityId": "Z", "payload": {"displayName": "Zed"}}]})
+        await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/commit", json={}, headers=h)
+        dcl = (await c.get(f"{ws1}/graphs/{gid}/commits", params={"branchId": mdb}, headers=h)).json()
+        assert any(cm["message"] == "checkpoint" for cm in dcl["commits"]), dcl
+        # MR detail + list carry maps over actor/reviewers/approvedBy; an unresolvable id is absent.
+        mrid = (await c.post(f"{ws1}/graphs/{gid}/branches/{mdb}/merge-requests",
+                             json={"reviewers": ["u_rev", "usr_ghost"]}, headers=h)).json()["prId"]
+        # Approve as u_rev (a different principal — authors can't self-approve).
+        from backend.app.auth.dependencies import get_current_user
+        _orig_user = app.dependency_overrides[get_current_user]
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="u_rev", email="rev@example.com")
+        try:
+            assert (await c.post(f"{ws1}/merge-requests/{mrid}/approve", headers=h)).status_code == 200
+        finally:
+            app.dependency_overrides[get_current_user] = _orig_user
+        mr = (await c.get(f"{ws1}/merge-requests/{mrid}", headers=h)).json()
+        assert mr["userNames"].get("u_test") == "Test Actor", mr        # actor + source_branch_owner
+        assert mr["userNames"].get("u_rev") == "Reviewer Person", mr    # reviewer + approvedBy
+        assert "usr_ghost" not in mr["userNames"], mr                   # unresolvable → absent, still 200
+        assert "usr_ghost" in mr["reviewers"] and "u_rev" in mr["approvedBy"]  # raw ids kept on their fields
+        mlist = (await c.get(f"{ws1}/graphs/{gid}/merge-requests", headers=h)).json()
+        assert any(m["userNames"].get("u_test") == "Test Actor" for m in mlist), mlist
 
         # ── projection reconcile: RBAC + tenant isolation + unpinned skip ─
         # read-only caller may not reconcile (manage-gated) → 403
