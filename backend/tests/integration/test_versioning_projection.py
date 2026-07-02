@@ -40,17 +40,21 @@ class FakeGraph:
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
-        if cypher == "MATCH (n) RETURN count(n) AS c":          # projection verify (Part 1E)
-            return _Result([[len(self.nodes)]])
-        if cypher == "MATCH ()-[r]->() RETURN count(r) AS c":   # projection verify (Part 1E)
-            return _Result([[len(self.edges)]])
+        # projection verify (Part 1E) — mirrors _falkor_counts: exclude rollup-derived artifacts
+        # (the :AGGREGATED layer and its _GVRollupMeta marker) the same way FalkorDB's WHERE does.
+        if cypher == "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c":
+            return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") != "_GVRollupMeta")]])
+        if cypher == "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c":
+            return _Result([[sum(1 for e in self.edges.values() if e.get("type") != "AGGREGATED")]])
         if cypher.startswith("UNWIND $batch AS item MERGE (n:"):
+            label = cypher[len("UNWIND $batch AS item MERGE (n:"):].split(" {urn:", 1)[0]
             for it in params["batch"]:
-                self.nodes[it["urn"]] = dict(it)
+                self.nodes[it["urn"]] = {**it, "_label": label}
         elif cypher.startswith("UNWIND $batch AS item MATCH (a {urn: item.src})"):
+            rel_type = cypher.split("MERGE (a)-[r:", 1)[1].split("]->", 1)[0]
             for it in params["batch"]:
                 if it["src"] in self.nodes and it["tgt"] in self.nodes:   # MATCH semantics
-                    self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"],
+                    self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel_type,
                                              "props": it.get("props"), "conf": it.get("conf")}
         elif cypher == _DELETE_EDGES:
             for i in params["ids"]:

@@ -748,7 +748,7 @@ class FalkorProjector:
                 return f"projection heal reseed failed at seq {to_seq}", True
         msg = f"projection verify mismatch at seq {to_seq} after heal (committed != FalkorDB)"
         logger.error("%s for %s", msg, graph_id)
-        return msg
+        return msg, False
 
     async def _sweep_tombstoned(self, client, graph_id, main_id) -> None:
         """DETACH DELETE from the cache every node/edge ``main`` has TOMBSTONED that the
