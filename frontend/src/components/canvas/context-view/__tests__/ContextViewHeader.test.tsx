@@ -45,7 +45,6 @@ function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextView
     onRetrySync: vi.fn(),
     pendingChangeCount: 0,
     onOpenStagedChanges: vi.fn(),
-    onOpenChangeOverview: vi.fn(),
     canUndo: false,
     canRedo: false,
     onUndo: vi.fn(),
@@ -73,7 +72,6 @@ describe('ContextViewHeader — View mode (Published)', () => {
     expect(screen.queryByText(/review & save/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/add entity/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Done' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Changes' })).not.toBeInTheDocument()
   })
 
   it('gives a manager the Edit entry and fires onEnterEdit on click', () => {
@@ -104,6 +102,9 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
     // Authoring cluster present
     expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Redo' })).toBeInTheDocument()
+    // Undo/Redo carry visible word labels — self-explanatory, not icon-only.
+    expect(screen.getByText('Undo')).toBeInTheDocument()
+    expect(screen.getByText('Redo')).toBeInTheDocument()
     expect(screen.getByText(/review & save/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument()
     // The Edit entry belongs to View mode only
@@ -145,14 +146,6 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
     expect(props.onExitEdit).toHaveBeenCalledTimes(1)
   })
 
-  it('offers a Changes overview button that opens the change panel', () => {
-    const props = baseProps({ isDraft: true })
-    render(<ContextViewHeader {...props} />)
-
-    const changes = screen.getByRole('button', { name: 'Changes' })
-    fireEvent.click(changes)
-    expect(props.onOpenChangeOverview).toHaveBeenCalledTimes(1)
-  })
 })
 
 describe('ContextViewHeader — blueprint sync subline', () => {

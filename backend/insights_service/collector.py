@@ -29,6 +29,7 @@ from typing import Any, Optional
 from backend.app.db.engine import get_jobs_session
 from backend.app.db.models import DataSourcePollingConfigORM, WorkspaceDataSourceORM
 from backend.app.db.repositories.stats_repo import (
+    touch_schema_freshness,
     upsert_data_source_stats,
     upsert_data_source_stats_counts,
 )
@@ -152,15 +153,58 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
     Counts derive from its per-type summaries (same key expressions as
     ``get_stats`` — ``labels(n)[0] or "unknown"`` / ``type(r) or
     "UNKNOWN"`` — so the persisted dicts are byte-identical), and the
-    graph schema is built from it without re-fetching. The old shape ran
-    ``get_schema_stats`` TWICE (once directly, once inside
-    ``get_graph_schema``) plus ``get_stats``' two more scans.
+    graph schema is built from it without re-fetching.
+
+    CHANGE DETECTION: before the heavy scan set, a cheap counts probe
+    is compared against the stored row — identical per-type counts mean
+    the graph hasn't changed, so the samples/tags scans and schema
+    rebuild are SKIPPED and only the freshness markers advance. At
+    hundreds of graphs this is the difference between the deep sweep
+    re-profiling everything every interval and it costing two grouped
+    scans per unchanged graph (near-zero with INSIGHTS_FAST_COUNTS).
     """
     engine, provider, provider_id, ontology_meta = await _open_context(
         envelope, resolve_ontology=True,
     )
 
+    async with get_jobs_session() as session:
+        from backend.app.db.repositories.stats_repo import get_data_source_stats
+        stored = await get_data_source_stats(session, envelope.data_source_id)
+        stored_counts = None
+        if stored is not None and stored.schema_stats and stored.schema_stats != "{}":
+            try:
+                stored_counts = {
+                    "nodeCount": stored.node_count,
+                    "edgeCount": stored.edge_count,
+                    # Parsed (not string-compared): row order from the
+                    # provider scans is not stable across runs.
+                    "entityTypeCounts": json.loads(stored.entity_type_counts or "{}"),
+                    "edgeTypeCounts": json.loads(stored.edge_type_counts or "{}"),
+                }
+            except (TypeError, ValueError):
+                stored_counts = None
+
     async with admission.gate(provider_id, op_kind="stats_deep"):
+        if stored_counts is not None:
+            try:
+                probe = await provider.get_stats(bypass_cache=True)
+            except TypeError:
+                probe = await provider.get_stats()
+            if (
+                probe.get("nodeCount") == stored_counts["nodeCount"]
+                and probe.get("edgeCount") == stored_counts["edgeCount"]
+                and probe.get("entityTypeCounts", {}) == stored_counts["entityTypeCounts"]
+                and probe.get("edgeTypeCounts", {}) == stored_counts["edgeTypeCounts"]
+            ):
+                logger.info(
+                    "stats_deep.unchanged ds=%s — counts identical, skipping "
+                    "schema scans", envelope.data_source_id,
+                )
+                async with get_jobs_session() as session:
+                    await touch_schema_freshness(session, envelope.data_source_id)
+                    await _stamp_poll_success(session, envelope.data_source_id)
+                return
+
         schema_stats = await provider.get_schema_stats()
         graph_schema = await engine.get_graph_schema(
             stats=schema_stats, ontology=ontology_meta,

@@ -62,6 +62,19 @@ async def upsert_data_source_stats(
     return new_stats
 
 
+async def touch_schema_freshness(session: AsyncSession, ds_id: str) -> None:
+    """Advance both freshness markers WITHOUT rewriting any data —
+    used when a deep poll's cheap probe shows the graph is unchanged,
+    so the expensive scans (and a pointless row rewrite) are skipped."""
+    existing = await get_data_source_stats(session, ds_id)
+    if existing is None:
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    existing.updated_at = now_iso
+    existing.schema_updated_at = now_iso
+    await session.flush()
+
+
 async def upsert_data_source_stats_counts(
     session: AsyncSession,
     ds_id: str,

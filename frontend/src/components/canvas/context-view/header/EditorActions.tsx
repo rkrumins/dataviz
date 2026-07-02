@@ -27,8 +27,6 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   pendingChangeCount?: number
   /** Opens the staged-changes review panel (the only save path). */
   onOpenStagedChanges?: () => void
-  /** Opens the change-overview panel (pending edits + saved-to-branch changes). */
-  onOpenChangeOverview?: () => void
   onExitEdit: () => void
 }
 
@@ -39,7 +37,6 @@ export function EditorActions({
   onRedo,
   pendingChangeCount = 0,
   onOpenStagedChanges,
-  onOpenChangeOverview,
   onExitEdit,
   ...tools
 }: EditorActionsProps) {
@@ -49,8 +46,8 @@ export function EditorActions({
 
       <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
 
-      {/* Undo / Redo — compact segmented icon pair (labels live in the
-          tooltips; the icons are unambiguous and the cluster stays tight). */}
+      {/* Undo / Redo — labelled segmented pair (icon + word, mirrored like
+          bookends) so both actions read at a glance, not only on hover. */}
       <div className="flex items-stretch rounded-xl overflow-hidden bg-black/[0.03] dark:bg-gradient-to-b dark:from-white/[0.06] dark:to-white/[0.02] border border-black/[0.10] dark:border-white/[0.08]">
         <button
           onClick={onUndo}
@@ -58,13 +55,14 @@ export function EditorActions({
           title="Undo last change (⌘Z)"
           aria-label="Undo"
           className={cn(
-            "flex items-center px-2.5 py-2 transition-all",
+            "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
             canUndo
               ? "text-ink/85 hover:bg-black/[0.06] hover:text-ink active:bg-black/[0.10] dark:hover:bg-white/[0.06] dark:active:bg-white/[0.10]"
               : "text-ink-muted/40 dark:text-ink-muted/25 cursor-not-allowed"
           )}
         >
-          <LucideIcons.Undo2 className="w-4 h-4" strokeWidth={2.4} />
+          <LucideIcons.Undo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
+          <span>Undo</span>
         </button>
         <div className="w-px bg-black/[0.10] dark:bg-white/[0.08]" />
         <button
@@ -73,27 +71,16 @@ export function EditorActions({
           title="Redo (⌘⇧Z)"
           aria-label="Redo"
           className={cn(
-            "flex items-center px-2.5 py-2 transition-all",
+            "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
             canRedo
               ? "text-ink/85 hover:bg-black/[0.06] hover:text-ink active:bg-black/[0.10] dark:hover:bg-white/[0.06] dark:active:bg-white/[0.10]"
               : "text-ink-muted/40 dark:text-ink-muted/25 cursor-not-allowed"
           )}
         >
-          <LucideIcons.Redo2 className="w-4 h-4" strokeWidth={2.4} />
+          <span>Redo</span>
+          <LucideIcons.Redo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
         </button>
       </div>
-
-      {/* Changes — ghost overview into the versioning panel: everything changed
-          in this draft (pending edits + saved-to-branch changes). Read-only entry
-          point; the actual save stays on Review & Save. */}
-      <button
-        onClick={onOpenChangeOverview}
-        title="See everything changed in this draft — pending edits and saved changes"
-        className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-all duration-300"
-      >
-        <LucideIcons.FileDiff className="w-4 h-4" strokeWidth={2.4} />
-        <span>Changes</span>
-      </button>
 
       {/* Review & Save — THE primary action of edit mode: filled accent,
           count chip while edits are pending, muted until there's

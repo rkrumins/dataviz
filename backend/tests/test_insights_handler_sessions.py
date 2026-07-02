@@ -59,9 +59,14 @@ class _JsonModel:
         return "{}"
 
 
-def _wire_collector(monkeypatch, events: list[str]):
+def _wire_collector(monkeypatch, events: list[str], *, stored_row=None):
     """Shared fakes for the collector handlers. Returns
-    (primes, upserts_full, upserts_counts, warms, schema_stats)."""
+    (primes, upserts_full, upserts_counts, warms, schema_stats).
+    ``stored_row`` is what the deep facet's stored-counts read finds."""
+
+    class _FakeResult:
+        def scalar_one_or_none(self):
+            return stored_row
 
     class _FakeSession:
         async def get(self, _orm, _key):
@@ -69,6 +74,9 @@ def _wire_collector(monkeypatch, events: list[str]):
                 provider_id="prov1",
                 last_polled_at=None, last_status=None, last_error=None,
             )
+
+        async def execute(self, _stmt):
+            return _FakeResult()
 
     @asynccontextmanager
     async def fake_jobs_session():
@@ -163,14 +171,15 @@ def _envelope() -> StatsJobEnvelope:
     )
 
 
-def _assert_session_discipline(events: list[str]) -> None:
-    """Session 1 fully closed before ANY provider IO; upsert inside
-    session 2 opened after the IO finished."""
+def _assert_session_discipline(events: list[str], expected_opens: int = 2) -> None:
+    """Every session fully closed before ANY provider IO; upsert inside
+    a session opened after the IO finished."""
     first_io = min(i for i, e in enumerate(events) if e.startswith("io:"))
     last_io = max(i for i, e in enumerate(events) if e.startswith("io:"))
-    assert events.index("session_close") < first_io, events
+    closes_before_io = [i for i, e in enumerate(events) if e == "session_close" and i < first_io]
+    assert closes_before_io, events
     assert events.index("upsert") > last_io, events
-    assert events.count("session_open") == 2
+    assert events.count("session_open") == expected_opens
 
 
 @pytest.mark.asyncio
@@ -180,10 +189,12 @@ async def test_deep_facet_one_fetch_and_session_discipline(monkeypatch) -> None:
 
     await collector.collect_deep(_envelope())
 
-    # One-fetch: exactly one schema-stats scan set, zero get_stats calls.
+    # One-fetch: exactly one schema-stats scan set, zero get_stats calls
+    # (no stored row → no change-detection probe either).
     assert events.count("io:get_schema_stats") == 1
     assert not any(e.startswith("io:get_stats") for e in events)
-    _assert_session_discipline(events)
+    # Deep opens 3 short sessions: context, stored-counts read, upsert.
+    _assert_session_discipline(events, expected_opens=3)
 
     # Derived counts flow to the provider-cache prime and the full upsert.
     expected_payload = {
@@ -199,6 +210,37 @@ async def test_deep_facet_one_fetch_and_session_discipline(monkeypatch) -> None:
     assert json.loads(upserts_full[0]["entity_type_counts"]) == {"dataset": 5}
     assert json.loads(upserts_full[0]["edge_type_counts"]) == {"CONTAINS": 3}
     assert warms == [{"ws_id": "ws1", "ds_id": "ds1", "node_count": 5}]
+
+
+@pytest.mark.asyncio
+async def test_deep_facet_skips_scans_when_counts_unchanged(monkeypatch) -> None:
+    """The 'never re-profile an unchanged graph' invariant: when the
+    cheap counts probe matches the stored row, the deep facet must skip
+    the samples/tags scans + schema rebuild and only advance freshness."""
+    events: list[str] = []
+    stored = SimpleNamespace(
+        node_count=5, edge_count=3,
+        entity_type_counts='{"dataset": 5}',
+        edge_type_counts='{"CONTAINS": 3}',
+        schema_stats='{"totalNodes": 5}',
+    )
+    primes, upserts_full, upserts_counts, warms, _ = _wire_collector(
+        monkeypatch, events, stored_row=stored,
+    )
+    touched: list[str] = []
+
+    async def fake_touch(session, ds_id):
+        touched.append(ds_id)
+
+    monkeypatch.setattr(collector, "touch_schema_freshness", fake_touch)
+
+    await collector.collect_deep(_envelope())
+
+    assert events.count("io:get_stats(bypass=True)") == 1  # the probe
+    assert "io:get_schema_stats" not in events  # heavy scans skipped
+    assert "io:get_graph_schema" not in events
+    assert upserts_full == [] and upserts_counts == [] and primes == []
+    assert touched == ["ds1"]  # freshness advanced without a rewrite
 
 
 @pytest.mark.asyncio

@@ -318,6 +318,41 @@ async def add_data_source(
             raise HTTPException(status_code=409, detail="This data source already exists on this workspace")
         raise
 
+    # Seed instant stats from what discovery already profiled: if this
+    # asset's counts are in asset_discovery_cache (they usually are —
+    # the user just picked it from the discovery list), copy them into
+    # data_source_stats so real figures show the moment the source is
+    # registered. Bonus: the first poll then knows the graph's size and
+    # gets the right timeout budget. Best-effort — the seeded poll
+    # below refreshes everything regardless.
+    if created.provider_id and created.graph_name:
+        import json as _json
+
+        from backend.app.db.models import AssetDiscoveryCacheORM
+        from backend.app.db.repositories.stats_repo import (
+            upsert_data_source_stats_counts,
+        )
+        try:
+            cache_row = await session.get(
+                AssetDiscoveryCacheORM, (created.provider_id, created.graph_name)
+            )
+            payload = (
+                _json.loads(cache_row.payload)
+                if cache_row is not None and cache_row.payload
+                else {}
+            )
+            if payload.get("nodeCount") is not None:
+                await upsert_data_source_stats_counts(
+                    session=session,
+                    ds_id=created.id,
+                    node_count=int(payload.get("nodeCount") or 0),
+                    edge_count=int(payload.get("edgeCount") or 0),
+                    entity_type_counts=_json.dumps(payload.get("entityTypeCounts", {})),
+                    edge_type_counts=_json.dumps(payload.get("edgeTypeCounts", {})),
+                )
+        except Exception:
+            pass  # seed is a bonus; the poll below is the real refresh
+
     # Commit before enqueueing the stats poll. The stats worker uses an
     # independent session pool (PoolRole.JOBS), so if it pulls the job
     # off the Redis stream before this transaction commits, ``_resolve_
