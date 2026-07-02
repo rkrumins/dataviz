@@ -342,9 +342,9 @@ export function ContextViewCanvas({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     onConnectMode: (nodeId) => {
-      // Draft-gated: on Published the connect shortcut is inert — managers
-      // enter edit via the header's Edit button.
-      if (!useBranchStore.getState().isDraftMode()) return
+      // Draft-gated on the SCOPED isDraft: on Published (or a draft open on a different data
+      // source) the connect shortcut is inert — managers enter edit via the header's Edit button.
+      if (!isDraft) return
       edgeConnectRef.current?.armConnect(nodeId)
     },
     layers: layers,
@@ -411,14 +411,15 @@ export function ContextViewCanvas({
   const graphId = useGraphId()
   const canEnterEdit = !!graphId
 
-  // Keyboard shortcuts. Published is read-only, so the destructive Delete shortcut is neutralised
-  // there with a no-op — a bare `undefined` would fall through to useCanvasKeyboard's built-in
-  // node-removal. (The mutation entry points themselves are draft-gated on the context menu.)
+  // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
+  // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
+  // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
+  // (The context-menu mutation entry points are draft-gated separately.)
   useCanvasKeyboard({
     enabled: true,
     handlers: isDraft
       ? interactions.keyboardHandlers
-      : { ...interactions.keyboardHandlers, onDelete: () => {} },
+      : { ...interactions.keyboardHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
   })
 
   // Blueprint autosync is ambient: display-rule / layer edits dirty the reference model, but there
@@ -427,7 +428,9 @@ export function ContextViewCanvas({
   // their edits stay session-local — firing here would only spam errors at people without permission.
   useEffect(() => {
     if (syncStatus !== 'dirty' || !canManage || !activeWorkspaceId) return
-    const t = setTimeout(() => { void saveToBackend(activeWorkspaceId) }, 1500)
+    // saveToBackend re-throws on failure; that's already surfaced via syncStatus='error' + the
+    // header's retry affordance, so swallow the rejection here to avoid unhandled-rejection noise.
+    const t = setTimeout(() => { saveToBackend(activeWorkspaceId).catch(() => {}) }, 1500)
     return () => clearTimeout(t)
   }, [syncStatus, canManage, activeWorkspaceId, saveToBackend])
 
