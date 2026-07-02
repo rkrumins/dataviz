@@ -39,14 +39,18 @@ class _Session:
         return self._row
 
 
-def _wire_safe_enqueue(monkeypatch) -> list[tuple[str, str]]:
+def _wire_safe_enqueue(monkeypatch, *, claim_held: bool = False) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
 
     async def fake_safe(provider_id, asset_name):
         calls.append((provider_id, asset_name))
         return "1-1"
 
+    async def fake_claim_exists(_scope_key, **_kw):
+        return claim_held
+
     monkeypatch.setattr(insights, "enqueue_discovery_job_safe", fake_safe)
+    monkeypatch.setattr(insights, "claim_exists", fake_claim_exists)
     return calls
 
 
@@ -90,6 +94,28 @@ async def test_true_miss_still_enqueues_once(monkeypatch) -> None:
     assert env["meta"]["status"] == "computing"
     assert env["meta"]["refreshing"] is True
     assert calls == [("p1", "g1")]  # first-ever view self-heals
+
+
+@pytest.mark.asyncio
+async def test_pending_job_claim_drives_refreshing_signal(monkeypatch) -> None:
+    """After a user clicks refresh (or the sweep enqueues), the dedup
+    claim is held — reads must report ``refreshing=true`` so the UI can
+    spin-and-poll until the job completes, WITHOUT any enqueue side
+    effect of their own."""
+    calls = _wire_safe_enqueue(monkeypatch, claim_held=True)
+
+    stale_age = resilience.DISCOVERY_CACHE_FRESH_SECS + 60
+    env = await insights._build_response(
+        session=_Session(_row(stale_age)), provider_id="p1", asset_name="g1",
+    )
+    assert env["meta"]["refreshing"] is True
+    assert calls == []  # signal only — still no enqueue-on-read
+
+    fresh_env = await insights._build_response(
+        session=_Session(_row(10)), provider_id="p1", asset_name="g1",
+    )
+    assert fresh_env["meta"]["status"] == "fresh"
+    assert fresh_env["meta"]["refreshing"] is True  # forced refresh of a fresh row
 
 
 @pytest.mark.asyncio

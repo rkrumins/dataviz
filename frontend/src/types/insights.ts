@@ -45,8 +45,19 @@ export interface Envelope<T> {
 }
 
 /** Discovery-specific data payloads. */
+
+/** Cached per-asset summary carried in bulk on the list endpoint so
+ *  the UI can sort/paginate without one stats request per row. */
+export interface AssetDetailSummary {
+    name: string
+    nodeCount: number | null
+    edgeCount: number | null
+    updatedAt: string | null
+}
+
 export interface AssetListPayload {
     assets: string[]
+    assetsDetail?: AssetDetailSummary[]
 }
 
 export interface AssetStatsPayload {

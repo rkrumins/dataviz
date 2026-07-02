@@ -167,6 +167,14 @@ async def try_claim(scope_key: str, ttl_secs: int, *, stream: StreamConfig = STA
     return bool(await redis.set(_dedup_key(stream, scope_key), "1", nx=True, ex=ttl_secs))
 
 
+async def claim_exists(scope_key: str, *, stream: StreamConfig = STATS_STREAM) -> bool:
+    """True while a job for this scope is pending/running (its dedup
+    claim is held). Read-only — the honest "refreshing" signal for read
+    paths that must not enqueue as a side effect."""
+    redis = get_redis()
+    return bool(await redis.exists(_dedup_key(stream, scope_key)))
+
+
 async def release_claim(scope_key: str, *, stream: StreamConfig = STATS_STREAM) -> None:
     redis = get_redis()
     await redis.delete(_dedup_key(stream, scope_key))

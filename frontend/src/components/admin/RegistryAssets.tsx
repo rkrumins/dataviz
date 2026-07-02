@@ -12,7 +12,8 @@ import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
-    AlertTriangle, Zap, X, ChevronRight, Plus, WifiOff
+    AlertTriangle, Zap, X, ChevronLeft, ChevronRight, Plus, WifiOff,
+    ArrowUp, ArrowDown,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -654,6 +655,14 @@ export function RegistryAssets() {
     const [searchQuery, setSearchQuery] = useState('')
     const [statusFilter, setStatusFilter] = useState<'all' | 'selected' | 'registered' | 'unregistered'>('all')
 
+    // Sort + pagination. Sort keys come from the bulk ``assetsDetail``
+    // summaries on the list envelope (one query server-side) — no
+    // per-row stats fetches are needed to order the whole list.
+    const [sortBy, setSortBy] = useState<'name' | 'size' | 'refreshed'>('name')
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+    const [pageSize, setPageSize] = useState<10 | 25 | 50>(25)
+    const [page, setPage] = useState(0)
+
     // Actions
     const [showOnboarding, setShowOnboarding] = useState(false)
     const [onboardingCatalogs, setOnboardingCatalogs] = useState<any[]>([])
@@ -976,29 +985,64 @@ export function RegistryAssets() {
         return true
     })
 
+    // Sort using the bulk per-asset summaries from the list envelope —
+    // assets without a cached summary sort to the end of size/refreshed
+    // orders (they've never been scanned).
+    const detailByName = new Map(
+        (assetsEnvelope?.data?.assetsDetail ?? []).map(d => [d.name, d]),
+    )
+    const sortedAssets = [...filteredAssets].sort((a, b) => {
+        const dir = sortDir === 'asc' ? 1 : -1
+        if (sortBy === 'name') return a.localeCompare(b) * dir
+        const da = detailByName.get(a)
+        const db = detailByName.get(b)
+        if (sortBy === 'size') {
+            const na = da?.nodeCount ?? -1
+            const nb = db?.nodeCount ?? -1
+            if (na !== nb) return (na - nb) * dir
+        } else {
+            const ta = da?.updatedAt ?? ''
+            const tb = db?.updatedAt ?? ''
+            if (ta !== tb) return ta.localeCompare(tb) * dir
+        }
+        return a.localeCompare(b)
+    })
+
+    const pageCount = Math.max(1, Math.ceil(sortedAssets.length / pageSize))
+    const clampedPage = Math.min(page, pageCount - 1)
+    const pagedAssets = sortedAssets.slice(
+        clampedPage * pageSize, (clampedPage + 1) * pageSize,
+    )
+
+    // Back to page one whenever the visible set changes shape.
+    useEffect(() => {
+        setPage(0)
+    }, [selectedProviderId, searchQuery, statusFilter, sortBy, sortDir, pageSize])
+
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
 
-    // Refresh the asset list + the assets the user is looking at
-    // (current filter view, capped). Used by the panel-level
-    // RefreshControl. Deliberately NOT refresh-everything: a provider
-    // with 200 cached assets used to grind for minutes through the
-    // worker on every click; individual rows keep their own ⟳ button.
-    // The list stays rendered throughout — chips update in place as
-    // workers complete; no full-panel spinner.
+    // Refresh the asset list + the assets on the CURRENT PAGE. Used by
+    // the panel-level RefreshControl. Deliberately NOT refresh-
+    // everything: a provider with 200 cached assets used to grind for
+    // minutes through the worker on every click; individual rows keep
+    // their own ⟳ button. The list stays rendered throughout, and the
+    // promise resolves only when every queued asset's job has finished
+    // (its envelope stops reporting ``refreshing``) — RefreshControl
+    // awaits this, so the button spins until the new figures are live.
     const handleRefreshSelectedProvider = useCallback(async () => {
         if (!selectedProviderId) return
-        const visibleAssets = filteredAssets.slice(0, 50)
+        const targets = pagedAssets
         try {
             const result = await providerService.refreshAllAssets(
-                selectedProviderId, visibleAssets,
+                selectedProviderId, targets,
             )
             const noun = result.jobs_queued === 1 ? 'asset' : 'assets'
-            const scopeHint = filteredAssets.length > visibleAssets.length
-                ? ` (first ${visibleAssets.length} of ${filteredAssets.length} in view)`
+            const scopeHint = sortedAssets.length > targets.length
+                ? ` (this page — ${targets.length} of ${sortedAssets.length})`
                 : ''
             showToast(
                 'success',
-                `Refresh queued for ${result.jobs_queued} ${noun}${scopeHint} — chips will update as workers complete.`,
+                `Refresh queued for ${result.jobs_queued} ${noun}${scopeHint}.`,
             )
         } catch (err: any) {
             showToast(
@@ -1007,14 +1051,45 @@ export function RegistryAssets() {
             )
         }
         // Invalidate every per-row asset-stats query under this
-        // provider so polling picks up the now-pending refreshes.
+        // provider so mounted rows re-read (and show the refreshing
+        // spinner from the claim-backed ``meta.refreshing`` signal).
         queryClient.invalidateQueries({
             predicate: (q) =>
                 q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
                 && q.queryKey[1] === selectedProviderId,
         })
-        // Background re-list (no spinner — the current list stays
-        // useful; the list-all job lands new/removed assets shortly).
+
+        // Wait for the queued jobs to actually finish: poll each
+        // target's stats endpoint until ``refreshing`` clears (the
+        // worker releases the claim on success AND failure, so this
+        // terminates promptly either way; 90s safety cap). fetchQuery
+        // writes into the same query keys the rows render from, so the
+        // figures update in place as each job lands.
+        const providerId = selectedProviderId
+        const deadline = Date.now() + 90_000
+        const pending = new Set(targets)
+        while (pending.size > 0 && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2500))
+            const checks = await Promise.allSettled(
+                Array.from(pending).map(async name => {
+                    const env = await queryClient.fetchQuery({
+                        queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, name],
+                        queryFn: () => providerService.getAssetStats(providerId, name),
+                        staleTime: 0,
+                    })
+                    return { name, refreshing: !!(env as any)?.meta?.refreshing }
+                }),
+            )
+            for (const c of checks) {
+                if (c.status === 'fulfilled' && !c.value.refreshing) {
+                    pending.delete(c.value.name)
+                }
+            }
+        }
+
+        // Final re-list so the bulk summaries (sort keys, counts,
+        // updatedAt) reflect the completed jobs. No spinner — the
+        // current list stays useful throughout.
         try {
             const [res, existing] = await Promise.all([
                 providerService.listAssets(selectedProviderId),
@@ -1024,7 +1099,7 @@ export function RegistryAssets() {
             setAssets(res.data?.assets ?? [])
             setExistingCatalogs(existing)
         } catch { /* keep current list on re-list failure */ }
-    }, [selectedProviderId, filteredAssets, queryClient, showToast])
+    }, [selectedProviderId, pagedAssets, sortedAssets.length, queryClient, showToast])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (
@@ -1196,8 +1271,26 @@ export function RegistryAssets() {
                                     ))}
                                 </div>
 
-                                {/* Bulk actions */}
+                                {/* Sort + bulk actions */}
                                 <div className="flex items-center gap-1.5">
+                                    <select
+                                        value={sortBy}
+                                        onChange={e => setSortBy(e.target.value as typeof sortBy)}
+                                        aria-label="Sort assets by"
+                                        className="px-2 py-1.5 rounded-lg text-xs font-semibold bg-canvas-elevated border border-glass-border text-ink outline-none focus:ring-2 focus:ring-indigo-500/50"
+                                    >
+                                        <option value="name">Name</option>
+                                        <option value="size">Size (nodes)</option>
+                                        <option value="refreshed">Last refreshed</option>
+                                    </select>
+                                    <button
+                                        onClick={() => setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))}
+                                        title={sortDir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending'}
+                                        aria-label="Toggle sort direction"
+                                        className="p-1.5 rounded-lg text-ink-muted bg-black/5 dark:bg-white/5 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+                                    >
+                                        {sortDir === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />}
+                                    </button>
                                     <button
                                         onClick={() => setSelected(new Set(assets.filter(a => !registeredSourceIds.has(a))))}
                                         className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-600 bg-indigo-500/10 hover:bg-indigo-500/20 transition-colors"
@@ -1272,7 +1365,7 @@ export function RegistryAssets() {
                                     </button>
                                 </div>
                             ) : (
-                                filteredAssets.map(assetName => (
+                                pagedAssets.map(assetName => (
                                     <AssetRow
                                         // Keyed by provider TOO: a bare assetName key reuses the
                                         // row instance across providers that share asset names,
@@ -1291,6 +1384,47 @@ export function RegistryAssets() {
                                 ))
                             )}
                         </div>
+
+                        {/* Pager */}
+                        {!assetsLoading && sortedAssets.length > 0 && (
+                            <div className="shrink-0 mt-3 flex items-center justify-between gap-4 text-xs text-ink-muted">
+                                <div className="flex items-center gap-2">
+                                    <span>Show</span>
+                                    <select
+                                        value={pageSize}
+                                        onChange={e => setPageSize(Number(e.target.value) as 10 | 25 | 50)}
+                                        aria-label="Assets per page"
+                                        className="px-1.5 py-1 rounded-lg font-semibold bg-canvas-elevated border border-glass-border text-ink outline-none focus:ring-2 focus:ring-indigo-500/50"
+                                    >
+                                        <option value={10}>10</option>
+                                        <option value={25}>25</option>
+                                        <option value={50}>50</option>
+                                    </select>
+                                    <span>per page</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span>
+                                        {clampedPage * pageSize + 1}–{Math.min((clampedPage + 1) * pageSize, sortedAssets.length)} of {sortedAssets.length}
+                                    </span>
+                                    <button
+                                        onClick={() => setPage(p => Math.max(0, p - 1))}
+                                        disabled={clampedPage === 0}
+                                        aria-label="Previous page"
+                                        className="p-1.5 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-40"
+                                    >
+                                        <ChevronLeft className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                        onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+                                        disabled={clampedPage >= pageCount - 1}
+                                        aria-label="Next page"
+                                        className="p-1.5 rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-40"
+                                    >
+                                        <ChevronRight className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
 
                         {/* Footer action bar */}
                         <div className="shrink-0 mt-4 pt-4 border-t border-glass-border flex items-center justify-between gap-4">

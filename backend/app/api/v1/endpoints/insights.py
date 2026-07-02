@@ -58,6 +58,7 @@ from backend.app.db.models import (
 )
 from backend.insights_service.admission import invalidate_config as invalidate_admission_cache
 from backend.insights_service.enqueue import enqueue_discovery_job_safe
+from backend.insights_service.redis_streams import DISCOVERY_STREAM, claim_exists
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,20 @@ async def _read_cache(
     return await session.get(AssetDiscoveryCacheORM, (provider_id, asset_name))
 
 
+async def _refresh_in_flight(provider_id: str, asset_name: str) -> bool:
+    """True while a discovery job for this exact scope is pending — the
+    dedup claim doubles as the honest progress signal. Reads stay pure
+    (no enqueue); the UI polls while this is true and stops when the
+    completed job releases the claim. Redis down → False (no signal is
+    better than a stuck spinner)."""
+    try:
+        return await claim_exists(
+            f"{provider_id}:{asset_name}", stream=DISCOVERY_STREAM,
+        )
+    except Exception:
+        return False
+
+
 async def _ensure_provider_exists(
     session: AsyncSession, provider_id: str
 ) -> None:
@@ -197,7 +212,10 @@ async def _build_response(
     tier = _classify_freshness(age)
 
     if cache_row is not None and tier == "fresh":
-        # Hot path. No enqueue.
+        # Hot path. No enqueue. ``refreshing`` reflects whether a job
+        # for this scope is genuinely in flight (a user-forced refresh
+        # or the background sweep) so the UI can spin-and-poll until
+        # the new figures land.
         try:
             payload = json.loads(cache_row.payload)
         except (TypeError, ValueError):
@@ -210,7 +228,7 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=False,
+            refreshing=await _refresh_in_flight(provider_id, asset_name),
             job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
@@ -235,7 +253,7 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=False,
+            refreshing=await _refresh_in_flight(provider_id, asset_name),
             job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
@@ -275,11 +293,42 @@ async def list_assets(
     ``/admin/providers/{id}/assets`` (legacy, providers.py:401-411). The
     web tier never hits the upstream provider here; an insights worker
     refreshes ``asset_discovery_cache`` on a separate process.
+
+    ``data.assetsDetail`` carries the cached per-asset summaries
+    (counts + freshness) in ONE bulk read so the UI can sort and
+    paginate the whole list without a per-row stats request each.
     """
     await _ensure_provider_exists(session, provider_id)
-    return await _build_response(
+    env = await _build_response(
         session=session, provider_id=provider_id, asset_name="",
     )
+
+    if env.get("data") is not None:
+        rows = await session.execute(
+            select(
+                AssetDiscoveryCacheORM.asset_name,
+                AssetDiscoveryCacheORM.payload,
+                AssetDiscoveryCacheORM.computed_at,
+            ).where(
+                AssetDiscoveryCacheORM.provider_id == provider_id,
+                AssetDiscoveryCacheORM.asset_name != "",
+            )
+        )
+        detail = []
+        for name, payload_raw, computed_at in rows.all():
+            try:
+                p = json.loads(payload_raw) if payload_raw else {}
+            except (TypeError, ValueError):
+                p = {}
+            detail.append({
+                "name": name,
+                "nodeCount": p.get("nodeCount"),
+                "edgeCount": p.get("edgeCount"),
+                "updatedAt": computed_at,
+            })
+        env["data"]["assetsDetail"] = detail
+
+    return env
 
 
 @router.get("/providers/{provider_id}/assets/{asset_name}/stats")
