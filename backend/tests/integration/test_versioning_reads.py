@@ -84,7 +84,8 @@ async def _run() -> None:
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         # seed A -> B, publish (projection NOT run → projected < committed)
-        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1"})).json()["graphId"]
+        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1",
+                                                 "falkorGraphName": "gvt_" + os.urandom(3).hex()})).json()["graphId"]
         bid = (await c.post(f"{ws1}/graphs/{gid}/branches", json={})).json()["branchId"]
         await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/changes", json={"ops": [
             {"op": "create", "entityKind": "node", "entityId": "A", "payload": {"displayName": "Alpha", "entityType": "Dataset"}},

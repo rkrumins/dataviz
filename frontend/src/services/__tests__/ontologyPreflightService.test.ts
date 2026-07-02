@@ -6,6 +6,9 @@ import {
   isContainmentRelType,
   allowedChildTypeIds,
   NON_DRAWABLE_EDGE_TYPES,
+  endpointOk,
+  validateDrawnEdge,
+  connectedEdgeTypes,
 } from '../ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
@@ -148,5 +151,76 @@ describe('allowedChildTypeIds', () => {
 
   it('treats empty canContain as unrestricted', () => {
     expect([...allowedChildTypeIds('dataset', types, ['domain'], {})].sort()).toEqual(['dataset', 'domain', 'system'])
+  })
+})
+
+describe('endpointOk', () => {
+  it('passes wildcard/empty/`*` and exact matches; fails a non-member', () => {
+    expect(endpointOk('domain', undefined)).toBe(true)
+    expect(endpointOk('domain', [])).toBe(true)
+    expect(endpointOk('domain', ['*'])).toBe(true)
+    expect(endpointOk('domain', ['domain', 'system'])).toBe(true)
+    expect(endpointOk('column', ['domain', 'system'])).toBe(false)
+  })
+})
+
+describe('validateDrawnEdge', () => {
+  const rels = [
+    rt('FLOWS_TO', ['dataset'], ['dataset'], { isLineage: true }),
+    rt('CONTAINS', ['domain'], ['dataset'], { isContainment: true }),
+  ]
+  const base = { relationshipTypes: rels, containmentEdgeTypes: ['CONTAINS'] }
+
+  it('rejects a containment type from free-draw', () => {
+    const v = validateDrawnEdge({ ...base, sourceType: 'domain', targetType: 'dataset', edgeType: 'CONTAINS' })
+    expect(v.allowed).toBe(false)
+    expect(v.reason).toMatch(/Move to|child/i)
+  })
+
+  it('rejects an unknown relationship type', () => {
+    expect(validateDrawnEdge({ ...base, sourceType: 'dataset', targetType: 'dataset', edgeType: 'NOPE' }).allowed).toBe(false)
+  })
+
+  it('rejects an endpoint-type violation', () => {
+    const v = validateDrawnEdge({ ...base, sourceType: 'column', targetType: 'dataset', edgeType: 'FLOWS_TO' })
+    expect(v.allowed).toBe(false)
+    expect(v.reason).toMatch(/source/i)
+  })
+
+  it('allows a valid lineage edge', () => {
+    expect(validateDrawnEdge({ ...base, sourceType: 'dataset', targetType: 'dataset', edgeType: 'FLOWS_TO' }).allowed).toBe(true)
+  })
+
+  it('rejects a duplicate (same source+target+type already present)', () => {
+    const existingEdges = [{ source: 'a', target: 'b', data: { edgeType: 'flows_to' } }]
+    const v = validateDrawnEdge({
+      ...base, sourceType: 'dataset', targetType: 'dataset', edgeType: 'FLOWS_TO',
+      existingEdges, sourceId: 'a', targetId: 'b',
+    })
+    expect(v.allowed).toBe(false)
+    expect(v.reason).toMatch(/already/i)
+  })
+
+  it('allows the same type between a DIFFERENT pair', () => {
+    const existingEdges = [{ source: 'a', target: 'b', data: { edgeType: 'FLOWS_TO' } }]
+    const v = validateDrawnEdge({
+      ...base, sourceType: 'dataset', targetType: 'dataset', edgeType: 'FLOWS_TO',
+      existingEdges, sourceId: 'a', targetId: 'c',
+    })
+    expect(v.allowed).toBe(true)
+  })
+})
+
+describe('connectedEdgeTypes', () => {
+  it('returns the UPPERCASE set of types already connecting source→target', () => {
+    const edges = [
+      { source: 'a', target: 'b', data: { edgeType: 'flows_to' } },
+      { source: 'a', target: 'b', data: { relationship: 'derives_from' } },
+      { source: 'a', target: 'c', data: { edgeType: 'other' } },
+    ]
+    const s = connectedEdgeTypes(edges, 'a', 'b')
+    expect(s.has('FLOWS_TO')).toBe(true)
+    expect(s.has('DERIVES_FROM')).toBe(true)
+    expect(s.has('OTHER')).toBe(false)
   })
 })

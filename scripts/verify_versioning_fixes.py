@@ -308,10 +308,14 @@ async def part_1e(svc, c, actor, ws):
     except Exception as exc:                                   # pragma: no cover
         print(f"  {DIM}- 1E skipped (FalkorDB unavailable: {exc}){RESET}")
         return
+    # Pin an explicit test graph name: the projector (correctly) no longer projects UNPINNED
+    # graphs into the synthetic gv_<id> fallback — nothing reads those keys and they leaked
+    # one empty FalkorDB graph per test run. 1E tests reconcile/heal mechanics, so give it a
+    # real (test-scoped) target and drop it in the finally below.
+    name = "gvtest_1e_" + uuid.uuid4().hex[:8]
     g = await svc.create_graph(data_source_id="ds_" + uuid.uuid4().hex[:8], workspace_id=ws,
-                               kind="manual", actor=actor)
+                               kind="manual", actor=actor, falkor_graph_name=name)
     gid = g["graph_id"]
-    name = FalkorProjector.default_graph_name(gid)
     client = factory(name)
     urns = [f"urn:li:dataset:p_{i}_{uuid.uuid4().hex[:6]}" for i in range(3)]
     d = await svc.open_draft(graph_id=gid, owner=actor)

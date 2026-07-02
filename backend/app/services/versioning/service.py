@@ -606,6 +606,7 @@ class GraphVersioningService:
         message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         actor_groups: Sequence[str] = (),
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> str:
         """Squash a draft into a single ``main`` commit, rebasing onto current
         main with a field-level 3-way merge (plan §8) — the ungated path (admin /
@@ -647,12 +648,14 @@ class GraphVersioningService:
                 if conflicts:
                     raise MergeConflict(conflicts)
                 return await self._apply_draft_squash(
-                    s, graph, draft, main_id, merged_state, theirs, actor, message
+                    s, graph, draft, main_id, merged_state, theirs, actor, message,
+                    containment_edge_types=containment_edge_types,
                 )
         return await self._retry_seq(f"publish {branch_id}", _once)
 
     async def _apply_draft_squash(
         self, s, graph, draft, main_id, merged_state, theirs, actor, message,
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> str:
         """Squash a draft's (already-merged, conflict-free) state onto ``main`` as a
         single ``squash_publish`` commit: cascade incident-edge deletes, assert
@@ -707,6 +710,19 @@ class GraphVersioningService:
             viol = validate_entities(
                 [(d.entity_id, kind_by_entity.get(d.entity_id, "node"), d.payload)
                  for d in deltas if d.op != "delete"], ontology)
+            if viol:
+                raise OntologyViolation(viol)
+        # Same authoritative duplicate/single-parent/cycle integrity the write path enforces,
+        # re-checked against CURRENT main at merge time — two drafts that are each clean in
+        # isolation must not compose into a two-parent or cyclic hierarchy on main.
+        merge_edge_creates = [(d.entity_id, d.payload) for d in deltas
+                              if d.op == "create" and d.payload is not None
+                              and kind_by_entity.get(d.entity_id) == "edge"]
+        if merge_edge_creates:
+            viol = await self._validate_edge_integrity(
+                s, graph.id, main_id, merge_edge_creates,
+                {d.entity_id for d in deltas if d.op == "delete"},
+                containment_edge_types or [])
             if viol:
                 raise OntologyViolation(viol)
         await self._write_deltas(s, graph.id, main_id, squash, deltas, kind_by_entity, actor)
@@ -998,10 +1014,14 @@ class GraphVersioningService:
             await s.flush()                      # materialise fork_point.id before linking
             main.head_commit_id = fork_point.id
             parent_ps = await s.get(ProjectionStateORM, parent_graph_id)
-            parent_name = (parent_ps.falkor_graph_name if parent_ps else None) or f"gv_{parent_graph_id}"
+            # Forks get their own FalkorDB graph — but ONLY when the parent has a real one.
+            # An unpinned parent (test-created, or pre-injection) has no FalkorDB readers, so
+            # its fork must stay unpinned too: deriving a synthetic "gv_<parent>__fork_<id>"
+            # name would make the projection worker materialise an orphan key nothing reads.
+            parent_name = parent_ps.falkor_graph_name if parent_ps else None
             s.add(ProjectionStateORM(
                 graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
-                falkor_graph_name=f"{parent_name}__fork_{fork.id}",   # forks get their own graph
+                falkor_graph_name=(f"{parent_name}__fork_{fork.id}" if parent_name else None),
                 falkor_provider=(parent_ps.falkor_provider if parent_ps else None),  # same instance as parent
             ))
             return {
@@ -1353,6 +1373,7 @@ class GraphVersioningService:
     async def merge_mr(
         self, *, mr_id: str, actor: str, message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        containment_edge_types: Optional[Sequence[str]] = None,
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
@@ -1401,7 +1422,8 @@ class GraphVersioningService:
                 if reviewers and pr.approval_status != "approved":
                     raise ApprovalRequired(mr_id, sorted(reviewers - set(pr.approved_by or [])))
                 commit_id = await self._apply_draft_squash(
-                    s, graph, draft, main_id, merged_state, theirs, actor, message
+                    s, graph, draft, main_id, merged_state, theirs, actor, message,
+                    containment_edge_types=containment_edge_types,
                 )
                 pr.status = "merged"
                 pr.resulting_commit_id = commit_id
@@ -2093,6 +2115,96 @@ class GraphVersioningService:
                     nxt.add(b)
             frontier = nxt
         return seen
+
+    async def _validate_edge_integrity(
+        self, s, graph_id: str, branch_id: str,
+        edge_creates: Sequence[Tuple[str, Mapping]], deleted_edge_ids: set,
+        containment_edge_types: Sequence[str],
+    ) -> List[dict]:
+        """Structural integrity for a batch of edge CREATES against a branch's live state —
+        the batch's deletes subtracted and its other creates overlaid: no edge may (a)
+        duplicate an existing one (same source+target+type), (b) give a node a SECOND
+        containment parent, or (c) form a containment cycle. Shared by the write path
+        (:meth:`_apply_ops_once`) and the merge/squash path (:meth:`_apply_draft_squash`),
+        so an invariant no single commit can violate can't be composed onto ``main`` by
+        merging two individually-clean drafts either. Returns ``[{entity_id, kind, reason}]``."""
+        cset = {t.upper() for t in (containment_edge_types or [])}
+
+        def _etype(p: Mapping) -> str:
+            return str(p.get("edgeType") or p.get("edge_type") or "").upper()
+
+        create_targets = {t for _e, v in edge_creates for _s2, t in [_edge_src_tgt(v)] if t}
+        existing_incident = (await self._incident_live_edges(s, graph_id, branch_id, create_targets)
+                             if create_targets else {})
+        viol: List[dict] = []
+        batch_parent: Dict[str, set] = {}     # target → containment sources added in THIS batch
+        batch_seen: set = set()               # (src,tgt,type) created in THIS batch
+        for eid, v in edge_creates:
+            src, tgt = _edge_src_tgt(v)
+            if not src or not tgt:
+                continue
+            etype = _etype(v)
+            # (a) duplicate — against existing live edges + earlier creates in this batch.
+            dup = (src, tgt, etype) in batch_seen or any(
+                oeid != eid and oeid not in deleted_edge_ids
+                and _edge_src_tgt(op_) == (src, tgt) and _etype(op_) == etype
+                for oeid, op_ in existing_incident.items())
+            if dup:
+                viol.append({"entity_id": eid, "kind": "edge",
+                             "reason": "These entities are already connected by this relationship."})
+            batch_seen.add((src, tgt, etype))
+            # (b) second containment parent.
+            if etype in cset:
+                parents = {osrc for oeid, op_ in existing_incident.items()
+                           if oeid != eid and oeid not in deleted_edge_ids
+                           and _etype(op_) in cset
+                           for osrc, otgt in [_edge_src_tgt(op_)] if otgt == tgt and osrc}
+                parents |= batch_parent.get(tgt, set())
+                if parents - {src}:
+                    viol.append({"entity_id": eid, "kind": "edge",
+                                 "reason": "This entity already has a parent — use “Move to” to change it, "
+                                           "rather than adding a second parent."})
+                batch_parent.setdefault(tgt, set()).add(src)
+        # (c) containment cycle — a new parent→child edge cycles if the child is an ancestor
+        #     of the parent in the EFFECTIVE post-batch graph: live edges MINUS this batch's
+        #     deletes PLUS its other creates. Overlaying the batch both admits a legitimate
+        #     one-commit restructure (delete P→C + create C→P) and catches a cycle built
+        #     entirely inside one batch (create A→B + create B→A).
+        if cset:
+            batch_cont = {eid: v for eid, v in edge_creates if _etype(v) in cset}
+
+            async def _ancestors_effective(start: str, skip: str) -> set:
+                seen_a, frontier = {start}, {start}
+                for _ in range(64):                    # bounded by hierarchy depth
+                    if not frontier:
+                        break
+                    inc = await self._incident_live_edges(s, graph_id, branch_id, frontier, None)
+                    cand = [(oeid, p) for oeid, p in inc.items()
+                            if oeid != skip and oeid not in deleted_edge_ids]
+                    cand += [(beid, bp) for beid, bp in batch_cont.items() if beid != skip]
+                    nxt: set = set()
+                    for _oeid, p in cand:
+                        if _etype(p) not in cset:
+                            continue
+                        a, b = _edge_src_tgt(p)        # a = parent, b = child
+                        if b in frontier and a and a not in seen_a:
+                            seen_a.add(a)
+                            nxt.add(a)
+                    frontier = nxt
+                return seen_a
+
+            for eid, v in batch_cont.items():
+                src, tgt = _edge_src_tgt(v)
+                if not src or not tgt:
+                    continue
+                if src == tgt:
+                    viol.append({"entity_id": eid, "kind": "edge",
+                                 "reason": "An entity can’t contain itself."})
+                    continue
+                if tgt in await _ancestors_effective(src, eid):
+                    viol.append({"entity_id": eid, "kind": "edge",
+                                 "reason": "This move would create a containment loop."})
+        return viol
 
     async def trace_from_state(
         self, *, graph_id: str, urn: str, level: int,
@@ -3715,6 +3827,23 @@ class GraphVersioningService:
                 if not _live(src) or not _live(tgt):
                     raise ConcurrencyError(f"edge {eid} would dangle: {src}->{tgt}")
 
+            # ── Containment/edge integrity (authoritative, always on) ────────────────────────────
+            # Duplicate-edge / second-containment-parent / containment-cycle guards, shared with
+            # the merge path via _validate_edge_integrity. Creates only — an update can't add an
+            # edge, and legacy-dirty data must not block property edits. Same-batch deletes are
+            # subtracted (a reparent stages delete(old parent)+create(new)).
+            edge_creates = [(eid, v) for eid, v in new_vals.items()
+                            if v is not None and kind_by_entity.get(eid) == "edge"
+                            and eid not in update_ids]
+            if edge_creates:
+                deleted_edge_ids = {eid for eid, v in new_vals.items()
+                                    if v is None and kind_by_entity.get(eid) == "edge"}
+                viol = await self._validate_edge_integrity(
+                    s, graph_id, bid, edge_creates, deleted_edge_ids,
+                    containment_edge_types or [])
+                if viol:
+                    raise OntologyViolation(viol)
+
             ontology = Ontology.from_spec(graph.ontology_spec)   # write-through ontology gate
             if ontology is not None and graph.ontology_enforcement == "strict":
                 viol = validate_entities(
@@ -3908,6 +4037,13 @@ class GraphVersioningService:
         Copy-on-write fork aware: a fork's ``main`` is seeded from its parent's
         state at the fork point (recursively, so a fork-of-a-fork resolves) before
         the fork's own divergence is overlaid — no parent rows are ever copied.
+
+        Two-phase, O(live state) not O(history): phase 1 picks each entity's WINNING
+        version at the seq via a NARROW ``DISTINCT ON`` over ``ix_*_entity_hist``
+        (entity_id, version id, op — payloads never enter the sort, and superseded
+        versions are never transferred); phase 2 point-fetches payloads by version id
+        for the LIVE winners only (deletes skip payload I/O entirely). Replaces the
+        full-history replay that loaded every version row ever written.
         """
         state: Dict[str, Optional[dict]] = {}
         graph = await s.get(GraphORM, graph_id)
@@ -3920,14 +4056,23 @@ class GraphVersioningService:
                     graph.fork_base_commit_seq or 0,
                 ))
         for model in (NodeVersionORM, EdgeVersionORM):
-            rows = (await s.execute(
-                select(model).where(
-                    model.graph_id == graph_id, model.branch_id == branch_id,
-                    model.commit_seq <= seq,
-                ).order_by(model.commit_seq, model.created_at)
-            )).scalars().all()
-            for r in rows:
-                state[r.entity_id] = None if r.op == "delete" else r.payload
+            winners = (await s.execute(
+                select(model.entity_id, model.id, model.op)
+                .where(model.graph_id == graph_id, model.branch_id == branch_id,
+                       model.commit_seq <= seq)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+            )).all()
+            live_vids = [vid for _eid, vid, op in winners if op != "delete"]
+            payload_by_vid: Dict[str, dict] = {}
+            for chunk in _chunks(live_vids, _IN_LIST_MAX):
+                for vid, payload in (await s.execute(
+                    select(model.id, model.payload).where(
+                        model.graph_id == graph_id, model.id.in_(chunk))
+                )).all():
+                    payload_by_vid[vid] = payload
+            for eid, vid, op in winners:
+                state[eid] = None if op == "delete" else payload_by_vid.get(vid)
         return state
 
     async def _changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> set:

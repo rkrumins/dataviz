@@ -7,10 +7,13 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useCanvasStore } from '@/store/canvas'
+import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
+import { useToast } from '@/components/ui/toast'
 import { getDeleteImpact } from '@/services/versioningApiService'
+import { validateDrawnEdge } from '@/services/ontologyPreflightService'
 import { generateId } from '@/lib/utils'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
 
@@ -107,8 +110,9 @@ export interface UseCanvasInteractionsResult {
     editEdge: (edgeId: string) => void
     deleteEdge: (edgeId: string) => void
     reverseEdge: (edgeId: string) => void
-    /** Stage a new RAW edge between two nodes (optimistic + create_edge change). */
-    stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string
+    /** Stage a new RAW edge between two nodes (optimistic + create_edge change). Returns the temp
+     *  edge id, or `null` when the ontology gate rejects it (invalid type/endpoints or duplicate). */
+    stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
     
     // Canvas Actions
     selectAll: () => void
@@ -152,6 +156,7 @@ export function useCanvasInteractions(
     } = options
     
     const provider = useGraphProvider()
+    const { showToast } = useToast()
     const {
         nodes,
         selectedNodeIds,
@@ -458,6 +463,16 @@ export function useCanvasInteractions(
         const edge = useCanvasStore.getState().edges.find(e => e.id === edgeId)
         if (!edge) return
 
+        // Containment defines the hierarchy and is always stored parent→child — reversing it would
+        // invert (or duplicate) a parent relationship. Changing an entity's parent goes through
+        // "Move to" (ontology-validated, single-parent), never a raw direction flip.
+        const containmentEdgeTypes = useSchemaStore.getState().schema?.containmentEdgeTypes ?? []
+        const edgeTypeUpper = (edge.data?.edgeType ?? edge.data?.relationship ?? '').toUpperCase()
+        if (containmentEdgeTypes.some(c => c.toUpperCase() === edgeTypeUpper)) {
+            showToast('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
+            return
+        }
+
         const reversedId = `${edgeId}-reversed`
         const reversed = {
             ...edge,
@@ -479,9 +494,30 @@ export function useCanvasInteractions(
                 useCanvasStore.getState().addEdges([{ ...edge }])
             },
         })
-    }, [])
+    }, [showToast])
 
     const stageEdgeCreate = useCallback((sourceUrn: string, targetUrn: string, edgeType: string) => {
+        // Ontology gate before we stage anything: lineage-only (no hand-drawn containment), valid
+        // source/target types, and not a duplicate of an edge already between these two entities.
+        const canvas = useCanvasStore.getState()
+        const schema = useSchemaStore.getState().schema
+        const srcNode = canvas.nodes.find(n => n.id === sourceUrn || (n.data?.urn as string) === sourceUrn)
+        const tgtNode = canvas.nodes.find(n => n.id === targetUrn || (n.data?.urn as string) === targetUrn)
+        const verdict = validateDrawnEdge({
+            sourceType: (srcNode?.data?.type as string) ?? null,
+            targetType: (tgtNode?.data?.type as string) ?? null,
+            edgeType,
+            relationshipTypes: schema?.relationshipTypes ?? [],
+            containmentEdgeTypes: schema?.containmentEdgeTypes ?? [],
+            existingEdges: canvas.edges,
+            sourceId: sourceUrn,
+            targetId: targetUrn,
+        })
+        if (!verdict.allowed) {
+            showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+            return null
+        }
+
         const tempId = generateId('staged-edge')
         const optimistic = {
             id: tempId,
@@ -511,7 +547,7 @@ export function useCanvasInteractions(
             discard: () => useCanvasStore.getState().removeEdge(tempId),
         })
         return tempId
-    }, [])
+    }, [showToast])
 
     // ===================
     // Canvas Actions

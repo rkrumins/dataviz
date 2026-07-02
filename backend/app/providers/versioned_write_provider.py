@@ -56,11 +56,22 @@ class VersionedWriteProvider:
         self._falkor_graph_name = falkor_graph_name
         self._gid: Optional[str] = None
         self._lock = asyncio.Lock()
+        self._containment_types: List[str] = []
 
     def __getattr__(self, name):                         # delegate reads/lifecycle to inner
         if name.startswith("_"):                         # never delegate privates (and avoid recursion)
             raise AttributeError(name)
         return getattr(self._inner, name)
+
+    def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
+        """Intercept the engine's ontology push-down (``__getattr__`` would otherwise send it
+        straight to the inner provider): keep a copy so every recorded commit can enforce
+        containment integrity (single parent, no cycles) in ``apply_ops`` — the same types the
+        ``/changes`` path passes explicitly — then forward to the inner provider unchanged."""
+        self._containment_types = list(edge_types or [])
+        setter = getattr(self._inner, "set_containment_edge_types", None)
+        if callable(setter):
+            setter(edge_types, from_ontology)
 
     # ------------------------------------------------------------------ #
     async def _graph_id(self) -> str:
@@ -89,7 +100,8 @@ class VersionedWriteProvider:
         if not ops:
             return
         await self._svc.apply_ops(graph_id=await self._graph_id(), ops=ops,
-                                  actor=self._actor, message=message)
+                                  actor=self._actor, message=message,
+                                  containment_edge_types=self._containment_types)
 
     async def _endpoint_op(self, urn: str) -> Optional[dict]:
         """A create op for an edge endpoint node (fetched from the inner provider) so the

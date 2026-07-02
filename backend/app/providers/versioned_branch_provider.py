@@ -184,7 +184,8 @@ class VersionedBranchProvider:
         if self._as_of is not None:
             raise PermissionError("cannot write to a historical (as-of) view")
         return await self._svc.apply_ops(
-            graph_id=self._gid, branch_id=self._branch, ops=ops, actor=self._actor, message=message)
+            graph_id=self._gid, branch_id=self._branch, ops=ops, actor=self._actor, message=message,
+            containment_edge_types=self._containment_types)
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,

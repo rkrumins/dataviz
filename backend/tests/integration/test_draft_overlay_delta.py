@@ -55,9 +55,11 @@ async def _run() -> None:
     assert ("B", "A") not in adj                                  # direction respected
 
     # ── draft ADDS a lineage edge → it appears in the patch set as an upsert ────
+    # (reverse direction: an exact duplicate of lin1 — same source+target+type — is now
+    # rejected by the authoritative edge-integrity gate, as it is in the UI)
     d1 = await svc.open_draft(graph_id=gid, owner="u")
     await svc.apply_ops(graph_id=gid, branch_id=d1, actor="u", message="add lineage",
-                        containment_edge_types=CONT, ops=[_e("lin2", "A.c", "B.c", "LINEAGE")])
+                        containment_edge_types=CONT, ops=[_e("lin2", "B.c", "A.c", "LINEAGE")])
     delta1 = await svc.branch_overlay_delta(graph_id=gid, branch_id=d1)
     assert [e["id"] for e in delta1["edgesUpsert"]] == ["lin2"], delta1
     assert not delta1["nodesUpsert"] and not delta1["nodesRemove"] and not delta1["edgesRemove"]

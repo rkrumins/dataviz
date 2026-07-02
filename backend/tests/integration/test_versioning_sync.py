@@ -37,7 +37,8 @@ def _eid_of(state, urn):
 async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
-    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="ext")
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="ext",
+                               falkor_graph_name="gvt_" + os.urandom(3).hex())
     gid, main = G["graph_id"], G["main_branch_id"]
 
     # ── day-0 import: A(owner team1), B, A->B ──

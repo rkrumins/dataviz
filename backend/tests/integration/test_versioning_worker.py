@@ -36,7 +36,8 @@ def _factory(_name):
 
 
 async def _seed_graph(svc) -> str:
-    g = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a")
+    g = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a",
+                               falkor_graph_name="gvt_" + os.urandom(3).hex())
     gid = g["graph_id"]
     d = await svc.open_draft(graph_id=gid, owner="a")
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="a", ops=[

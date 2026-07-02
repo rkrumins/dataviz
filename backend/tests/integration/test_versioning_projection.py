@@ -130,8 +130,10 @@ async def _run() -> None:
     fake = FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake, batch_size=2)   # tiny batch → UNWIND chunking
 
-    # ── seed + first projection ──────────────────────────────────────────
-    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    # ── seed + first projection (pinned target: unpinned graphs are no longer projected) ──
+    first_name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=first_name)
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A",
@@ -190,14 +192,14 @@ async def _run() -> None:
     assert fg.entity_ids() == {"A", "C"} and set(fg.edges) == {"E2"}   # inherited base, nothing copied
     assert "__fork_" in await _graph_name(F["graph_id"])               # fork has its own graph name
 
-    # ── self-healing re-point: a graph auto-created without its real FalkorDB name is pinned to the
-    # orphan gv_<id>. ensure_projection_target re-points it to the data source's real graph and resets
-    # the watermark; the next projection REBUILDS that graph clean — a stale row main no longer has
-    # must be gone (the additive seed alone would leave it: the reported "deletes still show on Main").
+    # ── self-healing re-point: ensure_projection_target re-points a graph to the data source's
+    # real graph and resets the watermark; the next projection REBUILDS that graph clean — a stale
+    # row main no longer has must be gone (the additive seed alone would leave it: the reported
+    # "deletes still show on Main").
     real_name = "real_ds_graph"
     fake(real_name).nodes["gv:STALE"] = {"urn": "gv:STALE", "entityId": "STALE", "displayName": "stale"}
     old = await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=real_name)
-    assert old == f"gv_{gid}", old                                     # returns the now-orphaned name to drop
+    assert old == first_name, old                                      # returns the now-orphaned name to drop
     assert await _graph_name(gid) == real_name                         # re-pointed to the real graph
     assert await _watermark(gid) == 0                                  # reset → next projection is a full reseed
     assert (await proj.project_graph(gid))["projected"] == 4
@@ -237,11 +239,15 @@ async def _run_target_resolver() -> None:
         {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
     ], "seed")
 
-    # A resolver-less projector first lands the data in the orphan gv_<id> (pre-B1 / un-injected graph).
+    # Pre-B1 legacy state: the row was once pinned to (and projected into) its orphan gv_<id>.
+    # A resolver-less projection NO LONGER creates that state — unpinned graphs are skipped
+    # outright (nothing reads a synthetic gv_ key) — so first pin the new invariant, then
+    # simulate the legacy row by pinning the orphan name explicitly.
     orphan_name = FalkorProjector.default_graph_name(gid)
-    await FalkorProjector(graph_client_factory=fake, batch_size=2).project_graph(gid)
-    assert await _graph_name(gid) == orphan_name
-    assert fake.graphs[orphan_name].entity_ids() == {"A", "B"}
+    r0 = await FalkorProjector(graph_client_factory=fake, batch_size=2).project_graph(gid)
+    assert r0["noop"] and r0.get("skipped") == "unpinned", r0
+    assert fake.graphs.get(orphan_name) is None                      # no orphan key was created
+    await svc.ensure_projection_target(graph_id=gid, falkor_graph_name=orphan_name)
 
     # The worker's projector carries a target_resolver pinning the data source's REAL graph.
     real_name = "real_ds_graph_b1"

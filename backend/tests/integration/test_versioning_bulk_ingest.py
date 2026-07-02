@@ -42,7 +42,8 @@ async def _run() -> None:
     async with db.graphver_session() as s:
         await s.execute(text('ALTER TABLE graphver.commits ADD COLUMN IF NOT EXISTS idempotency_key text'))
     svc = GraphVersioningService()
-    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a"))["graph_id"]
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a",
+                                   falkor_graph_name="gvt_" + os.urandom(3).hex()))["graph_id"]
     mid = await svc.main_branch_id(gid)
 
     # ── import: valid rows land, invalid rows reported ───────────────────
@@ -90,7 +91,8 @@ async def _run() -> None:
     app.dependency_overrides[get_current_user] = fake_user
     app.dependency_overrides[get_permission_claims] = fake_claims
 
-    gid2 = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a"))["graph_id"]
+    gid2 = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a",
+                                    falkor_graph_name="gvt_" + os.urandom(3).hex()))["graph_id"]
     ndjson = (
         '{"kind":"node","id":"N1","entityType":"Dataset","displayName":"n1"}\n'
         'this is not json\n'

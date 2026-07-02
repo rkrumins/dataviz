@@ -82,7 +82,8 @@ async def _run() -> None:
     ws1 = "/api/v1/ws1/versioning"
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1"})).json()["graphId"]
+        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1",
+                                                 "falkorGraphName": "gvt_" + os.urandom(3).hex()})).json()["graphId"]
 
         # ── v1 on main: A -> B ──
         d1 = (await c.post(f"{ws1}/graphs/{gid}/branches", json={})).json()["branchId"]

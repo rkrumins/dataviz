@@ -32,10 +32,7 @@ import {
   normalizeEdgeType,
   isContainmentEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, isContainmentRelType, deriveContainmentEdges } from '@/services/ontologyPreflightService'
-
-const endpointOk = (t: string | undefined, allowed: string[] | undefined): boolean =>
-  !t || !allowed?.length || allowed.includes('*') || allowed.includes(t)
+import { allowedChildTypeIds, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
 
 export function useReparentNode() {
   const { showToast } = useToast()
@@ -161,12 +158,15 @@ export function useReparentNode() {
       return
     }
 
-    // Forward-orientation containment relationship (the new edge is stored parent→child).
+    // Forward-orientation containment relationship (the new edge is stored parent→child). No
+    // fallback to containmentEdgeTypes[0]: if no relationship type's endpoint constraints admit
+    // this exact parent→child pair, the move is ontology-invalid — abort rather than stage an
+    // edge the backend would reject.
     const fwd = relationshipTypes.find((rt) =>
       isContainmentRelType(rt, containmentEdgeTypes) &&
       endpointOk(parentType, rt.sourceTypes) && endpointOk(childType, rt.targetTypes),
     )
-    const containmentType = fwd?.id ?? containmentEdgeTypes[0]
+    const containmentType = fwd?.id
     if (!containmentType) {
       showToast('error', 'No containment relationship is allowed between these entities.')
       return

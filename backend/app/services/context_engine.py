@@ -1802,6 +1802,10 @@ class ContextEngine:
         except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
         except Exception as exc:
+            from backend.app.services.versioning.service import OntologyViolation
+            if isinstance(exc, OntologyViolation):       # surface the per-edge reasons, not the count
+                reasons = "; ".join(v.get("reason", "") for v in exc.violations) or str(exc)
+                return EdgeMutationResult(success=False, error=reasons, warnings=val.warnings or [])
             return EdgeMutationResult(success=False, error=str(exc))
 
         return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])

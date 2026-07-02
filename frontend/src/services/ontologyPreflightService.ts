@@ -69,8 +69,80 @@ export function isDrawableLineageType(
 }
 
 /** True when `type` satisfies an endpoint constraint (empty / '*' = wildcard). */
-function endpointOk(type: string | null, allowedTypes: string[] | undefined): boolean {
+export function endpointOk(type: string | null, allowedTypes: string[] | undefined): boolean {
   return !type || !allowedTypes?.length || allowedTypes.includes('*') || allowedTypes.includes(type)
+}
+
+const upper = (t?: string | null) => (t ?? '').toUpperCase()
+
+/** A minimal edge shape for duplicate detection (canvas store LineageEdge subset). */
+export interface EdgeLike {
+  source?: string
+  target?: string
+  data?: { edgeType?: string; relationship?: string }
+}
+
+/** The (UPPERCASE) relationship types that already connect `sourceId`→`targetId` among `edges`. */
+export function connectedEdgeTypes(
+  edges: EdgeLike[] | undefined,
+  sourceId: string | undefined,
+  targetId: string | undefined,
+): Set<string> {
+  const out = new Set<string>()
+  if (!edges || !sourceId || !targetId) return out
+  for (const e of edges) {
+    if (e.source === sourceId && e.target === targetId) out.add(upper(e.data?.edgeType ?? e.data?.relationship))
+  }
+  return out
+}
+
+export interface DrawnEdgeContext {
+  sourceType: string | null
+  targetType: string | null
+  edgeType: string
+  relationshipTypes: RelationshipTypeSchema[]
+  containmentEdgeTypes: string[]
+  /** Existing canvas edges + the specific endpoint ids, for duplicate detection (optional). */
+  existingEdges?: EdgeLike[]
+  sourceId?: string
+  targetId?: string
+}
+
+export interface EdgeValidation {
+  allowed: boolean
+  reason?: string
+}
+
+/**
+ * The single gate for a hand-DRAWN edge between two nodes (free-draw / connect / reconnect).
+ * Free-draw is lineage-only — containment is set via Create-child / "Move to", never drawn — so a
+ * containment type is rejected here. Also rejects unknown / non-drawable types, endpoint-type
+ * violations, and exact duplicates (same source+target+type already on the canvas). Containment
+ * single-parent + duplicate are enforced on the reparent/create-child paths and authoritatively by
+ * the backend; this keeps every drawing surface honest before save.
+ */
+export function validateDrawnEdge(ctx: DrawnEdgeContext): EdgeValidation {
+  const { sourceType, targetType, edgeType, relationshipTypes, containmentEdgeTypes } = ctx
+  const rt = relationshipTypes.find((r) => upper(r.id) === upper(edgeType))
+
+  const isContainment = rt
+    ? isContainmentRelType(rt, containmentEdgeTypes)
+    : new Set(containmentEdgeTypes.map(upper)).has(upper(edgeType))
+  if (isContainment) {
+    return { allowed: false, reason: 'Containment is set by adding a child or using “Move to”, not by drawing an edge.' }
+  }
+  if (!rt) return { allowed: false, reason: `“${edgeType}” isn’t a relationship in the ontology.` }
+  if (NON_DRAWABLE_EDGE_TYPES.has(rt.id)) return { allowed: false, reason: `“${rt.id}” can’t be drawn by hand.` }
+  if (!endpointOk(sourceType, rt.sourceTypes)) {
+    return { allowed: false, reason: `“${sourceType ?? '?'}” isn’t a valid source for “${rt.name ?? rt.id}”.` }
+  }
+  if (!endpointOk(targetType, rt.targetTypes)) {
+    return { allowed: false, reason: `“${targetType ?? '?'}” isn’t a valid target for “${rt.name ?? rt.id}”.` }
+  }
+  if (connectedEdgeTypes(ctx.existingEdges, ctx.sourceId, ctx.targetId).has(upper(edgeType))) {
+    return { allowed: false, reason: 'These entities are already connected by this relationship.' }
+  }
+  return { allowed: true }
 }
 
 /** Whether a relationship type is a containment edge (explicit flag, or membership fallback). */

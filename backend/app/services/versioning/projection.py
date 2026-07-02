@@ -23,7 +23,7 @@ import json
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 
 from . import config, db
 from .models import (
@@ -191,6 +191,15 @@ class FalkorProjector:
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
+            if name == self.default_graph_name(graph_id):
+                # No REAL FalkorDB target (a test-created graph, or one whose data source the
+                # resolver couldn't heal): nothing ever reads a synthetic ``gv_<id>`` key, and even
+                # an empty GRAPH.QUERY would instantiate it — so projecting only leaks orphan
+                # FalkorDB graphs. Skip without advancing the watermark: reads keep falling back to
+                # Postgres (the SoR), and a later repin (``ensure_projection_target``) re-enters the
+                # normal path. ``project_pending`` applies the same filter in SQL so the poll loop
+                # doesn't churn on these rows; this guard covers direct nudges.
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "unpinned"}
             ps.status = "projecting"
             main_id = await self._svc._main_branch_id(s, graph_id)
             is_fork = graph.fork_parent_graph_id is not None
@@ -267,7 +276,14 @@ class FalkorProjector:
         async with self._session() as s:
             ids = (await s.execute(
                 select(ProjectionStateORM.graph_id).where(
-                    ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq
+                    ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
+                    # Unpinned graphs (no real FalkorDB target — falkor_graph_name NULL or the
+                    # synthetic gv_<id> fallback) are never projected: nothing reads those keys.
+                    # Filtered here in SQL so hundreds of test-created graphs can't crowd out
+                    # (limit) or churn the poll loop; project_graph re-checks for direct nudges.
+                    ProjectionStateORM.falkor_graph_name.isnot(None),
+                    ProjectionStateORM.falkor_graph_name
+                    != literal("gv_").concat(ProjectionStateORM.graph_id),
                 ).order_by(
                     (ProjectionStateORM.target_commit_seq
                      - ProjectionStateORM.projected_commit_seq).desc()
