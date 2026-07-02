@@ -169,6 +169,16 @@ DISCOVERY_DEDUP_TTL_SECS: int = int(os.getenv("DISCOVERY_DEDUP_TTL_SECS", "90"))
 # outer) and the worker killed discovery jobs before their inner budget.
 DISCOVERY_LIVE_TIMEOUT_SECS: int = int(os.getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "35"))
 
+# Read-path freshness window for asset_discovery_cache rows. Defaults to
+# the background sweep cadence: a row is "fresh" until the next scheduled
+# sweep would have replaced it anyway. The old value (STATS_CACHE_FRESH_
+# SECS=300, 6× shorter than the 1800s sweep) meant every row read as
+# "stale" most of the time — flipping every visible UI row into a 5s
+# polling loop and (worse) re-enqueueing a discovery job on every read.
+DISCOVERY_CACHE_FRESH_SECS: int = int(
+    os.getenv("DISCOVERY_CACHE_FRESH_SECS", str(DISCOVERY_REFRESH_INTERVAL_SECS))
+)
+
 # ── Insights frontend / job-poll knobs (surfaced via /admin/insights/config) ─
 # Frontend reads these once at app mount via ``useInsightsConfig``;
 # all values are env-driven on the backend. Changing requires a
@@ -177,13 +187,13 @@ INSIGHTS_FRONTEND_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_FRONTEND_POLL_
 INSIGHTS_FRONTEND_STALE_TIME_MS: int = int(os.getenv("INSIGHTS_FRONTEND_STALE_TIME_MS", "60000"))
 INSIGHTS_JOB_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_JOB_POLL_INTERVAL_MS", "2000"))
 INSIGHTS_JOB_MAX_RETRIES: int = int(os.getenv("INSIGHTS_JOB_MAX_RETRIES", "4"))
-# UI-only "Stale" presentation threshold. The backend still classifies
-# rows past STATS_CACHE_FRESH_SECS as ``stale`` (it's the read-path
-# enqueue trigger), but the frontend's StatusChip suppresses the amber
-# warning until ``staleness_secs`` exceeds this threshold. Default 24h
-# avoids the "Stale 4m ago" false-alarm UX with the 30-min discovery
-# scheduler cadence; ops can lower it for environments that need tighter
-# freshness signalling.
+# UI-only "Stale" presentation threshold. The backend classifies rows
+# past DISCOVERY_CACHE_FRESH_SECS as ``stale`` (presentation only —
+# reads no longer enqueue refresh work), and the frontend's StatusChip
+# suppresses the amber warning until ``staleness_secs`` exceeds this
+# threshold. Default 24h avoids the "Stale 4m ago" false-alarm UX;
+# ops can lower it for environments that need tighter freshness
+# signalling.
 INSIGHTS_UI_STALE_THRESHOLD_SECS: int = int(os.getenv("INSIGHTS_UI_STALE_THRESHOLD_SECS", "86400"))
 
 # ── Insights worker / DLQ knobs ─────────────────────────────────────

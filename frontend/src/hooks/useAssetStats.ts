@@ -46,18 +46,22 @@ export function useAssetStats(
 
     return useQuery<Envelope<AssetStatsPayload>, Error>({
         queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
-        queryFn: () => providerService.getAssetStats(providerId, assetName),
+        // React Query aborts the signal when the query unmounts or is
+        // cancelled — switching providers now cancels superseded
+        // requests instead of letting them run to completion.
+        queryFn: ({ signal }) => providerService.getAssetStats(providerId, assetName, signal),
         enabled: enabled && Boolean(providerId) && Boolean(assetName),
-        // While the backend reports the cache is non-fresh (mid-refresh,
-        // computing, or stale), poll at the configured interval. Once
-        // status settles to ``fresh``, refetchInterval returns false
-        // and React Query stops polling automatically.
+        // While a refresh job is actually in flight (mid-refresh or
+        // first-ever compute), poll at the configured interval; stop
+        // once status settles. ``stale`` deliberately does NOT poll:
+        // since the backend stopped enqueue-on-read, a stale row has
+        // no pending job — polling it would spin forever between
+        // background sweeps.
         refetchInterval: (q) => {
             const meta = q.state.data?.meta
             const interval = config.frontend_poll_interval_ms
             if (meta?.refreshing) return interval
             if (meta?.status === 'computing') return interval
-            if (meta?.status === 'stale') return interval
             return false
         },
         // staleTime tuned via env. Short enough that a stale row gets

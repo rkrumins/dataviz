@@ -302,9 +302,10 @@ export const providerService = {
      * fresh, stale, computing, or unavailable. `data` is null on
      * computing / unavailable.
      */
-    listAssets(id: string): Promise<Envelope<AssetListPayload>> {
+    listAssets(id: string, signal?: AbortSignal): Promise<Envelope<AssetListPayload>> {
         return request<Envelope<AssetListPayload>>(
             `${INSIGHTS_API}/providers/${id}/assets`,
+            { signal },
         )
     },
 
@@ -316,9 +317,11 @@ export const providerService = {
     getAssetStats(
         providerId: string,
         assetName: string,
+        signal?: AbortSignal,
     ): Promise<Envelope<AssetStatsPayload>> {
         return request<Envelope<AssetStatsPayload>>(
             `${INSIGHTS_API}/providers/${providerId}/assets/${encodeURIComponent(assetName)}/stats`,
+            { signal },
         )
     },
 
@@ -347,6 +350,7 @@ export const providerService = {
      */
     refreshAllAssets(
         providerId: string,
+        assetNames?: string[],
     ): Promise<{
         provider_id: string
         jobs_queued: number
@@ -356,7 +360,15 @@ export const providerService = {
     }> {
         return request(
             `${INSIGHTS_API}/providers/${providerId}/assets/refresh`,
-            { method: 'POST' },
+            {
+                method: 'POST',
+                // Scope the per-asset fan-out to what the user is
+                // looking at; omitting the body keeps the legacy
+                // refresh-everything behavior.
+                ...(assetNames
+                    ? { body: JSON.stringify({ asset_names: assetNames }) }
+                    : {}),
+            },
         )
     },
 

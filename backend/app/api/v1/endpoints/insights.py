@@ -83,10 +83,15 @@ def _age_seconds(ts: Optional[datetime]) -> Optional[int]:
 
 
 def _classify_freshness(age_secs: Optional[int]) -> str:
-    """fresh | stale | expired"""
+    """fresh | stale | expired.
+
+    The fresh window is the background sweep cadence
+    (``DISCOVERY_CACHE_FRESH_SECS``) — a row younger than the next
+    scheduled sweep is by definition as fresh as this system produces.
+    """
     if age_secs is None:
         return "expired"
-    if age_secs <= resilience.STATS_CACHE_FRESH_SECS:
+    if age_secs <= resilience.DISCOVERY_CACHE_FRESH_SECS:
         return "fresh"
     if age_secs >= resilience.STATS_CACHE_ABSOLUTE_EXPIRY_SECS:
         return "expired"
@@ -96,7 +101,7 @@ def _classify_freshness(age_secs: Optional[int]) -> str:
 def _ttl_seconds(age_secs: Optional[int]) -> Optional[int]:
     if age_secs is None:
         return None
-    return max(0, resilience.STATS_CACHE_FRESH_SECS - age_secs)
+    return max(0, resilience.DISCOVERY_CACHE_FRESH_SECS - age_secs)
 
 
 async def _provider_health(
@@ -211,10 +216,13 @@ async def _build_response(
             last_error=cache_row.last_error,
         )
 
-    # stale or expired or missing — kick a refresh job.
-    job_id = await enqueue_discovery_job_safe(provider_id, asset_name)
-
     if cache_row is not None and tier == "stale":
+        # Serve the cache verbatim — NO enqueue side effect. Reads must
+        # never generate provider work: refresh ownership belongs to the
+        # background sweep and the explicit /refresh endpoints. (The old
+        # enqueue-on-read here meant merely RENDERING an asset list
+        # manufactured one discovery job per visible row, on every
+        # provider flick and every 5s poll.)
         try:
             payload = json.loads(cache_row.payload)
         except (TypeError, ValueError):
@@ -227,14 +235,17 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=True,
-            job_id=job_id,
+            refreshing=False,
+            job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
         )
 
-    # No usable cache. ``status=computing`` when a job is in flight, or
-    # ``unavailable`` when Redis is down (job_id == None and no row).
+    # No usable cache (true miss or past absolute expiry) — kick ONE
+    # refresh so the first-ever view self-heals. ``status=computing``
+    # when a job is in flight, or ``unavailable`` when Redis is down
+    # (job_id == None and no row).
+    job_id = await enqueue_discovery_job_safe(provider_id, asset_name)
     status = "computing" if job_id is not None else "unavailable"
     return _build_envelope(
         payload=None,
@@ -323,25 +334,35 @@ async def refresh_asset(
     }
 
 
+class ProviderRefreshRequest(BaseModel):
+    """Optional scope for the provider-level refresh. ``asset_names``
+    limits the per-asset fan-out to the rows the user is actually
+    looking at; ``None`` keeps the legacy refresh-everything behavior."""
+
+    asset_names: Optional[list[str]] = None
+
+
 @router.post(
     "/providers/{provider_id}/assets/refresh",
     status_code=202,
 )
 async def refresh_all_assets(
     provider_id: str = Path(...),
+    body: Optional[ProviderRefreshRequest] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """Force-refresh every cached asset for one provider.
+    """Force-refresh a provider's asset list + a scoped set of assets.
 
-    Fans out to (a) the list-all sentinel and (b) every per-asset row
-    already in ``asset_discovery_cache`` for this provider. Capped at
-    ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200) so a single
-    click can't enqueue thousands of jobs.
-
-    The list-all is always included even if no per-asset rows exist
-    yet — that's the only way to discover new assets when the cache
-    is initially empty.
+    Always enqueues the list-all sentinel (the only way to discover
+    new/removed assets). Per-asset fan-out is scoped to
+    ``body.asset_names`` when provided (intersected with cached rows so
+    arbitrary names can't seed stub cache entries), else every cached
+    row. Capped at ``INSIGHTS_MAX_PROVIDER_REFRESH`` (env, default 200)
+    and enqueued concurrently so the POST returns in one Redis
+    round-trip's time, not N.
     """
+    import asyncio
+
     from backend.insights_service.enqueue import enqueue_discovery_job_force
 
     await _ensure_provider_exists(session, provider_id)
@@ -352,18 +373,22 @@ async def refresh_all_assets(
         .where(AssetDiscoveryCacheORM.provider_id == provider_id)
         .limit(resilience.INSIGHTS_MAX_PROVIDER_REFRESH)
     )
-    asset_names = [row[0] for row in rows.all()]
-    if "" not in asset_names:
-        asset_names.insert(0, "")
+    cached_names = [row[0] for row in rows.all() if row[0]]
 
-    list_job_id: Optional[str] = None
-    asset_job_ids: list[Optional[str]] = []
-    for name in asset_names:
-        msg = await enqueue_discovery_job_force(provider_id, name)
-        if name == "":
-            list_job_id = msg
-        else:
-            asset_job_ids.append(msg)
+    requested = body.asset_names if body is not None else None
+    if requested is not None:
+        wanted = set(requested)
+        asset_names = [n for n in cached_names if n in wanted]
+    else:
+        asset_names = cached_names
+    asset_names = asset_names[: resilience.INSIGHTS_MAX_PROVIDER_REFRESH]
+
+    list_job_id = await enqueue_discovery_job_force(provider_id, "")
+    asset_job_ids = list(
+        await asyncio.gather(
+            *(enqueue_discovery_job_force(provider_id, n) for n in asset_names)
+        )
+    )
 
     return {
         "provider_id": provider_id,

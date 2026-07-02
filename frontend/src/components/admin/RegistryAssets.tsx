@@ -699,13 +699,17 @@ export function RegistryAssets() {
     useEffect(() => {
         if (!selectedProviderId) return
         let mounted = true
+        // Abort the previous provider's in-flight list fetch on switch —
+        // without this, rapidly flicking through providers piles up
+        // superseded requests that all run to completion server-side.
+        const abort = new AbortController()
         setAssetsLoading(true)
         setAssetsError('')
         setSearchQuery('')
         setStatusFilter('all')
 
         Promise.all([
-            providerService.listAssets(selectedProviderId),
+            providerService.listAssets(selectedProviderId, abort.signal),
             catalogService.list(selectedProviderId),
         ]).then(([res, existing]) => {
             if (!mounted) return
@@ -733,11 +737,13 @@ export function RegistryAssets() {
                 }
             }))
         }).catch(err => {
-            if (mounted) setAssetsError(err.message || 'Failed to load assets.')
+            if (mounted && err?.name !== 'AbortError') {
+                setAssetsError(err.message || 'Failed to load assets.')
+            }
         }).finally(() => {
             if (mounted) setAssetsLoading(false)
         })
-        return () => { mounted = false }
+        return () => { mounted = false; abort.abort() }
     }, [selectedProviderId])
 
     // Select provider + update URL
@@ -972,22 +978,27 @@ export function RegistryAssets() {
 
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
 
-    // Force-refresh every cached asset for the selected provider, then
-    // reload the asset list. Used by the panel-level RefreshControl.
-    // Best-effort on the enqueue: if Redis is unreachable, we still
-    // re-list the assets so the user isn't left with a stale view.
+    // Refresh the asset list + the assets the user is looking at
+    // (current filter view, capped). Used by the panel-level
+    // RefreshControl. Deliberately NOT refresh-everything: a provider
+    // with 200 cached assets used to grind for minutes through the
+    // worker on every click; individual rows keep their own ⟳ button.
+    // The list stays rendered throughout — chips update in place as
+    // workers complete; no full-panel spinner.
     const handleRefreshSelectedProvider = useCallback(async () => {
         if (!selectedProviderId) return
-        setAssetsLoading(true)
+        const visibleAssets = filteredAssets.slice(0, 50)
         try {
-            const result = await providerService.refreshAllAssets(selectedProviderId)
+            const result = await providerService.refreshAllAssets(
+                selectedProviderId, visibleAssets,
+            )
             const noun = result.jobs_queued === 1 ? 'asset' : 'assets'
-            const truncatedHint = result.truncated
-                ? ' (capped — re-click to catch any remaining assets)'
+            const scopeHint = filteredAssets.length > visibleAssets.length
+                ? ` (first ${visibleAssets.length} of ${filteredAssets.length} in view)`
                 : ''
             showToast(
                 'success',
-                `Refresh queued for ${result.jobs_queued} ${noun}${truncatedHint} — chips will update as workers complete.`,
+                `Refresh queued for ${result.jobs_queued} ${noun}${scopeHint} — chips will update as workers complete.`,
             )
         } catch (err: any) {
             showToast(
@@ -1002,6 +1013,8 @@ export function RegistryAssets() {
                 q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
                 && q.queryKey[1] === selectedProviderId,
         })
+        // Background re-list (no spinner — the current list stays
+        // useful; the list-all job lands new/removed assets shortly).
         try {
             const [res, existing] = await Promise.all([
                 providerService.listAssets(selectedProviderId),
@@ -1010,10 +1023,8 @@ export function RegistryAssets() {
             setAssetsEnvelope(res)
             setAssets(res.data?.assets ?? [])
             setExistingCatalogs(existing)
-        } finally {
-            setAssetsLoading(false)
-        }
-    }, [selectedProviderId, queryClient, showToast])
+        } catch { /* keep current list on re-list failure */ }
+    }, [selectedProviderId, filteredAssets, queryClient, showToast])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (
@@ -1263,7 +1274,11 @@ export function RegistryAssets() {
                             ) : (
                                 filteredAssets.map(assetName => (
                                     <AssetRow
-                                        key={assetName}
+                                        // Keyed by provider TOO: a bare assetName key reuses the
+                                        // row instance across providers that share asset names,
+                                        // and the reused row's already-true visibility gate then
+                                        // fires the new provider's stats fetch instantly.
+                                        key={`${selectedProviderId}:${assetName}`}
                                         providerId={selectedProviderId!}
                                         assetName={assetName}
                                         isRegistered={registeredSourceIds.has(assetName)}
