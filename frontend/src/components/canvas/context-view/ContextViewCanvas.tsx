@@ -35,6 +35,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { usePermission } from '@/store/auth'
+import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
@@ -405,9 +406,15 @@ export function ContextViewCanvas({
   // `isDraftMode()`) so the header never claims Edit for a draft that
   // belongs to a different data source.
   const dataSourceId = activeView?.dataSourceId ?? null
-  const effectiveBranchId = useEffectiveBranchId(activeWorkspaceId ?? '', dataSourceId)
+  // The canvas-versioning scope is the VIEW's own workspace — the same source
+  // CanvasVersioningBar / branchStore.setResolved use. The global workspaces-store
+  // selection can lag or diverge (deep links, workspace switching), and when it does
+  // the strict scope guard in useEffectiveBranchId returned null → isDraft false →
+  // the whole Edit cluster went invisible. See canvasScopeWorkspaceId.
+  const scopeWsId = canvasScopeWorkspaceId(activeView?.workspaceId, activeWorkspaceId)
+  const effectiveBranchId = useEffectiveBranchId(scopeWsId ?? '', dataSourceId)
   const isDraft = !!effectiveBranchId
-  const canManage = usePermission('workspace:datasource:manage', activeWorkspaceId ?? undefined)
+  const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
   const canEnterEdit = !!graphId
 
@@ -427,12 +434,12 @@ export function ContextViewCanvas({
   // flips syncStatus off 'dirty' (→ saving/synced/error), so this can't loop. Viewers can't save, so
   // their edits stay session-local — firing here would only spam errors at people without permission.
   useEffect(() => {
-    if (syncStatus !== 'dirty' || !canManage || !activeWorkspaceId) return
+    if (syncStatus !== 'dirty' || !canManage || !scopeWsId) return
     // saveToBackend re-throws on failure; that's already surfaced via syncStatus='error' + the
     // header's retry affordance, so swallow the rejection here to avoid unhandled-rejection noise.
-    const t = setTimeout(() => { saveToBackend(activeWorkspaceId).catch(() => {}) }, 1500)
+    const t = setTimeout(() => { saveToBackend(scopeWsId).catch(() => {}) }, 1500)
     return () => clearTimeout(t)
-  }, [syncStatus, canManage, activeWorkspaceId, saveToBackend])
+  }, [syncStatus, canManage, scopeWsId, saveToBackend])
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -1988,7 +1995,7 @@ export function ContextViewCanvas({
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
         activeContextModelName={activeContextModelName}
         syncStatus={syncStatus}
-        onRetrySync={() => { if (activeWorkspaceId) void saveToBackend(activeWorkspaceId) }}
+        onRetrySync={() => { if (scopeWsId) void saveToBackend(scopeWsId) }}
         isDraft={isDraft}
         canManage={canManage}
         canEnterEdit={canEnterEdit}
@@ -2070,7 +2077,7 @@ export function ContextViewCanvas({
              or the pending-changes badge. Single source of truth for reviewing
              and confirming a batch of staged edits before they hit the backend. */}
         <StagedChangesPanel onConfirm={async () => {
-          if (!activeWorkspaceId) return
+          if (!scopeWsId) return
           // Draft mode: persist every change type to the draft branch as one atomic,
           // server-merged commit (creates via the proven provider path, the rest via
           // /graph/changes). This is the path that makes draft editing actually work.
@@ -2078,7 +2085,7 @@ export function ContextViewCanvas({
           if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
             try {
               await saveStagedChangesToDraft(stagedChangeList, {
-                wsId: bs.workspaceId ?? activeWorkspaceId,
+                wsId: bs.workspaceId ?? scopeWsId,
                 dataSourceId: bs.dataSourceId,
                 branchId: bs.currentBranchId,
                 provider,
@@ -2095,7 +2102,7 @@ export function ContextViewCanvas({
               // history. Invalidate the whole versioning namespace so saved changes appear at once
               // (a save is user-initiated and infrequent, so the broad refetch is fine).
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-              await saveToBackend(activeWorkspaceId)   // view/blueprint config (layers) — not graph entities
+              await saveToBackend(scopeWsId)   // view/blueprint config (layers) — not graph entities
               closeStagedChangesPanel()
               showToast('success', 'Saved to draft.')
             } catch (e) {
@@ -2105,10 +2112,10 @@ export function ContextViewCanvas({
           }
           // Main mode: legacy per-change apply.
           const result = stagedChangeList.length > 0
-            ? await applyStagedChanges(provider, activeWorkspaceId)
+            ? await applyStagedChanges(provider, scopeWsId)
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
-            await saveToBackend(activeWorkspaceId)
+            await saveToBackend(scopeWsId)
             closeStagedChangesPanel()
           }
         }} />
