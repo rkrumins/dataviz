@@ -10,6 +10,7 @@ import { useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Loader2, AlertTriangle } from 'lucide-react'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
+import { UnsavedWorkGuard } from '@/components/canvas/UnsavedWorkGuard'
 import { useViewNavigation } from '@/hooks/useViewNavigation'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { ViewExecutionProvider } from '@/providers/ViewExecutionContext'
@@ -93,6 +94,7 @@ export function ViewPage() {
           dataSourceId={viewDataSourceId}
         >
           <CanvasRouter layoutType={layoutType} />
+          <UnsavedWorkGuard />
         </ViewExecutionProvider>
       )}
 

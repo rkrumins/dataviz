@@ -36,7 +36,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { usePermission, useAuthStore } from '@/store/auth'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
-import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS, useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
@@ -812,10 +811,6 @@ export function ContextViewCanvas({
   const queryClient = useQueryClient()
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
-
-  // Warn before the browser leaves the page (close tab / refresh / hard nav)
-  // while staged edits haven't been saved to the draft yet.
-  useUnsavedChangesWarning(stagedChangeList.length > 0)
 
   // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas, but only in draft (edit)
   // mode: Published is read-only, so there are no staged changes to undo/redo.
