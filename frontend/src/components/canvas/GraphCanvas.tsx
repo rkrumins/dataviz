@@ -1022,8 +1022,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   // endpoint-validated. Returns only the allowed options.
   const getValidEdgeTypes = useCallback(
     (sourceType: string, targetType: string) =>
-      deriveConnectableEdges(sourceType, targetType, relationshipTypes, containmentEdgeTypes).filter(o => o.allowed),
-    [relationshipTypes, containmentEdgeTypes],
+      deriveConnectableEdges(sourceType, targetType, relationshipTypes, containmentEdgeTypes, schemaEntityTypes).filter(o => o.allowed),
+    [relationshipTypes, containmentEdgeTypes, schemaEntityTypes],
   )
 
   // Edge picker state — the shared EdgeTypePickerPopover is shown when >1 valid type exists.
@@ -1049,6 +1049,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         existingEdges: useCanvasStore.getState().edges,
         sourceId: source,
         targetId: target,
+        entityTypes: schemaEntityTypes,
       })
       if (!verdict.allowed) {
         showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
@@ -1065,7 +1066,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       }])
       setEdgePicker(null)
     },
-    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, showToast],
+    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
   )
 
   // Create edge by dragging between node handles — ontology-aware
@@ -1138,6 +1139,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         sourceType, targetType, edgeType, relationshipTypes, containmentEdgeTypes,
         existingEdges: useCanvasStore.getState().edges.filter(e => e.id !== oldEdge.id),
         sourceId: newConnection.source, targetId: newConnection.target,
+        entityTypes: schemaEntityTypes,
       })
       if (!verdict.allowed) {
         showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
@@ -1155,7 +1157,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         animated: true,
       }])
     },
-    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, showToast],
+    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
   )
 
   // Connection validation — checks ALL ontology relationship types

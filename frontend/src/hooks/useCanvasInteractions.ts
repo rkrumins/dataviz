@@ -507,6 +507,7 @@ export function useCanvasInteractions(
             existingEdges: canvas.edges,
             sourceId: sourceUrn,
             targetId: targetUrn,
+            entityTypes: schema?.entityTypes ?? [],
         })
         if (!verdict.allowed) {
             showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')

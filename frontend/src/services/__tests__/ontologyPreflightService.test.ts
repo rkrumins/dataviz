@@ -70,7 +70,20 @@ describe('deriveConnectableEdges', () => {
     const out = deriveConnectableEdges('dataJob', 'dataJob', rels, [])
     const produces = out.find((o) => o.edgeType === 'PRODUCES')
     expect(produces?.allowed).toBe(false)
-    expect(produces?.reason).toContain('not a valid target')
+    expect(produces?.reason).toContain("can't be the target")
+  })
+
+  it('humanizes reasons with entity-type names and the edge label', () => {
+    const named = [
+      { ...et('attribute', []), name: 'Attribute' },
+      { ...et('column', []), name: 'Column' },
+      { ...et('dataJob', []), name: 'Data Job' },
+      { ...et('dataset', []), name: 'Dataset' },
+    ]
+    const flows = [rt('flows_to', ['column', 'dataJob', 'dataset'], ['dataset'], { isLineage: true, name: 'Flows To' })]
+    const out = deriveConnectableEdges('attribute', 'dataset', flows, [], named)
+    expect(out[0].allowed).toBe(false)
+    expect(out[0].reason).toBe("An Attribute can't be the source of 'Flows To'. Works from: Column, Data Job, Dataset.")
   })
 
   it('never offers AGGREGATED or containment types', () => {

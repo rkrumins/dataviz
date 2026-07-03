@@ -10,7 +10,7 @@ import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCanvasStore } from '@/store/canvas'
-import { useRelationshipTypes, useContainmentEdgeTypes } from '@/store/schema'
+import { useRelationshipTypes, useContainmentEdgeTypes, useEntityTypes } from '@/store/schema'
 import { deriveConnectableEdges, connectedEdgeTypes } from '@/services/ontologyPreflightService'
 
 export interface EdgeTypePickerPopoverProps {
@@ -27,6 +27,7 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
   const edges = useCanvasStore((s) => s.edges)
   const relationshipTypes = useRelationshipTypes()
   const containmentEdgeTypes = useContainmentEdgeTypes()
+  const entityTypes = useEntityTypes()
   const ref = useRef<HTMLDivElement>(null)
 
   const nodeType = (id: string) => {
@@ -46,7 +47,7 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
     () => {
       // Disable types that already connect this exact source→target so the user can't draw a duplicate.
       const connected = connectedEdgeTypes(edges, sourceId, targetId)
-      return deriveConnectableEdges(nodeType(sourceId), nodeType(targetId), relationshipTypes, containmentEdgeTypes)
+      return deriveConnectableEdges(nodeType(sourceId), nodeType(targetId), relationshipTypes, containmentEdgeTypes, entityTypes)
         .map((o) =>
           connected.has(o.edgeType.toUpperCase())
             ? { ...o, allowed: false, reason: 'Already connected by this relationship.' }
@@ -54,7 +55,7 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
         )
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodes, edges, sourceId, targetId, relationshipTypes, containmentEdgeTypes],
+    [nodes, edges, sourceId, targetId, relationshipTypes, containmentEdgeTypes, entityTypes],
   )
 
   useEffect(() => {

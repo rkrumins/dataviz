@@ -11,6 +11,7 @@
  * for staged nodes.
  */
 import type { AllowedEdgeOption } from '@/providers/GraphDataProvider'
+import { relationshipLabel } from '@/lib/relationshipLabel'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
 export type { AllowedEdgeOption, EdgeDirection } from '@/providers/GraphDataProvider'
@@ -175,6 +176,33 @@ export function endpointOk(type: string | null, allowedTypes: string[] | undefin
 
 const upper = (t?: string | null) => (t ?? '').toUpperCase()
 
+// ── Plain-language endpoint reasons (shared by deriveConnectableEdges and
+// validateDrawnEdge). Entity-type ids resolve to their display NAMES via the
+// optional `entityTypes` list (unknown ids fall back to the id); the edge is
+// named by its label, never its raw id.
+const displayTypeName = (id: string, entityTypes?: EntityTypeSchema[]): string =>
+  entityTypes?.find((et) => et.id === id)?.name ?? id
+
+const indefinite = (name: string): string => (/^[aeiou]/i.test(name) ? 'An' : 'A')
+
+const edgeDisplayLabel = (rt: RelationshipTypeSchema): string =>
+  rt.name && rt.name !== rt.id ? rt.name : relationshipLabel(rt.id)
+
+/** e.g. `An Attribute can't be the source of 'Flows To'. Works from: Column, Data Job.` */
+function endpointReason(
+  side: 'source' | 'target',
+  typeId: string,
+  rt: RelationshipTypeSchema,
+  entityTypes?: EntityTypeSchema[],
+): string {
+  const name = displayTypeName(typeId, entityTypes)
+  const works = ((side === 'source' ? rt.sourceTypes : rt.targetTypes) ?? [])
+    .map((t) => displayTypeName(t, entityTypes))
+    .sort((a, b) => a.localeCompare(b))
+    .join(', ')
+  return `${indefinite(name)} ${name} can't be the ${side} of '${edgeDisplayLabel(rt)}'. Works ${side === 'source' ? 'from' : 'to'}: ${works}.`
+}
+
 /** A minimal edge shape for duplicate detection (canvas store LineageEdge subset). */
 export interface EdgeLike {
   source?: string
@@ -206,6 +234,8 @@ export interface DrawnEdgeContext {
   existingEdges?: EdgeLike[]
   sourceId?: string
   targetId?: string
+  /** Resolves reason strings to display names; omitted → raw ids. */
+  entityTypes?: EntityTypeSchema[]
 }
 
 export interface EdgeValidation {
@@ -234,10 +264,10 @@ export function validateDrawnEdge(ctx: DrawnEdgeContext): EdgeValidation {
   if (!rt) return { allowed: false, reason: `“${edgeType}” isn’t a relationship in the ontology.` }
   if (NON_DRAWABLE_EDGE_TYPES.has(rt.id)) return { allowed: false, reason: `“${rt.id}” can’t be drawn by hand.` }
   if (!endpointOk(sourceType, rt.sourceTypes)) {
-    return { allowed: false, reason: `“${sourceType ?? '?'}” isn’t a valid source for “${rt.name ?? rt.id}”.` }
+    return { allowed: false, reason: endpointReason('source', sourceType ?? '?', rt, ctx.entityTypes) }
   }
   if (!endpointOk(targetType, rt.targetTypes)) {
-    return { allowed: false, reason: `“${targetType ?? '?'}” isn’t a valid target for “${rt.name ?? rt.id}”.` }
+    return { allowed: false, reason: endpointReason('target', targetType ?? '?', rt, ctx.entityTypes) }
   }
   if (connectedEdgeTypes(ctx.existingEdges, ctx.sourceId, ctx.targetId).has(upper(edgeType))) {
     return { allowed: false, reason: 'These entities are already connected by this relationship.' }
@@ -298,6 +328,8 @@ export function deriveConnectableEdges(
   targetType: string | null,
   relationshipTypes: RelationshipTypeSchema[],
   containmentEdgeTypes: string[],
+  /** Resolves reason strings to display names; omitted → raw ids. */
+  entityTypes?: EntityTypeSchema[],
 ): AllowedEdgeOption[] {
   return relationshipTypes
     .filter((rt) => isDrawableLineageType(rt, containmentEdgeTypes))
@@ -306,8 +338,8 @@ export function deriveConnectableEdges(
       const tgtOk = endpointOk(targetType, rt.targetTypes)
       const allowed = srcOk && tgtOk
       let reason: string | undefined
-      if (!srcOk) reason = `'${sourceType}' is not a valid source for '${rt.id}'. Allowed: ${[...(rt.sourceTypes ?? [])].sort().join(', ') || '(any)'}`
-      else if (!tgtOk) reason = `'${targetType}' is not a valid target for '${rt.id}'. Allowed: ${[...(rt.targetTypes ?? [])].sort().join(', ') || '(any)'}`
+      if (!srcOk) reason = endpointReason('source', sourceType ?? '?', rt, entityTypes)
+      else if (!tgtOk) reason = endpointReason('target', targetType ?? '?', rt, entityTypes)
       return { edgeType: rt.id, label: rt.name ?? rt.id, description: rt.description, allowed, reason }
     })
 }
