@@ -4,8 +4,8 @@
  * covers ONLY the reroute onto useHierarchyBuilderStore — createChild,
  * keyboardHandlers.onCreate, and the onCancel Escape cascade. The legacy
  * quickCreate machinery (openQuickCreate/closeQuickCreate/state.quickCreate)
- * stays intact for GraphCanvas/HierarchyCanvas until their own integration
- * tasks, so it is deliberately not exercised here.
+ * has since been fully removed from GraphCanvas/HierarchyCanvas, so it was
+ * never exercised here.
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
