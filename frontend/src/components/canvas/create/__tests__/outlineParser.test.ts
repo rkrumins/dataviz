@@ -155,4 +155,29 @@ describe('parseIndentedOutline', () => {
     expect(rows[0].name).toBe('Ratio: 4:1 blend')
     expect(rows[0].explicitType).toBe(false)
   })
+
+  // Builder leaf policy: empty/absent canContain = CLOSED to nesting (unlike
+  // allowedChildTypeIds' lenient "empty = unrestricted" rule).
+  it('blocks a row nested under a leaf type (empty canContain)', () => {
+    const text =
+      'Domain: Sales\n  Data Platform: A\n    Container: C\n      Dataset: D\n        Column: c1\n          Under'
+    const rows = parseIndentedOutline(text, baseCtx)
+    const under = rows[5]
+    expect(under.typeId).toBeNull()
+    expect(under.issues).toContain("Nothing can be added inside a Column.")
+  })
+
+  it('blocks depth-0 rows when rootParentType itself is a leaf type', () => {
+    const ctx: OutlineParseContext = { ...baseCtx, rootParentType: 'column' }
+    const rows = parseIndentedOutline('Anything', ctx)
+    expect(rows[0].typeId).toBeNull()
+    expect(rows[0].issues).toContain("Nothing can be added inside a Column.")
+  })
+
+  it('gives a grandchild of a leaf type "Fix the row above first."', () => {
+    const ctx: OutlineParseContext = { ...baseCtx, rootParentType: 'column' }
+    const rows = parseIndentedOutline('Blocked\n  Grandchild', ctx)
+    expect(rows[1].typeId).toBeNull()
+    expect(rows[1].issues).toContain('Fix the row above first.')
+  })
 })
