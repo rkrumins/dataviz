@@ -48,7 +48,8 @@ import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
-import { UnifiedCreatePanel } from '../create/UnifiedCreatePanel'
+import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
+import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -514,24 +515,12 @@ export function ContextViewCanvas({
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Entity creation state. Two entry points feed one panel: the toolbar /
-  // layer "add" buttons open it in Detailed mode (isCreatingEntity); the
-  // 'N' key, context-menu "Create entity/child", and palette open it in
-  // Quick mode (interactions.quickCreate). UnifiedCreatePanel reconciles them.
-  const [isCreatingEntity, setIsCreatingEntity] = useState(false)
-  const [creationParentId, setCreationParentId] = useState<string | null>(null)
-  const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
-
-  const quickCreateState = interactions.state.quickCreate
-  const isCreatePanelOpen = isCreatingEntity || quickCreateState.isOpen
-  const createPanelMode: 'quick' | 'detailed' = isCreatingEntity ? 'detailed' : 'quick'
-  const createPanelParentUrn = creationParentId ?? quickCreateState.parentUrn ?? null
-  const closeCreatePanel = useCallback(() => {
-    setIsCreatingEntity(false)
-    setCreationParentId(null)
-    setCreationLayerId(null)
-    interactions.closeQuickCreate()
-  }, [interactions])
+  // Entity creation. Every entry point (layer "add" buttons, per-row
+  // add-child, right-click create, palette, 'N' key) opens the shared
+  // Hierarchy Builder; its store centralizes scope + the ensureDraftOpen
+  // guard. Subscribed via selectors so unrelated store writes don't re-render.
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen)
+  const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
 
   // Assignment warning state (shown when user tries to assign child to different layer)
   const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
@@ -1204,11 +1193,8 @@ export function ContextViewCanvas({
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
-    // Open a draft before authoring (no-op if already in one) so the edit is
-    // staged into the versioning system rather than landing on main.
-    void ensureDraftOpen()
-    setCreationParentId(parentId)
-    setIsCreatingEntity(true)
+    // The builder store's open() runs the ensureDraftOpen guard itself.
+    useHierarchyBuilderStore.getState().open({ parentUrn: parentId })
   }, [])
 
   // Toggle node expansion with Lazy Loading
@@ -2235,10 +2221,7 @@ export function ContextViewCanvas({
             isDraft={isDraft}
             canManage={canManage}
             onAddEntity={() => {
-              void ensureDraftOpen()
-              setCreationLayerId(sortedLayers[0]?.id ?? null)
-              setCreationParentId(null)
-              setIsCreatingEntity(true)
+              useHierarchyBuilderStore.getState().open({ layerId: sortedLayers[0]?.id })
             }}
             onStartBuilding={() => { void ensureDraftOpen() }}
           />
@@ -2362,10 +2345,7 @@ export function ContextViewCanvas({
                 // Published shows zero mutation entry points for anyone.
                 onAddChild={isDraft ? handleAddChildEntity : undefined}
                 onAddToLayer={isDraft ? (layerId) => {
-                  void ensureDraftOpen()
-                  setCreationLayerId(layerId)
-                  setCreationParentId(null)
-                  setIsCreatingEntity(true)
+                  useHierarchyBuilderStore.getState().open({ layerId })
                 } : undefined}
                 onBeginConnect={isDraft ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
@@ -2409,20 +2389,16 @@ export function ContextViewCanvas({
       <AnimatePresence>
         {/* Creation takes the rail when active (it's an explicit action), so it
             is never hidden behind a drawer the user happened to leave open. */}
-        {isCreatePanelOpen && (
-          <UnifiedCreatePanel
-            key="unified-create-panel"
-            isOpen={isCreatePanelOpen}
-            onClose={closeCreatePanel}
-            parentUrn={createPanelParentUrn}
-            layerId={creationLayerId}
-            defaultMode={createPanelMode}
-            onEntityCreated={(tempUrn, parentUrn) => {
+        {builderOpen && (
+          <HierarchyBuilderPanel
+            key="hierarchy-builder-panel"
+            onClose={() => useHierarchyBuilderStore.getState().close()}
+            onEntityStaged={(tempUrn, parentUrn) => {
               // The layered view only renders nodes that resolve to a layer, so
               // a freshly-staged node is invisible until assigned. Assign it to
               // the creation layer → else the parent's layer → else the first
               // layer (an instanceAssignment wins even in closed-scope views).
-              const layer = creationLayerId
+              const layer = builderLayerId
                 ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
                 ?? sortedLayers[0]?.id
               if (layer) assignEntityToLayer(tempUrn, layer)
@@ -2432,7 +2408,7 @@ export function ContextViewCanvas({
             }}
           />
         )}
-        {!isCreatePanelOpen && drawerNodeId && (
+        {!builderOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
@@ -2442,7 +2418,7 @@ export function ContextViewCanvas({
             onLocateMany={locateManyOnCanvas}
           />
         )}
-        {!isCreatePanelOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
@@ -2490,12 +2466,10 @@ export function ContextViewCanvas({
         onEditEdge={isDraft ? interactions.editEdge : undefined}
         onDeleteEdge={isDraft ? interactions.deleteEdge : undefined}
         onReverseEdge={isDraft ? interactions.reverseEdge : undefined}
-        onCreateNode={isDraft ? (pos, layerId) => {
-          void ensureDraftOpen()
+        onCreateNode={isDraft ? (_pos, layerId) => {
           // Right-clicked an empty layer column → scope the new node to that
-          // layer so it lands there (and is assigned on create, see onEntityCreated).
-          if (layerId) setCreationLayerId(layerId)
-          interactions.openQuickCreate(pos)
+          // layer so it lands there (and is assigned on stage, see onEntityStaged).
+          useHierarchyBuilderStore.getState().open({ layerId })
         } : undefined}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
@@ -2511,17 +2485,16 @@ export function ContextViewCanvas({
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Quick create now lives in the UnifiedCreatePanel right rail
-          (driven by interactions.state.quickCreate). */}
+      {/* Quick create now lives in the Hierarchy Builder right rail
+          (opened via useHierarchyBuilderStore). */}
 
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={isDraft ? (_typeId) => {
-          void ensureDraftOpen()
+        onCreateEntity={isDraft ? (typeId) => {
           interactions.closeCommandPalette()
-          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+          useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
         } : undefined}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
