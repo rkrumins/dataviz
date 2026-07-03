@@ -272,7 +272,13 @@ export function useHierarchyOutline(opts: {
     }
   }, [active.parentUrn, tree, canvasNodes, scopeParentUrn])
 
-  const setName = useCallback((name: string) => setActive((prev) => ({ ...prev, name })), [])
+  // Typing clears a stale indent-blocked message: indent() only fires on an
+  // EMPTY name, so once the user types, the failed Tab is history — leaving the
+  // reason set would wrongly gate a perfectly valid sibling commit via canCommit.
+  const setName = useCallback((name: string) => {
+    setIndentBlockedReason(null)
+    setActive((prev) => ({ ...prev, name }))
+  }, [])
   const setType = useCallback((typeId: string | null) => {
     setIndentBlockedReason(null)
     setActive((prev) => ({ ...prev, typeId }))

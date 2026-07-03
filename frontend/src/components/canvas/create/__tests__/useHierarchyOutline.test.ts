@@ -338,6 +338,72 @@ describe('useHierarchyOutline', () => {
 
     expect(result.current.active.parentUrn).toBeNull()
   })
+
+  it('11. a blocked indent does not gate a later valid sibling commit: typing a name clears the stale reason', () => {
+    seedNode('urn:real:container1', 'container', 'Raw Container')
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', layerId: null, initialTypeId: null }),
+    )
+
+    // Stage a dataset, nest under it, stage a leaf column — then a blocked indent.
+    act(() => result.current.setType('dataset'))
+    act(() => result.current.setName('DS'))
+    let dsUrn: string | null = null
+    act(() => { dsUrn = result.current.commitAndNest() })
+    act(() => result.current.setName('Col1'))
+    act(() => { result.current.commitSibling() })
+
+    let blocked = true
+    act(() => { blocked = result.current.indent() })
+    expect(blocked).toBe(false)
+    expect(result.current.blockedReason).toBe('Nothing can be added inside a Column.')
+
+    // The active row still sits under its perfectly valid dataset parent —
+    // typing a name (acting) must clear the stale indent message so Enter works.
+    act(() => result.current.setName('Col2'))
+    expect(result.current.blockedReason).toBeNull()
+    expect(result.current.canCommit).toBe(true)
+
+    let tempUrn: string | null = null
+    act(() => { tempUrn = result.current.commitSibling() })
+    expect(tempUrn).toBeTruthy()
+    expect(afterOf(findByTempUrn(tempUrn!)).parentUrn).toBe(dsUrn)
+  })
+
+  it('12. descendantCount counts staged descendants transitively (2 / 1 / 0 for a 3-level chain)', () => {
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: null, layerId: null, initialTypeId: null }),
+    )
+
+    act(() => result.current.setName('Sales'))
+    let domainUrn: string | null = null
+    act(() => { domainUrn = result.current.commitAndNest() })
+    act(() => result.current.setName('Analytics'))
+    let platformUrn: string | null = null
+    act(() => { platformUrn = result.current.commitAndNest() })
+    act(() => result.current.setName('Raw'))
+    let containerUrn: string | null = null
+    act(() => { containerUrn = result.current.commitSibling() })
+
+    expect(result.current.descendantCount(domainUrn!)).toBe(2)
+    expect(result.current.descendantCount(platformUrn!)).toBe(1)
+    expect(result.current.descendantCount(containerUrn!)).toBe(0)
+  })
+
+  it('13. renameRow updates the staged change after.displayName and the optimistic canvas label', () => {
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: null, layerId: null, initialTypeId: null }),
+    )
+
+    act(() => result.current.setName('Sales'))
+    let tempUrn: string | null = null
+    act(() => { tempUrn = result.current.commitSibling() })
+
+    act(() => result.current.renameRow(tempUrn!, 'Sales EMEA'))
+
+    expect(afterOf(findByTempUrn(tempUrn!)).displayName).toBe('Sales EMEA')
+    expect(canvasNode(tempUrn!)?.data.label).toBe('Sales EMEA')
+  })
 })
 
 describe('useHierarchyBuilderStore', () => {
