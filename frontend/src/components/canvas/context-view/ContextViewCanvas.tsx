@@ -62,6 +62,8 @@ import { CommandPalette } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
+import { CreateLinkPopover } from '../edge-create/CreateLinkPopover'
+import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 import { BlankCanvasEmptyState } from './BlankCanvasEmptyState'
 import { FirstStepsChecklist } from './FirstStepsChecklist'
@@ -2456,6 +2458,13 @@ export function ContextViewCanvas({
         onDeleteNode={isDraft ? interactions.deleteNode : undefined}
         onCreateChild={isDraft ? interactions.createChild : undefined}
         onConnect={isDraft ? (id) => edgeConnect.armConnect(id) : undefined}
+        onLinkNode={isDraft ? (id) => {
+          const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
+          useCreateLinkStore.getState().open({
+            sourceUrn: (node?.data?.urn as string) || id,
+            anchor: interactions.state.contextMenu.position,
+          })
+        } : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={isDraft ? interactions.editEdge : undefined}
@@ -2509,6 +2518,11 @@ export function ContextViewCanvas({
           onCancel={edgeConnect.cancel}
         />
       )}
+
+      {/* Click-based "Link to…" flow — the discoverable sibling of the drag
+          connect above. Mounted once, outside the mutually-exclusive right-rail
+          block so it floats over whatever panel is open. */}
+      <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
 
       {/* View-metadata dialogs (title menu). EditViewDetailsDialog is
           prop-driven; Share is reused unchanged from the Explorer, mounted

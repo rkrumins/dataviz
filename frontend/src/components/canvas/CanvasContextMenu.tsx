@@ -51,6 +51,8 @@ export interface CanvasContextMenuProps {
     onCopyUrn?: (id: string) => void
     /** Arm edge connect-mode from this node */
     onConnect?: (sourceId: string) => void
+    /** Open the click-based "Link to…" popover from this node */
+    onLinkNode?: (nodeId: string) => void
     /** Edge actions */
     onEditEdge?: (id: string) => void
     onDeleteEdge?: (id: string) => void
@@ -82,6 +84,7 @@ export function CanvasContextMenu({
     onTraceNode,
     onCopyUrn,
     onConnect,
+    onLinkNode,
     onEditEdge,
     onDeleteEdge,
     onReverseEdge,
@@ -186,6 +189,15 @@ export function CanvasContextMenu({
                 })
             }
 
+            if (onLinkNode) {
+                result.push({
+                    id: 'link-to',
+                    label: 'Link to…',
+                    icon: 'Link2',
+                    onClick: () => { onLinkNode(target.id); onClose() }
+                })
+            }
+
             if (onDuplicateNode) {
                 result.push({
                     id: 'duplicate',
@@ -285,7 +297,7 @@ export function CanvasContextMenu({
 
         return result
     }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode,
-        onCopyUrn, onConnect, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
+        onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, layers, onMoveToLayer, onClose])
 
     // Get icon component

@@ -36,6 +36,7 @@ import {
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import { useToast } from '@/components/ui/toast'
 import { parseIndentedOutline, type ParsedOutlineRow, type OutlineParseContext } from './outlineParser'
+import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import { useHierarchyOutline, type OutlineRow } from './useHierarchyOutline'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
@@ -481,6 +482,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                               onSelect={() => { clearConsumedClick(); retarget(row.tempUrn); focusName() }}
                               onRenameStart={cancelFocusName}
                               onToggleDetails={() => { clearConsumedClick(); setDetailsRowUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn)) }}
+                              onLink={(anchor) => useCreateLinkStore.getState().open({ sourceUrn: row.tempUrn, anchor })}
                               onRemove={() => removeRow(row.changeId)}
                               onRename={(name) => renameRow(row.tempUrn, name)}
                             />
@@ -623,7 +625,8 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                       <span className="min-w-0 flex-1 text-[11px] font-medium text-ink truncate">Details — {detailsRow.name}</span>
                       <button
                         type="button"
-                        onClick={() => { clearConsumedClick(); setDetailsRowUrn(null) }}
+                        // Rebinds to the ACTIVE row AND opens its editor — symmetry with ⌥↵.
+                        onClick={() => { clearConsumedClick(); setDetailsRowUrn(null); setDetailsOpen(true) }}
                         className="text-[11px] font-medium text-accent-lineage hover:underline flex-shrink-0"
                       >
                         Back to new entity
@@ -723,7 +726,7 @@ type DetailsValue = { description: string; tags: string; fieldValues: Record<str
 
 function AddingRow({
   row, type, isTarget, canNest, descendants, detailsShown,
-  onSelect, onRenameStart, onToggleDetails, onRemove, onRename,
+  onSelect, onRenameStart, onToggleDetails, onLink, onRemove, onRename,
 }: {
   row: OutlineRow
   type?: EntityTypeSchema
@@ -735,11 +738,14 @@ function AddingRow({
   /** Fired when a double-click opens the rename editor, BEFORE it mounts. */
   onRenameStart: () => void
   onToggleDetails: () => void
+  /** Open the "Link to…" popover for this row, anchored at the given viewport point. */
+  onLink: (anchor: { x: number; y: number }) => void
   onRemove: () => void
   onRename: (name: string) => void
 }) {
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(row.name)
+  const rowRef = useRef<HTMLDivElement>(null)
 
   const commitRename = () => {
     const name = draft.trim()
@@ -754,6 +760,7 @@ function AddingRow({
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.1 }}>
       <div
+        ref={rowRef}
         className={cn('group/row flex items-center gap-1.5 rounded-md pr-1 py-1 transition-colors',
           isTarget ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage/40' : 'hover:bg-black/5 dark:hover:bg-white/5')}
         style={{ paddingLeft: 6 + row.depth * 14 }}
@@ -792,6 +799,17 @@ function AddingRow({
             <LucideIcons.CornerDownRight className="w-3.5 h-3.5" />
           </button>
         )}
+        <button
+          onClick={() => {
+            const rect = rowRef.current?.getBoundingClientRect()
+            onLink(rect ? { x: rect.right + 8, y: rect.top } : { x: window.innerWidth / 2, y: window.innerHeight / 2 })
+          }}
+          title={`Link ${row.name} to…`}
+          aria-label={`Link ${row.name} to…`}
+          className={cn(actionCls, 'hover:text-accent-lineage')}
+        >
+          <LucideIcons.Link2 className="w-3.5 h-3.5" />
+        </button>
         <button onClick={onToggleDetails} title="Details" aria-label="Details" className={cn(actionCls, detailsShown ? 'opacity-100 text-accent-lineage' : 'hover:text-ink')}>
           <LucideIcons.SlidersHorizontal className="w-3.5 h-3.5" />
         </button>

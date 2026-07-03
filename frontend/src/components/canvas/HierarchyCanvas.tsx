@@ -24,6 +24,8 @@ import { useLoadingToast } from '@/components/ui/toast'
 
 // UX-first interaction components (shared across canvases)
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
+import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
+import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { InlineNodeEditor } from './InlineNodeEditor'
 import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
@@ -584,6 +586,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
+        onLinkNode={(id) => {
+          const node = flatNodes.find(n => n.id === id)
+          useCreateLinkStore.getState().open({
+            sourceUrn: node?.urn || id,
+            anchor: interactions.state.contextMenu.position,
+          })
+        }}
         onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
@@ -622,6 +631,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
+
+      {/* Click-based "Link to…" flow — this canvas has no drag-connect, so this
+          popover is its only lineage-linking affordance. */}
+      <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
     </div>
   )
 }

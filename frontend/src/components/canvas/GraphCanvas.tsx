@@ -78,6 +78,8 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useLoadingToast, useToast } from '@/components/ui/toast'
 import { EdgeTypePickerPopover } from './edge-create/EdgeTypePickerPopover'
+import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
+import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { deriveConnectableEdges, validateDrawnEdge } from '@/services/ontologyPreflightService'
 
 // Stores
@@ -1594,6 +1596,13 @@ export function GraphCanvas({ className }: { className?: string }) {
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
+        onLinkNode={(id) => {
+          const node = rawNodes.find(n => n.id === id)
+          useCreateLinkStore.getState().open({
+            sourceUrn: (node?.data?.urn as string) || id,
+            anchor: interactions.state.contextMenu.position,
+          })
+        }}
         onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
@@ -1640,6 +1649,9 @@ export function GraphCanvas({ className }: { className?: string }) {
           onCancel={() => setEdgePicker(null)}
         />
       )}
+
+      {/* Click-based "Link to…" flow — the discoverable sibling of handle-drag connect. */}
+      <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
     </div>
   )
 }
