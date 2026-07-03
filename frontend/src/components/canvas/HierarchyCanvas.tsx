@@ -27,7 +27,6 @@ import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from './edge-create/createLinkStore'
 import { InlineNodeEditor } from './InlineNodeEditor'
-import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
@@ -37,7 +36,8 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
 // Editor components (shared across canvases)
 import { EditorToolbar } from './EditorToolbar'
-import { NodePalette } from './NodePalette'
+import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
+import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
@@ -104,7 +104,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
   // Edit Mode State (shared across canvases)
-  const [isPaletteOpen, setPaletteOpen] = useState(false)
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
   // Build containment hierarchy using shared hook (must precede trace + traceContextSet)
@@ -349,7 +349,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       {/* Editor Toolbar - Unified with LineageCanvas */}
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
-          onAddNode={() => setPaletteOpen(true)}
+          onAddNode={() => useHierarchyBuilderStore.getState().open()}
           onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
@@ -364,16 +364,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           />
         )}
       </div>
-
-      {/* Node Palette - Drag and drop entity creation */}
-      <AnimatePresence>
-        {isPaletteOpen && (
-          <NodePalette
-            isOpen={isPaletteOpen}
-            onClose={() => setPaletteOpen(false)}
-          />
-        )}
-      </AnimatePresence>
 
       {/* Header */}
       <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
@@ -456,49 +446,76 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
       </div>
 
-      {/* Hierarchy Content */}
-      <div className="flex-1 overflow-auto p-6 custom-scrollbar">
-        {hierarchyTree.length === 0 ? (
-          <EmptyState />
-        ) : (
-          <div className="space-y-3">
-            {hierarchyTree.map((rootNode) => (
-              <HierarchyContainer
-                key={rootNode.id}
-                node={rootNode}
-                schema={schema}
-                selectedNodeId={selectedNodeId}
-                expandedNodes={expandedNodes}
-                searchResults={searchResults}
-                onSelect={selectNode}
-                onToggle={toggleNode}
-                onContextMenu={(e, nodeId) => {
-                  interactions.openContextMenu(e, {
-                    type: 'node',
-                    id: nodeId,
-                    data: flatNodes.find(n => n.id === nodeId)?.data || {}
-                  })
-                }}
-                onDoubleClick={(nodeId, e) => {
-                  const node = flatNodes.find(n => n.id === nodeId)
-                  const element = document.getElementById(`hierarchy-node-${nodeId}`)
-                  if (element && node) {
-                    const rect = element.getBoundingClientRect()
-                    interactions.startInlineEdit(
-                      nodeId,
-                      node.name,
-                      { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
-                    )
-                  }
-                }}
-                isTraceActive={trace.isTracing}
-                traceContextSet={traceContextSet}
-                traceFocusId={trace.focusId}
-              />
-            ))}
-          </div>
+      {/* Tree + right-rail row. The rail panels (builder / EntityDrawer) are
+          width-animated flex siblings, so opening one shrinks the tree area
+          rather than overlaying it — parity with GraphCanvas (44d8811).
+          SearchMapPanel/PropertyManagerDrawer stay outside this row, same as
+          GraphCanvas — they mount below as their own flex-sibling drawers. */}
+      <div className="flex-1 min-h-0 flex">
+        {/* Hierarchy Content */}
+        <div className="flex-1 min-w-0 overflow-auto p-6 custom-scrollbar">
+          {hierarchyTree.length === 0 ? (
+            <EmptyState />
+          ) : (
+            <div className="space-y-3">
+              {hierarchyTree.map((rootNode) => (
+                <HierarchyContainer
+                  key={rootNode.id}
+                  node={rootNode}
+                  schema={schema}
+                  selectedNodeId={selectedNodeId}
+                  expandedNodes={expandedNodes}
+                  searchResults={searchResults}
+                  onSelect={selectNode}
+                  onToggle={toggleNode}
+                  onContextMenu={(e, nodeId) => {
+                    interactions.openContextMenu(e, {
+                      type: 'node',
+                      id: nodeId,
+                      data: flatNodes.find(n => n.id === nodeId)?.data || {}
+                    })
+                  }}
+                  onDoubleClick={(nodeId, e) => {
+                    const node = flatNodes.find(n => n.id === nodeId)
+                    const element = document.getElementById(`hierarchy-node-${nodeId}`)
+                    if (element && node) {
+                      const rect = element.getBoundingClientRect()
+                      interactions.startInlineEdit(
+                        nodeId,
+                        node.name,
+                        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+                      )
+                    }
+                  }}
+                  isTraceActive={trace.isTracing}
+                  traceContextSet={traceContextSet}
+                  traceFocusId={trace.focusId}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Right rail — mutual exclusion: creation takes the rail (an
+            explicit action), so the builder is never hidden behind an
+            inspector the user left open. Mirrors GraphCanvas. */}
+        {builderOpen && (
+          <HierarchyBuilderPanel
+            onClose={() => useHierarchyBuilderStore.getState().close()}
+            onEntityStaged={(_tempUrn, parentUrn) => {
+              if (parentUrn) setExpandedNodes(prev => new Set([...prev, parentUrn]))
+            }}
+          />
         )}
-      </div>
+        {!builderOpen && (
+          <EntityDrawer
+            onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+            onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+            onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+            onFocusNode={expandToNode}
+          />
+        )}
+      </div>{/* end tree + right-rail row */}
 
       {/* Trace Toolbar */}
       <AnimatePresence>
@@ -566,14 +583,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         )}
       </AnimatePresence>
 
-      {/* Entity Drawer - Unified view & edit */}
-      <EntityDrawer
-        onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-        onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-        onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
-        onFocusNode={expandToNode}
-      />
-
       {/* === UX-FIRST INTERACTION COMPONENTS (Unified with LineageCanvas) === */}
 
       {/* Context Menu - Right-click on nodes */}
@@ -598,7 +607,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
         onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onCreateNode={() => useHierarchyBuilderStore.getState().open()}
         onSelectAll={interactions.selectAll}
       />
 
@@ -611,23 +620,13 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Quick Create - Press 'N' or use context menu */}
-      <QuickCreateNode
-        isOpen={interactions.state.quickCreate.isOpen}
-        position={interactions.state.quickCreate.position}
-        parentUrn={interactions.state.quickCreate.parentUrn}
-        onClose={interactions.closeQuickCreate}
-        onCreated={(nodeId) => selectNode(nodeId)}
-        variant="centered"
-      />
-
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
         onCreateEntity={(typeId) => {
           interactions.closeCommandPalette()
-          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+          useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
@@ -773,7 +772,7 @@ function HierarchyContainer({
         {/* Header (always visible) */}
         <div
           className={cn(
-            "flex items-center gap-3 px-4 py-3 cursor-pointer",
+            "group/row flex items-center gap-3 px-4 py-3 cursor-pointer",
             "hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
           )}
           onClick={() => onSelect(node.id)}
@@ -866,6 +865,22 @@ function HierarchyContainer({
           {/* Display-rule tags — shared premium chip cluster (same as the
               other canvases). */}
           <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
+
+          {/* Add child — hover-visible; direct store import so the recursive
+              render never threads an onAddChild prop down every level. */}
+          {(entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                useHierarchyBuilderStore.getState().open({ parentUrn: node.urn ?? node.id })
+              }}
+              className="opacity-0 group-hover/row:opacity-100 flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95"
+              title={`Add inside ${node.name}`}
+              aria-label={`Add inside ${node.name}`}
+            >
+              <LucideIcons.Plus className="w-4 h-4" style={{ color: visual?.color ?? '#6b7280' }} />
+            </button>
+          )}
 
           {/* Expand indicator */}
           {hasChildren && !isExpanded && (
