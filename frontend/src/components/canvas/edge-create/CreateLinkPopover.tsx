@@ -25,9 +25,14 @@ import type { EntityTypeSchema } from '@/types/schema'
 import { useCreateLinkStore } from './createLinkStore'
 
 export interface CreateLinkPopoverProps {
-  /** Stage a RAW lineage edge (source urn → target urn) of the chosen type. */
-  onCreateLink: (sourceUrn: string, targetUrn: string, edgeType: string) => void
+  /** Stage a RAW lineage edge (source urn → target urn) of the chosen type.
+   *  Returns the staged temp edge id, or `null` when the ontology gate rejects
+   *  it (the gate shows its own error toast). */
+  onCreateLink: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
 }
+
+/** The duplicate-disable reason (mirrors EdgeTypePickerPopover's wording). */
+const ALREADY_CONNECTED = 'Already connected by this relationship.'
 
 /** Prefer the ontology's human label; fall back to a humanized id. Never a raw id. */
 function relationshipText(o: AllowedEdgeOption): string {
@@ -139,16 +144,22 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
       return deriveConnectableEdges(sourceType, targetType, relationshipTypes, containmentEdgeTypes, entityTypes)
         .map((o) =>
           connected.has(o.edgeType.toUpperCase())
-            ? { ...o, allowed: false, reason: 'Already connected by this relationship.' }
+            ? { ...o, allowed: false, reason: ALREADY_CONNECTED }
             : o,
         )
     },
     [targetUrn, sourceUrn, edges, sourceType, targetType, relationshipTypes, containmentEdgeTypes, entityTypes],
   )
   const options = useMemo(() => allOptions.filter((o) => o.allowed), [allOptions])
+  // Zero-state flavor: every ontology-valid type is blocked only because it already
+  // connects this pair → say "already linked" (and drop the now-redundant bullet).
+  const alreadyLinked = options.length === 0 && allOptions.some((o) => o.reason === ALREADY_CONNECTED)
   const disabledReasons = useMemo(
-    () => [...new Set(allOptions.filter((o) => !o.allowed && o.reason).map((o) => o.reason as string))].slice(0, 2),
-    [allOptions],
+    () => {
+      const reasons = [...new Set(allOptions.filter((o) => !o.allowed && o.reason).map((o) => o.reason as string))]
+      return (alreadyLinked ? reasons.filter((r) => r !== ALREADY_CONNECTED) : reasons).slice(0, 2)
+    },
+    [allOptions, alreadyLinked],
   )
 
   // Default the radio selection to the first allowed type when the pair changes.
@@ -159,6 +170,12 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
   const chosenEdgeType = options.length >= 2 ? selectedEdgeType : (options[0]?.edgeType ?? null)
 
   // Dismiss: outside-click closes; Escape steps back from the link step, else closes.
+  // Escape is intercepted in the CAPTURE phase with stopPropagation: the canvases'
+  // useCanvasKeyboard listens on document in the bubble phase with no input-guard
+  // for buttons, so an un-stopped Escape would fire the canvas onCancel — which can
+  // close the Hierarchy Builder underneath a builder-row-initiated link. Capture
+  // runs first and stops the event before that listener (and before anything else)
+  // ever sees it, wherever focus happens to be.
   useEffect(() => {
     if (!isOpen) return
     const onDown = (e: MouseEvent) => {
@@ -166,16 +183,17 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      e.stopPropagation()
       e.preventDefault()
       if (targetUrn) setTargetUrn(null)
       else close()
     }
     const t = window.setTimeout(() => document.addEventListener('mousedown', onDown), 0)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     return () => {
       window.clearTimeout(t)
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
     }
   }, [isOpen, targetUrn, close])
 
@@ -199,8 +217,12 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
 
   const confirm = useCallback(() => {
     if (!sourceUrn || !targetUrn || !chosenEdgeType) return
-    onCreateLink(sourceUrn, targetUrn, chosenEdgeType)
-    showToast('success', `Linked ${sourceName} → ${targetName} — save when you're done`)
+    // stageEdgeCreate returns null when its ontology gate rejects (it toasts
+    // its own error) — only claim success for an actually-staged edge.
+    const staged = onCreateLink(sourceUrn, targetUrn, chosenEdgeType)
+    if (staged !== null) {
+      showToast('success', `Linked ${sourceName} → ${targetName} — save when you're done`)
+    }
     close()
   }, [sourceUrn, targetUrn, chosenEdgeType, onCreateLink, showToast, sourceName, targetName, close])
 
@@ -213,6 +235,12 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
   return (
     <motion.div
       ref={ref}
+      // Enter must never leak to useCanvasKeyboard's document listener: its
+      // input-guard passes buttons through, and it preventDefaults Enter (killing
+      // the focused "Create link" activation) then fires onEdit on the source
+      // node. Stopping propagation here ends the event at the React root, before
+      // it bubbles on to document — the button's default activation still runs.
+      onKeyDown={(e) => { if (e.key === 'Enter') e.stopPropagation() }}
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.12 }}
@@ -295,7 +323,9 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
               <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
               <div className="min-w-0">
-                <p className="font-medium text-ink">These two can&apos;t be linked.</p>
+                <p className="font-medium text-ink">
+                  {alreadyLinked ? 'These two are already linked.' : 'These two can’t be linked.'}
+                </p>
                 {disabledReasons.length > 0 && (
                   <ul className="mt-1 space-y-1 text-ink-muted">
                     {disabledReasons.map((r) => (
