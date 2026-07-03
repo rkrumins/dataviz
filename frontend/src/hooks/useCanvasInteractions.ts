@@ -5,7 +5,7 @@
  * into a single cohesive hook for consistent UX across all canvas views.
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
@@ -15,6 +15,7 @@ import { useToast } from '@/components/ui/toast'
 import { getDeleteImpact } from '@/services/versioningApiService'
 import { validateDrawnEdge } from '@/services/ontologyPreflightService'
 import { generateId } from '@/lib/utils'
+import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
 
 // ============================================
@@ -193,9 +194,6 @@ export function useCanvasInteractions(
         nodeIds: [],
         hasContent: false,
     })
-    
-    // Refs for position tracking
-    const lastMousePosition = useRef({ x: 0, y: 0 })
     
     // ===================
     // Context Menu
@@ -403,12 +401,9 @@ export function useCanvasInteractions(
     const createChild = useCallback((parentId: string) => {
         const parentNode = nodes.find(n => n.id === parentId)
         if (parentNode) {
-            openQuickCreate(
-                { x: parentNode.position.x + 100, y: parentNode.position.y + 100 },
-                parentNode.data.urn
-            )
+            useHierarchyBuilderStore.getState().open({ parentUrn: (parentNode.data.urn as string) ?? parentNode.id })
         }
-    }, [nodes, openQuickCreate])
+    }, [nodes])
     
     const copyUrn = useCallback(async (nodeId: string) => {
         const node = nodes.find(n => n.id === nodeId)
@@ -597,8 +592,8 @@ export function useCanvasInteractions(
         onCancel: () => {
             if (inlineEdit.nodeId) {
                 cancelInlineEdit()
-            } else if (quickCreate.isOpen) {
-                closeQuickCreate()
+            } else if (useHierarchyBuilderStore.getState().isOpen) {
+                useHierarchyBuilderStore.getState().close()
             } else if (commandPalette.isOpen) {
                 closeCommandPalette()
             } else if (contextMenu.isOpen) {
@@ -621,23 +616,14 @@ export function useCanvasInteractions(
             }
         },
         onCreate: () => {
-            openQuickCreate(lastMousePosition.current)
+            useHierarchyBuilderStore.getState().open()
         },
         onConnectMode: () => {
             if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
         },
         onCommandPalette: openCommandPalette,
     }
-    
-    // Track mouse position for 'N' key create
-    useEffect(() => {
-        const handler = (e: MouseEvent) => {
-            lastMousePosition.current = { x: e.clientX, y: e.clientY }
-        }
-        document.addEventListener('mousemove', handler, { passive: true })
-        return () => document.removeEventListener('mousemove', handler)
-    }, [])
-    
+
     return {
         state: {
             contextMenu,
