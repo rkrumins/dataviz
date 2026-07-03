@@ -139,10 +139,12 @@ const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byS
 
 /**
  * The `root` change plus every staged `create_entity` descendant of it, found by
- * walking the temp-urn → `after.parentUrn` linkage. Returned LEAF-FIRST (deepest
- * descendants before their ancestors) so discard hooks restore children before
- * parents, regardless of staging order or same-millisecond timestamps. Used so
- * discarding a staged parent also discards the children created under it (no orphans).
+ * walking the temp-urn → `after.parentUrn` linkage, plus any staged `create_edge`
+ * changes anchored to one of those entities' temp urns. Returned LEAF-FIRST
+ * (deepest descendants and edges before their ancestors) so discard hooks restore
+ * children before parents, regardless of staging order or same-millisecond
+ * timestamps. Used so discarding a staged parent also discards the children
+ * created under it (no orphans) and any edges staged against them (no phantoms).
  */
 function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedChange[] {
   const victims: StagedChange[] = [root]
@@ -165,6 +167,21 @@ function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedCh
         if (c.targetUrn) urnDepth.set(c.targetUrn, d)
         grew = true
       }
+    }
+  }
+  // Any staged `create_edge` whose endpoint is one of the victim entities' temp
+  // urns becomes a phantom once that entity is discarded (its optimistic edge
+  // leaves the canvas but the staged change survives, later shipping an
+  // unresolvable urn:staged: endpoint on save). Cascade those too — deepest, so
+  // their discard hooks run before the entities they reference.
+  const maxDepth = Math.max(0, ...depthById.values())
+  for (const c of all) {
+    if (c.type !== 'create_edge' || victimIds.has(c.id)) continue
+    const after = c.after as { source?: string; target?: string } | undefined
+    if (after && (urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) {
+      depthById.set(c.id, maxDepth + 1)
+      victims.push(c)
+      victimIds.add(c.id)
     }
   }
   // Deepest first; stable sort keeps siblings in their original (creation) order.

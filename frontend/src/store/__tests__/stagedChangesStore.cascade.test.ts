@@ -4,11 +4,16 @@
  * would be orphaned (its parent never saved) and surface at the top level — the same
  * class of "flattened hierarchy" the collapse fix addresses, but via discard.
  */
+import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useStagedChangesStore } from '../stagedChangesStore'
+import { useCanvasStore } from '../canvas'
+import { useStageEntityCreation } from '@/components/canvas/create/useStageEntityCreation'
 
-const reset = () =>
+const reset = () => {
   useStagedChangesStore.setState({ changes: [], redoStack: [], _scopeKey: null, _byScope: {} })
+  useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set() } as never)
+}
 
 const createEntity = (tempUrn: string, parentUrn: string | null, discard?: () => void) => ({
   type: 'create_entity' as const,
@@ -60,5 +65,46 @@ describe('stagedChangesStore cascade discard', () => {
 
     s.discard(useStagedChangesStore.getState().changes[0].id)
     expect(order).toEqual(['C', 'P'])
+  })
+
+  it('discarding a staged entity also discards a staged edge linked to it, and runs the edge discard hook', () => {
+    const { result } = renderHook(() => useStageEntityCreation())
+    let aTemp = ''
+    let bTemp = ''
+    act(() => {
+      aTemp = result.current.stageEntity({ entityType: 't', displayName: 'A' })
+      bTemp = result.current.stageEntity({ entityType: 't', displayName: 'B' })
+    })
+
+    // Stage a create_edge change shaped exactly like useCanvasInteractions.stageEdgeCreate
+    // builds it (optimistic edge + `after: { edgeType, source, target }`).
+    const tempEdgeId = 'staged-edge-1'
+    const edgeDiscard = vi.fn(() => useCanvasStore.getState().removeEdge(tempEdgeId))
+    act(() => {
+      useCanvasStore.getState().addEdges([{
+        id: tempEdgeId,
+        source: aTemp,
+        target: bTemp,
+        type: 'lineage',
+        data: { edgeType: 'DEPENDS_ON', relationship: 'depends_on' },
+      }])
+      useStagedChangesStore.getState().stage({
+        type: 'create_edge',
+        targetId: tempEdgeId,
+        after: { edgeType: 'DEPENDS_ON', source: aTemp, target: bTemp },
+        summary: `Create DEPENDS_ON edge ${aTemp} → ${bTemp}`,
+        discard: edgeDiscard,
+      })
+    })
+
+    const aChange = useStagedChangesStore.getState().changes.find((c) => c.targetUrn === aTemp)!
+    act(() => {
+      useStagedChangesStore.getState().discard(aChange.id)
+    })
+
+    const remaining = useStagedChangesStore.getState().changes
+    expect(remaining.find((c) => c.targetId === tempEdgeId)).toBeUndefined()
+    expect(edgeDiscard).toHaveBeenCalledTimes(1)
+    expect(useCanvasStore.getState().edges.find((e) => e.id === tempEdgeId)).toBeUndefined()
   })
 })
