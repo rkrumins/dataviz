@@ -1,15 +1,19 @@
 /**
- * HierarchyBuilderPanel — the premium right-rail Hierarchy Builder.
+ * HierarchyBuilderPanel — the right-rail Hierarchy Builder.
  *
- * A single outliner surface for building a whole hierarchy of staged entities
- * before one Save. All logic lives in {@link useHierarchyOutline} (allowed
- * types, edge auto-pick, blocking, staging, rename/details/remove) — this panel
- * only renders and forwards. It reads its scope (parent/layer/type/mode/
- * template) from {@link useHierarchyBuilderStore}.
+ * Presentation follows the old UnifiedCreatePanel's quick-mode backbone — the
+ * "ADDING (N) / Save to keep" outline card, a prominent always-visible
+ * ENTITY TYPE list, a labeled DISPLAY NAME field, and a green + Add button —
+ * with the outliner powers layered on top: Enter/Tab keyboard flow, per-row
+ * retarget/rename/details/remove, containment-chain templates, and a
+ * multi-line paste mode. All logic lives in {@link useHierarchyOutline}
+ * (allowed types, edge auto-pick, blocking, staging, rename/details/remove) —
+ * this panel only renders and forwards. It reads its scope
+ * (parent/layer/type/mode/template) from {@link useHierarchyBuilderStore}.
  *
- * Note on accents: this repo defines no `accent-primary` color (UnifiedCreatePanel's
- * `accent-primary` classes are dead no-ops). The real primary accent is
- * `accent-lineage`; the green Plus/Add CTA is kept from the old panel.
+ * Note on accents: this repo defines no `accent-primary` color (the old
+ * panel's `accent-primary` classes were dead no-ops). The real primary accent
+ * is `accent-lineage`; the green Plus/Add CTA is kept from the old panel.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -103,7 +107,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const initialTemplate = useHierarchyBuilderStore((s) => s.initialTemplate)
 
   const {
-    tree, active, allowedTypes, edgeOptions, blockedReason,
+    tree, active, allowedTypes, edgeOptions, blockedReason, canCommit,
     setName, setType, setEdgeType, setDetails, retarget,
     commitSibling, commitAndNest, indent, outdent,
     renameRow, updateRowDetails, removeRow, descendantCount, stageRows,
@@ -125,12 +129,16 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const [templateChain, setTemplateChain] = useState<string[] | null>(null)
   const [pasteText, setPasteText] = useState('')
   const [detailsOpen, setDetailsOpen] = useState(false)
-  const [showTypeDropdown, setShowTypeDropdown] = useState(false)
+  const [typeQuery, setTypeQuery] = useState('')
+  const [highlighted, setHighlighted] = useState(0)
   const [showParentPicker, setShowParentPicker] = useState(false)
   const [showEdgePicker, setShowEdgePicker] = useState(false)
   const [openDetailsUrn, setOpenDetailsUrn] = useState<string | null>(null)
   const [blockFlash, setBlockFlash] = useState(0)
   const nameRef = useRef<HTMLInputElement>(null)
+  const typeSearchRef = useRef<HTMLInputElement>(null)
+  const typeListRef = useRef<HTMLDivElement>(null)
+  const didInitialFocus = useRef(false)
 
   const focusName = useCallback(() => {
     window.setTimeout(() => nameRef.current?.focus(), 20)
@@ -142,10 +150,29 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     setTemplateChain(initialTemplate && initialTemplate.length > 0 ? initialTemplate : null)
   }, [initialMode, initialTemplate])
 
-  // Keep the name input focused whenever we land back on the outline.
+  // Old-panel focus flow: open → the type search; returning to the outline
+  // later (from paste/template) → the name input.
   useEffect(() => {
-    if (mode === 'outline' && !templateChain) focusName()
-  }, [mode, templateChain, focusName])
+    if (mode !== 'outline' || templateChain) return
+    const t = window.setTimeout(() => {
+      if (didInitialFocus.current) nameRef.current?.focus()
+      else { typeSearchRef.current?.focus(); didInitialFocus.current = true }
+    }, 60)
+    return () => window.clearTimeout(t)
+  }, [mode, templateChain])
+
+  // A retarget/nest changes the allowed types — a stale query would hide the
+  // auto-inferred pick, so reset the search with the parent.
+  useEffect(() => {
+    setTypeQuery('')
+    setHighlighted(0)
+  }, [active.parentUrn])
+
+  // Keep the selected (possibly auto-inferred) type row visible in the list.
+  useEffect(() => {
+    if (!active.typeId) return
+    typeListRef.current?.querySelector('[data-active]')?.scrollIntoView({ block: 'nearest' })
+  }, [active.typeId])
 
   // Resolve where the next entity lands ("Adding inside X") from the active parent —
   // a staged row or a real canvas node.
@@ -176,7 +203,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
       if (seen.has(key)) continue
       seen.add(key)
       out.push(c)
-      if (out.length >= 6) break
+      if (out.length >= 3) break
     }
     return out
   }, [tree.length, entityTypes, rootEntityTypes, activeParentType])
@@ -186,17 +213,36 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, activeParentType],
   )
 
-  const selectedEdge = edgeOptions.find((o) => o.edgeType === active.edgeType) ?? edgeOptions[0]
+  const filteredTypes = useMemo(() => {
+    if (!typeQuery.trim()) return allowedTypes
+    const q = typeQuery.toLowerCase()
+    return allowedTypes.filter((t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q))
+  }, [allowedTypes, typeQuery])
 
-  // ── Keyboard model (see brief §Keyboard). Tab routing is load-bearing:
+  const pickType = useCallback((id: string) => {
+    setType(id)
+    focusName()
+  }, [setType, focusName])
+
+  const onTypeSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHighlighted((i) => Math.min(i + 1, filteredTypes.length - 1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHighlighted((i) => Math.max(i - 1, 0)) }
+    else if (e.key === 'Enter') { e.preventDefault(); if (filteredTypes[highlighted]) pickType(filteredTypes[highlighted].id) }
+    else if (e.key === 'Escape') { e.preventDefault(); onClose() }
+  }, [filteredTypes, highlighted, pickType, onClose])
+
+  const doAdd = useCallback(() => { commitSibling(); focusName() }, [commitSibling, focusName])
+  const doAddNest = useCallback(() => { commitAndNest(); focusName() }, [commitAndNest, focusName])
+
+  // ── Keyboard model (unchanged from v1). Tab routing is load-bearing:
   //    non-blank name → commitAndNest(); blank name → indent(). ──
   const onNameKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && e.altKey) { e.preventDefault(); setDetailsOpen((v) => !v); return }
-    if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); commitAndNest(); focusName(); return }
-    if (e.key === 'Enter') { e.preventDefault(); commitSibling(); focusName(); return }
+    if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); doAddNest(); return }
+    if (e.key === 'Enter') { e.preventDefault(); doAdd(); return }
     if (e.key === 'Tab' && !e.shiftKey) {
       e.preventDefault()
-      if (active.name.trim()) { commitAndNest(); focusName() }
+      if (active.name.trim()) { doAddNest() }
       else if (!indent()) { setBlockFlash((n) => n + 1) }
       return
     }
@@ -207,7 +253,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
       if (active.name) { setName(''); return }
       onClose()
     }
-  }, [active.name, commitAndNest, commitSibling, indent, outdent, detailsOpen, setName, onClose, focusName])
+  }, [active.name, doAdd, doAddNest, indent, outdent, detailsOpen, setName, onClose])
 
   // A multi-line paste into the name input switches straight to paste mode.
   const onNamePaste = useCallback((e: React.ClipboardEvent) => {
@@ -215,161 +261,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     if (text.includes('\n')) { e.preventDefault(); setPasteText(text); setMode('paste') }
   }, [])
 
-  const pickType = useCallback((id: string) => {
-    setType(id)
-    setShowTypeDropdown(false)
-    focusName()
-  }, [setType, focusName])
-
   if (!isOpen) return null
-
-  // ── Active-row editor (rendered inline at its tree position) ──
-  const canPickType = allowedTypes.length > 0
-  const activeEditor = (
-    <div
-      key="__active__"
-      className="relative mr-1 my-1 rounded-lg border border-accent-lineage/30 bg-accent-lineage/5 px-2 py-1.5 space-y-1.5"
-      style={{ marginLeft: 12 + activeDepthFor(tree, active.parentUrn) * 14 }}
-    >
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => canPickType && setShowTypeDropdown((v) => !v)}
-          disabled={!canPickType}
-          title="Change type"
-          aria-label="Change type"
-          className={cn(
-            'flex items-center gap-1 pl-0.5 pr-1 py-0.5 rounded-md flex-shrink-0 max-w-[46%] transition-colors',
-            canPickType ? 'hover:bg-black/5 dark:hover:bg-white/5' : 'opacity-60 cursor-not-allowed',
-          )}
-        >
-          <TypeChip type={activeType} size="xs" />
-          <span className="text-[11px] font-medium text-ink truncate">{activeType?.name ?? 'Type'}</span>
-          {canPickType && <LucideIcons.ChevronDown className="w-3 h-3 text-ink-muted flex-shrink-0" />}
-        </button>
-        <input
-          ref={nameRef}
-          type="text"
-          value={active.name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={onNameKeyDown}
-          onPaste={onNamePaste}
-          placeholder="Name…"
-          className="flex-1 min-w-0 bg-transparent text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none"
-        />
-      </div>
-
-      <AnimatePresence>
-        {showTypeDropdown && (
-          <TypeChipDropdown
-            types={allowedTypes}
-            selectedId={active.typeId}
-            onPick={pickType}
-            onClose={() => setShowTypeDropdown(false)}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Relationship line / blocked note / recovery hint */}
-      {blockedReason ? (
-        <motion.div
-          key={`blocked-${blockFlash}`}
-          initial={{ opacity: 0, x: 0 }}
-          animate={{ opacity: 1, x: [0, -3, 3, -2, 2, 0] }}
-          transition={{ duration: 0.28 }}
-          className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400"
-        >
-          <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0 mt-0.5" />
-          <span>{blockedReason}</span>
-        </motion.div>
-      ) : !canPickType && parentInfo ? (
-        <div className="flex items-start gap-1.5 text-[11px] text-ink-muted">
-          <LucideIcons.CircleSlash className="w-3 h-3 flex-shrink-0 mt-0.5" />
-          <span>
-            Nothing more can go inside <span className="text-ink">{parentInfo.name}</span> — press{' '}
-            <kbd className="px-1 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">⇧⇥</kbd> to go back.
-          </span>
-        </div>
-      ) : edgeOptions.length === 1 && parentInfo ? (
-        <div className="flex items-center gap-1.5 text-[11px] text-ink-muted">
-          <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-accent-lineage/70" />
-          <span>{relationshipText(edgeOptions[0])} <span className="text-ink">{parentInfo.name}</span></span>
-        </div>
-      ) : edgeOptions.length > 1 && parentInfo && selectedEdge ? (
-        <div className="relative flex items-center gap-1.5 text-[11px] text-ink-muted">
-          <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-accent-lineage/70" />
-          <span>{relationshipText(selectedEdge)} <span className="text-ink">{parentInfo.name}</span></span>
-          <button
-            type="button"
-            onClick={() => setShowEdgePicker((v) => !v)}
-            className="font-medium text-accent-lineage hover:underline"
-          >
-            Change
-          </button>
-          <AnimatePresence>
-            {showEdgePicker && (
-              <EdgePickerPopover
-                options={edgeOptions}
-                selectedId={active.edgeType}
-                onPick={(id) => { setEdgeType(id); setShowEdgePicker(false) }}
-                onClose={() => setShowEdgePicker(false)}
-              />
-            )}
-          </AnimatePresence>
-        </div>
-      ) : null}
-
-      {tree.length === 0 && (
-        <p className="text-[10px] text-ink-muted/80 pl-0.5">Type a name and press Enter. Tab nests the next one inside.</p>
-      )}
-
-      {/* Details accordion */}
-      <button
-        type="button"
-        onClick={() => setDetailsOpen((v) => !v)}
-        className="flex items-center gap-1 text-[10px] font-medium text-ink-muted hover:text-ink transition-colors"
-      >
-        {detailsOpen ? <LucideIcons.ChevronDown className="w-3 h-3" /> : <LucideIcons.ChevronRight className="w-3 h-3" />}
-        Add details
-        <span className="text-ink-muted/50">⌥↵</span>
-      </button>
-      <AnimatePresence>
-        {detailsOpen && (
-          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
-            <DetailsForm type={activeType} value={active.details} onChange={setDetails} />
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-
-  // Assemble the outline: committed rows with the active editor spliced in
-  // under its parent (after that parent's whole subtree).
-  const insertAt = insertIndexFor(tree, active.parentUrn)
-  const outlineItems: React.ReactNode[] = []
-  let activeInserted = false
-  tree.forEach((row, i) => {
-    if (i === insertAt) { outlineItems.push(activeEditor); activeInserted = true }
-    const t = typeById.get(row.typeId)
-    outlineItems.push(
-      <OutlineTreeRow
-        key={row.tempUrn}
-        row={row}
-        type={t}
-        node={canvasNodes.find((n) => n.id === row.tempUrn || (n.data?.urn as string) === row.tempUrn)}
-        canNest={(t?.hierarchy.canContain?.length ?? 0) > 0}
-        descendants={descendantCount(row.tempUrn)}
-        detailsShown={openDetailsUrn === row.tempUrn}
-        onAddSibling={() => { retarget(row.parentUrn ?? null); focusName() }}
-        onAddChild={() => { retarget(row.tempUrn); focusName() }}
-        onToggleDetails={() => setOpenDetailsUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn))}
-        onRemove={() => removeRow(row.changeId)}
-        onRename={(name) => renameRow(row.tempUrn, name)}
-        onSaveDetails={(v) => updateRowDetails(row.tempUrn, { description: v.description, tags: splitTags(v.tags), properties: v.fieldValues })}
-      />,
-    )
-  })
-  if (!activeInserted) outlineItems.push(activeEditor)
 
   return (
     <AnimatePresence>
@@ -473,39 +365,202 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
             />
           ) : (
             <>
-              <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar">
+              <div className="flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar">
+                {/* ADDING (N) — the live outline of what's being staged. Click a
+                    row to add the next entity under it. */}
+                {tree.length > 0 && (
+                  <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-2">
+                    <div className="flex items-center justify-between px-1 pb-1.5">
+                      <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Adding ({tree.length})</span>
+                      <span className="text-[10px] text-ink-muted/70">Save to keep</span>
+                    </div>
+                    <div className="max-h-44 overflow-y-auto custom-scrollbar">
+                      <AnimatePresence initial={false}>
+                        {tree.map((row) => {
+                          const t = typeById.get(row.typeId)
+                          return (
+                            <AddingRow
+                              key={row.tempUrn}
+                              row={row}
+                              type={t}
+                              node={canvasNodes.find((n) => n.id === row.tempUrn || (n.data?.urn as string) === row.tempUrn)}
+                              isTarget={active.parentUrn === row.tempUrn}
+                              canNest={(t?.hierarchy.canContain?.length ?? 0) > 0}
+                              descendants={descendantCount(row.tempUrn)}
+                              detailsShown={openDetailsUrn === row.tempUrn}
+                              onSelect={() => { retarget(row.tempUrn); focusName() }}
+                              onToggleDetails={() => setOpenDetailsUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn))}
+                              onRemove={() => removeRow(row.changeId)}
+                              onRename={(name) => renameRow(row.tempUrn, name)}
+                              onSaveDetails={(v) => updateRowDetails(row.tempUrn, { description: v.description, tags: splitTags(v.tags), properties: v.fieldValues })}
+                            />
+                          )
+                        })}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                )}
+
+                {/* Templates — a scaffold to start from, only on an empty outline. */}
                 {chains.length > 0 && (
                   <div className="space-y-2">
                     <div className="flex items-center gap-1.5 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">
                       <LucideIcons.Sparkles className="w-3 h-3" />Start from a template
                     </div>
-                    <div className="grid grid-cols-1 gap-1.5">
-                      {chains.map((chain) => (
-                        <button
-                          key={chain.join('>')}
-                          type="button"
-                          onClick={() => setTemplateChain(chain)}
-                          className="group flex items-center gap-2 px-3 py-2 rounded-lg border border-glass-border hover:border-accent-lineage/50 hover:bg-accent-lineage/5 text-left transition-colors"
-                        >
-                          <span className="flex items-center gap-1 flex-shrink-0">
-                            {chain.map((id, i) => (
-                              <React.Fragment key={id}>
-                                {i > 0 && <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/50" />}
-                                <TypeChip type={typeById.get(id)} size="xs" />
-                              </React.Fragment>
-                            ))}
-                          </span>
-                          <span className="text-[11px] text-ink-muted truncate">
-                            {chain.map((id) => typeById.get(id)?.name ?? id).join(' → ')}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
+                    {chains.map((chain) => (
+                      <button
+                        key={chain.join('>')}
+                        type="button"
+                        onClick={() => setTemplateChain(chain)}
+                        className="w-full flex items-center gap-2.5 px-3.5 py-3 rounded-xl border border-glass-border hover:border-accent-lineage/60 hover:bg-accent-lineage/5 hover:-translate-y-0.5 hover:shadow-md text-left transition-all duration-200"
+                      >
+                        <span className="flex items-center gap-1 flex-shrink-0">
+                          {chain.map((id, i) => (
+                            <React.Fragment key={id}>
+                              {i > 0 && <LucideIcons.ChevronRight className="w-3 h-3 text-ink-muted/50" />}
+                              <TypeChip type={typeById.get(id)} size="xs" />
+                            </React.Fragment>
+                          ))}
+                        </span>
+                        <span className="min-w-0 flex-1 text-xs text-ink truncate">
+                          {chain.map((id) => typeById.get(id)?.name ?? id).join(' → ')}
+                        </span>
+                      </button>
+                    ))}
                   </div>
                 )}
 
+                {/* Entity type — the anchor: search + always-visible icon-rich list. */}
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-ink-muted uppercase tracking-wider">
+                    Entity Type <span className="text-red-400">*</span>
+                  </label>
+                  <div className="relative">
+                    <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
+                    <input
+                      ref={typeSearchRef} type="text" value={typeQuery}
+                      onChange={(e) => { setTypeQuery(e.target.value); setHighlighted(0) }}
+                      onKeyDown={onTypeSearchKeyDown} placeholder="Search entity types..."
+                      className="input w-full pl-10"
+                    />
+                  </div>
+                  <div ref={typeListRef} className="max-h-[260px] overflow-y-auto custom-scrollbar space-y-1 mt-1">
+                    {filteredTypes.map((t, i) => (
+                      <button key={t.id} data-active={t.id === active.typeId || undefined} onClick={() => pickType(t.id)}
+                        className={cn('w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors',
+                          t.id === active.typeId ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage'
+                            : i === highlighted ? 'bg-black/5 dark:bg-white/5' : 'hover:bg-black/5 dark:hover:bg-white/5')}>
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${t.visual?.color}20`, color: t.visual?.color }}>
+                          <DynamicIcon name={t.visual?.icon} className="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-ink truncate">{t.name}</div>
+                          {t.description && <div className="text-[10px] text-ink-muted truncate">{t.description}</div>}
+                        </div>
+                        {t.id === active.typeId && <LucideIcons.Check className="w-4 h-4 text-accent-lineage" />}
+                      </button>
+                    ))}
+                    {filteredTypes.length === 0 && <div className="text-center py-6 text-amber-500 text-xs">No entity types allowed here</div>}
+                  </div>
+                </div>
+
+                {/* Relationship: a fixed plain phrase — never an edge-type label here.
+                    Edge choices live only behind "Change". */}
+                {blockedReason ? (
+                  <motion.div
+                    key={`blocked-${blockFlash}`}
+                    initial={{ opacity: 0, x: 0 }}
+                    animate={{ opacity: 1, x: [0, -3, 3, -2, 2, 0] }}
+                    transition={{ duration: 0.28 }}
+                    className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2"
+                  >
+                    <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                    <span>{blockedReason}</span>
+                  </motion.div>
+                ) : allowedTypes.length === 0 && parentInfo ? (
+                  <div className="flex items-start gap-1.5 px-1 text-[11px] text-ink-muted">
+                    <LucideIcons.CircleSlash className="w-3 h-3 flex-shrink-0 mt-0.5" />
+                    <span>
+                      Nothing more can go inside <span className="text-ink">{parentInfo.name}</span> — press{' '}
+                      <kbd className="px-1 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">⇧⇥</kbd> to go back.
+                    </span>
+                  </div>
+                ) : parentInfo && active.typeId ? (
+                  <div className="relative flex items-center gap-1.5 px-1 text-[11px] text-ink-muted">
+                    <LucideIcons.CornerDownRight className="w-3 h-3 flex-shrink-0 text-accent-lineage/70" />
+                    <span>Inside <span className="font-medium text-ink">{parentInfo.name}</span></span>
+                    {edgeOptions.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowEdgePicker((v) => !v)}
+                        className="font-medium text-accent-lineage hover:underline"
+                      >
+                        Change
+                      </button>
+                    )}
+                    <AnimatePresence>
+                      {showEdgePicker && (
+                        <EdgePickerPopover
+                          options={edgeOptions}
+                          selectedId={active.edgeType}
+                          onPick={(id) => { setEdgeType(id); setShowEdgePicker(false) }}
+                          onClose={() => setShowEdgePicker(false)}
+                        />
+                      )}
+                    </AnimatePresence>
+                  </div>
+                ) : null}
+
+                {/* Name */}
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-ink-muted uppercase tracking-wider">
+                    Display Name <span className="text-red-400">*</span>
+                  </label>
+                  <input
+                    ref={nameRef} type="text" value={active.name}
+                    onChange={(e) => setName(e.target.value)}
+                    onKeyDown={onNameKeyDown} onPaste={onNamePaste}
+                    placeholder="Enter display name..." className="input w-full"
+                  />
+                </div>
+
+                {/* Details accordion */}
                 <div>
-                  <AnimatePresence initial={false}>{outlineItems}</AnimatePresence>
+                  <button
+                    type="button"
+                    onClick={() => setDetailsOpen((v) => !v)}
+                    className="flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-ink transition-colors"
+                  >
+                    {detailsOpen ? <LucideIcons.ChevronDown className="w-3 h-3" /> : <LucideIcons.ChevronRight className="w-3 h-3" />}
+                    Add details
+                    <span className="text-ink-muted/50">⌥↵</span>
+                  </button>
+                  <AnimatePresence>
+                    {detailsOpen && (
+                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                        <DetailsForm type={activeType} value={active.details} onChange={setDetails} />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* Action buttons — mouse parity with the keyboard flow. */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button" onClick={doAdd} disabled={!canCommit}
+                    className={cn('px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2',
+                      canCommit ? 'bg-green-500 text-white hover:bg-green-600 shadow-sm' : 'bg-gray-300 dark:bg-gray-700 text-gray-500 cursor-not-allowed')}
+                  >
+                    <LucideIcons.Plus className="w-4 h-4" />Add
+                  </button>
+                  <button
+                    type="button" onClick={doAddNest} disabled={!canCommit}
+                    title="Add, then create the next entity inside it"
+                    className="px-3 py-2 rounded-lg text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                  >
+                    Add &amp; nest inside
+                    <kbd className="px-1 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">⇥</kbd>
+                  </button>
                 </div>
 
                 <button
@@ -520,8 +575,8 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
               {/* ── Footer ── */}
               <div className="flex-shrink-0 px-5 py-4 border-t border-glass-border bg-canvas-elevated/95 flex items-center justify-between gap-3">
                 <span className="text-[10px] text-ink-muted">
-                  <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">↵</kbd> next ·{' '}
-                  <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">⇥</kbd> inside ·{' '}
+                  <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">↵</kbd> add ·{' '}
+                  <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">⇥</kbd> add inside ·{' '}
                   <kbd className="px-1.5 py-0.5 rounded bg-black/10 dark:bg-white/10 font-mono">⇧⇥</kbd> back out
                 </span>
                 <div className="flex items-center gap-2">
@@ -543,41 +598,22 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   )
 }
 
-/** Depth of the active row: one below its parent row, else a staged-tree root. */
-function activeDepthFor(tree: OutlineRow[], parentUrn: string | null): number {
-  const parentRow = tree.find((r) => r.tempUrn === parentUrn)
-  return parentRow ? parentRow.depth + 1 : 0
-}
-
-/** Index at which to splice the active editor — after its parent's whole subtree. */
-function insertIndexFor(tree: OutlineRow[], parentUrn: string | null): number {
-  const parentRow = tree.find((r) => r.tempUrn === parentUrn)
-  if (!parentRow) return tree.length
-  const pIdx = tree.indexOf(parentRow)
-  let idx = pIdx + 1
-  for (let i = pIdx + 1; i < tree.length; i++) {
-    if (tree[i].depth > parentRow.depth) idx = i + 1
-    else break
-  }
-  return idx
-}
-
-// ─── Committed row ───────────────────────────────────────────────────────────
+// ─── ADDING (N) outline row ──────────────────────────────────────────────────
 
 type DetailsValue = { description: string; tags: string; fieldValues: Record<string, unknown> }
 
-function OutlineTreeRow({
-  row, type, node, canNest, descendants, detailsShown,
-  onAddSibling, onAddChild, onToggleDetails, onRemove, onRename, onSaveDetails,
+function AddingRow({
+  row, type, node, isTarget, canNest, descendants, detailsShown,
+  onSelect, onToggleDetails, onRemove, onRename, onSaveDetails,
 }: {
   row: OutlineRow
   type?: EntityTypeSchema
   node?: LineageNode
+  isTarget: boolean
   canNest: boolean
   descendants: number
   detailsShown: boolean
-  onAddSibling: () => void
-  onAddChild: () => void
+  onSelect: () => void
   onToggleDetails: () => void
   onRemove: () => void
   onRename: (name: string) => void
@@ -593,12 +629,19 @@ function OutlineTreeRow({
     setRenaming(false)
   }
 
-  const actionCls = 'opacity-0 group-hover:opacity-100 p-1 rounded-md text-ink-muted transition-all duration-200 hover:scale-110 active:scale-95'
+  const actionCls = cn('p-0.5 rounded text-ink-muted transition-all',
+    isTarget ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100')
 
   return (
-    <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, height: 0 }} className="group">
-      <div className="flex items-center gap-1.5 rounded-md pr-1 py-1 hover:bg-black/5 dark:hover:bg-white/5" style={{ paddingLeft: 12 + row.depth * 14 }}>
-        <TypeChip type={type} size="xs" />
+    <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, height: 0 }}>
+      <div
+        className={cn('group/row flex items-center gap-1.5 rounded-md pr-1 py-1 transition-colors',
+          isTarget ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage/40' : 'hover:bg-black/5 dark:hover:bg-white/5')}
+        style={{ paddingLeft: 6 + row.depth * 14 }}
+      >
+        <span className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${type?.visual?.color}22`, color: type?.visual?.color }}>
+          <DynamicIcon name={type?.visual?.icon} className="w-2.5 h-2.5" />
+        </span>
         {renaming ? (
           <input
             autoFocus
@@ -612,33 +655,33 @@ function OutlineTreeRow({
             className="flex-1 min-w-0 bg-transparent text-[12px] text-ink focus:outline-none border-b border-accent-lineage/50"
           />
         ) : (
-          <button onDoubleClick={() => { setDraft(row.name); setRenaming(true) }} title="Double-click to rename" className="flex-1 min-w-0 text-left">
+          <button
+            onClick={onSelect}
+            onDoubleClick={() => { setDraft(row.name); setRenaming(true) }}
+            title="Add the next entity under this one"
+            className="flex-1 min-w-0 text-left"
+          >
             <span className="block text-[12px] text-ink truncate">{row.name}</span>
           </button>
         )}
         {row.hasDetails && <span className="w-1.5 h-1.5 rounded-full bg-accent-lineage/60 flex-shrink-0" title="Has details" />}
 
-        <div className="flex items-center gap-0.5 flex-shrink-0">
-          <button onClick={onAddSibling} title="Add another at this level" aria-label="Add another at this level" className={cn(actionCls, 'hover:text-accent-lineage')}>
+        {canNest && (
+          <button onClick={onSelect} title="Add a child" aria-label="Add a child" className={cn(actionCls, 'hover:text-accent-lineage')}>
             <LucideIcons.Plus className="w-3.5 h-3.5" />
           </button>
-          {canNest && (
-            <button onClick={onAddChild} title="Add something inside" aria-label="Add something inside" className={cn(actionCls, 'hover:text-accent-lineage')}>
-              <LucideIcons.CornerDownRight className="w-3.5 h-3.5" />
-            </button>
-          )}
-          <button onClick={onToggleDetails} title="Details" aria-label="Details" className={cn(actionCls, detailsShown ? 'opacity-100 text-accent-lineage' : 'hover:text-ink')}>
-            <LucideIcons.SlidersHorizontal className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={onRemove}
-            title={descendants > 0 ? `Removes ${descendants} nested item${descendants === 1 ? '' : 's'} too` : 'Remove'}
-            aria-label="Remove"
-            className={cn(actionCls, 'hover:text-rose-500')}
-          >
-            <LucideIcons.X className="w-3.5 h-3.5" />
-          </button>
-        </div>
+        )}
+        <button onClick={onToggleDetails} title="Details" aria-label="Details" className={cn(actionCls, detailsShown ? 'opacity-100 text-accent-lineage' : 'hover:text-ink')}>
+          <LucideIcons.SlidersHorizontal className="w-3.5 h-3.5" />
+        </button>
+        <button
+          onClick={onRemove}
+          title={descendants > 0 ? `Removes ${descendants} nested item${descendants === 1 ? '' : 's'} too` : 'Remove'}
+          aria-label="Remove"
+          className={cn(actionCls, 'hover:text-rose-500')}
+        >
+          <LucideIcons.X className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       <AnimatePresence>
@@ -648,7 +691,7 @@ function OutlineTreeRow({
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
-            style={{ paddingLeft: 12 + row.depth * 14 + 20, paddingRight: 4 }}
+            style={{ paddingLeft: 6 + row.depth * 14 + 20, paddingRight: 4 }}
           >
             <RowDetails type={type} node={node} onSave={onSaveDetails} />
           </motion.div>
