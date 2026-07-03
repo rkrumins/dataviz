@@ -133,15 +133,22 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const [highlighted, setHighlighted] = useState(0)
   const [showParentPicker, setShowParentPicker] = useState(false)
   const [showEdgePicker, setShowEdgePicker] = useState(false)
-  const [openDetailsUrn, setOpenDetailsUrn] = useState<string | null>(null)
+  /** Committed row the single bottom details editor is bound to (null = the active row). */
+  const [detailsRowUrn, setDetailsRowUrn] = useState<string | null>(null)
   const [blockFlash, setBlockFlash] = useState(0)
   const nameRef = useRef<HTMLInputElement>(null)
   const typeSearchRef = useRef<HTMLInputElement>(null)
   const typeListRef = useRef<HTMLDivElement>(null)
   const didInitialFocus = useRef(false)
+  const focusTimer = useRef<number | null>(null)
 
   const focusName = useCallback(() => {
-    window.setTimeout(() => nameRef.current?.focus(), 20)
+    if (focusTimer.current) window.clearTimeout(focusTimer.current)
+    focusTimer.current = window.setTimeout(() => nameRef.current?.focus(), 20)
+  }, [])
+  /** Cancel a scheduled focus — a click that becomes a rename must not steal it back. */
+  const cancelFocusName = useCallback(() => {
+    if (focusTimer.current) { window.clearTimeout(focusTimer.current); focusTimer.current = null }
   }, [])
 
   // Sync mode/template from the store each time the panel is (re)opened.
@@ -155,11 +162,22 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   useEffect(() => {
     if (mode !== 'outline' || templateChain) return
     const t = window.setTimeout(() => {
-      if (didInitialFocus.current) nameRef.current?.focus()
-      else { typeSearchRef.current?.focus(); didInitialFocus.current = true }
+      if (didInitialFocus.current) {
+        nameRef.current?.focus()
+      } else if (typeSearchRef.current) {
+        // Latch only on an ACTUAL focus — if the panel isn't rendered yet the
+        // first real open must still get the type-search focus.
+        typeSearchRef.current.focus()
+        didInitialFocus.current = true
+      }
     }, 60)
     return () => window.clearTimeout(t)
   }, [mode, templateChain])
+
+  // The bound details row was removed (or cascaded away) — fall back to the active row.
+  useEffect(() => {
+    if (detailsRowUrn && !tree.some((r) => r.tempUrn === detailsRowUrn)) setDetailsRowUrn(null)
+  }, [detailsRowUrn, tree])
 
   // A retarget/nest changes the allowed types — a stale query would hide the
   // auto-inferred pick, so reset the search with the parent.
@@ -228,8 +246,12 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     if (e.key === 'ArrowDown') { e.preventDefault(); setHighlighted((i) => Math.min(i + 1, filteredTypes.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setHighlighted((i) => Math.max(i - 1, 0)) }
     else if (e.key === 'Enter') { e.preventDefault(); if (filteredTypes[highlighted]) pickType(filteredTypes[highlighted].id) }
-    else if (e.key === 'Escape') { e.preventDefault(); onClose() }
-  }, [filteredTypes, highlighted, pickType, onClose])
+    else if (e.key === 'Escape') {
+      e.preventDefault()
+      if (typeQuery) setTypeQuery('')
+      else onClose()
+    }
+  }, [filteredTypes, highlighted, pickType, typeQuery, onClose])
 
   const doAdd = useCallback(() => { commitSibling(); focusName() }, [commitSibling, focusName])
   const doAddNest = useCallback(() => { commitAndNest(); focusName() }, [commitAndNest, focusName])
@@ -237,7 +259,13 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   // ── Keyboard model (unchanged from v1). Tab routing is load-bearing:
   //    non-blank name → commitAndNest(); blank name → indent(). ──
   const onNameKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && e.altKey) { e.preventDefault(); setDetailsOpen((v) => !v); return }
+    if (e.key === 'Enter' && e.altKey) {
+      e.preventDefault()
+      // ⌥↵ always talks about the ACTIVE row — rebind first if a committed row is shown.
+      if (detailsRowUrn) { setDetailsRowUrn(null); setDetailsOpen(true) }
+      else setDetailsOpen((v) => !v)
+      return
+    }
     if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); doAddNest(); return }
     if (e.key === 'Enter') { e.preventDefault(); doAdd(); return }
     if (e.key === 'Tab' && !e.shiftKey) {
@@ -249,17 +277,20 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     if (e.key === 'Tab' && e.shiftKey) { e.preventDefault(); outdent(); return }
     if (e.key === 'Escape') {
       e.preventDefault()
+      if (detailsRowUrn) { setDetailsRowUrn(null); return }
       if (detailsOpen) { setDetailsOpen(false); return }
       if (active.name) { setName(''); return }
       onClose()
     }
-  }, [active.name, doAdd, doAddNest, indent, outdent, detailsOpen, setName, onClose])
+  }, [active.name, doAdd, doAddNest, indent, outdent, detailsOpen, detailsRowUrn, setName, onClose])
 
   // A multi-line paste into the name input switches straight to paste mode.
   const onNamePaste = useCallback((e: React.ClipboardEvent) => {
     const text = e.clipboardData.getData('text')
     if (text.includes('\n')) { e.preventDefault(); setPasteText(text); setMode('paste') }
   }, [])
+
+  const detailsRow = detailsRowUrn ? (tree.find((r) => r.tempUrn === detailsRowUrn) ?? null) : null
 
   if (!isOpen) return null
 
@@ -374,7 +405,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                       <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Adding ({tree.length})</span>
                       <span className="text-[10px] text-ink-muted/70">Save to keep</span>
                     </div>
-                    <div className="max-h-44 overflow-y-auto custom-scrollbar">
+                    <div className="max-h-40 overflow-y-auto custom-scrollbar">
                       <AnimatePresence initial={false}>
                         {tree.map((row) => {
                           const t = typeById.get(row.typeId)
@@ -383,16 +414,15 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                               key={row.tempUrn}
                               row={row}
                               type={t}
-                              node={canvasNodes.find((n) => n.id === row.tempUrn || (n.data?.urn as string) === row.tempUrn)}
                               isTarget={active.parentUrn === row.tempUrn}
                               canNest={(t?.hierarchy.canContain?.length ?? 0) > 0}
                               descendants={descendantCount(row.tempUrn)}
-                              detailsShown={openDetailsUrn === row.tempUrn}
+                              detailsShown={detailsRowUrn === row.tempUrn}
                               onSelect={() => { retarget(row.tempUrn); focusName() }}
-                              onToggleDetails={() => setOpenDetailsUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn))}
+                              onRenameStart={cancelFocusName}
+                              onToggleDetails={() => setDetailsRowUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn))}
                               onRemove={() => removeRow(row.changeId)}
                               onRename={(name) => renameRow(row.tempUrn, name)}
-                              onSaveDetails={(v) => updateRowDetails(row.tempUrn, { description: v.description, tags: splitTags(v.tags), properties: v.fieldValues })}
                             />
                           )
                         })}
@@ -444,7 +474,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                       className="input w-full pl-10"
                     />
                   </div>
-                  <div ref={typeListRef} className="max-h-[260px] overflow-y-auto custom-scrollbar space-y-1 mt-1">
+                  <div ref={typeListRef} className="max-h-[240px] overflow-y-auto custom-scrollbar space-y-1 mt-1">
                     {filteredTypes.map((t, i) => (
                       <button key={t.id} data-active={t.id === active.typeId || undefined} onClick={() => pickType(t.id)}
                         className={cn('w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors',
@@ -471,7 +501,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                     key={`blocked-${blockFlash}`}
                     initial={{ opacity: 0, x: 0 }}
                     animate={{ opacity: 1, x: [0, -3, 3, -2, 2, 0] }}
-                    transition={{ duration: 0.28 }}
+                    transition={{ duration: 0.15 }}
                     className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2"
                   >
                     <LucideIcons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -524,25 +554,54 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                   />
                 </div>
 
-                {/* Details accordion */}
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setDetailsOpen((v) => !v)}
-                    className="flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-ink transition-colors"
-                  >
-                    {detailsOpen ? <LucideIcons.ChevronDown className="w-3 h-3" /> : <LucideIcons.ChevronRight className="w-3 h-3" />}
-                    Add details
-                    <span className="text-ink-muted/50">⌥↵</span>
-                  </button>
-                  <AnimatePresence>
-                    {detailsOpen && (
-                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
-                        <DetailsForm type={activeType} value={active.details} onChange={setDetails} />
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
+                {/* Details — ONE editor in ONE place: bound to a committed row via
+                    its row action, or to the entity being typed. Never inline in
+                    the ADDING list, never two open at once. */}
+                {detailsRow ? (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 flex-1 text-[11px] font-medium text-ink truncate">Details — {detailsRow.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setDetailsRowUrn(null)}
+                        className="text-[11px] font-medium text-accent-lineage hover:underline flex-shrink-0"
+                      >
+                        Back to new entity
+                      </button>
+                    </div>
+                    <RowDetails
+                      key={detailsRow.tempUrn}
+                      type={typeById.get(detailsRow.typeId)}
+                      node={canvasNodes.find((n) => n.id === detailsRow.tempUrn || (n.data?.urn as string) === detailsRow.tempUrn)}
+                      onSave={(v) => updateRowDetails(detailsRow.tempUrn, { description: v.description, tags: splitTags(v.tags), properties: v.fieldValues })}
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setDetailsOpen((v) => !v)}
+                      className="flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-ink transition-colors"
+                    >
+                      {detailsOpen ? <LucideIcons.ChevronDown className="w-3 h-3" /> : <LucideIcons.ChevronRight className="w-3 h-3" />}
+                      Add details
+                      <span className="text-ink-muted/50">⌥↵</span>
+                    </button>
+                    <AnimatePresence>
+                      {detailsOpen && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          transition={{ duration: 0.15 }}
+                          className="overflow-hidden"
+                        >
+                          <DetailsForm type={activeType} value={active.details} onChange={setDetails} />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                )}
 
                 {/* Action buttons — mouse parity with the keyboard flow. */}
                 <div className="flex items-center gap-2">
@@ -603,21 +662,21 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
 type DetailsValue = { description: string; tags: string; fieldValues: Record<string, unknown> }
 
 function AddingRow({
-  row, type, node, isTarget, canNest, descendants, detailsShown,
-  onSelect, onToggleDetails, onRemove, onRename, onSaveDetails,
+  row, type, isTarget, canNest, descendants, detailsShown,
+  onSelect, onRenameStart, onToggleDetails, onRemove, onRename,
 }: {
   row: OutlineRow
   type?: EntityTypeSchema
-  node?: LineageNode
   isTarget: boolean
   canNest: boolean
   descendants: number
   detailsShown: boolean
   onSelect: () => void
+  /** Fired when a double-click opens the rename editor, BEFORE it mounts. */
+  onRenameStart: () => void
   onToggleDetails: () => void
   onRemove: () => void
   onRename: (name: string) => void
-  onSaveDetails: (v: DetailsValue) => void
 }) {
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(row.name)
@@ -633,15 +692,13 @@ function AddingRow({
     isTarget ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100')
 
   return (
-    <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, height: 0 }}>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.1 }}>
       <div
         className={cn('group/row flex items-center gap-1.5 rounded-md pr-1 py-1 transition-colors',
           isTarget ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage/40' : 'hover:bg-black/5 dark:hover:bg-white/5')}
         style={{ paddingLeft: 6 + row.depth * 14 }}
       >
-        <span className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${type?.visual?.color}22`, color: type?.visual?.color }}>
-          <DynamicIcon name={type?.visual?.icon} className="w-2.5 h-2.5" />
-        </span>
+        <TypeChip type={type} size="xs" />
         {renaming ? (
           <input
             autoFocus
@@ -656,9 +713,13 @@ function AddingRow({
           />
         ) : (
           <button
-            onClick={onSelect}
-            onDoubleClick={() => { setDraft(row.name); setRenaming(true) }}
-            title="Add the next entity under this one"
+            // A double-click is click→click→dblclick: only the FIRST click may
+            // retarget (e.detail === 1), and the rename must cancel any focus
+            // still scheduled by it — otherwise the 20ms focus timer would blur
+            // (and close) the rename editor as it mounts.
+            onClick={(e) => { if (e.detail === 1) onSelect() }}
+            onDoubleClick={() => { onRenameStart(); setDraft(row.name); setRenaming(true) }}
+            title="Add the next entity under this one — double-click to rename"
             className="flex-1 min-w-0 text-left"
           >
             <span className="block text-[12px] text-ink truncate">{row.name}</span>
@@ -668,7 +729,7 @@ function AddingRow({
 
         {canNest && (
           <button onClick={onSelect} title="Add a child" aria-label="Add a child" className={cn(actionCls, 'hover:text-accent-lineage')}>
-            <LucideIcons.Plus className="w-3.5 h-3.5" />
+            <LucideIcons.CornerDownRight className="w-3.5 h-3.5" />
           </button>
         )}
         <button onClick={onToggleDetails} title="Details" aria-label="Details" className={cn(actionCls, detailsShown ? 'opacity-100 text-accent-lineage' : 'hover:text-ink')}>
@@ -683,20 +744,6 @@ function AddingRow({
           <LucideIcons.X className="w-3.5 h-3.5" />
         </button>
       </div>
-
-      <AnimatePresence>
-        {detailsShown && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden"
-            style={{ paddingLeft: 6 + row.depth * 14 + 20, paddingRight: 4 }}
-          >
-            <RowDetails type={type} node={node} onSave={onSaveDetails} />
-          </motion.div>
-        )}
-      </AnimatePresence>
     </motion.div>
   )
 }
@@ -754,7 +801,7 @@ function DetailsForm({
           onBlur={() => commitOnBlur?.(value)}
           rows={2}
           placeholder="What is this?"
-          className="input w-full resize-none text-sm"
+          className="input w-full resize-none"
         />
       </div>
       <div className="space-y-1">
@@ -764,7 +811,7 @@ function DetailsForm({
           onChange={(e) => patch({ tags: e.target.value })}
           onBlur={() => commitOnBlur?.(value)}
           placeholder="tag1, tag2"
-          className="input w-full text-sm"
+          className="input w-full"
         />
         <p className="text-[10px] text-ink-muted">Separate tags with commas</p>
       </div>
@@ -793,7 +840,7 @@ function DetailsForm({
               value={(value.fieldValues[field.id] as number) ?? ''}
               onChange={(e) => patch({ fieldValues: { ...value.fieldValues, [field.id]: parseFloat(e.target.value) || 0 } })}
               onBlur={() => commitOnBlur?.(value)}
-              className="input w-full text-sm"
+              className="input w-full"
             />
           ) : (
             <input
@@ -801,7 +848,7 @@ function DetailsForm({
               value={(value.fieldValues[field.id] as string) ?? ''}
               onChange={(e) => patch({ fieldValues: { ...value.fieldValues, [field.id]: e.target.value } })}
               onBlur={() => commitOnBlur?.(value)}
-              className="input w-full text-sm"
+              className="input w-full"
             />
           )}
         </div>
