@@ -93,6 +93,11 @@ interface CanvasState {
   selectNode: (id: string, multi?: boolean) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
+  /** Last selectNode() call. `drawerNodeId` is sticky, so click observers (the
+   * Hierarchy Builder's canvas navigation) need this monotonic seq to see a
+   * fresh click on the SAME node. Bumped by every selectNode — never by
+   * clearSelection (a background deselect is not a click). */
+  lastNodeClick: { nodeId: string | null; seq: number }
 
   // Sticky entity drawer — which entity the drawer currently shows.
   // Decoupled from selection so background clicks / selection changes
@@ -305,6 +310,9 @@ export const useCanvasStore = create<CanvasState>()(
             ? [] // Toggle off: clicking the already-selected node deselects it
             : [id],
         selectedEdgeIds: multi ? state.selectedEdgeIds : [],
+        // Every selectNode is a click — recorded even when the sticky drawer
+        // id below doesn't change (same-node re-click).
+        lastNodeClick: { nodeId: id, seq: state.lastNodeClick.seq + 1 },
         // Single-select of a real entity opens (or swaps) the sticky drawer.
         // Toggle-off keeps it open — only the X button closes it. Logical
         // groupings and multi-select never touch the drawer.
@@ -322,6 +330,7 @@ export const useCanvasStore = create<CanvasState>()(
         drawerNodeId: null,
       })),
       clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
+      lastNodeClick: { nodeId: null, seq: 0 },
 
       // Sticky entity drawer
       drawerNodeId: null,

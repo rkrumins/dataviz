@@ -203,29 +203,33 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   // selection transition, not just clicks: palette jumps, search "Reveal",
   // and duplicate-selects drive the builder the same way — by design.) ──
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
-  const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
-  const consumedCanvasClick = useRef(drawerNodeId)
-  const prevSelection = useRef(selectedNodeIds)
+  const lastNodeClick = useCanvasStore((s) => s.lastNodeClick)
+  // Two SEPARATE guards (conflating them replayed the sticky drawer target
+  // after every re-arm — wrong-parent staging): `lastSeenDrawer`/`lastSeenClickSeq`
+  // are updated on EVERY run, so transitions fire exactly once; `reclickArmed`
+  // is the one-shot permission to honor a fresh click on the ALREADY-seen node.
+  const lastSeenDrawer = useRef(drawerNodeId)
+  const lastSeenClickSeq = useRef(lastNodeClick.seq)
+  const reclickArmed = useRef(false)
   /**
-   * Re-arm the click guard after a PANEL-originated target/binding move.
-   * `drawerNodeId` is sticky, so re-clicking the consumed node produces no
-   * drawer transition — without this, that click would be silently dead.
+   * Re-arm after a PANEL-originated target/binding move. `drawerNodeId` is
+   * sticky, so re-clicking that node produces no drawer transition — without
+   * this, that click would be silently dead.
    */
-  const clearConsumedClick = useCallback(() => { consumedCanvasClick.current = null }, [])
+  const clearConsumedClick = useCallback(() => { reclickArmed.current = true }, [])
   useEffect(() => {
-    // Every physical click toggles the node's selection even when the sticky
-    // drawer id doesn't change — a selection transition INVOLVING the drawer
-    // node is the re-click signal (only honored once the guard was re-armed).
-    const selectionChanged = prevSelection.current !== selectedNodeIds
-    const touched = selectionChanged ? new Set([...prevSelection.current, ...selectedNodeIds]) : null
-    prevSelection.current = selectedNodeIds
-    if (!drawerNodeId) { consumedCanvasClick.current = null; return }
-    const isNewTarget = drawerNodeId !== consumedCanvasClick.current
-    const isReclick = consumedCanvasClick.current === null && touched !== null && touched.has(drawerNodeId)
+    const isNewTarget = drawerNodeId !== lastSeenDrawer.current
+    lastSeenDrawer.current = drawerNodeId
+    // `lastNodeClick.seq` bumps on every physical click, same node included —
+    // THE re-click signal (selection toggling is click-direction noise).
+    const clicked = lastNodeClick.seq !== lastSeenClickSeq.current
+    lastSeenClickSeq.current = lastNodeClick.seq
+    if (!drawerNodeId) { reclickArmed.current = false; return }
+    const isReclick = reclickArmed.current && clicked && lastNodeClick.nodeId === drawerNodeId
     if (!isNewTarget && !isReclick) return
     const node = canvasNodes.find((n) => n.id === drawerNodeId || (n.data?.urn as string) === drawerNodeId)
-    if (!node) return // NOT consumed — the node may land in the store a tick later
-    consumedCanvasClick.current = drawerNodeId
+    if (!node) return
+    reclickArmed.current = false // one shot per re-arm
     const urn = (node.data?.urn as string) || node.id
     const canNest = ((typeById.get(node.data?.type as string)?.hierarchy.canContain?.length) ?? 0) > 0
     if (tree.some((r) => r.tempUrn === urn)) {
@@ -238,7 +242,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
       focusName()
     }
     // A leaf that isn't staged has nothing to offer the builder — ignore it.
-  }, [drawerNodeId, selectedNodeIds, canvasNodes, tree, typeById, retarget, focusName])
+  }, [drawerNodeId, lastNodeClick, canvasNodes, tree, typeById, retarget, focusName])
 
   // Resolve where the next entity lands ("Adding inside X") from the active parent —
   // a staged row or a real canvas node.
