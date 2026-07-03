@@ -18,6 +18,7 @@ import { useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useContainmentEdgeTypes } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { toCanvasNode } from '@/lib/canvasNodeMapper'
 import { generateId } from '@/lib/utils'
 
 export interface StageEntityInput {
@@ -135,21 +136,27 @@ export function useStageEntityCreation() {
             throw new Error(result.error || 'Failed to create entity')
           }
           registerTempIdResolution(tempUrn, result.node.urn)
-          // Swap the optimistic temp node for the backend-issued one.
+          // This node's staged children apply right AFTER it in the same save,
+          // so the backend reports childCount 0 here — count them from the
+          // still-optimistic containment edges before the swap. Without a
+          // truthful childCount, the post-save collapse → expand cycle is
+          // destructive: collapse drops the (now saved, non-pending)
+          // containment edges expecting `loadChildren` to refetch, but its
+          // `childCount === 0` early-return never does — the children are
+          // permanently orphaned (hierarchy flattens and HARD-RULE layer
+          // inheritance breaks with it).
+          const stagedChildCount = useCanvasStore.getState().edges.filter(
+            (e) => e.source === tempUrn && e.type === 'containment' && e.data?.isPending === 'create',
+          ).length
+          // Swap the optimistic temp node for the backend-issued one at FULL
+          // fidelity (childCount, OCC version, layerAssignment, …) via the
+          // shared hydration mapper — a hand-rolled field subset here is how
+          // those fields used to get silently dropped.
           useCanvasStore.getState().removeNode(tempUrn)
           if (containmentEdgeId) useCanvasStore.getState().removeEdge(containmentEdgeId)
-          useCanvasStore.getState().addNodes([{
-            id: result.node.urn,
-            type: 'generic',
-            position: { x: 0, y: 0 },
-            data: {
-              label: result.node.displayName,
-              type: result.node.entityType,
-              urn: result.node.urn,
-              classifications: result.node.tags,
-              properties: result.node.properties,
-            },
-          }])
+          const swapped = toCanvasNode(result.node)
+          swapped.data.childCount = Math.max(result.node.childCount ?? 0, stagedChildCount)
+          useCanvasStore.getState().addNodes([swapped])
           if (result.containmentEdge) {
             useCanvasStore.getState().addEdges([{
               id: result.containmentEdge.id,

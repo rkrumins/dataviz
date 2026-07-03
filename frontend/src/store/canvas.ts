@@ -21,6 +21,7 @@ export interface LineageNode extends Node {
     childIds?: string[]
     parentId?: string
     isExpanded?: boolean
+    childCount?: number
     // Roll-up data
     _collapsedChildCount?: number
     _rollupData?: Record<string, unknown>

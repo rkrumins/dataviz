@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useCanvasStore, type LineageNode, type LineageEdge } from '@/store/canvas'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
     useActiveView,
@@ -15,6 +15,7 @@ import {
 } from '@/hooks/useViewSchema'
 import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { BoundedQueue } from '@/lib/concurrency'
+import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -88,51 +89,10 @@ interface UseGraphHydrationOptions {
  * wire fidelity. Callers that need a "treat empty as absent" rule should
  * apply it at the consumer, not here.
  */
-export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }): LineageNode {
-    return {
-        id: n.urn,
-        type: 'generic' as const,
-        position: opts?.randomPosition
-            ? { x: Math.random() * 800, y: Math.random() * 600 }
-            : { x: 0, y: 0 },
-        data: {
-            // Identity
-            urn: n.urn,
-            label: n.displayName,
-            type: n.entityType,
-            // Descriptive — verbatim from the backend GraphNode
-            qualifiedName: n.qualifiedName,
-            description: n.description,
-            sourceSystem: n.sourceSystem,
-            layerAssignment: n.layerAssignment,
-            lastSyncedAt: n.lastSyncedAt,
-            childCount: n.childCount,
-            // Editable property bag (renamed from `metadata` → `properties`)
-            properties: n.properties,
-            // OCC token (content hash) the node was read at — echoed as baseVersion on an edit.
-            version: n.version,
-            // Frontend conveniences derived from the property bag / tags
-            classifications: n.tags,
-            businessLabel: (n.properties?.businessLabel as string) ?? undefined,
-        },
-    }
-}
-
-/** Convert a backend GraphEdge to a canvas LineageEdge using real backend edge data. */
-export function toCanvasEdge(e: GraphEdge): LineageEdge {
-    return {
-        id: e.id,
-        source: e.sourceUrn,
-        target: e.targetUrn,
-        type: 'lineage',
-        data: {
-            edgeType: e.edgeType,
-            relationship: e.edgeType,
-            confidence: e.confidence,
-            version: e.version,   // OCC token — echoed as baseVersion on an edit
-        },
-    }
-}
+// Moved to '@/lib/canvasNodeMapper' (pure module) so mapping-only consumers
+// don't inherit this hook's heavy transitive imports; re-exported here to
+// keep the existing import surface intact.
+export { toCanvasNode, toCanvasEdge }
 
 /**
  * Compute the "view-scoped root types" for a reference/context view.
