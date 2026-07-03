@@ -20,7 +20,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
-import { useStagedChangeCount } from '@/store/stagedChangesStore'
+import { useStagedChangeCount, useStagedChangesStore } from '@/store/stagedChangesStore'
 
 export function UnsavedWorkGuard() {
   const stagedCount = useStagedChangeCount()
@@ -42,7 +42,14 @@ export function UnsavedWorkGuard() {
     if (blocker.state === 'blocked') blocker.reset()
   }
   const leave = () => {
-    if (blocker.state === 'blocked') blocker.proceed()
+    if (blocker.state !== 'blocked') return
+    // "They'll be lost if you leave" must be true: discard the staged changes
+    // (running their discard hooks, which restore the canvas's optimistic
+    // state) BEFORE proceeding — otherwise they'd linger in the store and
+    // silently re-arm the guard on the next view sharing the same scope.
+    // Same order as OntologySchemaPage's blocker (discardChanges → proceed).
+    useStagedChangesStore.getState().discardAll()
+    blocker.proceed()
   }
 
   // Escape stays on the page — single, predictable escape (matches StagedChangesPanel).
