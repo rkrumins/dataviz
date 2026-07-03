@@ -396,9 +396,26 @@ export function resolveGraph(wsId: string, dataSourceId: string): Promise<Resolv
  */
 export function provisionBlankGraph(
   wsId: string,
-  req: { name: string; description?: string; providerId: string; ontologyId: string },
+  req: { name: string; description?: string; providerId: string; ontologyId: string;
+         graphName?: string },
 ): Promise<BlankGraphResult> {
   return vfetch<BlankGraphResult>(`${base(wsId)}/blank-graphs`, jsonBody(req))
+}
+
+export interface GraphNameCheck {
+  available: boolean
+  normalized: string
+  reason?: string | null
+}
+
+/** Live availability check for a blank model's physical graph name — the same
+ *  rules the provisioning endpoint enforces authoritatively (slug shape,
+ *  reserved prefixes, per-provider uniqueness, live key check). */
+export function checkBlankGraphName(
+  wsId: string, providerId: string, graphName: string,
+): Promise<GraphNameCheck> {
+  const q = new URLSearchParams({ providerId, graphName })
+  return vfetch<GraphNameCheck>(`${base(wsId)}/blank-graphs/name-check?${q}`)
 }
 
 /** Resolve and open a draft if the caller has none (requires `:manage`). */

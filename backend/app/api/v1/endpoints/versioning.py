@@ -26,6 +26,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import re
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
@@ -450,13 +451,22 @@ class CreateGraphResponse(_ApiModel):
 
 
 class CreateBlankGraphRequest(_ApiModel):
-    """Self-service blank lineage model: one call provisions the manual data source
-    (minted collision-proof graph name), the genesis-only versioned graph (strict,
-    ontology-governed), and registers it with aggregation."""
+    """Self-service blank lineage model: one call provisions the manual data source,
+    the genesis-only versioned graph (strict, ontology-governed), and registers it
+    with aggregation. ``graphName`` is the user-chosen PHYSICAL FalkorDB key the
+    model lives under (validated: slug rules, reserved prefixes, per-provider
+    uniqueness); omitted → a collision-proof ``blank_<ds_id>`` is minted."""
     name: str = Field(min_length=1, max_length=200)
     description: Optional[str] = None
     provider_id: str = Field(alias="providerId")
     ontology_id: str = Field(alias="ontologyId")
+    graph_name: Optional[str] = Field(default=None, alias="graphName", max_length=64)
+
+
+class GraphNameCheckResponse(_ApiModel):
+    available: bool
+    normalized: str
+    reason: Optional[str] = None
 
 
 class BlankGraphResponse(_ApiModel):
@@ -837,6 +847,72 @@ async def create_graph(
     )
 
 
+# ── Physical graph naming (blank models) ─────────────────────────────────────
+# The graph name IS the FalkorDB key the model projects into, and a full
+# projection seed WIPES that key — a collision is destructive. Names are
+# therefore validated centrally: slug rules, reserved system prefixes, and
+# per-provider uniqueness across ALL workspaces (the DB unique constraint is
+# only per-workspace), plus a best-effort live GRAPH.LIST check.
+_GRAPH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+_RESERVED_GRAPH_PREFIXES = ("gv_", "gvt_", "gvtest_", "blank_", "__fork_")
+
+
+async def _graph_name_availability(
+    session: AsyncSession, provider_id: str, raw: str,
+) -> Dict[str, object]:
+    """``{available, normalized, reason?}`` for a user-proposed physical graph name."""
+    from sqlalchemy import or_, select
+    from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
+
+    normalized = (raw or "").strip().lower()
+    if not _GRAPH_NAME_RE.match(normalized):
+        return {"available": False, "normalized": normalized,
+                "reason": "Use 3–64 characters: lowercase letters, numbers, '-' or '_', "
+                          "starting with a letter or number."}
+    if normalized.startswith(_RESERVED_GRAPH_PREFIXES) or normalized.endswith("_proj"):
+        return {"available": False, "normalized": normalized,
+                "reason": "Names starting with gv_, gvt_, blank_, __fork_ or ending in "
+                          "_proj are reserved for the system."}
+    ds_taken = (await session.execute(
+        select(WorkspaceDataSourceORM.id).where(
+            WorkspaceDataSourceORM.provider_id == provider_id,
+            or_(WorkspaceDataSourceORM.graph_name == normalized,
+                WorkspaceDataSourceORM.dedicated_graph_name == normalized),
+        ).limit(1))).scalar_one_or_none()
+    if ds_taken:
+        return {"available": False, "normalized": normalized,
+                "reason": "Another data source on this connection already uses this name."}
+    cat_taken = (await session.execute(
+        select(CatalogItemORM.id).where(
+            CatalogItemORM.provider_id == provider_id,
+            CatalogItemORM.source_identifier == normalized,
+        ).limit(1))).scalar_one_or_none()
+    if cat_taken:
+        return {"available": False, "normalized": normalized,
+                "reason": "A catalogued graph on this connection already uses this name."}
+    # Live key check — best-effort (None = unreachable → registry checks stand alone;
+    # they cover every app-managed key, so only out-of-band keys slip past).
+    from backend.app.providers.falkor_graph_registry import list_graph_keys
+    keys = await list_graph_keys(provider_id)
+    if keys is not None and normalized in keys:
+        return {"available": False, "normalized": normalized,
+                "reason": "A graph with this name already exists on this connection."}
+    return {"available": True, "normalized": normalized}
+
+
+@router.get("/blank-graphs/name-check", response_model=GraphNameCheckResponse)
+async def check_blank_graph_name(
+    ws_id: str,
+    provider_id: str = Query(..., alias="providerId"),
+    graph_name: str = Query(..., alias="graphName"),
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Live availability check for the wizard's graph-name field (same rules the
+    provisioning endpoint enforces authoritatively)."""
+    return await _graph_name_availability(session, provider_id, graph_name)
+
+
 @router.post("/blank-graphs", response_model=BlankGraphResponse,
              status_code=status.HTTP_201_CREATED)
 async def create_blank_graph(
@@ -889,12 +965,27 @@ async def create_blank_graph(
             "type": "ontology_not_published",
             "message": "Blank models must be built on a published ontology."})
 
-    # 3) Manual data source with a minted, collision-proof graph name (same txn).
+    # 3) Manual data source. The physical graph name is the user's choice when given
+    #    (validated + serialized under a per-(provider,name) advisory lock so two
+    #    concurrent provisions can't race past the cross-workspace uniqueness check
+    #    the DB constraint doesn't cover); otherwise a collision-proof
+    #    ``blank_<ds_id>`` is minted.
+    user_graph_name: Optional[str] = None
+    if body.graph_name:
+        from sqlalchemy import text as _sql_text
+        await session.execute(_sql_text(
+            "SELECT pg_advisory_xact_lock(hashtext(:k))"
+        ), {"k": f"graph-name:{body.provider_id}:{body.graph_name.strip().lower()}"})
+        verdict = await _graph_name_availability(session, body.provider_id, body.graph_name)
+        if not verdict["available"]:
+            raise HTTPException(status_code=422, detail={
+                "type": "graph_name_unavailable", "message": verdict["reason"]})
+        user_graph_name = str(verdict["normalized"])
     ds = await data_source_repo.create_data_source(session, ws_id, DataSourceCreateRequest(
         provider_id=body.provider_id, ontology_id=body.ontology_id,
         label=body.name, access_level="write"))
     row = await data_source_repo.get_data_source_orm(session, ds.id)
-    graph_name = f"blank_{row.id}"
+    graph_name = user_graph_name or f"blank_{row.id}"
     row.graph_name = graph_name
     row.source_mode = "managed"
     row.created_by = user.id

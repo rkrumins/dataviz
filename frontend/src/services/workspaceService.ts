@@ -35,7 +35,12 @@ export interface DataSourceUpdateRequest {
 export interface DataSourceResponse {
     id: string
     workspaceId: string
-    catalogItemId: string
+    /** Absent on manual (blank) models — they have no catalog item. */
+    catalogItemId?: string
+    /** Provider connection + physical graph key (sent by the backend; the only
+     *  provider resolution for catalog-less manual models). */
+    providerId?: string
+    graphName?: string
     ontologyId?: string
     label?: string
     accessLevel: string

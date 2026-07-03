@@ -25,9 +25,36 @@ export type { AllowedEdgeOption, EdgeDirection } from '@/providers/GraphDataProv
 export const NON_DRAWABLE_EDGE_TYPES = new Set<string>(['AGGREGATED'])
 
 /**
+ * Case-insensitive id equality: a discovered graph may store type/relationship
+ * ids in a different case than the ontology (e.g. `flows_to` vs `FLOWS_TO`,
+ * `attribute` vs `Attribute`) — validation must not require exact casing. If an
+ * ontology pathologically defines two ids differing only by case, the first
+ * match wins; not engineered for further.
+ */
+const sameId = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
+
+/** Case-insensitive entity-type lookup by id (exact match first, then case-insensitive). */
+function findEntityType(id: string, entityTypes: EntityTypeSchema[]): EntityTypeSchema | undefined {
+  return entityTypes.find((et) => et.id === id) ?? entityTypes.find((et) => sameId(et.id, id))
+}
+
+/** Case-insensitive hierarchyMap key lookup — same exact-then-case-insensitive strategy as {@link findEntityType}. */
+function findHierarchyEntry(
+  id: string,
+  hierarchyMap: Record<string, { canContain?: string[] }>,
+): { canContain?: string[] } | undefined {
+  if (id in hierarchyMap) return hierarchyMap[id]
+  const key = Object.keys(hierarchyMap).find((k) => sameId(k, id))
+  return key ? hierarchyMap[key] : undefined
+}
+
+/**
  * The entity type ids that may be created directly under a parent of
  * `parentType` (or at the root when `parentType` is null), per the ontology's
  * containment rules. An empty `canContain` means "unrestricted" (allow all).
+ * `parentType` is matched against the schema/hierarchyMap case-insensitively
+ * (a discovered graph node's type may be cased differently than the ontology's
+ * canonical id); the returned ids are always in ONTOLOGY casing.
  */
 export function allowedChildTypeIds(
   parentType: string | null,
@@ -41,8 +68,8 @@ export function allowedChildTypeIds(
     if (rootEntityTypes.length > 0) return new Set(rootEntityTypes)
     return new Set(entityTypes.filter((et) => et.hierarchy.canBeContainedBy.length === 0).map((et) => et.id))
   }
-  const fromSchema = entityTypes.find((et) => et.id === parentType)?.hierarchy.canContain ?? []
-  const fromOntology = hierarchyMap[parentType]?.canContain ?? []
+  const fromSchema = findEntityType(parentType, entityTypes)?.hierarchy.canContain ?? []
+  const fromOntology = findHierarchyEntry(parentType, hierarchyMap)?.canContain ?? []
   const canContain = [...new Set([...fromSchema, ...fromOntology])]
   // Empty canContain = unrestricted: every type is a valid child.
   if (canContain.length === 0) return new Set(entityTypes.map((et) => et.id))
@@ -54,15 +81,16 @@ export function allowedChildTypeIds(
  * schema and the hierarchyMap is CLOSED to nesting — consistent with the
  * FlatTreeItem add-child gate. This intentionally differs from
  * `allowedChildTypeIds`, whose lenient "empty = unrestricted" rule mirrors
- * backend fail-open validation and must not change.
+ * backend fail-open validation and must not change. `parentType` is matched
+ * case-insensitively (see {@link allowedChildTypeIds}).
  */
 export function isClosedToNesting(
   parentType: string,
   entityTypes: EntityTypeSchema[],
   hierarchyMap: Record<string, { canContain?: string[] }>,
 ): boolean {
-  const fromSchema = entityTypes.find((et) => et.id === parentType)?.hierarchy.canContain ?? []
-  const fromOntology = hierarchyMap[parentType]?.canContain ?? []
+  const fromSchema = findEntityType(parentType, entityTypes)?.hierarchy.canContain ?? []
+  const fromOntology = findHierarchyEntry(parentType, hierarchyMap)?.canContain ?? []
   return fromSchema.length === 0 && fromOntology.length === 0
 }
 
@@ -169,9 +197,9 @@ export function isDrawableLineageType(
   return rt.isLineage ?? true
 }
 
-/** True when `type` satisfies an endpoint constraint (empty / '*' = wildcard). */
+/** True when `type` satisfies an endpoint constraint (empty / '*' = wildcard; membership is case-insensitive). */
 export function endpointOk(type: string | null, allowedTypes: string[] | undefined): boolean {
-  return !type || !allowedTypes?.length || allowedTypes.includes('*') || allowedTypes.includes(type)
+  return !type || !allowedTypes?.length || allowedTypes.includes('*') || allowedTypes.some((t) => sameId(t, type))
 }
 
 const upper = (t?: string | null) => (t ?? '').toUpperCase()

@@ -10,8 +10,9 @@ affected projection rows to NULL (= unpinned, excluded from the worker's poll).
 
 Safety rules — a key is dropped ONLY if all of:
   * its name is synthetic: exactly ``gv_<graph_id>`` for a graphver row, a ``gv_*__fork_*``
-    fork of a synthetic parent, a ``gvt_*``/``gvtest_*`` test pin, or a ``gv_graph_*`` key
-    whose graph row no longer exists;
+    fork of a synthetic parent, a ``gvt_*``/``gvtest_*`` test pin, a ``gv_graph_*`` key
+    whose graph row no longer exists, or a ``blank_*`` key (only ever minted by the
+    blank-model provisioning) whose data source no longer claims it;
   * no management-DB data source uses that name as its real ``graph_name``;
   * no projection row pins a DIFFERENT graph to it with a non-synthetic claim;
   * it is EMPTY (0 nodes), unless ``--force`` is given (test keys hold a handful of rows,
@@ -38,7 +39,10 @@ _SYNTH_FORK = re.compile(r"^gv_.*__fork_")
 
 def _synthetic(name: str, gid: str | None = None) -> bool:
     """A name no real reader can be pointed at: the graph's own gv_ fallback, a fork of a
-    synthetic parent, a test pin, or (for keys) any gv_graph_* whose row is unknown."""
+    synthetic parent, a test pin, or (for keys) any gv_graph_* whose row is unknown.
+    NOTE: ``blank_*`` mints are deliberately NOT synthetic here — this predicate also
+    drives pin protection/unpinning, and live blank models pin their real key. Orphan
+    ``blank_*`` KEYS are swept via the key-candidacy check in main() instead."""
     if _TEST_PIN.match(name) or _SYNTH_FORK.match(name):
         return True
     if gid is not None:
@@ -98,9 +102,13 @@ async def main() -> int:
     dropped, skipped_nonempty, kept = [], [], []
     for key in sorted(existing):
         gid = key[3:] if key.startswith("gv_") and "__fork_" not in key else None
-        is_candidate = _synthetic(key, gid if gid in graph_ids else None)
+        # blank_* keys are only ever minted by blank-model provisioning; one no
+        # data source claims (the protected set) is an orphan (e.g. a compensated
+        # provisioning, a deleted model, or a FalkorDB-snapshot zombie).
+        is_candidate = (_synthetic(key, gid if gid in graph_ids else None)
+                        or key.startswith("blank_"))
         if not is_candidate or key in protected:
-            if key.startswith(("gv_", "gvt")):
+            if key.startswith(("gv_", "gvt", "blank_")):
                 kept.append(key)
             continue
         g = handle.select_graph(key)

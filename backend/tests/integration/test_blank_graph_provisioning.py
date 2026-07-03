@@ -157,6 +157,49 @@ async def _run() -> None:
         r = await c.get(f"{base}/resolve", params={"dataSourceId": ds_id}, headers=_hdr())
         assert r.status_code == 200 and r.json()["kind"] == "blank", r.text
 
+        # ── user-chosen physical graph name ──────────────────────────────────
+        custom = "e2e_named_" + os.urandom(3).hex()
+        # name-check: available before, then the same rules reject bad input
+        r = await c.get(f"{base}/blank-graphs/name-check",
+                        params={"providerId": ids["falkor"], "graphName": custom}, headers=_hdr())
+        assert r.status_code == 200 and r.json()["available"] is True, r.text
+        # (case is normalized, not rejected — "UPPER_Case" → available as "upper_case")
+        r = await c.get(f"{base}/blank-graphs/name-check",
+                        params={"providerId": ids["falkor"], "graphName": "UPPER_Case"}, headers=_hdr())
+        assert r.json() == {"available": True, "normalized": "upper_case", "reason": None}, r.text
+        for bad, why in [("Ab", "too short"), ("has space", "slug rules"),
+                         ("-leading", "slug rules"),
+                         ("gv_mine", "reserved"), ("blank_mine", "reserved"),
+                         ("mygraph_proj", "reserved")]:
+            r = await c.get(f"{base}/blank-graphs/name-check",
+                            params={"providerId": ids["falkor"], "graphName": bad}, headers=_hdr())
+            assert r.status_code == 200 and r.json()["available"] is False, (bad, why, r.text)
+        # provision with the custom name → it IS the physical key
+        r = await c.post(f"{base}/blank-graphs", headers=_hdr(), json={
+            "name": "Named Model", "providerId": ids["falkor"],
+            "ontologyId": ids["published"], "graphName": custom})
+        assert r.status_code == 201, r.text
+        named = r.json()
+        assert named["graphName"] == custom, named
+        named_row = await _ds_row(named["dataSourceId"])
+        assert named_row.graph_name == custom
+        async with db.graphver_session() as s:
+            ps2 = await s.get(ProjectionStateORM, named["graphId"])
+            assert ps2.falkor_graph_name == custom
+        # the name is now taken — check endpoint AND provisioning both refuse it
+        r = await c.get(f"{base}/blank-graphs/name-check",
+                        params={"providerId": ids["falkor"], "graphName": custom}, headers=_hdr())
+        assert r.json()["available"] is False, r.text
+        r = await c.post(f"{base}/blank-graphs", headers=_hdr(), json={
+            "name": "Named Again", "providerId": ids["falkor"],
+            "ontologyId": ids["published"], "graphName": custom})
+        assert r.status_code == 422 and r.json()["detail"]["type"] == "graph_name_unavailable", r.text
+        # invalid name at provision time is rejected before anything is created
+        r = await c.post(f"{base}/blank-graphs", headers=_hdr(), json={
+            "name": "Bad Name", "providerId": ids["falkor"],
+            "ontologyId": ids["published"], "graphName": "gv_reserved"})
+        assert r.status_code == 422 and r.json()["detail"]["type"] == "graph_name_unavailable", r.text
+
         # ── compensation: graph creation fails → the data source is removed ──
         class _FailingSvc:
             async def create_graph(self, **kw):

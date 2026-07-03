@@ -295,9 +295,17 @@ lineage model from the UI and build it by hand. Everything below is backend-veri
 `POST /{ws}/versioning/blank-graphs` (`versioning.py::create_blank_graph`, gate
 `workspace:datasource:manage`) provisions in one call:
 1. a **manual data source** on a chosen FalkorDB provider — no catalog item; the chosen
-   **published** ontology bound via `ontology_id`; `source_mode="managed"`; and a minted
-   collision-proof `graph_name = "blank_<ds_id>"` (a full projection seed WIPES its named
-   FalkorDB key, so physical names are never user-supplied);
+   **published** ontology bound via `ontology_id`; `source_mode="managed"`; and the
+   **user-chosen physical `graph_name`** (the FalkorDB key the model lives under, slugged
+   from the model name by default). Because a full projection seed WIPES the named key,
+   names are validated centrally (`_graph_name_availability` + the
+   `GET /blank-graphs/name-check` live endpoint): slug shape (`^[a-z0-9][a-z0-9_-]{2,63}$`),
+   reserved prefixes (`gv_`, `gvt_`, `blank_`, `__fork_`, `*_proj`) rejected, uniqueness
+   per provider across ALL workspaces (data sources + catalog items — the DB constraint is
+   only per-workspace, so provisioning serializes under a `pg_advisory_xact_lock`), plus a
+   best-effort live `GRAPH.LIST` check. Omitted name → collision-proof `blank_<ds_id>`
+   mint. Orphan keys (`gv_*`, `gvt_*`, unclaimed `blank_*`) are swept by
+   `scripts/cleanup_orphan_gv_graphs.py`;
 2. a **genesis-only versioned graph** — `create_graph(kind="blank", ontology_enforcement=
    "strict")` pinned to that name + provider (`projection_state.falkor_graph_name` /
    `falkor_provider`);

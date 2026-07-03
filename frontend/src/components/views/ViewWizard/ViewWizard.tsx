@@ -56,7 +56,7 @@ import { useWizardScope } from '@/hooks/useWizardScope'
 import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
-import { ontologyToWorkspaceSchema, deriveLayersFromOntology } from './blankModel'
+import { ontologyToWorkspaceSchema, deriveLayersFromOntology, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
 
 import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
@@ -117,6 +117,12 @@ export interface WizardFormData {
     advancedFilters: ActiveFilter[]
     scopeEdges?: ScopeEdgeConfig
     isValid: boolean
+    /** Blank models only: the user-chosen PHYSICAL FalkorDB graph name.
+     *  Undefined = auto-derived from `name` (slugified) until the user edits it. */
+    graphName?: string
+    /** Blank models only: last known availability of the (derived or edited)
+     *  graph name — false blocks Next on Basics; server re-validates at submit. */
+    graphNameAvailable?: boolean
 }
 
 type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
@@ -853,7 +859,16 @@ function ViewWizardBody({
 
     const canProceed = useMemo(() => {
         switch (currentStep) {
-            case 'basics': return formData.name.trim().length > 0
+            case 'basics': {
+                if (formData.name.trim().length === 0) return false
+                if (isBlank) {
+                    // The physical graph name must be shaped right and not known-taken
+                    // (unknown availability passes — the server re-validates at submit).
+                    const gname = formData.graphName ?? slugifyGraphName(formData.name)
+                    return GRAPH_NAME_RE.test(gname) && formData.graphNameAvailable !== false
+                }
+                return true
+            }
             case 'layout': return formData.layoutType !== undefined
             case 'assignment': return true
             case 'entities': return formData.visibleEntityTypes.length > 0
@@ -935,6 +950,10 @@ function ViewWizardBody({
                                 description: formData.description || undefined,
                                 providerId: blankProviderId!,
                                 ontologyId: blankOntologyId!,
+                                // Always name the physical graph — the user's edit, or the
+                                // slug of the model name. The server validates authoritatively
+                                // (a 422 lands in the provisionError banner).
+                                graphName: formData.graphName ?? slugifyGraphName(formData.name),
                             })
                             provisionRef.current = provisioned
                         } catch (err) {
@@ -1047,6 +1066,9 @@ function ViewWizardBody({
                     mode={mode}
                     scopeContext={scopeContext}
                     onChangeScope={mode === 'create' ? onBackToScope : undefined}
+                    blankNaming={isBlank && blankProviderId
+                        ? { workspaceId: resolvedWorkspaceId, providerId: blankProviderId }
+                        : undefined}
                 />
             )}
             {currentStep === 'layout' && (

@@ -96,12 +96,7 @@ def make_registry_graph_factory(session_factory=None) -> Callable[[str, Optional
         resolved[provider_id] = conn
         return conn
 
-    async def graph(name: str, provider_id: Optional[str] = None):
-        if provider_id in _UNROUTED:
-            return _env().select_graph(name)
-        conn = await _resolve(provider_id)
-        if conn is None:
-            return _env().select_graph(name)
+    def _handle_for(conn):
         host, port, username, password = conn
         key = (host, port, username)
         if key not in handles:
@@ -112,6 +107,57 @@ def make_registry_graph_factory(session_factory=None) -> Callable[[str, Optional
             if password:
                 kw["password"] = password
             handles[key] = FalkorDB(connection_pool=ConnectionPool(**kw))
-        return handles[key].select_graph(name)
+        return handles[key]
+
+    async def graph(name: str, provider_id: Optional[str] = None):
+        if provider_id in _UNROUTED:
+            return _env().select_graph(name)
+        conn = await _resolve(provider_id)
+        if conn is None:
+            return _env().select_graph(name)
+        return _handle_for(conn).select_graph(name)
 
     return graph
+
+
+async def list_graph_keys(provider_id: Optional[str] = None,
+                          session_factory=None) -> Optional[set]:
+    """Best-effort ``GRAPH.LIST`` on a provider's instance (env default when
+    unrouted/unresolvable). ``None`` when the instance is unreachable — callers
+    must treat that as "cannot verify", never as "no keys". Builds a one-shot
+    connection (callers are rare, e.g. graph-name availability checks)."""
+    try:
+        from falkordb.asyncio import FalkorDB          # pragma: no cover - infra
+        from redis.asyncio import ConnectionPool       # pragma: no cover - infra
+
+        host = os.getenv("FALKORDB_HOST", "localhost")
+        port = int(os.getenv("FALKORDB_PORT", "6379"))
+        username = password = None
+        if provider_id not in _UNROUTED:
+            try:
+                from backend.app.db.engine import PoolRole, get_session_factory
+                from backend.app.db.repositories import provider_repo
+                factory = session_factory or get_session_factory(PoolRole.READONLY)
+                async with factory() as session:
+                    row = await provider_repo.get_provider_orm(session, provider_id)
+                    if row is not None and row.is_active and row.provider_type == "falkordb" \
+                            and row.host:
+                        creds = await provider_repo.get_credentials(session, provider_id)
+                        from backend.app.providers.manager import apply_local_dev_falkordb_override
+                        host, port = apply_local_dev_falkordb_override(
+                            row.host, int(row.port or 6379))
+                        username, password = creds.get("username"), creds.get("password")
+            except Exception:
+                logger.exception("provider lookup for %r failed — listing DEFAULT instance",
+                                 provider_id)
+        kw = {"host": host, "port": port, "max_connections": 2}
+        if username:
+            kw["username"] = username
+        if password:
+            kw["password"] = password
+        handle = FalkorDB(connection_pool=ConnectionPool(**kw))
+        keys = await handle.list_graphs()
+        return {k.decode() if isinstance(k, bytes) else k for k in keys}
+    except Exception:
+        logger.warning("GRAPH.LIST failed for provider %r — key check unavailable", provider_id)
+        return None

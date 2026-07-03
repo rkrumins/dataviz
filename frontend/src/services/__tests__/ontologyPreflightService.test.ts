@@ -6,6 +6,7 @@ import {
   isContainmentRelType,
   allowedChildTypeIds,
   builderAllowedChildTypeIds,
+  isClosedToNesting,
   containmentChains,
   NON_DRAWABLE_EDGE_TYPES,
   endpointOk,
@@ -98,6 +99,13 @@ describe('deriveConnectableEdges', () => {
     expect(out.every((o) => o.allowed)).toBe(true)
     expect(out.map((o) => o.edgeType).sort()).toEqual(['LINKS', 'STAR'])
   })
+
+  it('matches endpoint types against a discovered graph\'s differently-cased ids (case-insensitive)', () => {
+    // rels' FLOWS_TO is defined with lowercase endpoint types ['dataset']; a discovered
+    // graph node typed 'DATASET' must still satisfy it.
+    const out = deriveConnectableEdges('DATASET', 'DATASET', rels, [])
+    expect(out.find((o) => o.edgeType === 'FLOWS_TO')?.allowed).toBe(true)
+  })
 })
 
 describe('isContainmentRelType', () => {
@@ -147,6 +155,13 @@ describe('deriveContainmentEdges', () => {
     expect(out.map((o) => o.edgeType)).toEqual(['OWNS'])
     expect(out[0].allowed).toBe(true) // wildcard endpoints
   })
+
+  it('matches the forward parent/child pair against a discovered graph\'s differently-cased ids', () => {
+    // CONTAINS is defined parent→child as ['system']→['dataset']; a discovered graph
+    // using lowercase/uppercase-mismatched ids must still resolve the same forward pair.
+    const out = deriveContainmentEdges('SYSTEM', 'DATASET', rels, [])
+    expect(out.find((o) => o.edgeType === 'CONTAINS')?.allowed).toBe(true)
+  })
 })
 
 describe('allowedChildTypeIds', () => {
@@ -167,6 +182,15 @@ describe('allowedChildTypeIds', () => {
   it('treats empty canContain as unrestricted', () => {
     expect([...allowedChildTypeIds('dataset', types, ['domain'], {})].sort()).toEqual(['dataset', 'domain', 'system'])
   })
+
+  it('resolves a differently-cased parentType against the ontology-cased entityTypes (e.g. discovered "DATASET" vs fixture "dataset")', () => {
+    expect([...allowedChildTypeIds('DATASET', types, ['domain'], {})].sort()).toEqual(['dataset', 'domain', 'system'])
+  })
+
+  it('resolves a differently-cased parentType against hierarchyMap keys, returning canContain in its stored (ontology) casing', () => {
+    const hierarchyMap = { SYSTEM: { canContain: ['dataset'] } }
+    expect([...allowedChildTypeIds('system', [], [], hierarchyMap)]).toEqual(['dataset'])
+  })
 })
 
 describe('builderAllowedChildTypeIds', () => {
@@ -185,6 +209,25 @@ describe('builderAllowedChildTypeIds', () => {
   it('intersects the parent canContain set with types nestable via at least one allowed containment edge', () => {
     // domain canContain system+dataset, but CONTAINS only targets dataset → system is dropped.
     expect([...builderAllowedChildTypeIds('domain', types, ['domain'], {}, rels, [])]).toEqual(['dataset'])
+  })
+
+  it('resolves a differently-cased parentType (e.g. discovered "DOMAIN" vs fixture "domain")', () => {
+    expect([...builderAllowedChildTypeIds('DOMAIN', types, ['domain'], {}, rels, [])]).toEqual(['dataset'])
+  })
+})
+
+describe('isClosedToNesting', () => {
+  it('is closed when canContain is empty in both the schema and hierarchyMap', () => {
+    expect(isClosedToNesting('dataset', [et('dataset', [])], {})).toBe(true)
+  })
+
+  it('is not closed when the schema declares children', () => {
+    expect(isClosedToNesting('domain', [et('domain', ['system'])], {})).toBe(false)
+  })
+
+  it('resolves a differently-cased parentType against the ontology-cased entityTypes', () => {
+    expect(isClosedToNesting('DATASET', [et('dataset', [])], {})).toBe(true)
+    expect(isClosedToNesting('DOMAIN', [et('domain', ['system'])], {})).toBe(false)
   })
 })
 
@@ -241,6 +284,13 @@ describe('endpointOk', () => {
     expect(endpointOk('domain', ['*'])).toBe(true)
     expect(endpointOk('domain', ['domain', 'system'])).toBe(true)
     expect(endpointOk('column', ['domain', 'system'])).toBe(false)
+  })
+
+  it('matches membership case-insensitively (discovered graph ids vs ontology-cased allowedTypes, and vice versa)', () => {
+    expect(endpointOk('DOMAIN', ['domain', 'system'])).toBe(true)
+    expect(endpointOk('domain', ['DOMAIN', 'SYSTEM'])).toBe(true)
+    expect(endpointOk('Attribute', ['attribute'])).toBe(true)
+    expect(endpointOk('COLUMN', ['domain', 'system'])).toBe(false)
   })
 })
 

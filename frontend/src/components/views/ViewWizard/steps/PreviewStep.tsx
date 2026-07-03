@@ -20,10 +20,12 @@ import {
     Users,
     Globe,
     Tag,
-    Server
+    Server,
+    Database
 } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { slugifyGraphName } from '../blankModel'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
 // ============================================
@@ -152,6 +154,13 @@ export function PreviewStep({ formData, scopeContext }: PreviewStepProps) {
                                         {scopeContext.providerName}
                                     </span>
                                 )}
+                                <span
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full text-sm font-mono"
+                                    title="The physical graph key this model is stored under"
+                                >
+                                    <Database className="w-3 h-3 text-violet-400" />
+                                    {formData.graphName ?? slugifyGraphName(formData.name)}
+                                </span>
                             </div>
                         </div>
                     )}

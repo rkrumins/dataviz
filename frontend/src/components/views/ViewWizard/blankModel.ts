@@ -49,6 +49,25 @@ export function ontologyToWorkspaceSchema(def: OntologyDefinitionResponse): Work
   }
 }
 
+/** Mirrors the backend's physical-graph-name contract (versioning.py):
+ *  3–64 chars, lowercase alnum with '-'/'_', not starting with punctuation. */
+export const GRAPH_NAME_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/
+
+/**
+ * Derive a physical FalkorDB graph name from a human model name —
+ * "Customer 360 Lineage" → "customer_360_lineage". The user can edit the
+ * result; the backend validates authoritatively (reserved prefixes,
+ * per-provider uniqueness) at provision time.
+ */
+export function slugifyGraphName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^[_-]+|[_-]+$/g, '')
+    .slice(0, 64)
+}
+
 /**
  * Derive an ordered set of reference-layout layers from the schema's entity-type
  * hierarchy: one layer per distinct `hierarchy.level`, coarsest (level 0) first,
