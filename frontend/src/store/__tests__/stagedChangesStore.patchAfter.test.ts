@@ -100,6 +100,8 @@ describe('stagedChangesStore.patchAfter + useStageEntityCreation.updateStagedEnt
       owner: 'alice',
       description: 'd',
     })
+    // Canvas node mirrors the same merged properties.
+    expect(node(tempUrn)?.data.properties).toEqual({ owner: 'alice', description: 'd' })
   })
 
   it('updateStagedEntity no-ops for an unknown temp urn', () => {
