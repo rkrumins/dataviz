@@ -180,4 +180,44 @@ describe('parseIndentedOutline', () => {
     expect(rows[1].typeId).toBeNull()
     expect(rows[1].issues).toContain('Fix the row above first.')
   })
+
+  it('flags a missing containment edge for a depth-0 row scoped under an existing node', () => {
+    // 'column' passes dataset's canContain, but no containment relationship
+    // accepts dataset→column endpoints — the edge check must also run at
+    // depth 0 when rootParentType is set (paste scoped under a node).
+    const ctx: OutlineParseContext = {
+      ...baseCtx,
+      rootParentType: 'dataset',
+      relationshipTypes: [rt('CONTAINS', ['domain'], ['dataPlatform'], { isContainment: true })],
+    }
+    const rows = parseIndentedOutline('c1', ctx)
+    expect(rows[0].typeId).toBe('column')
+    expect(rows[0].issues).toContain("A Dataset can't contain a Column.")
+  })
+
+  it('handles mixed indentation: tabs first, then spaces at the inferred unit', () => {
+    const text = 'Domain: Sales\n\tData Platform: A\n\t  Container: C'
+    const rows = parseIndentedOutline(text, baseCtx)
+    expect(rows.map((r) => r.depth)).toEqual([0, 1, 2])
+    expect(rows.map((r) => r.typeId)).toEqual(['domain', 'dataPlatform', 'container'])
+  })
+
+  it('tie-breaks multi-allowed inference by name when hierarchy levels are equal', () => {
+    const types = [
+      et('folder', 'Folder', ['zebra', 'apple'], [], 0),
+      et('zebra', 'Zebra', [], ['folder'], 1),
+      et('apple', 'Apple', [], ['folder'], 1),
+    ]
+    const ctx: OutlineParseContext = {
+      entityTypes: types,
+      rootEntityTypes: ['folder'],
+      hierarchyMap: {},
+      relationshipTypes,
+      containmentEdgeTypes,
+      rootParentType: 'folder',
+    }
+    const rows = parseIndentedOutline('Something', ctx)
+    expect(rows[0].typeId).toBe('apple') // Apple < Zebra at equal level 1
+    expect(rows[0].explicitType).toBe(false)
+  })
 })

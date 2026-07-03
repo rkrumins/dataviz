@@ -135,11 +135,14 @@ function resolveRow(args: {
         : 'Nothing can be added here.',
     )
   }
-  if (typeId && depth > 0) {
+  // Any row with an EFFECTIVE parent needs a valid containment edge — that
+  // includes depth-0 rows when the paste is scoped under an existing node
+  // (rootParentType). Only true root-level creates (no parent) are exempt.
+  if (typeId && parentType) {
     const edges = deriveContainmentEdges(parentType, typeId, ctx.relationshipTypes, ctx.containmentEdgeTypes)
     if (!edges.some((e) => e.allowed)) {
       issues.push(
-        `A ${typeName(parentType as string, ctx.entityTypes)} can't contain a ${typeName(typeId, ctx.entityTypes)}.`,
+        `A ${typeName(parentType, ctx.entityTypes)} can't contain a ${typeName(typeId, ctx.entityTypes)}.`,
       )
     }
   }
