@@ -38,6 +38,7 @@ import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { EditorToolbar } from './EditorToolbar'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
+import { BuilderEmptyState } from './create/BuilderEmptyState'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
@@ -77,6 +78,11 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const selectNode = useCanvasStore(s => s.selectNode)
   const selectedNodeIds = useCanvasStore(s => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
+  // Mirrors ContextViewCanvas's isHydratingInitial — CanvasRouter writes
+  // hydrationPhase into the canvas store for every canvas type, so the empty
+  // state can avoid flashing before the initial load lands.
+  const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
+  const isHydratingInitial = hydrationPhase !== 'complete'
   const schema = useSchemaStore((s) => s.schema)
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
@@ -453,9 +459,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           GraphCanvas — they mount below as their own flex-sibling drawers. */}
       <div className="flex-1 min-h-0 flex">
         {/* Hierarchy Content */}
-        <div className="flex-1 min-w-0 overflow-auto p-6 custom-scrollbar">
+        <div className="relative flex-1 min-w-0 overflow-auto p-6 custom-scrollbar">
           {hierarchyTree.length === 0 ? (
-            <EmptyState />
+            !isHydratingInitial && <BuilderEmptyState />
           ) : (
             <div className="space-y-3">
               {hierarchyTree.map((rootNode) => (
@@ -928,17 +934,3 @@ function HierarchyContainer({
   )
 }
 
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center justify-center py-20 text-center">
-      <div className="w-16 h-16 rounded-2xl bg-black/5 dark:bg-white/5 flex items-center justify-center mb-4">
-        <LucideIcons.FolderTree className="w-8 h-8 text-ink-muted" />
-      </div>
-      <h3 className="text-lg font-medium text-ink">No Hierarchy Data</h3>
-      <p className="text-sm text-ink-muted mt-1 max-w-sm">
-        This view requires entities with containment relationships.
-        Switch to a different view or add parent-child relationships.
-      </p>
-    </div>
-  )
-}

@@ -62,6 +62,7 @@ import { EditorToolbar } from './EditorToolbar'
 import { TraceToolbar } from './TraceToolbar'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
+import { BuilderEmptyState } from './create/BuilderEmptyState'
 
 // Hooks
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -126,6 +127,11 @@ export function GraphCanvas({ className }: { className?: string }) {
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
+  // Mirrors ContextViewCanvas's isHydratingInitial — CanvasRouter writes
+  // hydrationPhase into the canvas store for every canvas type, so the empty
+  // state can avoid flashing before the initial load lands.
+  const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
+  const isHydratingInitial = hydrationPhase !== 'complete'
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
@@ -1364,7 +1370,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           stays anchored to the root and floats over this row. */}
       <div className="flex-1 min-h-0 flex">
       {/* React Flow Canvas */}
-      <div className="flex-1 min-w-0">
+      <div className="relative flex-1 min-w-0">
         <ReactFlow
           onInit={setRfInstance}
           onMoveEnd={(_, viewport) => handleViewportChange(viewport)}
@@ -1442,6 +1448,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             </div>
           )}
         </ReactFlow>
+        {rawNodes.length === 0 && !isHydratingInitial && <BuilderEmptyState />}
       </div>
 
       {/* Stats Bar */}
