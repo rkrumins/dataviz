@@ -12,6 +12,7 @@ import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -147,6 +148,10 @@ export const GenericNode = memo(function GenericNode({
   const isExpandable = entityType.behavior.expandable && ((entityData.childCount ?? 0) > 0)
   // Expansion mode from ontology definition: 'inline' expands in-place, 'graph' expands the canvas
   const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
+  // Add-child affordance is ontology-gated: shown only when this type can
+  // contain others. Resolves normally for isPending:'create' ghost nodes.
+  const canAddChild = (entityType?.hierarchy?.canContain?.length ?? 0) > 0
+  const canTrace = entityType?.behavior.traceable ?? false
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
   // the canonical identifier; fall back to the React Flow node id
@@ -179,18 +184,35 @@ export const GenericNode = memo(function GenericNode({
 
   return (
     <>
-      {/* Node Toolbar (appears on selection) */}
-      {entityType.behavior.traceable && (
+      {/* Node Toolbar (appears on selection). Rendered when the type is
+          traceable OR can contain children. The trace/pin/more cluster keeps
+          its traceable gate; the Add-inside button is ontology-gated on
+          canContain and opens the Hierarchy Builder scoped to this node. */}
+      {(canTrace || canAddChild) && (
         <NodeToolbar
           isVisible={!!selected}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
-          <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />
-          <ToolbarButton icon="ArrowDownLeft" label="Trace Downstream" />
-          <div className="w-px h-4 bg-glass-border mx-0.5" />
-          <ToolbarButton icon="Pin" label="Pin" />
-          <ToolbarButton icon="MoreHorizontal" label="More" />
+          {canTrace && (
+            <>
+              <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />
+              <ToolbarButton icon="ArrowDownLeft" label="Trace Downstream" />
+              <div className="w-px h-4 bg-glass-border mx-0.5" />
+              <ToolbarButton icon="Pin" label="Pin" />
+              <ToolbarButton icon="MoreHorizontal" label="More" />
+            </>
+          )}
+          {canAddChild && (
+            <ToolbarButton
+              icon="Plus"
+              label={`Add inside ${primaryLabel}`}
+              onClick={(e) => {
+                e.stopPropagation()
+                useHierarchyBuilderStore.getState().open({ parentUrn: searchUrn })
+              }}
+            />
+          )}
         </NodeToolbar>
       )}
 
@@ -593,10 +615,12 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
 }
 
 // Toolbar Button Component
-function ToolbarButton({ icon, label }: { icon: string; label: string }) {
+function ToolbarButton({ icon, label, onClick }: { icon: string; label: string; onClick?: (e: React.MouseEvent) => void }) {
   return (
     <button
       title={label}
+      aria-label={label}
+      onClick={onClick}
       className={cn(
         "w-7 h-7 rounded-md flex items-center justify-center",
         "text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/10",

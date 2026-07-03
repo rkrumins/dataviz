@@ -57,11 +57,11 @@ import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPa
 // UX components
 import { CanvasContextMenu } from './CanvasContextMenu'
 import { InlineNodeEditor } from './InlineNodeEditor'
-import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
 import { TraceToolbar } from './TraceToolbar'
-import { NodePalette } from './NodePalette'
+import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
+import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 
 // Hooks
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -122,7 +122,7 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   const { showToast } = useToast()
   // 2. Canvas store
-  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges, addNodes } = useCanvasStore()
+  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore()
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
@@ -142,7 +142,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 4. Local state
   const [showLineageFlow, setShowLineageFlow] = useState(true)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
-  const [isPaletteOpen, setPaletteOpen] = useState(false)
+  // Hierarchy Builder open state — drives right-rail mutual exclusion with the
+  // inspectors ("creation takes the rail"). Selector, not getState-in-render.
+  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen)
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
@@ -1180,37 +1182,6 @@ export function GraphCanvas({ className }: { className?: string }) {
     [rawNodes, getValidEdgeTypes],
   )
 
-  // Drag-and-drop from NodePalette
-  const onDragOver = useCallback((event: React.DragEvent) => {
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'move'
-  }, [])
-
-  const onDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault()
-      const type = event.dataTransfer.getData('application/reactflow')
-      if (!type || !rfInstance) return
-
-      const position = rfInstance.screenToFlowPosition({
-        x: event.clientX,
-        y: event.clientY,
-      })
-
-      addNodes([{
-        id: `node-${Date.now()}`,
-        type: 'generic',
-        position,
-        data: {
-          type,
-          label: `New ${type}`,
-          urn: `urn:manual:${type}:${Date.now()}`,
-        },
-      }])
-    },
-    [rfInstance, addNodes],
-  )
-
   // Save graph to backend
   const handleSave = useCallback(async () => {
     try {
@@ -1303,7 +1274,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       {/* Editor Toolbar */}
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
-          onAddNode={() => setPaletteOpen(true)}
+          onAddNode={() => useHierarchyBuilderStore.getState().open()}
           onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
@@ -1318,13 +1289,6 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </div>
-
-      {/* Node Palette */}
-      <AnimatePresence>
-        {isPaletteOpen && (
-          <NodePalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
-        )}
-      </AnimatePresence>
 
       {/* Header */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
@@ -1393,8 +1357,14 @@ export function GraphCanvas({ className }: { className?: string }) {
         )}
       </AnimatePresence>
 
+      {/* Canvas + right-rail row. The rail panels (builder / EntityDrawer /
+          EdgeDetailPanel) are width-animated flex siblings, so opening one
+          shrinks the ReactFlow area rather than overlaying it — parity with
+          ContextViewCanvas. The absolute HUD (toolbars, header, stats, legend)
+          stays anchored to the root and floats over this row. */}
+      <div className="flex-1 min-h-0 flex">
       {/* React Flow Canvas */}
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <ReactFlow
           onInit={setRfInstance}
           onMoveEnd={(_, viewport) => handleViewportChange(viewport)}
@@ -1413,8 +1383,6 @@ export function GraphCanvas({ className }: { className?: string }) {
           onReconnect={onReconnect}
           onEdgeClick={onEdgeClick}
           onEdgeContextMenu={onEdgeContextMenu}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
           isValidConnection={isValidConnection}
           onNodeContextMenu={(event, node) => {
             event.preventDefault()
@@ -1528,9 +1496,21 @@ export function GraphCanvas({ className }: { className?: string }) {
         <EdgeLegend defaultExpanded={false} visibleEdges={allVisibleEdges} />
       </div>
 
-      {/* Panels */}
+      {/* Right rail — mutual exclusion: creation takes the rail (an explicit
+          action), so the builder is never hidden behind an inspector the user
+          left open. Mirrors ContextViewCanvas. */}
+      {builderOpen && (
+        <HierarchyBuilderPanel
+          onClose={() => useHierarchyBuilderStore.getState().close()}
+          onEntityStaged={(_tempUrn, parentUrn) => {
+            // Node ids are urns here (useGraphHydration sets id: n.urn), so
+            // expanding by parentUrn reveals the freshly-staged child.
+            if (parentUrn) setExpandedNodes((prev) => new Set([...prev, parentUrn]))
+          }}
+        />
+      )}
       <AnimatePresence>
-        {!drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
@@ -1539,13 +1519,16 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </AnimatePresence>
-      <EntityDrawer
-        onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-        onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-        onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
-        onFocusNode={revealAndFocus}
-        onLocateMany={locateManyOnCanvas}
-      />
+      {!builderOpen && (
+        <EntityDrawer
+          onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+          onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+          onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+          onFocusNode={revealAndFocus}
+          onLocateMany={locateManyOnCanvas}
+        />
+      )}
+      </div>{/* end canvas + right-rail row */}
 
       {/* Advanced search trigger + panel. The trigger handles ⌘K
           globally; the panel mounts as a flex-sibling drawer (parity
@@ -1608,7 +1591,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
         onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onCreateNode={() => useHierarchyBuilderStore.getState().open()}
         onSelectAll={interactions.selectAll}
       />
       <InlineNodeEditor
@@ -1618,23 +1601,12 @@ export function GraphCanvas({ className }: { className?: string }) {
         onSave={interactions.saveInlineEdit}
         onCancel={interactions.cancelInlineEdit}
       />
-      <QuickCreateNode
-        isOpen={interactions.state.quickCreate.isOpen}
-        position={interactions.state.quickCreate.position}
-        parentUrn={interactions.state.quickCreate.parentUrn}
-        onClose={interactions.closeQuickCreate}
-        onCreated={(nodeId) => selectNode(nodeId)}
-        variant="centered"
-      />
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={(_typeId) => {
+        onCreateEntity={(typeId) => {
           interactions.closeCommandPalette()
-          interactions.openQuickCreate({
-            x: window.innerWidth / 2,
-            y: window.innerHeight / 2,
-          })
+          useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
