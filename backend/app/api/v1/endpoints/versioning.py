@@ -532,6 +532,8 @@ class MergePreviewResponse(_ApiModel):
 class EntityHistoryResponse(_ApiModel):
     entity_id: str = Field(alias="entityId")
     versions: List[dict]
+    # id → display name for every version's actor (see _attach_user_names).
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class CommitLogResponse(_ApiModel):
@@ -1117,9 +1119,12 @@ async def get_entity_history(
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    return {"entity_id": entity_id,
-            "versions": await svc.entity_history(graph_id=graph_id, entity_id=entity_id, viewer=viewer)}
+    versions = await svc.entity_history(graph_id=graph_id, entity_id=entity_id, viewer=viewer)
+    payload = {"entity_id": entity_id, "versions": versions}
+    await _attach_user_names(session, versions, wrapper=payload)
+    return payload
 
 
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)

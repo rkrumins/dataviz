@@ -131,6 +131,8 @@ async def _run() -> None:
         assert (await c.post(f"{ws1}/graphs/{gid}/branches/{bid}/publish", json={"message": "seed"}, headers=h)).status_code == 200
         hist = (await c.get(f"{ws1}/graphs/{gid}/entities/A/history", headers=h)).json()
         assert hist["entityId"] == "A" and any(v["op"] == "create" for v in hist["versions"])
+        # entity history: ONE wrapper-level map covers every version's actor.
+        assert hist["userNames"].get("u_test") == "Test Actor", hist
         from backend.app.services.versioning.service import GraphVersioningService
         mid = await GraphVersioningService().main_branch_id(gid)
         d = (await c.get(f"{ws1}/graphs/{gid}/branches/{mid}/diff", params={"fromSeq": 1, "toSeq": 2}, headers=h)).json()
