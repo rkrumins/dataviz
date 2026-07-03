@@ -57,7 +57,10 @@ def _fake_session_factory(ps, graph):
     return _session
 
 
-async def _run(monkeypatch) -> _FakePS:
+async def _run(monkeypatch, hang_at: str) -> _FakePS:
+    """Cancel ``project_graph`` while it is suspended at ``hang_at`` — ``"apply"`` (mid
+    FalkorDB apply, the original timeout bug) or ``"client"`` (the provider-lookup/handle
+    build, a suspension point OUTSIDE the try until this fix moved it in)."""
     ps = _FakePS()
     graph = _FakeGraph()
     proj = FalkorProjector(
@@ -75,14 +78,14 @@ async def _run(monkeypatch) -> _FakePS:
 
     started = asyncio.Event()
 
-    async def hanging_apply(client, *changes):
+    async def hang(*args, **kwargs):
         started.set()
         await asyncio.Event().wait()          # never completes on its own — only via cancellation
-    monkeypatch.setattr(proj, "_apply", hanging_apply)
+    monkeypatch.setattr(proj, "_graph_client" if hang_at == "client" else "_apply", hang)
 
     task = asyncio.ensure_future(proj.project_graph("g1"))
-    await asyncio.wait_for(started.wait(), timeout=1)   # cancel mid-apply, not before or after
-    assert ps.status == "projecting"                    # sanity: status IS set before cancellation
+    await asyncio.wait_for(started.wait(), timeout=1)   # cancel at the suspension point, not before/after
+    assert ps.status == "projecting"                    # sanity: status IS committed before cancellation
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -92,6 +95,15 @@ async def _run(monkeypatch) -> _FakePS:
 
 
 def test_cancelled_projection_does_not_strand_status(monkeypatch):
-    ps = asyncio.run(_run(monkeypatch))
+    ps = asyncio.run(_run(monkeypatch, hang_at="apply"))
     assert ps.status == "idle", ps.status                # NOT left stranded at "projecting"
+    assert ps.last_error == "projection cancelled (timeout)", ps.last_error
+
+
+def test_cancelled_during_client_acquisition_does_not_strand_status(monkeypatch):
+    # The FalkorDB handle build (provider lookup + connect) is a real suspension point; a
+    # cancel there must reset the already-committed "projecting" row too (regression for the
+    # acquisition running outside the cleanup try).
+    ps = asyncio.run(_run(monkeypatch, hang_at="client"))
+    assert ps.status == "idle", ps.status
     assert ps.last_error == "projection cancelled (timeout)", ps.last_error

@@ -251,8 +251,11 @@ class FalkorProjector:
                                      graph_id)
                     rollup_pairs = "stale"
 
-        client = await self._graph_client(name, provider_id)
         try:
+            # Inside the try: the factory does a real Postgres provider lookup + FalkorDB handle
+            # build (a genuine suspension point), so a cancellation here must ALSO reset the
+            # already-committed "projecting" row rather than strand it.
+            client = await self._graph_client(name, provider_id)
             if from_seq <= 0:
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
                 # committed main exactly. The seed only MERGEs the live state, so without this an entity
@@ -305,23 +308,37 @@ class FalkorProjector:
                 ps.last_projected_at = _now()
                 ps.last_error = verify_error
         except (Exception, asyncio.CancelledError) as exc:
-            # Every exit from this block MUST clear "projecting"/"rebuilding" in Postgres —
+            # Reset the "projecting" row committed above so it is not stranded — a stranded row
+            # spins the UI's "Refreshing…" badge forever AND blocks the manual rebuild escape
+            # hatch (request_projection_rebuild skips a graph still in {projecting, rebuilding}).
             # `except Exception` alone does NOT catch asyncio.CancelledError (a BaseException
-            # since Python 3.8), so a caller-side timeout (asyncio.wait_for in project_now)
-            # used to strand the status row forever and spin the UI's "Refreshing…" badge
-            # indefinitely. CancelledError is re-raised below per the asyncio cancellation
-            # contract — it is never swallowed here.
+            # since Python 3.8), so a caller-side timeout (asyncio.wait_for in project_now) — or
+            # any other cancellation once "projecting" is committed — used to strand it. A cancel
+            # BEFORE that commit never reaches this handler and correctly leaves the prior status
+            # untouched. CancelledError is re-raised below per the asyncio contract — never swallowed.
             cancelled = isinstance(exc, asyncio.CancelledError)
             if cancelled:
                 logger.warning("projection for %s cancelled; resetting status so it is not stranded",
                                graph_id)
             else:
                 logger.exception("projection apply failed for %s: %s", graph_id, exc)
-            async with self._session() as s:
-                ps = await s.get(ProjectionStateORM, graph_id)
-                if ps is not None:
-                    ps.status = "idle"
-                    ps.last_error = "projection cancelled (timeout)" if cancelled else str(exc)[:500]
+
+            async def _reset_status() -> None:
+                async with self._session() as s:
+                    ps = await s.get(ProjectionStateORM, graph_id)
+                    if ps is not None:
+                        ps.status = "idle"
+                        ps.last_error = ("projection cancelled (timeout)" if cancelled
+                                         else str(exc)[:500])
+
+            # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
+            # abort the write and re-strand the row; catch a Postgres error so it can't replace the
+            # CancelledError we owe our caller. Then re-raise the original.
+            try:
+                await asyncio.shield(_reset_status())
+            except Exception:                          # pragma: no cover - infra
+                logger.warning("could not reset projection status for %s after failure/cancel",
+                               graph_id, exc_info=True)
             raise
 
         if orphan:                                     # the old gv_* graph is now unread — reclaim its RAM
