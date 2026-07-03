@@ -96,6 +96,13 @@ interface StagedChangesState {
     matcher: (c: StagedChange) => boolean,
     input: Omit<StagedChange, 'id' | 'timestamp'>,
   ) => string
+  /**
+   * Patch a staged change's `after` object in place, keeping its reference — so
+   * hooks that closed over `after` (e.g. a `create_entity`'s `apply`) observe the
+   * patch on save. The change entry itself is replaced immutably so subscribers
+   * re-render. No-op if `changeId` isn't in the current scope.
+   */
+  patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
   discardAll: () => void
   applyAll: (provider: GraphDataProvider, wsId: string) => Promise<{ ok: number; failed: number }>
@@ -219,6 +226,17 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       return existing.id
     }
     return get().stage(input)
+  },
+
+  patchAfter: (changeId, patch, summary) => {
+    const change = get().changes.find((c) => c.id === changeId)
+    if (!change) return
+    // Deliberate in-place mutation: `after` is the same object the change's `apply`
+    // closure reads from, so this patch is visible on save without re-staging.
+    Object.assign(change.after as Record<string, unknown>, patch)
+    set((s) => ({
+      changes: s.changes.map((c) => (c.id === changeId ? { ...c, summary: summary ?? c.summary } : c)),
+    }))
   },
 
   discard: (changeId) => {

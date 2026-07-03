@@ -98,15 +98,19 @@ export function useStageEntityCreation() {
         }])
       }
 
+      // Shared with `patchAfter`/`updateStagedEntity`: mutated in place post-stage, so
+      // `apply` (which reads from this same object) observes edits made after staging.
+      const afterState = {
+        entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties,
+        // Recorded so the staged-changes review can show how the child is related to its parent.
+        ...(parentUrn ? { containmentEdgeType, parentLabel } : {}),
+      }
+
       stageChange({
         type: 'create_entity',
         targetId: tempUrn,
         targetUrn: tempUrn,
-        after: {
-          entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties,
-          // Recorded so the staged-changes review can show how the child is related to its parent.
-          ...(parentUrn ? { containmentEdgeType, parentLabel } : {}),
-        },
+        after: afterState,
         summary: parentUrn
           ? `Create ${input.entityType}: '${input.displayName}' · ${containmentEdgeType}${parentLabel ? ` ${parentLabel}` : ''}`
           : `Create ${input.entityType}: '${input.displayName}'`,
@@ -121,11 +125,11 @@ export function useStageEntityCreation() {
           const resolvedParent = parentUrn ? (resolveTempId(parentUrn) ?? parentUrn) : undefined
           const result = await provider.createNode({
             entityType: input.entityType as never,
-            displayName: input.displayName,
+            displayName: afterState.displayName,
             parentUrn: resolvedParent,
             containmentEdgeType: parentUrn ? containmentEdgeType : undefined,
-            properties,
-            tags,
+            properties: afterState.properties,
+            tags: afterState.tags,
           })
           if (!result.success || !result.node) {
             throw new Error(result.error || 'Failed to create entity')
@@ -167,5 +171,52 @@ export function useStageEntityCreation() {
     [addNodes, addEdges, removeNode, removeEdge, containmentEdgeTypes, stageChange],
   )
 
-  return { stageEntity }
+  /**
+   * Edit a still-staged `create_entity` row in place (Hierarchy Builder rename/details).
+   * Patches the shared `after` object via `patchAfter` — so the edit survives to the
+   * eventual `apply`/save — and mirrors the visible fields onto the optimistic canvas node.
+   */
+  const updateStagedEntity = useCallback(
+    (tempUrn: string, patch: { displayName?: string; tags?: string[]; properties?: Record<string, unknown> }) => {
+      const change = useStagedChangesStore
+        .getState()
+        .changes.find((c) => c.type === 'create_entity' && c.targetUrn === tempUrn)
+      if (!change) return
+      const after = change.after as {
+        entityType: string
+        displayName: string
+        parentUrn?: string
+        containmentEdgeType?: string
+        parentLabel?: string
+        properties?: Record<string, unknown>
+      }
+
+      const afterPatch: Record<string, unknown> = {}
+      const nodePatch: Record<string, unknown> = {}
+      if (patch.displayName !== undefined) {
+        afterPatch.displayName = patch.displayName
+        nodePatch.label = patch.displayName
+      }
+      if (patch.tags !== undefined) {
+        afterPatch.tags = patch.tags
+        nodePatch.classifications = patch.tags
+      }
+      if (patch.properties !== undefined) {
+        const mergedProperties = { ...after.properties, ...patch.properties }
+        afterPatch.properties = mergedProperties
+        nodePatch.properties = mergedProperties
+      }
+
+      const displayName = patch.displayName ?? after.displayName
+      const summary = after.parentUrn
+        ? `Create ${after.entityType}: '${displayName}' · ${after.containmentEdgeType}${after.parentLabel ? ` ${after.parentLabel}` : ''}`
+        : `Create ${after.entityType}: '${displayName}'`
+
+      useStagedChangesStore.getState().patchAfter(change.id, afterPatch, summary)
+      useCanvasStore.getState().updateNode(tempUrn, nodePatch)
+    },
+    [],
+  )
+
+  return { stageEntity, updateStagedEntity }
 }
