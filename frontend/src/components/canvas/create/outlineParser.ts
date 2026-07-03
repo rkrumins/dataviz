@@ -5,7 +5,7 @@
  * type/edge legality is delegated to `ontologyPreflightService`, never
  * duplicated here.
  */
-import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, deriveContainmentEdges, isClosedToNesting } from '@/services/ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
 export interface ParsedOutlineRow {
@@ -28,19 +28,6 @@ export interface OutlineParseContext {
 
 const typeName = (id: string, entityTypes: EntityTypeSchema[]): string =>
   entityTypes.find((et) => et.id === id)?.name ?? id
-
-/**
- * Builder leaf policy: a parent whose `canContain` is empty/absent (in both
- * the schema and the hierarchyMap) is CLOSED to nesting — consistent with the
- * FlatTreeItem add-child gate. This intentionally differs from
- * `allowedChildTypeIds`, whose lenient "empty = unrestricted" rule mirrors
- * backend fail-open validation and must not change.
- */
-function isClosedToNesting(parentType: string, ctx: OutlineParseContext): boolean {
-  const fromSchema = ctx.entityTypes.find((et) => et.id === parentType)?.hierarchy.canContain ?? []
-  const fromOntology = ctx.hierarchyMap[parentType]?.canContain ?? []
-  return fromSchema.length === 0 && fromOntology.length === 0
-}
 
 /** Lowest hierarchy.level first, then name. */
 function pickByLevelThenName(ids: string[], entityTypes: EntityTypeSchema[]): string {
@@ -107,7 +94,7 @@ function resolveRow(args: {
   }
 
   const parentType = depth === 0 ? ctx.rootParentType : (parentRow!.typeId as string)
-  const allowed = parentType && isClosedToNesting(parentType, ctx)
+  const allowed = parentType && isClosedToNesting(parentType, ctx.entityTypes, ctx.hierarchyMap)
     ? new Set<string>()
     : allowedChildTypeIds(parentType, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap)
   const issues: string[] = []

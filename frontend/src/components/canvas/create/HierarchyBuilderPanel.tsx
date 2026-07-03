@@ -26,8 +26,7 @@ import {
 } from '@/hooks/useViewSchema'
 import {
   containmentChains,
-  allowedChildTypeIds,
-  deriveContainmentEdges,
+  builderAllowedChildTypeIds,
   type AllowedEdgeOption,
 } from '@/services/ontologyPreflightService'
 import { relationshipLabel } from '@/lib/relationshipLabel'
@@ -69,8 +68,8 @@ const splitTags = (s: string): string[] => s.split(',').map((t) => t.trim()).fil
 
 /**
  * The entity types allowed directly under `parentType` (or root when null),
- * for the paste-preview type dropdown. Mirrors the hook's `allowedTypesFor`
- * gate (closed-to-nesting + containment-edge filter) using ontology primitives.
+ * for the paste-preview type dropdown — the builder gate
+ * ({@link builderAllowedChildTypeIds}), sorted by level then name.
  */
 function allowedChildSchemas(
   parentType: string | null,
@@ -80,25 +79,7 @@ function allowedChildSchemas(
   relationshipTypes: RelationshipTypeSchema[],
   containmentEdgeTypes: string[],
 ): EntityTypeSchema[] {
-  let ids: Set<string>
-  if (!parentType) {
-    ids = allowedChildTypeIds(null, entityTypes, rootEntityTypes, hierarchyMap)
-  } else {
-    const canContain = new Set([
-      ...(entityTypes.find((et) => et.id === parentType)?.hierarchy.canContain ?? []),
-      ...(hierarchyMap[parentType]?.canContain ?? []),
-    ])
-    if (canContain.size === 0) {
-      ids = new Set<string>()
-    } else {
-      const candidates = allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap)
-      ids = new Set(
-        [...candidates].filter((id) =>
-          deriveContainmentEdges(parentType, id, relationshipTypes, containmentEdgeTypes).some((e) => e.allowed),
-        ),
-      )
-    }
-  }
+  const ids = builderAllowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes)
   return [...ids]
     .map((id) => entityTypes.find((et) => et.id === id))
     .filter((t): t is EntityTypeSchema => !!t)

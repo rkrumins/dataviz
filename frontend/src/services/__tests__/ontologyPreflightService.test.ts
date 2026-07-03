@@ -5,6 +5,7 @@ import {
   deriveContainmentEdges,
   isContainmentRelType,
   allowedChildTypeIds,
+  builderAllowedChildTypeIds,
   containmentChains,
   NON_DRAWABLE_EDGE_TYPES,
   endpointOk,
@@ -152,6 +153,25 @@ describe('allowedChildTypeIds', () => {
 
   it('treats empty canContain as unrestricted', () => {
     expect([...allowedChildTypeIds('dataset', types, ['domain'], {})].sort()).toEqual(['dataset', 'domain', 'system'])
+  })
+})
+
+describe('builderAllowedChildTypeIds', () => {
+  const types = [et('domain', ['system', 'dataset']), et('system', ['dataset'], ['domain']), et('dataset', [], ['system'])]
+  const rels = [rt('CONTAINS', ['domain', 'system'], ['dataset'], { isContainment: true })]
+
+  it('offers the declared roots when there is no parent', () => {
+    expect([...builderAllowedChildTypeIds(null, types, ['domain'], {}, rels, [])]).toEqual(['domain'])
+  })
+
+  it('offers nothing under a leaf, even with a wildcard containment edge (empty canContain = closed, not unrestricted)', () => {
+    const wildContains = rt('CONTAINS', [], [], { isContainment: true })
+    expect(builderAllowedChildTypeIds('dataset', types, ['domain'], {}, [wildContains], []).size).toBe(0)
+  })
+
+  it('intersects the parent canContain set with types nestable via at least one allowed containment edge', () => {
+    // domain canContain system+dataset, but CONTAINS only targets dataset → system is dropped.
+    expect([...builderAllowedChildTypeIds('domain', types, ['domain'], {}, rels, [])]).toEqual(['dataset'])
   })
 })
 

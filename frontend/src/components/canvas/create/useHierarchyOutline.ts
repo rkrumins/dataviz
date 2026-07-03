@@ -26,7 +26,12 @@ import {
   useViewRelationshipTypes,
   useViewContainmentEdgeTypes,
 } from '@/hooks/useViewSchema'
-import { allowedChildTypeIds, deriveContainmentEdges, type AllowedEdgeOption } from '@/services/ontologyPreflightService'
+import {
+  builderAllowedChildTypeIds,
+  deriveContainmentEdges,
+  isClosedToNesting,
+  type AllowedEdgeOption,
+} from '@/services/ontologyPreflightService'
 import { useStageEntityCreation } from './useStageEntityCreation'
 import type { ParsedOutlineRow } from './outlineParser'
 import type { EntityTypeSchema } from '@/types/schema'
@@ -167,43 +172,18 @@ export function useHierarchyOutline(opts: {
     [tree],
   )
 
-  /**
-   * Builder leaf policy: empty/absent canContain CLOSES a type to nesting —
-   * unlike `allowedChildTypeIds`, whose "empty = unrestricted" fallback is
-   * for backend fail-open validation and must not be reused here.
-   */
-  const isClosedToNesting = useCallback(
-    (parentType: string): boolean => {
-      const fromSchema = entityTypes.find((et) => et.id === parentType)?.hierarchy.canContain ?? []
-      const fromOntology = hierarchyMap[parentType]?.canContain ?? []
-      return fromSchema.length === 0 && fromOntology.length === 0
-    },
-    [entityTypes, hierarchyMap],
-  )
-
   /** THE gate for `allowedTypes`, `indent`, and `blockedReason` (rule 2). */
   const allowedTypesFor = useCallback(
     (parentUrn: string | null): EntityTypeSchema[] => {
-      const parentType = parentTypeOf(parentUrn)
-      let ids: Set<string>
-      if (!parentType) {
-        ids = allowedChildTypeIds(null, entityTypes, rootEntityTypes, hierarchyMap)
-      } else if (isClosedToNesting(parentType)) {
-        ids = new Set()
-      } else {
-        const candidates = allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap)
-        ids = new Set(
-          [...candidates].filter((id) =>
-            deriveContainmentEdges(parentType, id, relationshipTypes, containmentEdgeTypes).some((e) => e.allowed),
-          ),
-        )
-      }
+      const ids = builderAllowedChildTypeIds(
+        parentTypeOf(parentUrn), entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes,
+      )
       const types = [...ids]
         .map((id) => entityTypes.find((et) => et.id === id))
         .filter((t): t is EntityTypeSchema => !!t)
       return sortByLevelThenName(types)
     },
-    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, parentTypeOf, isClosedToNesting],
+    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, parentTypeOf],
   )
 
   const allowedTypes = useMemo(() => allowedTypesFor(active.parentUrn), [allowedTypesFor, active.parentUrn])
@@ -327,7 +307,7 @@ export function useHierarchyOutline(opts: {
     if (!targetTempUrn) return false
     const row = tree.find((r) => r.tempUrn === targetTempUrn)
     if (!row) return false
-    if (isClosedToNesting(row.typeId)) {
+    if (isClosedToNesting(row.typeId, entityTypes, hierarchyMap)) {
       const label = entityTypes.find((et) => et.id === row.typeId)?.name ?? row.typeId
       setIndentBlockedReason(`Nothing can be added inside a ${label}.`)
       return false
@@ -335,7 +315,7 @@ export function useHierarchyOutline(opts: {
     setIndentBlockedReason(null)
     setActive((prev) => ({ ...prev, parentUrn: targetTempUrn }))
     return true
-  }, [tree, isClosedToNesting, entityTypes])
+  }, [tree, entityTypes, hierarchyMap])
 
   const outdent = useCallback((): boolean => {
     if (active.parentUrn === scopeParentUrn) return false

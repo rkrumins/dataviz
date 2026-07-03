@@ -49,6 +49,49 @@ export function allowedChildTypeIds(
 }
 
 /**
+ * Builder leaf policy: a parent whose `canContain` is empty/absent in BOTH the
+ * schema and the hierarchyMap is CLOSED to nesting — consistent with the
+ * FlatTreeItem add-child gate. This intentionally differs from
+ * `allowedChildTypeIds`, whose lenient "empty = unrestricted" rule mirrors
+ * backend fail-open validation and must not change.
+ */
+export function isClosedToNesting(
+  parentType: string,
+  entityTypes: EntityTypeSchema[],
+  hierarchyMap: Record<string, { canContain?: string[] }>,
+): boolean {
+  const fromSchema = entityTypes.find((et) => et.id === parentType)?.hierarchy.canContain ?? []
+  const fromOntology = hierarchyMap[parentType]?.canContain ?? []
+  return fromSchema.length === 0 && fromOntology.length === 0
+}
+
+/**
+ * The entity type ids the Hierarchy Builder offers under `parentType` (or at
+ * the root when null): {@link allowedChildTypeIds} with the builder's two
+ * extra gates — a parent CLOSED to nesting (see {@link isClosedToNesting})
+ * offers nothing, and a child type is only offered when at least one
+ * containment relationship can actually nest it under the parent
+ * ({@link deriveContainmentEdges}). Sorting is left to call sites.
+ */
+export function builderAllowedChildTypeIds(
+  parentType: string | null,
+  entityTypes: EntityTypeSchema[],
+  rootEntityTypes: string[],
+  hierarchyMap: Record<string, { canContain?: string[] }>,
+  relationshipTypes: RelationshipTypeSchema[],
+  containmentEdgeTypes: string[],
+): Set<string> {
+  if (!parentType) return allowedChildTypeIds(null, entityTypes, rootEntityTypes, hierarchyMap)
+  if (isClosedToNesting(parentType, entityTypes, hierarchyMap)) return new Set()
+  const candidates = allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap)
+  return new Set(
+    [...candidates].filter((id) =>
+      deriveContainmentEdges(parentType, id, relationshipTypes, containmentEdgeTypes).some((e) => e.allowed),
+    ),
+  )
+}
+
+/**
  * Ontology containment chains from the given start types (e.g.
  * `['domain','dataPlatform','container','dataset']`), to power one-click
  * template scaffolds. DFS along `hierarchy.canContain`.
