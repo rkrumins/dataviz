@@ -192,6 +192,34 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     typeListRef.current?.querySelector('[data-active]')?.scrollIntoView({ block: 'nearest' })
   }, [active.typeId])
 
+  // ── Canvas clicks drive the builder. While this panel is open the entity
+  // drawer is suppressed (the canvases mount one right-rail panel at a time),
+  // so a node click would otherwise do nothing — a dead end that forced users
+  // to close the builder, read the drawer, then hunt for a "+" to resume.
+  // Instead: clicking a STAGED entity binds the details editor to it right
+  // here; clicking any container re-scopes "Adding inside X" and returns
+  // focus to the name input. Only click TRANSITIONS count — the selection
+  // that existed before the panel opened is ignored. ──
+  const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
+  const consumedCanvasClick = useRef(drawerNodeId)
+  useEffect(() => {
+    if (drawerNodeId === consumedCanvasClick.current) return
+    consumedCanvasClick.current = drawerNodeId
+    if (!drawerNodeId) return
+    const node = canvasNodes.find((n) => n.id === drawerNodeId || (n.data?.urn as string) === drawerNodeId)
+    if (!node) return
+    const urn = (node.data?.urn as string) || node.id
+    const canNest = ((typeById.get(node.data?.type as string)?.hierarchy.canContain?.length) ?? 0) > 0
+    if (tree.some((r) => r.tempUrn === urn)) {
+      setDetailsRowUrn(urn)
+      if (canNest) retarget(urn)
+    } else if (canNest) {
+      retarget(urn)
+      focusName()
+    }
+    // A leaf that isn't staged has nothing to offer the builder — ignore it.
+  }, [drawerNodeId, canvasNodes, tree, typeById, retarget, focusName])
+
   // Resolve where the next entity lands ("Adding inside X") from the active parent —
   // a staged row or a real canvas node.
   const parentInfo = useMemo(() => {
@@ -291,6 +319,13 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   }, [])
 
   const detailsRow = detailsRowUrn ? (tree.find((r) => r.tempUrn === detailsRowUrn) ?? null) : null
+
+  // Binding details (row action or canvas click) must be visible immediately —
+  // the editor lives below the type list and can sit under the fold.
+  const boundDetailsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (detailsRowUrn) boundDetailsRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [detailsRowUrn])
 
   if (!isOpen) return null
 
@@ -558,7 +593,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                     its row action, or to the entity being typed. Never inline in
                     the ADDING list, never two open at once. */}
                 {detailsRow ? (
-                  <div className="space-y-1">
+                  <div ref={boundDetailsRef} className="space-y-1">
                     <div className="flex items-center justify-between gap-2">
                       <span className="min-w-0 flex-1 text-[11px] font-medium text-ink truncate">Details — {detailsRow.name}</span>
                       <button
