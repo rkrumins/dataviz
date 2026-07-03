@@ -116,6 +116,7 @@ export function ContextViewCanvas({
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const removeEdgesByNodeIds = useCanvasStore((s) => s.removeEdgesByNodeIds)
   const removeStoreEdges = useCanvasStore((s) => s.removeEdges)
+  const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
@@ -1715,10 +1716,51 @@ export function ContextViewCanvas({
           if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
         }
       }
-      removeEdgesByNodeIds(
-        subtreeIds,
-        trace.isTracing ? trace.addedEdgeIds : undefined,
+
+      // Browse-mode collapse must PRUNE the subtree's descendant NODES, not
+      // just their containment edges. Dropping only edges leaves each
+      // descendant in `canvas.nodes` with no incoming containment edge; in a
+      // rule / entity-type-scoped Context View, `useLayerAssignment` then
+      // re-homes that edge-less node to its type column as a VISUAL ROOT
+      // (the root priority chain resolves it by entity type), and
+      // `useContainmentHierarchy` reports it parentless — so children and
+      // grandchildren float up as root-level siblings and the tree scrambles.
+      // Physically removing the descendants keeps collapse a true
+      // subtree-hide; re-expand refetches them via `loadChildren` (the
+      // backend returns each node with a correct `childCount`, including
+      // draft-created intermediates, so deeper drilling still works).
+      //
+      // Falls back to edge-only cleanup when:
+      //   • a trace is active — trace-merged edges have no re-add path and
+      //     `useTraceFilteredHierarchy` already hides non-context orphans, so
+      //     the existing preserve-edges behaviour is retained; or
+      //   • the subtree contains a node with ANY unsaved (isPending) overlay —
+      //     create/modify/delete. Pruning + refetch would drop in-progress
+      //     authoring or desync a staged edit's marker from stagedChangesStore.
+      //     `removeEdgesByNodeIds` already preserves unsaved edges in that case.
+      const storeNodes = useCanvasStore.getState().nodes
+      const hasPendingInSubtree = storeNodes.some(
+        (n) => subtreeIds.has(n.id) && !!(n.data as any)?.isPending,
       )
+      const canPrune = !trace.isTracing && !hasPendingInSubtree
+
+      if (canPrune && subtreeIds.size > 0) {
+        // Atomic node + incident-edge removal.
+        removeStoreNodes([...subtreeIds])
+        // Drop the pruned descendants from `expandedNodes` so a re-expand
+        // starts from a clean single level instead of resurrecting stale
+        // expansion state that points at nodes no longer in the store.
+        setExpandedNodes((prev) => {
+          const next = new Set(prev)
+          for (const id of subtreeIds) next.delete(id)
+          return next
+        })
+      } else {
+        removeEdgesByNodeIds(
+          subtreeIds,
+          trace.isTracing ? trace.addedEdgeIds : undefined,
+        )
+      }
 
       // Synchronous companion: drop matching entries in the aggregated-edge
       // map too. Otherwise stale child-level aggregated edges linger for up
@@ -1732,7 +1774,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
+  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
 
 
 
