@@ -68,7 +68,7 @@ export function BuilderEmptyState() {
           </button>
           <button
             onClick={() => useHierarchyBuilderStore.getState().open({ mode: 'paste' })}
-            className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm font-medium text-ink border border-glass-border hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+            className="btn btn-ghost px-4 py-2.5 text-sm text-ink"
           >
             <ClipboardList className="w-4 h-4" />
             Paste a list
