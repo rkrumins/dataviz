@@ -49,6 +49,63 @@ export function allowedChildTypeIds(
 }
 
 /**
+ * Ontology containment chains from the given start types (e.g.
+ * `['domain','dataPlatform','container','dataset']`), to power one-click
+ * template scaffolds. DFS along `hierarchy.canContain`.
+ *
+ * Unlike `allowedChildTypeIds`, an empty `canContain` here means the type is
+ * TERMINAL for chain purposes (not "unrestricted") — the unrestricted rule
+ * only applies to computing a parent's allowed children; unrestricted
+ * expansion would blow up here. A child id already on the current path is
+ * skipped (folds self-nesting / DAG re-entry), as is any id with no matching
+ * entity type. `maxLength` (default 5) caps the number of types in a path; a
+ * path truncated at the cap is still emitted. Only maximal paths are emitted
+ * — a path that is a strict prefix of another emitted path is dropped — and
+ * exact duplicates are deduped. Children are visited in `hierarchy.level`
+ * order (then name) for a deterministic result.
+ */
+export function containmentChains(
+  entityTypes: EntityTypeSchema[],
+  rootEntityTypes: string[],
+  opts?: { maxLength?: number; startType?: string },
+): string[][] {
+  const maxLength = opts?.maxLength ?? 5
+  const byId = new Map(entityTypes.map((et) => [et.id, et]))
+  const startIds = opts?.startType
+    ? [opts.startType]
+    : rootEntityTypes.length > 0
+      ? rootEntityTypes
+      : entityTypes.filter((et) => et.hierarchy.canBeContainedBy.length === 0).map((et) => et.id)
+
+  const sortChildren = (ids: string[]): string[] =>
+    [...ids].sort((a, b) => {
+      const ea = byId.get(a)
+      const eb = byId.get(b)
+      const levelDiff = (ea?.hierarchy.level ?? 0) - (eb?.hierarchy.level ?? 0)
+      return levelDiff !== 0 ? levelDiff : (ea?.name ?? a).localeCompare(eb?.name ?? b)
+    })
+
+  const chains: string[][] = []
+  const walk = (path: string[]): void => {
+    const children = (byId.get(path[path.length - 1])?.hierarchy.canContain ?? [])
+      .filter((id) => byId.has(id) && !path.includes(id))
+    if (children.length === 0 || path.length >= maxLength) {
+      chains.push(path)
+      return
+    }
+    for (const child of sortChildren(children)) walk([...path, child])
+  }
+  for (const id of startIds) {
+    if (byId.has(id)) walk([id])
+  }
+
+  const deduped = [...new Map(chains.map((c) => [JSON.stringify(c), c])).values()]
+  return deduped.filter(
+    (c) => !deduped.some((other) => other.length > c.length && c.every((id, i) => other[i] === id)),
+  )
+}
+
+/**
  * Whether a relationship type is a RAW lineage edge a user may draw by hand.
  * Mirrors GraphCanvas.getValidEdgeTypes' classification rather than relying on
  * the schema store's `lineageEdgeTypes` list (which is frequently empty when the

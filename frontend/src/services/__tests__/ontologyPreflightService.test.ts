@@ -5,6 +5,7 @@ import {
   deriveContainmentEdges,
   isContainmentRelType,
   allowedChildTypeIds,
+  containmentChains,
   NON_DRAWABLE_EDGE_TYPES,
   endpointOk,
   validateDrawnEdge,
@@ -12,9 +13,9 @@ import {
 } from '../ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
-const et = (id: string, canContain: string[], canBeContainedBy: string[] = []): EntityTypeSchema => ({
+const et = (id: string, canContain: string[], canBeContainedBy: string[] = [], level = 0): EntityTypeSchema => ({
   id, name: id, pluralName: id, visual: {} as never, fields: [], behavior: {} as never,
-  hierarchy: { level: 0, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
+  hierarchy: { level, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
 })
 
 const rt = (
@@ -151,6 +152,52 @@ describe('allowedChildTypeIds', () => {
 
   it('treats empty canContain as unrestricted', () => {
     expect([...allowedChildTypeIds('dataset', types, ['domain'], {})].sort()).toEqual(['dataset', 'domain', 'system'])
+  })
+})
+
+describe('containmentChains', () => {
+  // domain L0 -> {dataPlatform, system} L1 -> container L2 -> dataset L3 -> column L4,
+  // with container self-nesting (container -> container).
+  const types = [
+    et('domain', ['dataPlatform', 'system'], [], 0),
+    et('dataPlatform', ['container'], ['domain'], 1),
+    et('system', [], ['domain'], 1),
+    et('container', ['container', 'dataset'], ['dataPlatform', 'container'], 2),
+    et('dataset', ['column'], ['container'], 3),
+    et('column', [], ['dataset'], 4),
+  ]
+
+  it('derives maximal chains from the roots, folding the self-loop and terminating on empty canContain', () => {
+    const chains = containmentChains(types, ['domain'])
+    expect(chains).toEqual([
+      ['domain', 'dataPlatform', 'container', 'dataset', 'column'],
+      ['domain', 'system'],
+    ])
+    // The prefix must not appear as a separate maximal chain.
+    expect(chains).not.toContainEqual(['domain', 'dataPlatform', 'container', 'dataset'])
+  })
+
+  it('terminates the container->container self-loop without repeating a type in one path', () => {
+    const chains = containmentChains(types, ['domain'])
+    const withContainer = chains.find((c) => c.includes('container'))!
+    expect(withContainer.filter((id) => id === 'container')).toHaveLength(1)
+  })
+
+  it('startType scopes chains to start at that type', () => {
+    expect(containmentChains(types, ['domain'], { startType: 'container' })).toEqual([
+      ['container', 'dataset', 'column'],
+    ])
+  })
+
+  it('maxLength caps chain length and still emits the truncated path', () => {
+    expect(containmentChains(types, ['domain'], { maxLength: 3 })).toEqual([
+      ['domain', 'dataPlatform', 'container'],
+      ['domain', 'system'],
+    ])
+  })
+
+  it('falls back to empty-canBeContainedBy types as roots when rootEntityTypes is empty', () => {
+    expect(containmentChains(types, [])).toEqual(containmentChains(types, ['domain']))
   })
 })
 
