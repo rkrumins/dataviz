@@ -154,7 +154,10 @@ class AssignmentEngine:
             "by_type": by_type,
             "by_tag": by_tag,
             "patterns": patterns,
-            "instances": instances
+            "instances": instances,
+            # Valid layer ids — a node's persisted `layerAssignment` is only honoured
+            # when it still names a layer that exists in this view.
+            "valid_layer_ids": {layer.id for layer in layers},
         }
 
     def _build_parent_cache(
@@ -258,6 +261,25 @@ class AssignmentEngine:
                 isInherited=True,
                 inheritedFromId=parent_id, # or parent_assignment.entity_id
                 confidence=parent_assignment.confidence
+            )
+
+        # 2.5 Node's own persisted layer assignment.
+        # The frontend stamps the creation/target layer into the node's
+        # `layerAssignment` property (top-level field, mirrored in properties) on
+        # create and move. It is the durable per-node signal, so an entity built
+        # directly into a layer (e.g. a root Layer node created in "Transform")
+        # still lands there on reload — instead of falling through to the
+        # `layers[0]` default (Source) because it has no view-config
+        # entity_assignment yet and matches no rule. View-config assignments
+        # (step 1) and containment inheritance (step 2) intentionally outrank it:
+        # an explicit move or a parent's layer must win over a stale stamp.
+        node_layer = node.layer_assignment or (node.properties or {}).get("layerAssignment")
+        if node_layer and node_layer in index["valid_layer_ids"]:
+            return EntityAssignment(
+                entityId=entity_id,
+                layerId=node_layer,
+                confidence=1.0,
+                isInherited=False,
             )
 
         # 3. Rule Matching

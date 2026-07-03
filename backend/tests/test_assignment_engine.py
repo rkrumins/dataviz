@@ -8,11 +8,12 @@ import pytest
 
 from backend.app.services.assignment_engine import AssignmentEngine
 from backend.common.models.assignment import (
+    EntityAssignment,
     EntityAssignmentConfig,
     LayerAssignmentRuleConfig,
     ViewLayerConfig,
 )
-from backend.common.models.graph import GraphEdge
+from backend.common.models.graph import GraphEdge, GraphNode
 
 
 # ---------------------------------------------------------------------------
@@ -172,3 +173,98 @@ class TestBuildRuleIndex:
         assert index["by_tag"] == {}
         assert index["patterns"] == []
         assert index["instances"] == {}
+
+    def test_valid_layer_ids_collected(self):
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0),
+            ViewLayerConfig(id="transform", name="Transform", color="#222", order=1),
+        ]
+        index = self.engine._build_rule_index(layers)
+        assert index["valid_layer_ids"] == {"source", "transform"}
+
+
+# ---------------------------------------------------------------------------
+# _resolve_assignment — persisted node layerAssignment must survive reload
+# ---------------------------------------------------------------------------
+
+
+class TestResolveAssignmentNodeLayer:
+    """A node created directly into a layer persists its target in the node's
+    `layerAssignment` property. On reload it has no view-config entity_assignment
+    yet and matches no rule, so before the fix it fell through to the layers[0]
+    (Source) default. These tests pin the node-property tier and its precedence.
+    """
+
+    def setup_method(self):
+        self.engine = AssignmentEngine()
+        # Two plain layers, NO rules / entityTypes, so nothing but the node
+        # property (or the layers[0] default) can place a Layer-typed node.
+        self.layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0),
+            ViewLayerConfig(id="transform", name="Transform", color="#222", order=1),
+        ]
+        self.index = self.engine._build_rule_index(self.layers)
+        self.lsm = {l.id: i for i, l in enumerate(self.layers)}
+
+    def _resolve(self, node, parent_id=None, parent_assignment=None):
+        return self.engine._resolve_assignment(
+            node, parent_id, parent_assignment, self.index, self.layers, self.lsm
+        )
+
+    def _node(self, urn, etype="Layer", layer_assignment=None, properties=None):
+        return GraphNode(
+            urn=urn, entityType=etype, displayName=urn,
+            layerAssignment=layer_assignment, properties=properties or {},
+        )
+
+    def test_root_created_in_transform_lands_in_transform(self):
+        """Regression: was assigned to 'source' (layers[0] default)."""
+        node = self._node("urn:new-layer-test", "Layer", layer_assignment="transform")
+        result = self._resolve(node)
+        assert result is not None
+        assert result.layer_id == "transform"
+
+    def test_layer_assignment_from_properties_bag(self):
+        """The frontend also mirrors the choice into properties.layerAssignment."""
+        node = self._node("urn:x", "Layer", properties={"layerAssignment": "transform"})
+        result = self._resolve(node)
+        assert result.layer_id == "transform"
+
+    def test_without_node_layer_falls_back_to_default(self):
+        """No property, no rule -> layers[0] default (unchanged behaviour)."""
+        node = self._node("urn:plain", "Layer")
+        result = self._resolve(node)
+        assert result.layer_id == "source"
+
+    def test_stale_layer_id_ignored_falls_back_to_default(self):
+        """A property naming a layer that no longer exists must not win."""
+        node = self._node("urn:y", "Layer", layer_assignment="deleted-layer")
+        result = self._resolve(node)
+        assert result.layer_id == "source"
+
+    def test_view_config_assignment_outranks_node_property(self):
+        """An explicit view-config move (instance) beats a stale node stamp."""
+        assignment = EntityAssignmentConfig(
+            entityId="urn:x", layerId="source", priority=100,
+            assignedBy="test", assignedAt="2026-01-01",
+        )
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0,
+                            entityAssignments=[assignment]),
+            ViewLayerConfig(id="transform", name="Transform", color="#222", order=1),
+        ]
+        index = self.engine._build_rule_index(layers)
+        node = self._node("urn:x", "Layer", layer_assignment="transform")
+        result = self.engine._resolve_assignment(node, None, None, index, layers, self.lsm)
+        assert result.layer_id == "source"
+
+    def test_containment_inheritance_outranks_node_property(self):
+        """HARD RULE: a child follows its parent's layer even if its own
+        stamped property says otherwise."""
+        parent_assignment = EntityAssignment(
+            entityId="urn:parent", layerId="source", isInherited=False, confidence=1.0,
+        )
+        child = self._node("urn:child", "Object", layer_assignment="transform")
+        result = self._resolve(child, parent_id="urn:parent", parent_assignment=parent_assignment)
+        assert result.layer_id == "source"
+        assert result.is_inherited is True
