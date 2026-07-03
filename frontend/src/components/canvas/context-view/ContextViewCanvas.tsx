@@ -1734,15 +1734,34 @@ export function ContextViewCanvas({
       //   • a trace is active — trace-merged edges have no re-add path and
       //     `useTraceFilteredHierarchy` already hides non-context orphans, so
       //     the existing preserve-edges behaviour is retained; or
-      //   • the subtree contains a node with ANY unsaved (isPending) overlay —
-      //     create/modify/delete. Pruning + refetch would drop in-progress
-      //     authoring or desync a staged edit's marker from stagedChangesStore.
-      //     `removeEdgesByNodeIds` already preserves unsaved edges in that case.
-      const storeNodes = useCanvasStore.getState().nodes
-      const hasPendingInSubtree = storeNodes.some(
-        (n) => subtreeIds.has(n.id) && !!(n.data as any)?.isPending,
+      //   • the subtree carries UNSAVED work. Pruning + refetch would make
+      //     in-progress authoring vanish from the canvas. Unsaved work has three
+      //     representations in this app, so the guard checks all three:
+      //       (1) a subtree NODE with an isPending overlay (create/modify/delete);
+      //       (2) a pending containment EDGE incident to the subtree — a
+      //           reparented / "Move to…" node is a SAVED, markerless node whose
+      //           pending marker lives on the NEW edge (useReparentNode.
+      //           restageContainment); pruning the node would drop it from the
+      //           canvas until a manual re-expand; and
+      //       (3) a staged property edit (rename/update) in stagedChangesStore
+      //           targeting a subtree node — these carry NO canvas marker at all.
+      //     `removeEdgesByNodeIds` already preserves unsaved edges in that fallback.
+      const { nodes: storeNodes, edges: storeEdges } = useCanvasStore.getState()
+      const subtreeNodeUrns = new Set<string>()
+      let pendingNodeInSubtree = false
+      for (const n of storeNodes) {
+        if (!subtreeIds.has(n.id)) continue
+        subtreeNodeUrns.add((n.data?.urn as string | undefined) ?? n.id)
+        if (n.data?.isPending) pendingNodeInSubtree = true
+      }
+      const pendingEdgeInSubtree = storeEdges.some(
+        (e) => !!e.data?.isPending && (subtreeIds.has(e.source) || subtreeIds.has(e.target)),
       )
-      const canPrune = !trace.isTracing && !hasPendingInSubtree
+      const stagedEditInSubtree = useStagedChangesStore.getState().changes.some(
+        (c) => subtreeIds.has(c.targetId) || (c.targetUrn ? subtreeNodeUrns.has(c.targetUrn) : false),
+      )
+      const subtreeHasUnsavedWork = pendingNodeInSubtree || pendingEdgeInSubtree || stagedEditInSubtree
+      const canPrune = !trace.isTracing && !subtreeHasUnsavedWork
 
       if (canPrune && subtreeIds.size > 0) {
         // Atomic node + incident-edge removal.
