@@ -289,29 +289,40 @@ class FalkorProjector:
                 except Exception:                       # pragma: no cover - infra
                     logger.exception("rollup apply failed for %s — queuing rebuild", graph_id)
                     rollup_pairs = "stale"
-        except Exception as exc:                       # pragma: no cover - infra
-            logger.exception("projection apply failed for %s: %s", graph_id, exc)
+
+            # Reconcile PG (SoR) vs FalkorDB (cache) and bounded-heal a dropped delta before
+            # the watermark advances, so the cache can't silently diverge from committed main.
+            verify_error, heal_reseeded = (
+                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork)
+                if config.PROJECTION_VERIFY_ENABLED else (None, False)
+            )
+
+            async with self._session() as s:
+                ps = await s.get(ProjectionStateORM, graph_id)
+                ps.projected_commit_seq = to_seq
+                ps.status = "idle"
+                ps.falkor_graph_name = name
+                ps.last_projected_at = _now()
+                ps.last_error = verify_error
+        except (Exception, asyncio.CancelledError) as exc:
+            # Every exit from this block MUST clear "projecting"/"rebuilding" in Postgres —
+            # `except Exception` alone does NOT catch asyncio.CancelledError (a BaseException
+            # since Python 3.8), so a caller-side timeout (asyncio.wait_for in project_now)
+            # used to strand the status row forever and spin the UI's "Refreshing…" badge
+            # indefinitely. CancelledError is re-raised below per the asyncio cancellation
+            # contract — it is never swallowed here.
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            if cancelled:
+                logger.warning("projection for %s cancelled; resetting status so it is not stranded",
+                               graph_id)
+            else:
+                logger.exception("projection apply failed for %s: %s", graph_id, exc)
             async with self._session() as s:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.status = "idle"
-                    ps.last_error = str(exc)[:500]
+                    ps.last_error = "projection cancelled (timeout)" if cancelled else str(exc)[:500]
             raise
-
-        # Reconcile PG (SoR) vs FalkorDB (cache) and bounded-heal a dropped delta before
-        # the watermark advances, so the cache can't silently diverge from committed main.
-        verify_error, heal_reseeded = (
-            await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork)
-            if config.PROJECTION_VERIFY_ENABLED else (None, False)
-        )
-
-        async with self._session() as s:
-            ps = await s.get(ProjectionStateORM, graph_id)
-            ps.projected_commit_seq = to_seq
-            ps.status = "idle"
-            ps.falkor_graph_name = name
-            ps.last_projected_at = _now()
-            ps.last_error = verify_error
 
         if orphan:                                     # the old gv_* graph is now unread — reclaim its RAM
             try:
