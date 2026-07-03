@@ -32,7 +32,7 @@ import {
   normalizeEdgeType,
   isContainmentEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, setHasId, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
 
 export function useReparentNode() {
   const { showToast } = useToast()
@@ -153,7 +153,7 @@ export function useReparentNode() {
 
     const childType = dragged.data?.type as string
     const parentType = newParent.data?.type as string
-    if (!allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap).has(childType)) {
+    if (!setHasId(allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap), childType)) {
       showToast('error', `A ${parentType} can't contain a ${childType}.`)
       return
     }

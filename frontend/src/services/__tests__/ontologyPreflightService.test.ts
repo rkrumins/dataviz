@@ -10,6 +10,7 @@ import {
   containmentChains,
   NON_DRAWABLE_EDGE_TYPES,
   endpointOk,
+  setHasId,
   validateDrawnEdge,
   connectedEdgeTypes,
 } from '../ontologyPreflightService'
@@ -85,6 +86,15 @@ describe('deriveConnectableEdges', () => {
     const out = deriveConnectableEdges('attribute', 'dataset', flows, [], named)
     expect(out[0].allowed).toBe(false)
     expect(out[0].reason).toBe("An Attribute can't be the source of 'Flows To'. Works from: Column, Data Job, Dataset.")
+  })
+
+  it('resolves the display name case-insensitively when the offending endpoint type is graph-cased', () => {
+    // 'attribute' is ontology-cased in `named`; a discovered graph node typed 'ATTRIBUTE' must
+    // still resolve to the friendly name 'Attribute' in the reason, not fall back to the raw id.
+    const named = [{ ...et('attribute', []), name: 'Attribute' }, { ...et('column', []), name: 'Column' }]
+    const flows = [rt('flows_to', ['column'], ['dataset'], { isLineage: true, name: 'Flows To' })]
+    const out = deriveConnectableEdges('ATTRIBUTE', 'dataset', flows, [], named)
+    expect(out[0].reason).toContain('An Attribute')
   })
 
   it('never offers AGGREGATED or containment types', () => {
@@ -190,6 +200,20 @@ describe('allowedChildTypeIds', () => {
   it('resolves a differently-cased parentType against hierarchyMap keys, returning canContain in its stored (ontology) casing', () => {
     const hierarchyMap = { SYSTEM: { canContain: ['dataset'] } }
     expect([...allowedChildTypeIds('system', [], [], hierarchyMap)]).toEqual(['dataset'])
+  })
+})
+
+describe('setHasId', () => {
+  it('matches an exact id', () => {
+    expect(setHasId(new Set(['dataset', 'system']), 'dataset')).toBe(true)
+  })
+
+  it('matches a differently-cased id (discovered graph child type vs ontology-cased set)', () => {
+    expect(setHasId(new Set(['dataset', 'system']), 'DATASET')).toBe(true)
+  })
+
+  it('returns false when no member matches, case-insensitively', () => {
+    expect(setHasId(new Set(['dataset', 'system']), 'column')).toBe(false)
   })
 })
 

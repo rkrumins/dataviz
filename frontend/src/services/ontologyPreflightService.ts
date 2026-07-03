@@ -49,6 +49,15 @@ function findHierarchyEntry(
 }
 
 /**
+ * Case-insensitive `Set.has`: `set` is assumed ONTOLOGY-cased (e.g. the result of
+ * {@link allowedChildTypeIds}), while `id` may be a discovered graph's differently-cased
+ * type id. Exact match first, then case-insensitive.
+ */
+export function setHasId(set: Set<string>, id: string): boolean {
+  return set.has(id) || [...set].some((s) => sameId(s, id))
+}
+
+/**
  * The entity type ids that may be created directly under a parent of
  * `parentType` (or at the root when `parentType` is null), per the ontology's
  * containment rules. An empty `canContain` means "unrestricted" (allow all).
@@ -209,7 +218,7 @@ const upper = (t?: string | null) => (t ?? '').toUpperCase()
 // optional `entityTypes` list (unknown ids fall back to the id); the edge is
 // named by its label, never its raw id.
 const displayTypeName = (id: string, entityTypes?: EntityTypeSchema[]): string =>
-  entityTypes?.find((et) => et.id === id)?.name ?? id
+  (entityTypes && findEntityType(id, entityTypes))?.name ?? id
 
 const indefinite = (name: string): string => (/^[aeiou]/i.test(name) ? 'An' : 'A')
 

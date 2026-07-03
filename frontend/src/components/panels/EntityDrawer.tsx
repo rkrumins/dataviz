@@ -42,7 +42,7 @@ import {
   normalizeEdgeType,
   isContainmentEdgeType,
 } from '@/store/schema'
-import { allowedChildTypeIds, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { allowedChildTypeIds, setHasId, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 import { relationshipLabel, parentPlacementPhrase } from '@/lib/relationshipLabel'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
@@ -885,7 +885,7 @@ function useContainmentPlacement(nodeId: string) {
         if (descendants.has(n.id)) return false
         if (n.id === parentNode?.id) return false
         const candidateType = n.data.type as string
-        return allowedChildTypeIds(candidateType, entityTypes, rootEntityTypes, hierarchyMap).has(childType)
+        return setHasId(allowedChildTypeIds(candidateType, entityTypes, rootEntityTypes, hierarchyMap), childType)
       })
       .map((n) => ({
         id: n.id,

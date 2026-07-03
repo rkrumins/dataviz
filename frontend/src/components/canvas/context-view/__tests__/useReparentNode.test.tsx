@@ -72,6 +72,18 @@ describe('useReparentNode', () => {
     expect(showToast).toHaveBeenCalledWith('success', expect.any(String))
   })
 
+  it('stages a valid nesting when the dragged node is a differently-cased (discovered graph) type', () => {
+    // Discovered-graph nodes can carry a differently-cased type id (e.g. 'DATASET' vs the
+    // ontology's 'dataset'); allowedChildTypeIds' Set is ontology-cased, so the membership
+    // check against childType must be case-insensitive too.
+    setCanvas([node('S', 'system'), node('D', 'DATASET')])
+    const { result } = renderHook(() => useReparentNode())
+    result.current.reparent('D', 'S')
+    const ce = staged().find((c) => c.type === 'create_edge')
+    expect(ce).toBeTruthy()
+    expect(showToast).toHaveBeenCalledWith('success', expect.any(String))
+  })
+
   it('blocks an ontology-illegal nesting with a toast', () => {
     setCanvas([node('S', 'system'), node('D', 'dataset')])
     const { result } = renderHook(() => useReparentNode())
