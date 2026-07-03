@@ -15,9 +15,13 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useBranches, useEntityHistory } from '../hooks/useVersioning'
 import { deriveFieldDeltas, labelForPayload, type GraphChange } from '../model/changeModel'
+import { ownerName } from '../model/branchVocab'
 import { EntityDiff } from './EntityDiff'
 
-const who = (a?: unknown) => (typeof a === 'string' && a ? a.split('@')[0] : 'system')
+// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
+// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
+const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
+  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 
 type Version = {
   commit_id?: string
@@ -59,7 +63,7 @@ function buildChain(entityId: string, versions: Version[], base: Record<string, 
   return rows.reverse()
 }
 
-function Timeline({ rows, dotCls }: { rows: Row[]; dotCls: string }) {
+function Timeline({ rows, dotCls, userNames }: { rows: Row[]; dotCls: string; userNames?: Record<string, string> }) {
   return (
     <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
       {rows.map(({ v, change }) => {
@@ -70,7 +74,7 @@ function Timeline({ rows, dotCls }: { rows: Row[]; dotCls: string }) {
             <p className="text-[11px] text-ink-muted flex items-center gap-1.5 flex-wrap">
               <op.Icon className={cn('w-3 h-3', op.cls)} />
               <span className={cn('font-medium', op.cls)}>{op.label}</span>
-              <span>by {who(v.actor)}</span>
+              <span>by {actorLabel(v.actor, userNames)}</span>
               <span>·</span>
               <span>{v.created_at ? timeAgo(v.created_at) : ''}</span>
             </p>
@@ -144,7 +148,7 @@ export function EntityHistory({
             <GitBranch className="w-3 h-3" />
             In this draft · not merged yet
           </div>
-          <Timeline rows={draftRows} dotCls="bg-amber-500" />
+          <Timeline rows={draftRows} dotCls="bg-amber-500" userNames={q.data?.userNames} />
         </div>
       )}
       {publishedRows.length > 0 && (
@@ -152,7 +156,7 @@ export function EntityHistory({
           {draftRows.length > 0 && (
             <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70">Published</div>
           )}
-          <Timeline rows={publishedRows} dotCls="bg-accent-lineage" />
+          <Timeline rows={publishedRows} dotCls="bg-accent-lineage" userNames={q.data?.userNames} />
         </div>
       )}
       {publishedRows.length === 0 && draftRows.length > 0 && (

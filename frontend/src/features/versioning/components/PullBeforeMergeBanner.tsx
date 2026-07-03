@@ -14,9 +14,13 @@ import { ChevronDown, GitMerge } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useCommitLog } from '../hooks/useVersioning'
+import { ownerName } from '../model/branchVocab'
 import { PullLatestButton } from './PullLatestButton'
 
-const who = (a?: unknown) => (typeof a === 'string' && a ? a.split('@')[0] : 'system')
+// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
+// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
+const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
+  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 
 export function PullBeforeMergeBanner({
   wsId,
@@ -88,7 +92,7 @@ export function PullBeforeMergeBanner({
                       {(c.message as string) || `${c.kind ?? 'commit'} #${c.commit_seq ?? ''}`}
                     </p>
                     <p className="text-[10px] text-ink-muted">
-                      {who(c.actor)} · {timeAgo(c.created_at as string)}
+                      {actorLabel(c.actor, logQ.data?.userNames)} · {timeAgo(c.created_at as string)}
                       {n || e ? ` · ${n} node${n === 1 ? '' : 's'}, ${e} edge${e === 1 ? '' : 's'}` : ''}
                     </p>
                   </div>

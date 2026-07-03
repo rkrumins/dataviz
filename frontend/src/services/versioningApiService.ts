@@ -226,6 +226,8 @@ export interface CommitLogResponse {
 export interface EntityHistoryResponse {
   entityId: string
   versions: Array<Record<string, unknown>>
+  /** version actor id → resolved display name, covering every version in this response. */
+  userNames?: Record<string, string>
 }
 
 export interface MergePreviewResponse {
