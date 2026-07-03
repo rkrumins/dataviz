@@ -35,12 +35,6 @@ export interface CanvasInteractionState {
         value: string
         position: { x: number; y: number }
     }
-    // Quick Create
-    quickCreate: {
-        isOpen: boolean
-        position: { x: number; y: number }
-        parentUrn?: string
-    }
     // Command Palette
     commandPalette: {
         isOpen: boolean
@@ -91,10 +85,6 @@ export interface UseCanvasInteractionsResult {
     startInlineEdit: (nodeId: string, value: string, position: { x: number; y: number }) => void
     saveInlineEdit: (nodeId: string, newValue: string) => void
     cancelInlineEdit: () => void
-    
-    // Quick Create Actions
-    openQuickCreate: (position: { x: number; y: number }, parentUrn?: string) => void
-    closeQuickCreate: () => void
     
     // Command Palette Actions
     openCommandPalette: () => void
@@ -181,11 +171,6 @@ export function useCanvasInteractions(
         position: { x: 0, y: 0 },
     })
     
-    const [quickCreate, setQuickCreate] = useState<CanvasInteractionState['quickCreate']>({
-        isOpen: false,
-        position: { x: 0, y: 0 },
-    })
-    
     const [commandPalette, setCommandPalette] = useState<CanvasInteractionState['commandPalette']>({
         isOpen: false,
     })
@@ -253,18 +238,6 @@ export function useCanvasInteractions(
     
     const cancelInlineEdit = useCallback(() => {
         setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
-    }, [])
-    
-    // ===================
-    // Quick Create
-    // ===================
-    
-    const openQuickCreate = useCallback((position: { x: number; y: number }, parentUrn?: string) => {
-        setQuickCreate({ isOpen: true, position, parentUrn })
-    }, [])
-    
-    const closeQuickCreate = useCallback(() => {
-        setQuickCreate(prev => ({ ...prev, isOpen: false }))
     }, [])
     
     // ===================
@@ -629,7 +602,6 @@ export function useCanvasInteractions(
         state: {
             contextMenu,
             inlineEdit,
-            quickCreate,
             commandPalette,
             clipboard,
         },
@@ -642,10 +614,6 @@ export function useCanvasInteractions(
         startInlineEdit,
         saveInlineEdit,
         cancelInlineEdit,
-        
-        // Quick Create
-        openQuickCreate,
-        closeQuickCreate,
         
         // Command Palette
         openCommandPalette,

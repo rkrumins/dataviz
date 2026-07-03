@@ -110,6 +110,9 @@ export function isClosedToNesting(
  * offers nothing, and a child type is only offered when at least one
  * containment relationship can actually nest it under the parent
  * ({@link deriveContainmentEdges}). Sorting is left to call sites.
+ * The outline parser deliberately resolves against the lenient
+ * {@link allowedChildTypeIds} set instead of this gate to produce per-row
+ * diagnoses — do not "finish" the consolidation by swapping it to this gate.
  */
 export function builderAllowedChildTypeIds(
   parentType: string | null,
