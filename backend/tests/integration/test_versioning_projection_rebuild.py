@@ -68,7 +68,7 @@ class ReconcileFakeGraph(FakeGraph):
 
 
 class ReconcileFakeFalkor(FakeFalkor):
-    def __call__(self, name: str) -> ReconcileFakeGraph:
+    def __call__(self, name: str, provider_id=None) -> ReconcileFakeGraph:
         return self.graphs.setdefault(name, ReconcileFakeGraph())
 
 

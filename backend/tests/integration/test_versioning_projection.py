@@ -84,7 +84,7 @@ class FakeFalkor:
     def __init__(self):
         self.graphs: dict = {}
 
-    def __call__(self, name: str) -> FakeGraph:
+    def __call__(self, name: str, provider_id=None) -> FakeGraph:
         return self.graphs.setdefault(name, FakeGraph())
 
 

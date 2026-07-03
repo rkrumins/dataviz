@@ -38,7 +38,7 @@ from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from .ontology import Ontology, validate_entities
+from .ontology import Ontology, OntologyRules, validate_entities, validate_entities_rich
 from .models import (
     BranchORM,
     BranchMemberORM,
@@ -370,12 +370,18 @@ class GraphVersioningService:
         ops: Sequence[Mapping],
         actor: str,
         actor_groups: Sequence[str] = (),
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> Dict[str, str]:
         """Bulk-append working changes to a draft (plan decision #10).
 
         Each op: ``{ref?, op, entity_kind, entity_id?, payload, change_reason?}``.
         For ``create`` without an ``entity_id`` a stable ULID is minted.  Returns
         ``{ref_or_entity_id: entity_id}`` so the client can reconcile.
+
+        With injected ``ontology_rules`` (strict graphs only) staged CREATES are
+        rich-validated eagerly for fast feedback. Edge endpoints that exist only
+        as earlier *uncommitted* working changes can't be typed here, so those
+        edges are skipped — **checkpoint is the authoritative rich gate**.
         """
         assigned: Dict[str, str] = {}
         async with self._session() as s:
@@ -385,6 +391,7 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             ontology = Ontology.from_spec(graph.ontology_spec) if graph else None
             entities: List[tuple] = []
+            rich_entities: List[tuple] = []   # (entity_id, kind, payload, op) for the rich gate
             start = (
                 await s.execute(
                     select(func.coalesce(func.max(WorkingChangeORM.seq), 0)).where(
@@ -404,6 +411,7 @@ class GraphVersioningService:
                     payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
                     entities.append((entity_id, op["entity_kind"], payload))
+                rich_entities.append((entity_id, op["entity_kind"], payload, op["op"]))
                 base_hash = None
                 if op["op"] != "create":
                     base_hash = await self._effective_head_hash(
@@ -426,6 +434,24 @@ class GraphVersioningService:
             violations = validate_entities(entities, ontology)
             if violations and graph is not None and graph.ontology_enforcement == "strict":
                 raise OntologyViolation(violations)      # rolls back — nothing staged
+            if ontology_rules is not None and graph is not None \
+                    and graph.ontology_enforcement == "strict":
+                # Endpoint types: batch node payloads first, then committed heads.
+                endpoint_types: Dict[str, str] = {
+                    eid: p["entityType"] for eid, k, p, o in rich_entities
+                    if k == "node" and o != "delete" and p and p.get("entityType")
+                }
+                unknown = {ep for _e, k, p, o in rich_entities
+                           if k == "edge" and o == "create" and p
+                           for ep in _edge_src_tgt(p) if ep and ep not in endpoint_types}
+                if unknown:
+                    cur = await self._current_values(s, graph_id, branch_id, list(unknown))
+                    for ep, v in cur.items():
+                        if v and v.get("entityType"):
+                            endpoint_types[ep] = v["entityType"]
+                rich_viol = validate_entities_rich(rich_entities, endpoint_types, ontology_rules)
+                if rich_viol:
+                    raise OntologyViolation(rich_viol)   # rolls back — nothing staged
             return assigned
 
     async def checkpoint(
@@ -438,6 +464,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into a draft commit, retrying on a
         ``commit_seq`` collision so two collaborators checkpointing the SAME shared
@@ -447,7 +474,8 @@ class GraphVersioningService:
             lambda: self._checkpoint_once(
                 graph_id=graph_id, branch_id=branch_id, actor=actor, message=message,
                 resolutions=resolutions, actor_groups=actor_groups,
-                containment_edge_types=containment_edge_types),
+                containment_edge_types=containment_edge_types,
+                ontology_rules=ontology_rules),
         )
 
     async def _checkpoint_once(
@@ -460,6 +488,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
@@ -539,6 +568,31 @@ class GraphVersioningService:
                     kind_by_entity[e] = "edge" if _is_edge_payload(cur) else "node"
             deltas = net_delta(base_state, head_state)
 
+            # Rich ontology gate — the authoritative check for staged edits (stage_changes
+            # can't type endpoints that exist only as uncommitted working changes; here the
+            # composed head state can). Strictness is decided by the graph row.
+            if ontology_rules is not None and deltas:
+                graph = await s.get(GraphORM, graph_id)
+                if graph is not None and graph.ontology_enforcement == "strict":
+                    rich = [(d.entity_id, kind_by_entity.get(d.entity_id, "node"),
+                             d.payload, d.op) for d in deltas]
+                    endpoint_types: Dict[str, str] = {}
+                    eps = {ep for _e, k, p, o in rich if k == "edge" and o == "create" and p
+                           for ep in _edge_src_tgt(p) if ep}
+                    for ep in eps:
+                        v = head_state.get(ep) or base_state.get(ep) or composed.get(ep)
+                        if v and v.get("entityType"):
+                            endpoint_types[ep] = v["entityType"]
+                    unknown = [ep for ep in eps if ep not in endpoint_types]
+                    if unknown:
+                        cur = await self._current_values(s, graph_id, branch_id, unknown)
+                        for ep, v in cur.items():
+                            if v and v.get("entityType"):
+                                endpoint_types[ep] = v["entityType"]
+                    rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
+                    if rich_viol:
+                        raise OntologyViolation(rich_viol)   # rolls back — nothing committed
+
             commit_seq = await self._next_seq(s, graph_id, branch_id)
             commit = CommitORM(
                 graph_id=graph_id,
@@ -571,6 +625,7 @@ class GraphVersioningService:
         self, *, graph_id: str, branch_id: str, actor: str,
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         """Fold any staged-but-uncommitted ``working_changes`` on a draft into a
         checkpoint commit. Publish/merge read the draft side from committed heads
@@ -592,6 +647,7 @@ class GraphVersioningService:
             graph_id=graph_id, branch_id=branch_id, actor=actor,
             message="auto-checkpoint pending changes before merge",
             actor_groups=actor_groups, containment_edge_types=containment_edge_types,
+            ontology_rules=ontology_rules,
         )
 
     # ------------------------------------------------------------------ #
@@ -607,6 +663,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> str:
         """Squash a draft into a single ``main`` commit, rebasing onto current
         main with a field-level 3-way merge (plan §8) — the ungated path (admin /
@@ -622,7 +679,8 @@ class GraphVersioningService:
         # Fold any staged-but-uncommitted edits first, so a publish never silently
         # drops working changes that were staged but not checkpointed.
         await self._flush_pending_changes(
-            graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups
+            graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups,
+            ontology_rules=ontology_rules,
         )
 
         async def _once():
@@ -650,12 +708,14 @@ class GraphVersioningService:
                 return await self._apply_draft_squash(
                     s, graph, draft, main_id, merged_state, theirs, actor, message,
                     containment_edge_types=containment_edge_types,
+                    ontology_rules=ontology_rules,
                 )
         return await self._retry_seq(f"publish {branch_id}", _once)
 
     async def _apply_draft_squash(
         self, s, graph, draft, main_id, merged_state, theirs, actor, message,
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> str:
         """Squash a draft's (already-merged, conflict-free) state onto ``main`` as a
         single ``squash_publish`` commit: cascade incident-edge deletes, assert
@@ -713,6 +773,21 @@ class GraphVersioningService:
                  for d in deltas if d.op != "delete"], ontology)
             if viol:
                 raise OntologyViolation(viol)
+        # Rich re-gate at merge time: rules are resolved from the CURRENT published
+        # ontology by the caller, so a draft opened before an ontology tightening
+        # cannot merge violating creates onto main (violations 422 back with
+        # per-entity reasons). Endpoint types come from merged_state — already
+        # hydrated with added edges' endpoints by _hydrate_merge_neighborhood.
+        if ontology_rules is not None and graph.ontology_enforcement == "strict":
+            rich = [(d.entity_id, kind_by_entity.get(d.entity_id, "node"),
+                     d.payload, d.op) for d in deltas]
+            endpoint_types = {
+                eid: v["entityType"] for eid, v in merged_state.items()
+                if v and v.get("entityType")
+            }
+            rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
+            if rich_viol:
+                raise OntologyViolation(rich_viol)
         # Same authoritative duplicate/single-parent/cycle integrity the write path enforces,
         # re-checked against CURRENT main at merge time — two drafts that are each clean in
         # isolation must not compose into a two-parent or cyclic hierarchy on main.
@@ -1378,6 +1453,7 @@ class GraphVersioningService:
         self, *, mr_id: str, actor: str, message: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
@@ -1399,7 +1475,8 @@ class GraphVersioningService:
         # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
         # so the merge never silently drops working changes that were never checkpointed.
         await self._flush_pending_changes(
-            graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor
+            graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor,
+            ontology_rules=ontology_rules,
         )
 
         async def _once():
@@ -1428,6 +1505,7 @@ class GraphVersioningService:
                 commit_id = await self._apply_draft_squash(
                     s, graph, draft, main_id, merged_state, theirs, actor, message,
                     containment_edge_types=containment_edge_types,
+                    ontology_rules=ontology_rules,
                 )
                 pr.status = "merged"
                 pr.resulting_commit_id = commit_id
@@ -1529,6 +1607,7 @@ class GraphVersioningService:
                 "target": ps.target_commit_seq if ps else 0,
                 "status": ps.status if ps else "idle",
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
+                "falkor_provider": ps.falkor_provider if ps else None,
                 "fresh": projected >= committed,
             }
 
@@ -2907,7 +2986,7 @@ class GraphVersioningService:
             )).scalar_one_or_none()
             if g is None or (workspace_id is not None and g.workspace_id != workspace_id):
                 return None
-            graph_id, main_head = g.id, g.main_head_commit_seq
+            graph_id, main_head, graph_kind = g.id, g.main_head_commit_seq, g.kind
             main_id = await self._main_branch_id(s, graph_id)
             draft = (await s.execute(
                 select(BranchORM).where(
@@ -2924,6 +3003,7 @@ class GraphVersioningService:
         return {
             "graph_id": graph_id, "main_branch_id": main_id,
             "main_head_commit_seq": main_head, "my_draft": my_draft,
+            "kind": graph_kind,
         }
 
     async def list_branches(
@@ -3738,6 +3818,7 @@ class GraphVersioningService:
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
         message: str = "edit", branch_id: Optional[str] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -3759,13 +3840,15 @@ class GraphVersioningService:
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
-                branch_id=branch_id, containment_edge_types=containment_edge_types),
+                branch_id=branch_id, containment_edge_types=containment_edge_types,
+                ontology_rules=ontology_rules),
         )
 
     async def _apply_ops_once(
         self, *, graph_id: str, ops: Sequence[Mapping], actor: str,
         message: str, branch_id: Optional[str],
         containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
@@ -3898,6 +3981,26 @@ class GraphVersioningService:
                      for eid, v in new_vals.items() if v is not None], ontology)
                 if viol:
                     raise OntologyViolation(viol)
+
+            # Rich ontology gate (injected rules; creates only). Endpoint types are free:
+            # new_vals holds the batch, cur_vals was hydrated with unknown endpoints by the
+            # referential-integrity block above. Only GENUINE creates are gated — a `create`
+            # op on an already-live entity (the write-through provider re-records edge
+            # endpoints as idempotent upserts) nets to an update and must not re-litigate a
+            # legacy entity's type.
+            if ontology_rules is not None and graph.ontology_enforcement == "strict":
+                rich = [(eid, kind_by_entity.get(eid, "node"), v,
+                         "update" if (eid in update_ids or cur_vals.get(eid) is not None)
+                         else "create")
+                        for eid, v in new_vals.items() if v is not None]
+                endpoint_types = {}
+                for eid in set(new_vals) | set(cur_vals):
+                    v = new_vals.get(eid) if new_vals.get(eid) is not None else cur_vals.get(eid)
+                    if v and v.get("entityType"):
+                        endpoint_types[eid] = v["entityType"]
+                rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
+                if rich_viol:
+                    raise OntologyViolation(rich_viol)
 
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:

@@ -17,11 +17,16 @@ import type { Branch } from '@/services/versioningApiService'
 export function useBranchDeepLink({
   enabled,
   branches,
+  listRefreshing = false,
   currentBranchId,
   switchToDraft,
 }: {
   enabled: boolean
   branches: Branch[] | undefined
+  /** True while the branches list is being (re)fetched — a REJECT decision must
+   *  wait for the settled list (react-query serves the stale one meanwhile, and
+   *  a just-opened draft may not be in it yet); an ACCEPT can act immediately. */
+  listRefreshing?: boolean
   currentBranchId: string | null
   switchToDraft: (branchId: string, originatingViewId?: string | null) => void
 }) {
@@ -36,16 +41,18 @@ export function useBranchDeepLink({
     if (!enabled || !branches || !urlBranch) return
     if (urlBranch === currentBranchId) { handledRef.current = urlBranch; return }
     if (handledRef.current === urlBranch) return
-    handledRef.current = urlBranch
     const target = branches.find((b) => b.branchId === urlBranch && b.kind !== 'main' && b.status === 'open')
     if (target) {
+      handledRef.current = urlBranch
       switchToDraft(target.branchId, target.originatingViewId ?? null)
-    } else {
-      // Not accessible / not found → drop the param and stay on main.
+    } else if (!listRefreshing) {
+      // Not accessible / not found on a SETTLED list → drop the param and stay on main.
+      handledRef.current = urlBranch
       setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('branch'); return n }, { replace: true })
       showToast('error', "That branch isn't available — you may not have access, or it was merged/discarded.")
     }
-  }, [enabled, branches, urlBranch, currentBranchId, switchToDraft, setSearchParams, showToast])
+    // else: mid-refresh — leave unhandled so the effect re-decides on fresh data.
+  }, [enabled, branches, listRefreshing, urlBranch, currentBranchId, switchToDraft, setSearchParams, showToast])
 
   // store → URL: keep the param in step with the active branch (idempotent; guarded against loops).
   useEffect(() => {

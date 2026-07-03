@@ -65,7 +65,7 @@ async def _run() -> None:
     assert (await svc.get_graph(gid))["main_head_commit_seq"] == 2
 
     # ── the imported graph projects + reads fresh ───────────────────────
-    proj = FalkorProjector(graph_client_factory=lambda n: SimpleNamespace(query=_noop))
+    proj = FalkorProjector(graph_client_factory=lambda n, provider_id=None: SimpleNamespace(query=_noop))
     await proj.project_graph(gid)
     assert (await svc.projection_watermark(gid))["projected"] == 2
 

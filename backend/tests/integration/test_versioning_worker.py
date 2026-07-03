@@ -31,7 +31,7 @@ class _NoopGraph:
         return None
 
 
-def _factory(_name):
+def _factory(_name, _provider_id=None):
     return _NoopGraph()
 
 

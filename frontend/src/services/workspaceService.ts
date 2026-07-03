@@ -13,9 +13,13 @@ const ADMIN_API = '/api/v1/admin/workspaces'
 // ============================================================
 
 export interface DataSourceCreateRequest {
-    catalogItemId: string
+    catalogItemId?: string
     ontologyId?: string
     label?: string
+    // Manual/blank data sources bind a provider + graph name directly instead
+    // of a catalog item; the backend accepts either shape.
+    providerId?: string
+    graphName?: string
 }
 
 export interface DataSourceUpdateRequest {

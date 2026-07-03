@@ -31,14 +31,18 @@ import {
     ArrowUpDown,
     ChevronDown,
     X,
+    Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
+import type { ProviderResponse } from '@/services/providerService'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
+import type { ScopeMode } from '../ViewWizard'
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -51,6 +55,19 @@ export interface ScopeStepProps {
     activeWorkspaceId: string | null
     onSelectWorkspace: (wsId: string) => void
     onSelectDataSource: (dsId: string) => void
+
+    // ── Blank-model mode ──────────────────────────────────────────
+    scopeMode: ScopeMode
+    onScopeModeChange: (mode: ScopeMode) => void
+    /** FalkorDB providers a blank model can be provisioned on (pre-filtered). */
+    providers: ProviderResponse[]
+    /** Published semantic layers a blank model can be seeded from (pre-filtered). */
+    ontologies: OntologyDefinitionResponse[]
+    blankOptionsLoading: boolean
+    selectedProviderId: string | null
+    selectedOntologyId: string | null
+    onSelectProvider: (id: string) => void
+    onSelectOntology: (id: string) => void
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -541,6 +558,235 @@ function NoDataSourcesState({ workspaceName }: { workspaceName: string }) {
     )
 }
 
+// ─── Blank-model mode ──────────────────────────────────────────────
+
+function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: ScopeMode) => void }) {
+    const options: { id: ScopeMode; label: string; icon: ReactNode }[] = [
+        { id: 'existing', label: 'Use existing data', icon: <Database className="w-4 h-4" /> },
+        { id: 'blank', label: 'Start from blank', icon: <Sparkles className="w-4 h-4" /> },
+    ]
+    return (
+        <div className="inline-flex items-center rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 p-1">
+            {options.map(opt => {
+                const active = mode === opt.id
+                return (
+                    <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => onChange(opt.id)}
+                        className={cn(
+                            'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                            active
+                                ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm'
+                                : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200',
+                        )}
+                    >
+                        {opt.icon}
+                        {opt.label}
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+/** Shared card shell for the two blank-mode pickers, matching DataSourceCard's language. */
+function PickerCard({
+    isSelected,
+    icon,
+    title,
+    onClick,
+    children,
+}: {
+    isSelected: boolean
+    icon: ReactNode
+    title: string
+    onClick: () => void
+    children?: ReactNode
+}) {
+    return (
+        <button
+            onClick={onClick}
+            className={cn(
+                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
+                isSelected
+                    ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
+                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600',
+            )}
+        >
+            {isSelected && (
+                <div className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center">
+                    <Check className="w-3 h-3 text-white" />
+                </div>
+            )}
+            <div className="flex items-start gap-3">
+                <div className={cn(
+                    'w-9 h-9 rounded-lg flex items-center justify-center shrink-0',
+                    isSelected
+                        ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                        : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
+                )}>
+                    {icon}
+                </div>
+                <div className="min-w-0 flex-1 pr-6">
+                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 break-words">{title}</h4>
+                    {children}
+                </div>
+            </div>
+        </button>
+    )
+}
+
+function ProviderCard({ provider, isSelected, onClick }: { provider: ProviderResponse; isSelected: boolean; onClick: () => void }) {
+    return (
+        <PickerCard isSelected={isSelected} onClick={onClick} icon={<Server className="w-4 h-4" />} title={provider.name}>
+            <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="uppercase tracking-wide">{provider.providerType}</span>
+                {provider.host && <span className="text-slate-400 dark:text-slate-500 truncate">· {provider.host}</span>}
+            </div>
+            <div className="flex items-center gap-1.5 mt-1 text-[11px]">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                <span className="text-emerald-600 dark:text-emerald-400">Active</span>
+            </div>
+        </PickerCard>
+    )
+}
+
+function OntologyCard({ ontology, isSelected, onClick }: { ontology: OntologyDefinitionResponse; isSelected: boolean; onClick: () => void }) {
+    const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
+    const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
+    return (
+        <PickerCard isSelected={isSelected} onClick={onClick} icon={<Sparkles className="w-4 h-4" />} title={ontology.name}>
+            <div className="flex items-center gap-3 mt-1">
+                <div className="flex items-center gap-1 text-xs">
+                    <Layers className="w-3 h-3 text-emerald-500" />
+                    <span className="font-semibold text-slate-700 dark:text-slate-300">{entityCount}</span>
+                    <span className="text-slate-400">entities</span>
+                </div>
+                <div className="flex items-center gap-1 text-xs">
+                    <GitBranch className="w-3 h-3 text-violet-500" />
+                    <span className="font-semibold text-slate-700 dark:text-slate-300">{relCount}</span>
+                    <span className="text-slate-400">relationships</span>
+                </div>
+            </div>
+            {ontology.scope && (
+                <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-500 truncate">Scope: {ontology.scope}</div>
+            )}
+        </PickerCard>
+    )
+}
+
+function BlankPickerEmpty({ icon, title, hint, href, cta }: { icon: ReactNode; title: string; hint: string; href: string; cta: string }) {
+    return (
+        <div className="flex flex-col items-center justify-center py-8 text-center rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
+            <div className="w-11 h-11 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-3 text-slate-300 dark:text-slate-600">
+                {icon}
+            </div>
+            <p className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">{title}</p>
+            <p className="text-xs text-slate-400 max-w-[280px]">{hint}</p>
+            <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-blue-600 dark:text-blue-400 hover:text-blue-700 transition-colors"
+            >
+                {cta}
+                <ExternalLink className="w-3 h-3" />
+            </a>
+        </div>
+    )
+}
+
+function BlankScopePickers({
+    providers,
+    ontologies,
+    loading,
+    selectedProviderId,
+    selectedOntologyId,
+    onSelectProvider,
+    onSelectOntology,
+}: {
+    providers: ProviderResponse[]
+    ontologies: OntologyDefinitionResponse[]
+    loading: boolean
+    selectedProviderId: string | null
+    selectedOntologyId: string | null
+    onSelectProvider: (id: string) => void
+    onSelectOntology: (id: string) => void
+}) {
+    if (loading) {
+        return (
+            <div className="flex-1 flex items-center justify-center py-12">
+                <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Loading connections and semantic layers…
+                </div>
+            </div>
+        )
+    }
+    return (
+        <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
+            {/* Provider picker */}
+            <section className="space-y-3">
+                <div className="flex items-center gap-2">
+                    <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">FalkorDB connection</span>
+                    <span className="text-xs text-slate-400 ml-auto">{providers.length}</span>
+                </div>
+                {providers.length === 0 ? (
+                    <BlankPickerEmpty
+                        icon={<Server className="w-6 h-6" />}
+                        title="No FalkorDB connections available"
+                        hint="Ask an admin to register a FalkorDB provider for this workspace."
+                        href="/ingestion?tab=connections"
+                        cta="Manage connections"
+                    />
+                ) : (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        {providers.map(p => (
+                            <ProviderCard
+                                key={p.id}
+                                provider={p}
+                                isSelected={p.id === selectedProviderId}
+                                onClick={() => onSelectProvider(p.id)}
+                            />
+                        ))}
+                    </div>
+                )}
+            </section>
+
+            {/* Ontology picker */}
+            <section className="space-y-3">
+                <div className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
+                    <span className="text-xs text-slate-400 ml-auto">{ontologies.length}</span>
+                </div>
+                {ontologies.length === 0 ? (
+                    <BlankPickerEmpty
+                        icon={<Sparkles className="w-6 h-6" />}
+                        title="No published semantic layers"
+                        hint="Publish a semantic layer to seed a blank model from it."
+                        href="/schema"
+                        cta="Manage semantic layers"
+                    />
+                ) : (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        {ontologies.map(o => (
+                            <OntologyCard
+                                key={o.id}
+                                ontology={o}
+                                isSelected={o.id === selectedOntologyId}
+                                onClick={() => onSelectOntology(o.id)}
+                            />
+                        ))}
+                    </div>
+                )}
+            </section>
+        </div>
+    )
+}
+
 // ─── Main Component ────────────────────────────────────────────────
 
 const NO_FILTERS = { primary: false, ontology: false, ready: false }
@@ -553,7 +799,17 @@ export function ScopeStep({
     activeWorkspaceId,
     onSelectWorkspace,
     onSelectDataSource,
+    scopeMode,
+    onScopeModeChange,
+    providers,
+    ontologies,
+    blankOptionsLoading,
+    selectedProviderId,
+    selectedOntologyId,
+    onSelectProvider,
+    onSelectOntology,
 }: ScopeStepProps) {
+    const isBlank = scopeMode === 'blank'
     const [wsSearch, setWsSearch] = useState('')
     const [dsSearch, setDsSearch] = useState('')
     const [dsSort, setDsSort] = useState<DsSort>('recommended')
@@ -680,16 +936,23 @@ export function ScopeStep({
                 className="text-center mb-2"
             >
                 <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-3">
-                    <Database className="w-4 h-4" />
-                    Choose your data source
+                    {isBlank ? <Sparkles className="w-4 h-4" /> : <Database className="w-4 h-4" />}
+                    {isBlank ? 'Start a blank lineage model' : 'Choose your data source'}
                 </div>
                 <h3 className="text-2xl font-bold text-slate-900 dark:text-white mb-1.5">
                     Where should this view live?
                 </h3>
                 <p className="text-slate-500 dark:text-slate-400 text-sm">
-                    Select the workspace and data source this view will be built from
+                    {isBlank
+                        ? 'Pick a workspace, a FalkorDB connection, and a published semantic layer'
+                        : 'Select the workspace and data source this view will be built from'}
                 </p>
             </motion.div>
+
+            {/* Mode toggle */}
+            <div className="flex justify-center">
+                <ScopeModeToggle mode={scopeMode} onChange={onScopeModeChange} />
+            </div>
 
             {/* Two-panel layout */}
             <motion.div
@@ -740,9 +1003,19 @@ export function ScopeStep({
                     </div>
                 )}
 
-                {/* Right: Data Source Cards */}
+                {/* Right: Data Source Cards, or blank-model pickers */}
                 <div className="flex-1 flex flex-col min-w-0">
-                    {selectedWorkspace ? (
+                    {selectedWorkspace && isBlank ? (
+                        <BlankScopePickers
+                            providers={providers}
+                            ontologies={ontologies}
+                            loading={blankOptionsLoading}
+                            selectedProviderId={selectedProviderId}
+                            selectedOntologyId={selectedOntologyId}
+                            onSelectProvider={onSelectProvider}
+                            onSelectOntology={onSelectOntology}
+                        />
+                    ) : selectedWorkspace ? (
                         <>
                             {/* Right header + toolbar */}
                             <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-700/50 space-y-2.5">
@@ -881,8 +1154,8 @@ export function ScopeStep({
                 </div>
             </motion.div>
 
-            {/* Contextual banners */}
-            <ScopeBanners ds={selectedDs} schemaAvailability={schemaAvailability} />
+            {/* Contextual banners (existing-data mode only) */}
+            {!isBlank && <ScopeBanners ds={selectedDs} schemaAvailability={schemaAvailability} />}
         </div>
     )
 }

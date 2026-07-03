@@ -19,6 +19,7 @@ import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { useAbandonDraft, useBootstrapGraph, useBranches, useDiffVsMain, useResolveGraph } from '../hooks/useVersioning'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
+import { AggregationSyncChip } from './AggregationSyncChip'
 import { BranchSwitcher } from './BranchSwitcher'
 import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { RefreshingBadge } from './RefreshingBadge'
@@ -97,8 +98,11 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   // No versioned graph yet — or one that exists but was never seeded (genesis only,
   // mainHeadCommitSeq <= 1; e.g. a bootstrap that failed partway). Offer to enable/seed
   // it (managers only). This premium empty state is what makes the feature discoverable
-  // AND self-heals a half-enabled graph.
-  const needsSeed = !graphId || (resolve.data?.mainHeadCommitSeq ?? 0) <= 1
+  // AND self-heals a half-enabled graph. A `kind === 'blank'` model is EXCLUDED: it is
+  // genesis-only by design (built by hand, never seeded from a provider), so it gets
+  // the normal versioning strip + the canvas's guided empty state instead.
+  const isBlankModel = resolve.data?.kind === 'blank'
+  const needsSeed = !graphId || (!isBlankModel && (resolve.data?.mainHeadCommitSeq ?? 0) <= 1)
   if (needsSeed) {
     if (!canManage) return null
     return (
@@ -149,6 +153,9 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
       >
         <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
+        {/* Publish → rollup visibility for hand-built models: when the published head
+            advances, poll aggregation readiness and show Syncing → Synced. */}
+        <AggregationSyncChip dataSourceId={dataSourceId} mainHeadSeq={mainHead} enabled={isBlankModel} />
 
         {isDraft && branchId && (
           <div className="flex items-center gap-2 text-ink-muted">

@@ -84,11 +84,11 @@ class CacheManager:
         return await is_pinned(graph_id)
 
     # ---- eviction --------------------------------------------------------- #
-    async def evict(self, graph_id: str, *, drop_graph: Callable[[str], Awaitable]) -> bool:
+    async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable]) -> bool:
         """Evict a cold ``main`` from FalkorDB. Skips a pinned graph. Marks
         ``status=evicted`` + ``projected_commit_seq=0`` (so the worker rebuilds it)
-        and drops the FalkorDB graph via ``drop_graph(name)``. Returns whether it
-        evicted."""
+        and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed to
+        the graph's pinned provider instance. Returns whether it evicted."""
         if await self.is_pinned(graph_id):
             return False
         async with self._session() as s:
@@ -96,11 +96,12 @@ class CacheManager:
             if ps is None or ps.status == "evicted":
                 return False
             name = ps.falkor_graph_name
+            provider_id = ps.falkor_provider
             ps.status = "evicted"
             ps.projected_commit_seq = 0
         if name:
             try:
-                await drop_graph(name)
+                await drop_graph(name, provider_id)
             except Exception:   # pragma: no cover - infra
                 logger.warning("dropping FalkorDB graph %s failed (will be overwritten on rebuild)", name)
         return True

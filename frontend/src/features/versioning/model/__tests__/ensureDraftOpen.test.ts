@@ -11,6 +11,14 @@ vi.mock('@/services/versioningApiService', () => ({
   openDraft: vi.fn(),
 }))
 
+// ensureDraftOpen invalidates the versioning query caches through @/main's
+// getQueryClient (dynamic import) — stub it, since importing the real module
+// mounts the app (same precedent as useRevealNode.test.ts).
+const invalidateQueries = vi.fn()
+vi.mock('@/main', () => ({
+  getQueryClient: () => ({ invalidateQueries }),
+}))
+
 import { openDraft, resolveGraph } from '@/services/versioningApiService'
 import { useBranchStore } from '@/store/branchStore'
 import { ensureDraftOpen } from '../ensureDraftOpen'

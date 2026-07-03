@@ -20,6 +20,7 @@ import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
 import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import { useSchemaEntityTypes } from '@/store/schema'
 
 // ============================================
 // Types
@@ -38,6 +39,8 @@ interface LayoutStepProps {
     }[]
     /** Data source whose assigned ontology scopes the entity type picker. */
     dataSourceId?: string
+    /** Blank model: no data source yet — read entity types from the hydrated schema store. */
+    blank?: boolean
 }
 
 interface LayerTemplate {
@@ -96,9 +99,13 @@ const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#0
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId }: LayoutStepProps) {
+export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
-    const { entityTypes: schemaEntityTypes } = useDataSourceSchema(dataSourceId)
+    // Blank models have no data source to probe; their ontology schema is hydrated
+    // into the schema store, so read entity types from there instead.
+    const { entityTypes: dsEntityTypes } = useDataSourceSchema(dataSourceId)
+    const storeEntityTypes = useSchemaEntityTypes()
+    const schemaEntityTypes = blank ? storeEntityTypes : dsEntityTypes
     const availableEntityTypes = useMemo(
         () => schemaEntityTypes.slice().sort((a, b) => a.name.localeCompare(b.name)),
         [schemaEntityTypes]

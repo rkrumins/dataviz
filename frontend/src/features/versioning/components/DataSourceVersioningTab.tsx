@@ -53,8 +53,10 @@ export function DataSourceVersioningTab({ wsId, dataSourceId }: { wsId: string; 
 
   // Not enabled — or a graph that exists but was never seeded (genesis only). Both
   // need the seed step; treating "exists but empty" as not-enabled self-heals a
-  // bootstrap that failed partway.
-  const needsSeed = !graphId || (resolve.data?.mainHeadCommitSeq ?? 0) <= 1
+  // bootstrap that failed partway. Blank models are excluded: genesis-only by design
+  // (hand-built, never provider-seeded), so they get the normal versioning view.
+  const needsSeed = !graphId ||
+    (resolve.data?.kind !== 'blank' && (resolve.data?.mainHeadCommitSeq ?? 0) <= 1)
   if (needsSeed) {
     return (
       <div className="rounded-2xl border border-glass-border bg-gradient-to-br from-accent-lineage/[0.06] to-transparent p-6 text-center">

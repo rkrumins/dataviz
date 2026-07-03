@@ -66,6 +66,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   useBranchDeepLink({
     enabled: !!graphId && !!dataSourceId,
     branches: branchesQ.data,
+    listRefreshing: branchesQ.isFetching,
     currentBranchId,
     switchToDraft,
   })

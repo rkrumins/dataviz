@@ -877,9 +877,8 @@ async def lifespan(_app: FastAPI):
     try:
         from .services.versioning import config as _vcfg
         if _vcfg.PROJECTION_INPROCESS:
-            from .services.versioning.projection import (
-                FalkorProjector, make_falkor_graph_factory,
-            )
+            from .services.versioning.projection import FalkorProjector
+            from .providers.falkor_graph_registry import make_registry_graph_factory
             from .services.versioning.worker import ProjectionWorker
             from .services.versioning.service import GraphVersioningService
             from .services.projection_target import (
@@ -896,8 +895,12 @@ async def lifespan(_app: FastAPI):
                 # edge_types_resolver + on_rollups_stale keep :AGGREGATED rollups consistent
                 # automatically: incremental per projected window; a scoped rebuild is queued when a
                 # full seed wiped them or a containment move exceeded the bounded-recount cap.
+                # Provider-aware graph routing: each graph projects into its pinned
+                # provider instance (registry host/port/creds) so raw edges land on
+                # the same FalkorDB the per-provider read path + aggregation worker
+                # use; env instance is the default/fallback.
                 FalkorProjector(
-                    make_falkor_graph_factory(), target_resolver=repair_projection_target,
+                    make_registry_graph_factory(), target_resolver=repair_projection_target,
                     edge_types_resolver=resolve_aggregation_edge_types,
                     on_rollups_stale=make_rollup_rebuild_hook(
                         lambda: getattr(_app.state, "aggregation_service", None)),

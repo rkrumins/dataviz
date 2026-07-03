@@ -284,7 +284,109 @@ The merge corruption took three passes and two wrong turns; recording them:
   to `displayName=None, properties=null`. Lesson: reproduce end-to-end before fixing; static analysis
   alone sent me down the two wrong turns above.
 
-## 10. Per-commit file manifest
+## 10. Self-service blank models + commit-boundary ontology enforcement (2026-07-03)
+
+A second wave of work (branch `claude/affectionate-fermi-ii373`, uncommitted at time of writing)
+added the **blank-canvas authoring** capability: users provision an empty, ontology-governed
+lineage model from the UI and build it by hand. Everything below is backend-verified by tests.
+
+### 10.1 `kind="blank"` graphs & one-call provisioning
+
+`POST /{ws}/versioning/blank-graphs` (`versioning.py::create_blank_graph`, gate
+`workspace:datasource:manage`) provisions in one call:
+1. a **manual data source** on a chosen FalkorDB provider — no catalog item; the chosen
+   **published** ontology bound via `ontology_id`; `source_mode="managed"`; and a minted
+   collision-proof `graph_name = "blank_<ds_id>"` (a full projection seed WIPES its named
+   FalkorDB key, so physical names are never user-supplied);
+2. a **genesis-only versioned graph** — `create_graph(kind="blank", ontology_enforcement=
+   "strict")` pinned to that name + provider (`projection_state.falkor_graph_name` /
+   `falkor_provider`);
+3. best-effort **aggregation registration** (`AggregationService.trigger`, source
+   `onboarding`) so the data source's readiness row exists from day one.
+
+Cross-store consistency: management and graphver may be separate DBs (no 2PC) — the data
+source commits first and is **compensated away** (hard delete) if graph creation fails (502).
+Guards: unpublished ontology → 422 `ontology_not_published`; non-FalkorDB provider → 422
+`provider_unsupported`. `graphs.kind` gained `'blank'` via migration
+`20260703_1200_graph_kind_blank` (CHECK-constraint swap). `/resolve` now returns `kind` so
+the UI can distinguish a genesis-only blank model (guided empty canvas) from a not-yet-seeded
+graph (the "Enable version control" CTA) — the old `needsSeed = mainHeadCommitSeq <= 1`
+heuristic alone would misfire on blank graphs.
+
+### 10.2 Rich ontology rules at the commit boundary
+
+Previously the durable write path checked only inline-spec **type-name membership** plus
+structural edge integrity; the rich rules (`can_contain`, edge `source_types`/`target_types`)
+lived only in `mutation_validator.py` on the interactive `ContextEngine` path — and the
+`/graph/changes` batch save bypassed them for edges. Now:
+
+- `versioning/ontology.py` gained `OntologyRules` (frozen: `entity_types{can_contain}`,
+  `edge_types{source_types,target_types,is_containment}` keyed UPPERCASE,
+  `containment_edge_types`) and `validate_entities_rich(entities, endpoint_types, rules)` —
+  pure, mirrors `mutation_validator` semantics: empty sets = unrestricted, case-insensitive
+  type match, **creates-only** (updates/deletes never gated — legacy data must not block
+  edits), violations `{entity_id, kind, reason, rule}` with `rule ∈ unknown_entity_type |
+  unknown_edge_type | invalid_source | invalid_target | containment_not_allowed` (a superset
+  of the legacy shape — every `OntologyViolation` consumer keeps working).
+- The rules are **resolved at the API layer and injected** (`ontology_rules=` kwarg — the
+  same decoupling as `containment_edge_types`): `_live_ontology_rules`/`_rules_for_meta` in
+  `versioning.py` (stage/commit/publish/merge endpoints), `_resolve_ontology_rules` in
+  `graph.py::apply_graph_changes` (closing the batch-edge gap), and a
+  `set_ontology_rules(...)` push-down on `VersionedWriteProvider` from
+  `ContextEngine._resolve_ontology` (assigned-ontology only).
+- Service gates: `apply_ops`/`_apply_ops_once` (endpoint types free from the already-hydrated
+  `new_vals`/`cur_vals`; a `create` op on an already-live entity — the write-through's
+  idempotent endpoint upsert — counts as an update, so legacy entities are never
+  re-litigated); `stage_changes` (eager, batch+committed-head endpoint types; endpoints that
+  exist only as uncommitted working changes are skipped — **checkpoint is the authoritative
+  gate**); `checkpoint` (over `net_delta` against the composed head state);
+  `_apply_draft_squash` (publish + `merge_mr`) — **rules resolved at merge time**, so an
+  ontology tightened after a draft opened blocks the merge with per-entity reasons.
+- Scoping rules: only data sources with an **explicitly assigned** `ontology_id` are gated
+  (system-default/introspection fallback layers never retroactively gate legacy graphs);
+  `kind="blank"` graphs **fail closed** (`ontology_required` 422 / `ontology_unavailable`
+  503) — they are contractually ontology-governed. `bulk_ingest`/`sync_ingest` and
+  `revert_commit` are deliberately **exempt** (re-sync must not break; revert is the
+  administrative repair path and must be able to restore pre-ontology states).
+
+Tests: `backend/tests/test_versioning_ontology_rules.py` (pure validator),
+`backend/tests/integration/test_versioning_rich_enforcement.py` (apply_ops / stage+checkpoint
+/ publish re-gate / permissive + None unchanged / legacy-endpoint upsert not re-litigated),
+`backend/tests/integration/test_blank_graph_provisioning.py` (happy path, guards,
+compensation, `/resolve.kind`).
+
+### 10.3 Provider-aware projection routing & the aggregation chain
+
+The projector previously wrote to ONE env-configured FalkorDB (`FALKORDB_HOST/PORT`) while
+reads (`ProviderManager`) and the **aggregation worker** resolve per-provider connections —
+on a pinned non-default provider, raw edges and `:AGGREGATED` rollups would land on
+*different instances*. Now the graph-factory contract is `(name, provider_id=None) ->
+graph | awaitable`:
+
+- `backend/app/providers/falkor_graph_registry.py::make_registry_graph_factory` routes per
+  `projection_state.falkor_provider` (ProviderORM host/port + decrypted creds, one handle per
+  host/port, `apply_local_dev_falkordb_override` parity with the read path); anything
+  unroutable (None/"default"/unknown/inactive/non-falkordb/lookup failure) falls back to the
+  env instance with a loud log. Wired into the in-process worker (`main.py`), the standalone
+  worker (`versioning/__main__.py`), and the interactive projector + hot read path
+  (`versioning.py::get_falkor_read_factory`). Eviction drops route via the pinned provider
+  too (`cache_manager.evict` → `drop_graph(name, provider_id)`).
+- Publish→rollup chain for manual models (verified end-to-end wiring): publish →
+  `project_now` → incremental `:AGGREGATED` maintenance (`edge_types_resolver`) per window;
+  full seeds / stale windows → `on_rollups_stale` → `AggregationService.trigger`
+  (idempotency `gv-rollup-rebuild:<graph_id>`) → per-provider `AggregationWorker` MERGE.
+  **Deployment note:** the standalone projection worker has no `on_rollups_stale` wiring (no
+  in-process aggregation service) — manual-model publishes go through the interactive
+  `project_now`, which has it; wiring the standalone worker to the trigger API is a named
+  follow-up.
+- Known residuals: registry handles cache per process (credential rotation needs a restart);
+  a deleted provider row falls back to the env instance (logged loudly).
+
+Tests: `backend/tests/integration/test_versioning_projection_provider_routing.py` (pinned /
+default / sync-factory / drop routing); all existing projection/eviction/worker suites green
+with the widened factory contract (fake factories updated to `(name, provider_id=None)`).
+
+## 11. Per-commit file manifest
 
 - **`84a467f`** — new `backend/app/providers/draft_overlay_provider.py` (`DraftOverlayProvider` +
   `_OverlayDelta` index: node/edge upsert/remove maps, lineage-vs-containment split, childCount delta);

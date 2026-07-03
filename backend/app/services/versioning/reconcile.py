@@ -23,6 +23,7 @@ is a ``main``-only, non-fork concern — matching the projector's own count sema
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from dataclasses import dataclass
@@ -192,6 +193,7 @@ class ProjectionReconciler:
             projected = ps.projected_commit_seq if ps is not None else 0
             status = ps.status if ps is not None else "idle"
             name = ps.falkor_graph_name if ps is not None else None
+            provider_id = ps.falkor_provider if ps is not None else None
             pg_nodes, pg_edges = (
                 await pg_live_counts(s, graph_id, main_id) if main_id is not None else (0, 0)
             )
@@ -223,7 +225,11 @@ class ProjectionReconciler:
         if status in ("projecting", "rebuilding") and not fresh:
             return _report(skipped_reason="projection in flight")
 
-        client = self._client(name)
+        # Factory contract is (name, provider_id=None); a registry-backed factory may
+        # resolve the provider asynchronously — await the result when it's awaitable.
+        client = self._client(name, provider_id)
+        if inspect.isawaitable(client):
+            client = await client
         falkor_nodes, falkor_edges = await falkor_counts(client)
 
         missing_nodes, extra_nodes, trunc_n = await self._diff_nodes(

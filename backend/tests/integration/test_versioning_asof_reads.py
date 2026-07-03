@@ -136,14 +136,14 @@ async def _run() -> None:
         assert len(d2_log) == 1 and d2_log[0]["kind"] == "edit"   # draft checkpoint commit
 
         # ── project main → fresh; FalkorDB serves ONLY main@head, never branch/as-of ──
-        await FalkorProjector(graph_client_factory=lambda name: SimpleNamespace(query=_noop)).project_graph(gid)
+        await FalkorProjector(graph_client_factory=lambda name, provider_id=None: SimpleNamespace(query=_noop)).project_graph(gid)
         assert (await svc.projection_watermark(gid))["fresh"] is True
         fake = _FakeReadGraph(
             nodes=[{"urn": "gv:A", "entityType": "Dataset", "displayName": "Alpha"},
                    {"urn": "gv:B", "entityType": "Dataset", "displayName": "Beta"}],
             edges=[{"src": "gv:A", "tgt": "gv:B", "type": "FLOWS_TO", "props": {"id": "E1"}}],
         )
-        app.dependency_overrides[V.get_falkor_read_factory] = lambda: (lambda name: fake)
+        app.dependency_overrides[V.get_falkor_read_factory] = lambda: (lambda name, provider_id=None: fake)
 
         main_nb = (await c.get(f"{ws1}/graphs/{gid}/graph/neighbors", params={"urn": "gv:A", "depth": 1})).json()
         assert main_nb["source"] == "falkordb" and {n["urn"] for n in main_nb["nodes"]} == {"gv:A", "gv:B"}

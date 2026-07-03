@@ -16,7 +16,7 @@ def _unused_session():
     raise AssertionError("_verify_and_heal must not touch the session on this path")
 
 
-def _unused_client_factory(name):
+def _unused_client_factory(name, provider_id=None):
     raise AssertionError("_verify_and_heal must not touch the client factory on this path")
 
 

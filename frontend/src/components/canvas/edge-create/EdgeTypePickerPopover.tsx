@@ -92,7 +92,22 @@ export function EdgeTypePickerPopover({ sourceId, targetId, position, onPick, on
 
       <div className="max-h-[260px] overflow-y-auto custom-scrollbar p-2 space-y-1">
         {options.length === 0 && (
-          <div className="text-center py-6 text-ink-muted text-xs">No lineage edge types defined</div>
+          // Explain WHY nothing is offered: with both endpoint types known, this is an
+          // ontology rule (no relationship defined between the two types), not missing data.
+          <div className="text-center py-6 px-3 text-ink-muted text-xs">
+            {nodeType(sourceId) && nodeType(targetId) ? (
+              <>
+                Your ontology doesn&apos;t define a relationship from{' '}
+                <span className="font-medium text-ink">{nodeType(sourceId)}</span> to{' '}
+                <span className="font-medium text-ink">{nodeType(targetId)}</span>.
+                <span className="block mt-1 text-[10px] text-ink-muted/80">
+                  Add one on the ontology&apos;s schema page to connect these entities.
+                </span>
+              </>
+            ) : (
+              'No lineage edge types defined'
+            )}
+          </div>
         )}
         {options.map((o) => (
           <button

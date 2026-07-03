@@ -24,6 +24,7 @@ import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
+import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -101,6 +102,10 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     const key = `${scopeWs ?? ''}::${scopeDs ?? ''}::${currentBranchId ?? 'main'}`
     useStagedChangesStore.getState().setScope(key)
   }, [scopeWs, scopeDs, currentBranchId])
+
+  // A brand-new blank model opens ready to build: auto-open (or resume) the
+  // caller's draft once per graph per session. No-op for every other graph kind.
+  useAutoDraftForBlankModel(activeView?.workspaceId ?? null, activeView?.dataSourceId ?? null)
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {

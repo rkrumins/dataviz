@@ -30,6 +30,17 @@ export interface ResolveResponse {
   mainBranchId: string
   mainHeadCommitSeq: number
   myDraft?: DraftRef | null
+  /** Graph provenance — "blank" for self-serve blank models, else the seed kind. */
+  kind?: string
+}
+
+/** Result of provisioning a blank lineage model (data source + genesis graph). */
+export interface BlankGraphResult {
+  dataSourceId: string
+  graphId: string
+  mainBranchId: string
+  graphName: string
+  label: string
 }
 
 export type BranchKind = 'main' | 'draft' | 'fork'
@@ -297,7 +308,12 @@ export class MergeConflictError extends Error {
 export class OntologyViolationError extends Error {
   violations: Array<Record<string, unknown>>
   constructor(violations: Array<Record<string, unknown>>) {
-    super('These changes violate the active ontology.')
+    const reasons = violations.map((v) => v?.reason).filter(Boolean).slice(0, 2) as string[]
+    super(
+      reasons.length
+        ? `These changes violate the active ontology. ${reasons.join(' ')}`
+        : 'These changes violate the active ontology.',
+    )
     this.name = 'OntologyViolationError'
     this.violations = violations
   }
@@ -370,6 +386,19 @@ const jsonBody = (data: unknown): RequestInit => ({ method: 'POST', body: JSON.s
 /** Boot lookup: resolve a data source to its versioned graph + the caller's open draft (read-only — does NOT open one). */
 export function resolveGraph(wsId: string, dataSourceId: string): Promise<ResolveResponse> {
   return vfetch<ResolveResponse>(`${base(wsId)}/resolve?dataSourceId=${encodeURIComponent(dataSourceId)}`)
+}
+
+/**
+ * Provision a blank lineage model: a manual data source + genesis versioned graph
+ * bound to `providerId` and the published ontology `ontologyId`, in one call. The
+ * 422 `provider_unsupported` / `ontology_not_published` details surface as the
+ * thrown error's message (via `vfetch`), so the wizard can show them inline.
+ */
+export function provisionBlankGraph(
+  wsId: string,
+  req: { name: string; description?: string; providerId: string; ontologyId: string },
+): Promise<BlankGraphResult> {
+  return vfetch<BlankGraphResult>(`${base(wsId)}/blank-graphs`, jsonBody(req))
 }
 
 /** Resolve and open a draft if the caller has none (requires `:manage`). */

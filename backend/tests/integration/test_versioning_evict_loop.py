@@ -27,7 +27,7 @@ async def _noop(cypher, params=None):
 
 
 def _factory(dropped: list):
-    def make(name):
+    def make(name, provider_id=None):
         async def _delete():
             dropped.append(name)
         return SimpleNamespace(query=_noop, delete=_delete)

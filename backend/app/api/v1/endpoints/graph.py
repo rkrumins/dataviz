@@ -1638,6 +1638,43 @@ async def _resolve_containment_types(engine: ContextEngine) -> List[str]:
         return []
 
 
+async def _resolve_ontology_rules(engine: ContextEngine, *, fail_closed: bool = False):
+    """Rich commit-boundary rules (``OntologyRules``) from the engine's cached resolved
+    ontology — only when the data source has an *explicitly assigned* ontology (the
+    system-default/introspection fallback layers must not retroactively gate legacy
+    graphs). Best-effort ``None`` on failure, unless ``fail_closed`` (blank graphs are
+    contractually ontology-governed — a write whose rules can't be resolved must not
+    slip through unvalidated)."""
+    try:
+        from backend.app.db.repositories.data_source_repo import get_data_source_orm
+        from backend.app.ontology.rules import resolved_ontology_to_rules
+        # The engine keeps its scope private; this app-layer helper is the one sanctioned
+        # reader (it built the engine from the same request session).
+        ds_id, session = engine._data_source_id, engine._db_session
+        if not ds_id or session is None:
+            return None
+        ds = await get_data_source_orm(session, ds_id)
+        if ds is None or not ds.ontology_id:
+            if fail_closed:
+                raise HTTPException(status_code=422, detail={
+                    "type": "ontology_required",
+                    "message": "This graph is ontology-governed but its data source has no "
+                               "assigned ontology; assign one to resume editing."})
+            return None
+        resolved = await engine._resolve_ontology()
+        return resolved_ontology_to_rules(resolved)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ontology-rules resolution failed for /graph/changes")
+        if fail_closed:
+            raise HTTPException(status_code=503, detail={
+                "type": "ontology_unavailable",
+                "message": "The ontology for this graph could not be resolved; writes are "
+                           "blocked until it is available again."})
+        return None
+
+
 class GraphChangeOp(BaseModel):
     """One typed change in a draft save. ``update`` payloads are *partial* — the
     server merges them onto the entity's current state, so the client never has to
@@ -1727,7 +1764,9 @@ async def apply_graph_changes(
         commit_id = await svc.apply_ops(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
             message=request.message or "Canvas edits",
-            containment_edge_types=await _resolve_containment_types(engine))
+            containment_edge_types=await _resolve_containment_types(engine),
+            ontology_rules=await _resolve_ontology_rules(
+                engine, fail_closed=(g.get("kind") == "blank")))
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:

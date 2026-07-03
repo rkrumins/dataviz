@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 from contextlib import contextmanager
@@ -89,16 +90,23 @@ _read_factory = None  # lazily built FalkorDB read-client factory (name -> graph
 
 
 def get_falkor_read_factory():
-    """FalkorDB read-client factory for the hot traversal path (overridable in
-    tests; returns ``None`` → reads fall back to Postgres)."""
+    """FalkorDB graph factory for the hot traversal path AND the interactive projector
+    (overridable in tests; returns ``None`` → reads fall back to Postgres). Contract:
+    ``(name, provider_id=None) -> graph | awaitable`` — registry-backed, so each graph
+    routes to its data source's pinned FalkorDB instance, env instance as fallback."""
     global _read_factory
     if _read_factory is None:
         try:
-            from backend.app.services.versioning.projection import make_falkor_graph_factory
-            _read_factory = make_falkor_graph_factory()
-        except Exception as exc:   # pragma: no cover - infra
-            logger.warning("FalkorDB read factory unavailable, reads use Postgres: %s", exc)
-            _read_factory = False   # sentinel: tried and failed
+            from backend.app.providers.falkor_graph_registry import make_registry_graph_factory
+            _read_factory = make_registry_graph_factory()
+        except Exception:   # pragma: no cover - infra
+            try:
+                from backend.app.services.versioning.projection import make_falkor_graph_factory
+                _read_factory = make_falkor_graph_factory()
+                logger.warning("registry graph factory unavailable — using env FalkorDB instance")
+            except Exception as exc:
+                logger.warning("FalkorDB read factory unavailable, reads use Postgres: %s", exc)
+                _read_factory = False   # sentinel: tried and failed
     return _read_factory or None
 
 
@@ -294,6 +302,64 @@ async def _pr_containment_types(svc, session, ws_id, pr) -> List[str]:
     return await _live_containment_types(session, ws_id, base.get("data_source_id") if base else None)
 
 
+async def _live_ontology_rules(
+    session: AsyncSession, workspace_id: Optional[str], data_source_id: Optional[str],
+    *, fail_closed: bool = False,
+):
+    """The CURRENT assigned ontology's rich rules (``OntologyRules``) for the commit-boundary
+    gate, or ``None`` when the data source has no *explicitly assigned* ontology — the
+    system-default/introspection fallback layers must NOT retroactively gate legacy graphs
+    that never opted into an ontology. Mirrors :func:`_live_containment_types` (live, never a
+    stored snapshot). Best-effort ``None`` on failure — unless ``fail_closed`` (blank graphs
+    are contractually strict; a write that can't resolve its rules must not slip through)."""
+    if not data_source_id:
+        return None
+    try:
+        from backend.app.db.repositories.data_source_repo import get_data_source_orm
+        from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from backend.app.ontology.rules import resolved_ontology_to_rules
+        from backend.app.ontology.service import LocalOntologyService
+        ds = await get_data_source_orm(session, data_source_id)
+        if ds is None or not ds.ontology_id:
+            if fail_closed:
+                raise HTTPException(status_code=422, detail={
+                    "type": "ontology_required",
+                    "message": "This graph is ontology-governed but its data source has no "
+                               "assigned ontology; assign one to resume editing."})
+            return None
+        ont = LocalOntologyService(SQLAlchemyOntologyRepository(session))
+        resolved = await ont.resolve(workspace_id=workspace_id, data_source_id=data_source_id)
+        return resolved_ontology_to_rules(resolved)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ontology-rules resolution failed (ws=%s ds=%s)", workspace_id, data_source_id)
+        if fail_closed:
+            raise HTTPException(status_code=503, detail={
+                "type": "ontology_unavailable",
+                "message": "The ontology for this graph could not be resolved; writes are "
+                           "blocked until it is available again."})
+        return None
+
+
+async def _pr_ontology_rules(svc, session, ws_id, pr):
+    """Rich rules for a merge request, resolved from the **base** graph's data source
+    (the side the merge lands on) — same scoping as :func:`_pr_containment_types`."""
+    base = await svc.get_graph(str(pr["target_graph_id"]))
+    return await _rules_for_meta(session, ws_id, base)
+
+
+async def _rules_for_meta(session: AsyncSession, ws_id: str, meta: Optional[dict]):
+    """Rules for a graph's data source from its ``graph_in_workspace`` meta;
+    ``kind == 'blank'`` graphs fail closed (they are contractually ontology-governed),
+    others degrade to ``None`` (legacy behavior)."""
+    if not meta:
+        return None
+    return await _live_ontology_rules(
+        session, ws_id, meta.get("data_source_id"),
+        fail_closed=(meta.get("kind") == "blank"))
+
+
 # --------------------------------------------------------------------------- #
 # Models (camelCase wire, snake_case Python — matches the app convention)       #
 # --------------------------------------------------------------------------- #
@@ -383,6 +449,24 @@ class CreateGraphResponse(_ApiModel):
     genesis_commit_id: str = Field(alias="genesisCommitId")
 
 
+class CreateBlankGraphRequest(_ApiModel):
+    """Self-service blank lineage model: one call provisions the manual data source
+    (minted collision-proof graph name), the genesis-only versioned graph (strict,
+    ontology-governed), and registers it with aggregation."""
+    name: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = None
+    provider_id: str = Field(alias="providerId")
+    ontology_id: str = Field(alias="ontologyId")
+
+
+class BlankGraphResponse(_ApiModel):
+    data_source_id: str = Field(alias="dataSourceId")
+    graph_id: str = Field(alias="graphId")
+    main_branch_id: str = Field(alias="mainBranchId")
+    graph_name: str = Field(alias="graphName")
+    label: str
+
+
 class ResolveRequest(_ApiModel):
     data_source_id: str = Field(alias="dataSourceId")
     originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
@@ -399,6 +483,9 @@ class ResolveResponse(_ApiModel):
     main_branch_id: str = Field(alias="mainBranchId")
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     my_draft: Optional[DraftRefModel] = Field(default=None, alias="myDraft")
+    # manual | authoritative | hybrid | blank — lets the UI distinguish a genesis-only
+    # BLANK model (guided empty canvas) from a not-yet-seeded graph (bootstrap CTA).
+    kind: str = "manual"
 
 
 class GraphResponse(_ApiModel):
@@ -750,6 +837,107 @@ async def create_graph(
     )
 
 
+@router.post("/blank-graphs", response_model=BlankGraphResponse,
+             status_code=status.HTTP_201_CREATED)
+async def create_blank_graph(
+    ws_id: str,
+    body: CreateBlankGraphRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Provision a blank, self-service lineage model in one call:
+
+    1. a **manual data source** on the chosen FalkorDB provider — no catalog item, the
+       assigned ontology bound, and a minted collision-proof ``graph_name``
+       (``blank_<ds_id>``; a full projection seed wipes its named graph, so the physical
+       key is never user-supplied);
+    2. the **genesis-only versioned graph** (``kind="blank"``, strict enforcement) pinned
+       to that name + provider — Postgres is the source of truth from the first edit;
+    3. best-effort **aggregation registration** so readiness reporting and the
+       publish→rollup pipeline are live from day one.
+
+    Management and graphver may be separate DBs (no 2PC): the data source commits first
+    and is compensated away if graph creation fails."""
+    from backend.app.db.repositories import ontology_definition_repo, provider_repo
+    from backend.common.models.management import DataSourceCreateRequest
+
+    # 1) Provider must exist, be active, FalkorDB (Neo4j later), and workspace-permitted.
+    prov = await provider_repo.get_provider_orm(session, body.provider_id)
+    if prov is None or not prov.is_active:
+        raise HTTPException(status_code=422, detail={
+            "type": "provider_unsupported",
+            "message": "The selected provider connection does not exist or is inactive."})
+    if prov.provider_type != "falkordb":
+        raise HTTPException(status_code=422, detail={
+            "type": "provider_unsupported",
+            "message": f"Blank models are FalkorDB-backed for now; '{prov.provider_type}' "
+                       "providers are not supported yet."})
+    try:
+        permitted = json.loads(prov.permitted_workspaces or '["*"]')
+    except Exception:
+        permitted = ["*"]
+    if "*" not in permitted and ws_id not in permitted:
+        raise HTTPException(status_code=403, detail="provider not permitted in this workspace")
+
+    # 2) Ontology must exist and be published — blank models are ontology-governed.
+    ont = await ontology_definition_repo.get_ontology(session, body.ontology_id)
+    if ont is None or getattr(ont, "deleted_at", None):
+        raise HTTPException(status_code=404, detail="unknown ontology")
+    if not ont.is_published:
+        raise HTTPException(status_code=422, detail={
+            "type": "ontology_not_published",
+            "message": "Blank models must be built on a published ontology."})
+
+    # 3) Manual data source with a minted, collision-proof graph name (same txn).
+    ds = await data_source_repo.create_data_source(session, ws_id, DataSourceCreateRequest(
+        provider_id=body.provider_id, ontology_id=body.ontology_id,
+        label=body.name, access_level="write"))
+    row = await data_source_repo.get_data_source_orm(session, ds.id)
+    graph_name = f"blank_{row.id}"
+    row.graph_name = graph_name
+    row.source_mode = "managed"
+    row.created_by = user.id
+    await session.commit()
+
+    # 4) Genesis-only versioned graph pinned to the minted name + provider.
+    try:
+        created = await svc.create_graph(
+            data_source_id=ds.id, workspace_id=ws_id, kind="blank", actor=user.id,
+            base_ontology_id=body.ontology_id, falkor_graph_name=graph_name,
+            falkor_provider=body.provider_id, ontology_enforcement="strict")
+    except Exception:
+        logger.exception("blank-graph creation failed for ds=%s; compensating", ds.id)
+        try:                                             # compensate: remove the orphan ds
+            await data_source_repo.delete_data_source(session, ds.id)
+            await session.commit()
+        except Exception:                                # pragma: no cover - double fault
+            logger.exception("compensating delete of ds=%s failed — orphan data source", ds.id)
+        raise HTTPException(status_code=502, detail={
+            "type": "provisioning_failed",
+            "message": "The model's version store could not be created; nothing was kept."})
+
+    # 5) Aggregation registration (best-effort, never fails provisioning): creates the
+    #    data source's aggregation state row so readiness reads "configured" instead of
+    #    "none", and wires the publish→rollup pipeline from day one. The projector's
+    #    on_rollups_stale hook self-heals later if this is skipped.
+    try:
+        from backend.app.main import app as _app
+        agg = getattr(_app.state, "aggregation_service", None)
+        if agg is not None:
+            from backend.app.services.aggregation.schemas import AggregationTriggerRequest
+            await agg.trigger(
+                ds.id,
+                AggregationTriggerRequest(idempotency_key=f"blank-provision:{created['graph_id']}"),
+                "onboarding", session)
+    except Exception as exc:
+        logger.info("blank-model aggregation registration skipped for ds=%s: %s", ds.id, exc)
+
+    return {"data_source_id": ds.id, "graph_id": created["graph_id"],
+            "main_branch_id": created["main_branch_id"], "graph_name": graph_name,
+            "label": body.name}
+
+
 @router.get("/graphs/{graph_id}", response_model=GraphResponse)
 async def get_graph(
     ws_id: str, graph_id: str,
@@ -873,11 +1061,14 @@ async def stage_changes(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
         assigned = await svc.stage_changes(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             ops=[op.model_dump(exclude_none=True) for op in body.ops],
+            ontology_rules=rules,
         )
     return {"assigned": assigned, "count": len(body.ops)}
 
@@ -891,10 +1082,12 @@ async def checkpoint(
     session: AsyncSession = Depends(get_db_session),
 ):
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
         commit_id = await svc.checkpoint(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, message=body.message,
             resolutions=body.resolutions, containment_edge_types=cset,
+            ontology_rules=rules,
         )
     return {"commit_id": commit_id, "staged_changes": commit_id is not None}
 
@@ -920,11 +1113,12 @@ async def publish(
     session: AsyncSession = Depends(get_db_session),
 ):
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
         commit_id = await svc.publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
-            containment_edge_types=cset,
+            containment_edge_types=cset, ontology_rules=rules,
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
@@ -1300,8 +1494,13 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
     if can_falkor:
         await acquire_lease(graph_id)            # pin so an eviction sweep can't drop it mid-read
         try:
+            # Factory contract is (name, provider_id=None); registry-backed factories
+            # resolve the provider row asynchronously.
+            graph = read_factory(wm["falkor_graph_name"], wm.get("falkor_provider"))
+            if inspect.isawaitable(graph):
+                graph = await graph
             result = await _falkor_neighbors(
-                read_factory(wm["falkor_graph_name"]), urn=urn, depth=depth,
+                graph, urn=urn, depth=depth,
                 direction=direction, edge_types=edge_types, limit=limit,
             )
             return {"source": "falkordb", "watermark": wm_out, **result}
@@ -1826,10 +2025,11 @@ async def merge_merge_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
+    rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
     with _domain_errors():
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
-            containment_edge_types=cset,
+            containment_edge_types=cset, ontology_rules=rules,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)

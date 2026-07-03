@@ -369,6 +369,16 @@ class ContextEngine:
                             resolved.containment_edge_types,
                             from_ontology=has_real_ontology,
                         )
+                    if hasattr(self.provider, 'set_ontology_rules'):
+                        # Rich commit-boundary rules for the versioned write-through —
+                        # only when an EXPLICITLY ASSIGNED ontology contributed (the
+                        # system-default/introspection layers must not gate legacy data).
+                        from backend.app.ontology.rules import resolved_ontology_to_rules
+                        has_assigned = any(
+                            s == "assigned"
+                            for s in (resolved.resolution_sources or {}).values())
+                        self.provider.set_ontology_rules(
+                            resolved_ontology_to_rules(resolved) if has_assigned else None)
                     if hasattr(self.provider, 'set_resolved_edge_metadata'):
                         self.provider.set_resolved_edge_metadata(
                             resolved.edge_type_metadata,

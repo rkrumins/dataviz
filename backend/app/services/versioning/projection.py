@@ -19,6 +19,7 @@ composition); later passes apply only the rows in `(projected, target]`.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
@@ -147,7 +148,7 @@ class FalkorProjector:
 
     def __init__(
         self,
-        graph_client_factory: Callable[[str], object],
+        graph_client_factory: Callable[..., object],   # (name, provider_id=None) -> graph | awaitable
         session_factory=db.graphver_session,
         batch_size: Optional[int] = None,
         target_resolver: Optional[
@@ -189,10 +190,20 @@ class FalkorProjector:
         # projection_state.falkor_graph_name (set at create time).
         return f"gv_{graph_id}"
 
-    async def drop_graph(self, name: str) -> None:
-        """``GRAPH.DELETE`` a cache graph's FalkorDB key, freeing its RAM; the next
-        projection re-creates it from Postgres (plan §16.5 #9-10)."""
-        await self._client(name).delete()
+    async def _graph_client(self, name: str, provider_id: Optional[str] = None):
+        """Acquire the graph handle from the injected factory. The factory contract is
+        ``(name, provider_id=None)``; a registry-backed factory may resolve the provider
+        row asynchronously, so an awaitable result is awaited here."""
+        client = self._client(name, provider_id)
+        if inspect.isawaitable(client):
+            client = await client
+        return client
+
+    async def drop_graph(self, name: str, provider_id: Optional[str] = None) -> None:
+        """``GRAPH.DELETE`` a cache graph's FalkorDB key (on its pinned provider
+        instance), freeing its RAM; the next projection re-creates it from Postgres
+        (plan §16.5 #9-10)."""
+        await (await self._graph_client(name, provider_id)).delete()
 
     async def project_graph(self, graph_id: str) -> Dict[str, object]:
         """Catch a graph's FalkorDB projection up to its target watermark."""
@@ -209,6 +220,7 @@ class FalkorProjector:
             data_source_id = graph.data_source_id
             from_seq, to_seq = ps.projected_commit_seq, ps.target_commit_seq
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
+            provider_id = ps.falkor_provider    # pinned instance; None → env default
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -239,7 +251,7 @@ class FalkorProjector:
                                      graph_id)
                     rollup_pairs = "stale"
 
-        client = self._client(name)
+        client = await self._graph_client(name, provider_id)
         try:
             if from_seq <= 0:
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
@@ -303,7 +315,7 @@ class FalkorProjector:
 
         if orphan:                                     # the old gv_* graph is now unread — reclaim its RAM
             try:
-                await self.drop_graph(orphan)
+                await self.drop_graph(orphan, provider_id)
             except Exception as exc:                   # pragma: no cover - infra
                 logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
 
@@ -825,8 +837,12 @@ class FalkorProjector:
             await client.query(_DELETE_NODES, params={"urns": list(chunk)})
 
 
-def make_falkor_graph_factory() -> Callable[[str], object]:
-    """Production client factory — one async FalkorDB handle, a graph per name.
+def make_falkor_graph_factory() -> Callable[..., object]:
+    """Production ENV-instance client factory — one async FalkorDB handle, a graph per
+    name. ``provider_id`` is accepted (the factory contract is ``(name, provider_id=
+    None)``) but ignored: every graph lands on the single env-configured instance. For
+    per-provider routing inject ``backend.app.providers.falkor_graph_registry.
+    make_registry_graph_factory`` instead.
 
     Config: ``FALKORDB_HOST`` / ``FALKORDB_PORT`` / ``FALKORDB_POOL_SIZE``.
     """
@@ -840,4 +856,4 @@ def make_falkor_graph_factory() -> Callable[[str], object]:
         max_connections=int(os.getenv("FALKORDB_POOL_SIZE", "10")),
     )
     handle = FalkorDB(connection_pool=pool)
-    return lambda name: handle.select_graph(name)
+    return lambda name, provider_id=None: handle.select_graph(name)

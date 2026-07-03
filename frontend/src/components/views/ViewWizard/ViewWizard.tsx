@@ -20,7 +20,7 @@
  *                             used by both the scope phase and body phase.
  */
 
-import React, { useState, useCallback, useMemo, useEffect, startTransition } from 'react'
+import React, { useState, useCallback, useMemo, useEffect, useRef, startTransition } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -46,11 +46,17 @@ import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { viewService } from '@/services/viewService'
 import { viewToViewConfig } from '@/services/viewApiService'
+import { provisionBlankGraph, type BlankGraphResult } from '@/services/versioningApiService'
+import type { ProviderResponse } from '@/services/providerService'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
 import { useWizardScope } from '@/hooks/useWizardScope'
 import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import { useBlankScopeOptions } from './useBlankScopeOptions'
+import { useBlankSchemaHydration } from './useBlankSchemaHydration'
+import { ontologyToWorkspaceSchema, deriveLayersFromOntology } from './blankModel'
 
 import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
@@ -81,7 +87,14 @@ export interface ScopeContext {
     dataSourceId: string
     dataSourceLabel: string
     hasOntology: boolean
+    /** Blank-model scope: no data source yet — provider + ontology chosen instead. */
+    isBlank?: boolean
+    providerName?: string
+    ontologyName?: string
 }
+
+/** Which scope the create wizard is building for. */
+export type ScopeMode = 'existing' | 'blank'
 
 export interface ActiveFilter {
     id: string
@@ -120,6 +133,13 @@ interface ViewWizardBodyProps extends Omit<ViewWizardProps, 'initialWorkspaceId'
     viewMetadata: ViewMetadata | null
     scopeContext: ScopeContext
     onBackToScope?: () => void
+    /** Create-mode scope kind (defaults to 'existing'). Blank skips entities/assignment. */
+    scopeMode?: ScopeMode
+    /** Blank mode: provider + ontology to provision against on submit. */
+    blankProviderId?: string | null
+    blankOntologyId?: string | null
+    /** Blank mode: reference-layout layers derived from the chosen ontology. */
+    initialLayers?: ViewLayerConfig[]
 }
 
 const LAYOUT_TYPES = [
@@ -517,28 +537,49 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     const [selectedWsId, setSelectedWsId] = useState<string | null>(initialWs)
     const [selectedDsId, setSelectedDsId] = useState<string | null>(initialDs)
+    const [scopeMode, setScopeMode] = useState<ScopeMode>('existing')
+    const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
+    const [selectedOntologyId, setSelectedOntologyId] = useState<string | null>(null)
     const [scopeConfirmed, setScopeConfirmed] = useState(false)
 
-    // Fetch stats + probe schema while scope step is visible
+    // Fetch stats + probe schema while scope step is visible (existing mode)
     const probeScope = selectedWsId && selectedDsId
         ? { workspaceId: selectedWsId, dataSourceId: selectedDsId }
         : null
     const scopeData = useWizardScope(!scopeConfirmed, probeScope)
+
+    // Blank-mode pickers: FalkorDB providers + published semantic layers.
+    const blankOptions = useBlankScopeOptions(selectedWsId)
+    const chosenProvider = useMemo(
+        () => blankOptions.providers.find(p => p.id === selectedProviderId) ?? null,
+        [blankOptions.providers, selectedProviderId],
+    )
+    const chosenOntology = useMemo(
+        () => blankOptions.ontologies.find(o => o.id === selectedOntologyId) ?? null,
+        [blankOptions.ontologies, selectedOntologyId],
+    )
 
     // Reset on wizard reopen
     useEffect(() => {
         if (props.isOpen) {
             setSelectedWsId(initialWs)
             setSelectedDsId(initialDs)
+            setScopeMode('existing')
+            setSelectedProviderId(null)
+            setSelectedOntologyId(null)
             setScopeConfirmed(false)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.isOpen])
 
-    // Clear data source when workspace changes
+    // Clear the downstream selections when workspace changes
     const handleSelectWorkspace = useCallback((wsId: string) => {
         setSelectedWsId(prev => {
-            if (prev !== wsId) setSelectedDsId(null)
+            if (prev !== wsId) {
+                setSelectedDsId(null)
+                setSelectedProviderId(null)
+                setSelectedOntologyId(null)
+            }
             return wsId
         })
     }, [])
@@ -548,45 +589,67 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     }, [])
 
     const handleScopeConfirm = useCallback(() => {
-        if (selectedWsId && selectedDsId) {
-            saveLastScope(selectedWsId, selectedDsId)
+        if (scopeMode === 'existing') {
+            if (selectedWsId && selectedDsId) {
+                saveLastScope(selectedWsId, selectedDsId)
+                setScopeConfirmed(true)
+            }
+        } else if (selectedWsId && selectedProviderId && selectedOntologyId) {
             setScopeConfirmed(true)
         }
-    }, [selectedWsId, selectedDsId])
+    }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId])
 
     const handleBackToScope = useCallback(() => {
         setScopeConfirmed(false)
     }, [])
 
     const scopeContext = useMemo(
-        () => buildScopeContext(workspaces, selectedWsId, selectedDsId),
-        [workspaces, selectedWsId, selectedDsId],
+        () => scopeMode === 'blank'
+            ? buildBlankScopeContext(workspaces, selectedWsId, chosenProvider, chosenOntology)
+            : buildScopeContext(workspaces, selectedWsId, selectedDsId),
+        [scopeMode, workspaces, selectedWsId, selectedDsId, chosenProvider, chosenOntology],
     )
 
-    // ── Build full step list for create mode ───────────────────
+    // Derive the blank model's schema + starting layers from the chosen ontology,
+    // and hydrate the schema store for the blank body's lifetime (no SchemaScope).
+    const blankSchema = useMemo(
+        () => chosenOntology ? ontologyToWorkspaceSchema(chosenOntology) : null,
+        [chosenOntology],
+    )
+    const blankLayers = useMemo(
+        () => blankSchema ? deriveLayersFromOntology(blankSchema) : [],
+        [blankSchema],
+    )
+    const blankActive = scopeConfirmed && scopeMode === 'blank'
+    const blankReady = useBlankSchemaHydration(blankActive ? blankSchema : null, selectedWsId)
+
+    // ── Build step list for create mode (blank skips entities + assignment) ──
     const allSteps: StepDef[] = useMemo(() => {
         const steps: StepDef[] = [
             { id: 'scope', label: 'Scope', icon: <Database className="w-4 h-4" /> },
             { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
             { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
-            // assignment is added dynamically by ViewWizardBody
-            { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
-            { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
         ]
+        if (scopeMode !== 'blank') {
+            // assignment is added dynamically by ViewWizardBody
+            steps.push({ id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> })
+        }
+        steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [])
+    }, [scopeMode])
 
     // ── Phase A: ScopeStep (no SchemaScope yet) ────────────────
     if (!scopeConfirmed) {
-        const currentStepIndex = 0
-        const canProceed = !!(selectedWsId && selectedDsId)
+        const canProceed = scopeMode === 'existing'
+            ? !!(selectedWsId && selectedDsId)
+            : !!(selectedWsId && selectedProviderId && selectedOntologyId)
 
         return (
             <WizardShell
                 mode="create"
                 currentStep="scope"
                 activeSteps={allSteps}
-                currentStepIndex={currentStepIndex}
+                currentStepIndex={0}
                 onStepClick={() => {}}
                 onBack={() => {}}
                 onNext={handleScopeConfirm}
@@ -597,6 +660,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 onSubmit={() => {}}
             >
                 <ScopeStep
+                    scopeMode={scopeMode}
+                    onScopeModeChange={setScopeMode}
                     availableWorkspaces={scopeData.workspaces}
                     schemaAvailability={scopeData.schemaAvailability}
                     selectedWorkspaceId={selectedWsId}
@@ -604,8 +669,36 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                     activeWorkspaceId={activeWorkspaceId}
                     onSelectWorkspace={handleSelectWorkspace}
                     onSelectDataSource={handleSelectDataSource}
+                    providers={blankOptions.providers}
+                    ontologies={blankOptions.ontologies}
+                    blankOptionsLoading={blankOptions.isLoading}
+                    selectedProviderId={selectedProviderId}
+                    selectedOntologyId={selectedOntologyId}
+                    onSelectProvider={setSelectedProviderId}
+                    onSelectOntology={setSelectedOntologyId}
                 />
             </WizardShell>
+        )
+    }
+
+    // ── Phase B (blank): hydrate the schema store, no SchemaScope ──
+    if (scopeMode === 'blank') {
+        if (!blankReady) {
+            return <WizardLoadingShell label="Preparing blank model…" onClose={props.onClose} />
+        }
+        return (
+            <ViewWizardBody
+                {...wizardProps}
+                resolvedWorkspaceId={selectedWsId!}
+                resolvedDataSourceId={null}
+                viewMetadata={null}
+                scopeContext={scopeContext}
+                onBackToScope={handleBackToScope}
+                scopeMode="blank"
+                blankProviderId={selectedProviderId}
+                blankOntologyId={selectedOntologyId}
+                initialLayers={blankLayers}
+            />
         )
     }
 
@@ -624,6 +717,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 viewMetadata={null}
                 scopeContext={scopeContext}
                 onBackToScope={handleBackToScope}
+                scopeMode="existing"
             />
         </SchemaScope>
     )
@@ -644,11 +738,31 @@ function ViewWizardBody({
     viewMetadata,
     scopeContext,
     onBackToScope,
+    scopeMode = 'existing',
+    blankProviderId,
+    blankOntologyId,
+    initialLayers,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
     const { clearAssignments, setLayers } = useReferenceModelStore()
+    const isBlank = scopeMode === 'blank'
+
+    // Blank provisioning result — held so a failed createView retry reuses the
+    // same data source instead of provisioning a duplicate.
+    const provisionRef = useRef<BlankGraphResult | null>(null)
+    const [provisionError, setProvisionError] = useState<string | null>(null)
+
+    // Create-mode initial form: blank pre-fills reference layers from the ontology.
+    const makeCreateFormData = useCallback((): WizardFormData => {
+        const base = getInitialFormData(schema)
+        return {
+            ...base,
+            layers: isBlank ? (initialLayers ?? base.layers) : base.layers,
+            dataSourceId: resolvedDataSourceId ?? undefined,
+        }
+    }, [schema, isBlank, initialLayers, resolvedDataSourceId])
 
     const fullViewQuery = useViewFull(mode === 'edit' ? viewId : null)
     const editingView = useMemo(() => {
@@ -662,10 +776,7 @@ function ViewWizardBody({
     const [linkedContextModelId, setLinkedContextModelId] = useState<string | null>(null)
     const [driftDismissed, setDriftDismissed] = useState(false)
 
-    const [formData, setFormData] = useState<WizardFormData>(() => ({
-        ...getInitialFormData(schema),
-        dataSourceId: resolvedDataSourceId ?? undefined,
-    }))
+    const [formData, setFormData] = useState<WizardFormData>(makeCreateFormData)
 
     // Hydrate form from view in edit mode.
     useEffect(() => {
@@ -706,10 +817,7 @@ function ViewWizardBody({
             clearSelection()
             clearAssignments()
             if (mode === 'create') {
-                setFormData({
-                    ...getInitialFormData(schema),
-                    dataSourceId: resolvedDataSourceId ?? undefined,
-                })
+                setFormData(makeCreateFormData())
             }
         } else {
             clearAssignments()
@@ -728,15 +836,17 @@ function ViewWizardBody({
             { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
             { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
         )
-        if (formData.layoutType === 'reference') {
-            steps.push({ id: 'assignment', label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
+        // Blank models skip per-entity scoping + rule assignment — the ontology
+        // defines the whole graph and the derived layers are the starting point.
+        if (!isBlank) {
+            if (formData.layoutType === 'reference') {
+                steps.push({ id: 'assignment', label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
+            }
+            steps.push({ id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> })
         }
-        steps.push(
-            { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
-            { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
-        )
+        steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [formData.layoutType, mode])
+    }, [formData.layoutType, mode, isBlank])
 
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
@@ -807,11 +917,39 @@ function ViewWizardBody({
 
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true)
+        setProvisionError(null)
         try {
             const layersWithScope = formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges }))
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
             if (mode === 'create') {
+                let dataSourceId = resolvedDataSourceId ?? undefined
+                if (isBlank) {
+                    // Provision the blank model (data source + genesis graph). Reuse a
+                    // prior result on retry so a failed createView never duplicates it.
+                    let provisioned = provisionRef.current
+                    if (!provisioned) {
+                        try {
+                            provisioned = await provisionBlankGraph(resolvedWorkspaceId, {
+                                name: formData.name,
+                                description: formData.description || undefined,
+                                providerId: blankProviderId!,
+                                ontologyId: blankOntologyId!,
+                            })
+                            provisionRef.current = provisioned
+                        } catch (err) {
+                            setProvisionError(err instanceof Error ? err.message : 'Could not create the blank model. Please try again.')
+                            return
+                        }
+                    }
+                    dataSourceId = provisioned.dataSourceId
+                    // The workspaces store is the app's cache of each workspace's data
+                    // sources (ViewPage's health check and the view execution context
+                    // both read it). It was loaded before this data source existed —
+                    // refresh it or the new view opens onto a false "data source has
+                    // been deleted" overlay.
+                    await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
+                }
                 const result = await viewService.createView({
                     name: formData.name,
                     description: formData.description,
@@ -822,7 +960,7 @@ function ViewWizardBody({
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     workspaceId: resolvedWorkspaceId,
-                    dataSourceId: resolvedDataSourceId ?? undefined,
+                    dataSourceId,
                     contextModelId: linkedContextModelId ?? undefined,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
@@ -857,7 +995,7 @@ function ViewWizardBody({
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, onComplete, onClose, navigate, setLayers, buildFieldFilters, linkedContextModelId])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, setLayers, buildFieldFilters, linkedContextModelId])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         setFormData(prev => ({ ...prev, ...updates }))
@@ -892,6 +1030,16 @@ function ViewWizardBody({
                 />
             )}
 
+            {provisionError && (
+                <div className="mb-6 flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3">
+                    <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-red-700 dark:text-red-300">Couldn't create the blank model</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">{provisionError}</p>
+                    </div>
+                </div>
+            )}
+
             {currentStep === 'basics' && (
                 <BasicsStep
                     formData={formData}
@@ -907,6 +1055,7 @@ function ViewWizardBody({
                     updateFormData={updateFormData}
                     layoutTypes={LAYOUT_TYPES}
                     dataSourceId={formData.dataSourceId}
+                    blank={isBlank}
                 />
             )}
             {currentStep === 'assignment' && (
@@ -948,6 +1097,26 @@ function buildScopeContext(
         dataSourceId: dsId ?? '',
         dataSourceLabel: ds?.label || ds?.catalogItemId || 'Data Source',
         hasOntology: !!ds?.ontologyId,
+    }
+}
+
+/** Blank-model scope context — no data source yet, so surface the chosen provider + ontology. */
+function buildBlankScopeContext(
+    workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces'],
+    wsId: string | null,
+    provider: ProviderResponse | null,
+    ontology: OntologyDefinitionResponse | null,
+): ScopeContext {
+    const ws = workspaces.find(w => w.id === wsId)
+    return {
+        workspaceId: wsId ?? '',
+        workspaceName: ws?.name ?? 'Unknown',
+        dataSourceId: '',
+        dataSourceLabel: ontology?.name ?? 'Blank model',
+        hasOntology: true,
+        isBlank: true,
+        providerName: provider?.name,
+        ontologyName: ontology?.name,
     }
 }
 

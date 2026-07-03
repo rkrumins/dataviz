@@ -45,11 +45,11 @@ async def _ps(gid):
 async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
-    proj = FalkorProjector(graph_client_factory=lambda name: SimpleNamespace(query=_noop))
+    proj = FalkorProjector(graph_client_factory=lambda name, provider_id=None: SimpleNamespace(query=_noop))
     cm = CacheManager(proj)
     dropped: list = []
 
-    async def drop_graph(name):
+    async def drop_graph(name, provider_id=None):
         dropped.append(name)
 
     gid = await _seed(svc)

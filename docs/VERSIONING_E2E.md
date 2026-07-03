@@ -113,6 +113,7 @@ curl -b cookies.txt -s "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BID/st
 | Method & path | Purpose | Permission |
 |---|---|---|
 | `POST /graphs` | create a versioned graph | `…:manage` |
+| `POST /blank-graphs` | one-call blank model: manual data source + genesis graph (see §7) | `…:manage` |
 | `GET  /graphs/{gid}` | graph metadata | `…:read` |
 | `GET  /graphs/{gid}/branches` | list branches (main + drafts) | `…:read` |
 | `POST /graphs/{gid}/branches` | open a draft | `…:manage` |
@@ -180,15 +181,33 @@ FalkorDB projection.
 
 ---
 
-## 7 · Known limitation — the frontend UI
+## 7 · The frontend UI — full authoring, including blank-canvas models
 
-The current graph canvas is **read-only visualization** — there is no draft /
-publish / fork / PR UI yet (the lone `EditNodePanel` is unused, and canvas edits
-are local-only). So MVP end-to-end testing of the *editing* flow is **API-driven**
-(the smoke script / curl / your own client), not click-through in the existing UI.
+The canvas is a **full versioned editor** (the "read-only visualization" note that
+used to live here is long stale). The React frontend drives everything in §3
+through `frontend/src/services/versioningApiService.ts`:
 
-Wiring the React canvas to this API is a separate front-end effort: a new
-`versioningStore` + `versioningService`, and a version-control panel/toolbar
-(draft badge, Publish, Fork, PR list). The endpoints above are everything that
-UI would call.
+- **Edit mode = an open draft** (`ensureDraftOpen`): node/edge creation
+  (`UnifiedCreatePanel`, edge connect + ontology-filtered type picker), staged
+  changes, one atomic save per batch (`POST /{ws}/graph/changes`), checkpoint,
+  Publish / Discard / merge requests — all from `CanvasVersioningBar` and the
+  Context View canvas.
+- **Blank-canvas models (self-service)**: the New View wizard's **Start from
+  blank** path asks for workspace + FalkorDB provider connection + a **published
+  ontology**, then calls `POST /{ws}/versioning/blank-graphs`, which provisions a
+  manual data source (minted `blank_<ds_id>` graph name, ontology bound) + a
+  genesis-only `kind="blank"` versioned graph (strict enforcement) and registers
+  it with the aggregation service. The user lands on the Context View with a
+  draft auto-opened and a guided empty state; publishes project to FalkorDB and
+  `:AGGREGATED` rollups sync automatically (see
+  VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md §10).
+- **Ontology governance**: the durable write path (stage/commit/publish/merge and
+  `/graph/changes`) enforces the assigned ontology's rich rules server-side —
+  entity types must be defined, edge source/target types must be compatible,
+  containment must satisfy `can_contain`. Violations return
+  422 `{"type": "ontology_violation", "violations": [{entity_id, kind, reason,
+  rule}]}`; blank graphs fail closed if their ontology can't be resolved.
+
+API-driven testing (smoke script / curl) remains the fastest harness for the
+write path itself.
 ```

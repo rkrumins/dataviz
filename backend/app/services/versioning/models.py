@@ -82,7 +82,7 @@ class GraphORM(VersioningBase):
     data_source_id = Column(Text, nullable=False)          # logical ref to public
     workspace_id = Column(Text, nullable=False)            # logical ref (tenant)
     tenant_id = Column(Text, nullable=True)                # optional org grouping
-    kind = Column(Text, nullable=False)                    # manual|authoritative|hybrid
+    kind = Column(Text, nullable=False)                    # manual|authoritative|hybrid|blank
     base_ontology_id = Column(Text, nullable=True)
     base_ontology_version_id = Column(Text, nullable=True)
     ontology_spec = Column(JSONB, nullable=True)           # inline vocab: {entity_types, edge_types}
@@ -103,7 +103,7 @@ class GraphORM(VersioningBase):
         Index("ix_graphs_tenant", "tenant_id"),
         Index("ix_graphs_fork_parent", "fork_parent_graph_id"),
         CheckConstraint(
-            "kind IN ('manual','authoritative','hybrid')", name="ck_graphs_kind"
+            "kind IN ('manual','authoritative','hybrid','blank')", name="ck_graphs_kind"
         ),
         CheckConstraint(
             "ontology_enforcement IN ('strict','permissive')", name="ck_graphs_enforce"

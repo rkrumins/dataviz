@@ -57,6 +57,7 @@ class VersionedWriteProvider:
         self._gid: Optional[str] = None
         self._lock = asyncio.Lock()
         self._containment_types: List[str] = []
+        self._ontology_rules = None   # injected OntologyRules (see set_ontology_rules)
 
     def __getattr__(self, name):                         # delegate reads/lifecycle to inner
         if name.startswith("_"):                         # never delegate privates (and avoid recursion)
@@ -72,6 +73,15 @@ class VersionedWriteProvider:
         setter = getattr(self._inner, "set_containment_edge_types", None)
         if callable(setter):
             setter(edge_types, from_ontology)
+
+    def set_ontology_rules(self, rules) -> None:
+        """Intercept the engine's rich-rules push-down (assigned ontology only; ``None``
+        clears): every recorded commit then enforces endpoint-type + containment rules in
+        ``apply_ops`` — the same gate the ``/changes`` batch path passes explicitly."""
+        self._ontology_rules = rules
+        setter = getattr(self._inner, "set_ontology_rules", None)
+        if callable(setter):
+            setter(rules)
 
     # ------------------------------------------------------------------ #
     async def _graph_id(self) -> str:
@@ -101,7 +111,8 @@ class VersionedWriteProvider:
             return
         await self._svc.apply_ops(graph_id=await self._graph_id(), ops=ops,
                                   actor=self._actor, message=message,
-                                  containment_edge_types=self._containment_types)
+                                  containment_edge_types=self._containment_types,
+                                  ontology_rules=self._ontology_rules)
 
     async def _endpoint_op(self, urn: str) -> Optional[dict]:
         """A create op for an edge endpoint node (fetched from the inner provider) so the

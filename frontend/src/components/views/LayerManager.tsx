@@ -153,13 +153,19 @@ export function LayerManager({
     }, [layers, onUpdate])
 
     const handleAddLayer = useCallback(() => {
+        // Derive name/order from what EXISTS, not from the count — after a
+        // deletion, `length`-based values collide with surviving layers
+        // (two "Layer 5"s sharing order 4 renders a duplicated column).
+        const nextOrder = layers.reduce((m, l) => Math.max(m, (l.order ?? 0) + 1), 0)
+        let n = layers.length + 1
+        while (layers.some(l => l.name === `Layer ${n}`)) n += 1
         const newLayer: ViewLayerConfig = {
             id: generateId(),
-            name: `Layer ${layers.length + 1}`,
+            name: `Layer ${n}`,
             description: '',
             color: ['#3B82F6', '#8B5CF6', '#22C55E', '#F97316', '#EC4899', '#06B6D4'][layers.length % 6],
-            order: layers.length,
-            sequence: layers.length,
+            order: nextOrder,
+            sequence: nextOrder,
             entityTypes: [],
             rules: []
         }

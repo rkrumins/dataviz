@@ -2,9 +2,10 @@
 
 Run: ``python -m backend.app.services.versioning``
 
-Builds a FalkorDB client from ``FALKORDB_HOST/PORT`` (via
-:func:`make_falkor_graph_factory`), bootstraps the graphver schema, and runs the
-:class:`ProjectionWorker` (poll loop + Redis-stream consumer). Mirrors
+Builds a provider-aware FalkorDB graph factory (registry-routed per
+``projection_state.falkor_provider``, env ``FALKORDB_HOST/PORT`` as the default
+instance), bootstraps the graphver schema, and runs the :class:`ProjectionWorker`
+(poll loop + Redis-stream consumer). Mirrors
 ``backend/app/services/aggregation/__main__.py``.
 """
 from __future__ import annotations
@@ -36,7 +37,16 @@ async def _amain() -> None:
         nudge_stats_after_projection,
         resolve_aggregation_edge_types,
     )
-    projector = FalkorProjector(make_falkor_graph_factory(), target_resolver=repair_projection_target,
+    # Provider-aware routing: each graph projects into its pinned provider instance
+    # (registry host/port/creds), matching the per-provider read path and aggregation
+    # worker. Falls back to the env-instance factory if the registry is unavailable.
+    try:
+        from backend.app.providers.falkor_graph_registry import make_registry_graph_factory
+        graph_factory = make_registry_graph_factory()
+    except Exception:                                  # pragma: no cover - infra
+        logger.exception("registry graph factory unavailable — using env FalkorDB instance")
+        graph_factory = make_falkor_graph_factory()
+    projector = FalkorProjector(graph_factory, target_resolver=repair_projection_target,
                                 edge_types_resolver=resolve_aggregation_edge_types,
                                 on_projected=nudge_stats_after_projection)
     worker = ProjectionWorker(

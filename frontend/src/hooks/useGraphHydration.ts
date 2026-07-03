@@ -295,8 +295,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // ── Type-based loading (empty/new views) ──
                         // No assignments yet — load by entity type so the view has data
                         // for the user to start assigning in the wizard.
+                        // An EMPTY result is a terminal state, not a stall: mark hydration
+                        // complete so the canvas leaves its ghost-loading UI and renders
+                        // its real empty states (blank models legitimately start at zero).
                         const rootTypes = computeViewScopedRoots(viewTypes, schemaEntityTypes, rootEntityTypes)
-                        if (rootTypes.length === 0) return
+                        if (rootTypes.length === 0) {
+                            setHydrationPhase('complete')
+                            return
+                        }
 
                         const rootResults = await Promise.all(
                             rootTypes.map(et =>
@@ -305,7 +311,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             )
                         )
                         allNodes = rootResults.flat()
-                        if (controller.signal.aborted || allNodes.length === 0) return
+                        if (controller.signal.aborted) return
+                        if (allNodes.length === 0) {
+                            setHydrationPhase('complete')
+                            return
+                        }
 
                         // Also load remaining visible types (non-root layers)
                         setHydrationPhase('children')
@@ -324,7 +334,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                     }
 
-                    if (allNodes.length === 0) return
+                    if (allNodes.length === 0) {
+                        setHydrationPhase('complete')   // empty view — terminal, not a stall
+                        return
+                    }
 
                     // Show nodes immediately, then fetch edges
                     setGraph(
@@ -357,7 +370,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         ? rootEntityTypes
                         : schemaEntityTypes.map(et => et.id)
 
-                    if (typesToLoad.length === 0) return
+                    if (typesToLoad.length === 0) {
+                        setHydrationPhase('complete')   // nothing to load — terminal
+                        return
+                    }
 
                     // Step 1: Fetch root nodes
                     setHydrationPhase('roots')
@@ -365,7 +381,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         entityTypes: typesToLoad as any[],
                         limit: PER_TYPE_LIMIT,
                     })
-                    if (controller.signal.aborted || rootNodes.length === 0) return
+                    if (controller.signal.aborted) return
+                    if (rootNodes.length === 0) {
+                        setHydrationPhase('complete')   // empty graph — terminal, not a stall
+                        return
+                    }
 
                     // Show roots immediately
                     setGraph(
@@ -414,7 +434,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         nodeMap.set(n.urn, n)
                     }
                     const uniqueNodes = Array.from(nodeMap.values())
-                    if (uniqueNodes.length === 0) return
+                    if (uniqueNodes.length === 0) {
+                        setHydrationPhase('complete')   // empty graph — terminal
+                        return
+                    }
 
                     // Step 4: Fetch edges between ALL loaded nodes
                     setHydrationPhase('edges')

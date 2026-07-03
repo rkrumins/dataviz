@@ -109,7 +109,7 @@ async def _run() -> None:
         assert nb["watermark"]["fresh"] is False
 
         # advance the projection (no-op write client) → fresh
-        await FalkorProjector(graph_client_factory=lambda name: SimpleNamespace(query=_noop)).project_graph(gid)
+        await FalkorProjector(graph_client_factory=lambda name, provider_id=None: SimpleNamespace(query=_noop)).project_graph(gid)
         wm = await svc.projection_watermark(gid)
         assert wm["projected"] == 2 and wm["fresh"] is True
 
@@ -119,14 +119,14 @@ async def _run() -> None:
                    {"urn": "gv:B", "entityType": "Dataset", "displayName": "Beta"}],
             edges=[{"src": "gv:A", "tgt": "gv:B", "type": "FLOWS_TO", "props": {"id": "E1"}}],
         )
-        app.dependency_overrides[V.get_falkor_read_factory] = lambda: (lambda name: fake)
+        app.dependency_overrides[V.get_falkor_read_factory] = lambda: (lambda name, provider_id=None: fake)
         nb = (await c.get(f"{ws1}/graphs/{gid}/graph/neighbors", params={"urn": "gv:A", "depth": 1})).json()
         assert nb["source"] == "falkordb", nb
         assert {n["urn"] for n in nb["nodes"]} == {"gv:A", "gv:B"}
         assert [e["id"] for e in nb["edges"]] == ["E1"]
 
         # fresh but FalkorDB errors → graceful Postgres fallback
-        app.dependency_overrides[V.get_falkor_read_factory] = lambda: (lambda name: _RaisingGraph())
+        app.dependency_overrides[V.get_falkor_read_factory] = lambda: (lambda name, provider_id=None: _RaisingGraph())
         nb = (await c.get(f"{ws1}/graphs/{gid}/graph/neighbors", params={"urn": "gv:A"})).json()
         assert nb["source"] == "postgres" and {n["entityId"] for n in nb["nodes"]} == {"A", "B"}
 

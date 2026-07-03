@@ -68,4 +68,29 @@ describe('useBranchDeepLink', () => {
     )
     expect(switchToDraft).not.toHaveBeenCalled()
   })
+
+  it('defers rejection while the branch list is refreshing, then applies the fresh list', () => {
+    // Regression: a just-opened draft is in the URL but not yet in the STALE
+    // cached list react-query serves during a refetch — rejecting (and
+    // toasting) on that list branded the user's own draft "not available".
+    showToast.mockClear()
+    const switchToDraft = vi.fn()
+    const { rerender } = renderHook(
+      ({ branches, listRefreshing }: {
+        branches: ReturnType<typeof draft>[]; listRefreshing: boolean
+      }) =>
+        useBranchDeepLink({ enabled: true, branches, listRefreshing, currentBranchId: null, switchToDraft }),
+      {
+        wrapper: wrap('/views/v1?branch=br_new'),
+        initialProps: { branches: [] as ReturnType<typeof draft>[], listRefreshing: true },
+      },
+    )
+    // Stale list mid-refresh → neither reject nor toast.
+    expect(switchToDraft).not.toHaveBeenCalled()
+    expect(showToast).not.toHaveBeenCalled()
+    // Fresh list lands with the draft → applied.
+    rerender({ branches: [draft('br_new')], listRefreshing: false })
+    expect(switchToDraft).toHaveBeenCalledWith('br_new', null)
+    expect(showToast).not.toHaveBeenCalled()
+  })
 })
