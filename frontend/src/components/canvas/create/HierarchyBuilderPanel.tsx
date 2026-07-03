@@ -179,11 +179,14 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const activeParentType = parentInfo?.typeId ?? null
   const parentType = activeParentType ? typeById.get(activeParentType) : undefined
 
-  // Templates: only offered on an empty outline. Chains that would be a single
-  // type aren't a scaffold, so they're dropped.
+  // Templates: only offered on an empty outline. When scoped to a parent, the
+  // scaffold creates CHILDREN — the parent's own type is dropped from each
+  // chain (brief Amendment 1). Chains that would be a single type aren't a
+  // scaffold, so they're dropped.
   const chains = useMemo<string[][]>(() => {
     if (tree.length !== 0) return []
     const raw = containmentChains(entityTypes, rootEntityTypes, { startType: activeParentType ?? undefined })
+      .map((c) => (activeParentType ? c.slice(1) : c))
     const seen = new Set<string>()
     const out: string[][] = []
     for (const c of raw) {
