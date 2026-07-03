@@ -38,7 +38,7 @@ import { usePermission, useAuthStore } from '@/store/auth'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
-import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
+import { VERSIONING_KEYS, useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -63,6 +63,8 @@ import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
+import { BlankCanvasEmptyState } from './BlankCanvasEmptyState'
+import { FirstStepsChecklist } from './FirstStepsChecklist'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 
@@ -421,6 +423,11 @@ export function ContextViewCanvas({
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
   const canEnterEdit = !!graphId
+  // Blank (hand-built) models drive the guided empty state + first-steps
+  // companion; react-query dedupes this against CanvasVersioningBar's resolve.
+  const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId)
+  const isBlankModel = resolveQ.data?.kind === 'blank'
+  const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
 
   // View-level rights for the title menu — deliberately independent of the
   // canvas Edit cluster (view metadata is not graph data). Scoped to the
@@ -2218,6 +2225,27 @@ export function ContextViewCanvas({
         >
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
         </div>
+
+        {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
+            empty model, and the first-steps companion while building. Both are
+            scoped to kind === 'blank' so every other view is untouched. */}
+        {isBlankModel && !isHydratingInitial && nodes.length === 0 && (
+          <BlankCanvasEmptyState
+            modelName={activeView?.name ?? null}
+            isDraft={isDraft}
+            canManage={canManage}
+            onAddEntity={() => {
+              void ensureDraftOpen()
+              setCreationLayerId(sortedLayers[0]?.id ?? null)
+              setCreationParentId(null)
+              setIsCreatingEntity(true)
+            }}
+            onStartBuilding={() => { void ensureDraftOpen() }}
+          />
+        )}
+        {isBlankModel && isDraft && graphId && (
+          <FirstStepsChecklist graphId={graphId} mainHeadSeq={mainHeadSeq} />
+        )}
 
 
         {/* Layer Columns. */}
