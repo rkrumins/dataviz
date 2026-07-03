@@ -263,25 +263,6 @@ class AssignmentEngine:
                 confidence=parent_assignment.confidence
             )
 
-        # 2.5 Node's own persisted layer assignment.
-        # The frontend stamps the creation/target layer into the node's
-        # `layerAssignment` property (top-level field, mirrored in properties) on
-        # create and move. It is the durable per-node signal, so an entity built
-        # directly into a layer (e.g. a root Layer node created in "Transform")
-        # still lands there on reload — instead of falling through to the
-        # `layers[0]` default (Source) because it has no view-config
-        # entity_assignment yet and matches no rule. View-config assignments
-        # (step 1) and containment inheritance (step 2) intentionally outrank it:
-        # an explicit move or a parent's layer must win over a stale stamp.
-        node_layer = node.layer_assignment or (node.properties or {}).get("layerAssignment")
-        if node_layer and node_layer in index["valid_layer_ids"]:
-            return EntityAssignment(
-                entityId=entity_id,
-                layerId=node_layer,
-                confidence=1.0,
-                isInherited=False,
-            )
-
         # 3. Rule Matching
         candidates = []
 
@@ -312,6 +293,31 @@ class AssignmentEngine:
                 layerId=winner_layer_id,
                 ruleId=winner_rule.id,
                 confidence=1.0
+            )
+
+        # 3.5 Node's own persisted layer assignment — LAST-RESORT fallback.
+        #
+        # `layerAssignment` is a denormalised per-node hint the frontend stamps at
+        # create time (also read by the "layer =" search filter); it is NOT the
+        # authoritative placement store — view-config entity_assignments and rules
+        # (incl. moveToLayer's urnPattern rule) are, and they are honoured above.
+        # We consult the hint ONLY after all of those miss, purely to beat the
+        # arbitrary `layers[0]` (Source) default: an entity created in "Transform"
+        # with no explicit assignment yet should fall back to Transform (its own
+        # recorded home) rather than snapping to Source. Because it sits BELOW
+        # rules, a later moveToLayer (a rule) still wins — no stale-stamp override.
+        #
+        # NOTE: this is a stop-gap that keeps a freshly-created entity in place on
+        # reload. The strategic fix is to persist creation's layer choice into the
+        # same view/model assignment store moveToLayer writes, so placement has a
+        # single source of truth; see the layer-assignment persistence follow-up.
+        node_layer = node.layer_assignment or (node.properties or {}).get("layerAssignment")
+        if node_layer and node_layer in index["valid_layer_ids"]:
+            return EntityAssignment(
+                entityId=entity_id,
+                layerId=node_layer,
+                confidence=0.5,
+                isInherited=False,
             )
 
         # 4. Default
