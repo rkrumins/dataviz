@@ -1727,7 +1727,9 @@ class ContextEngine:
                     tgt = list(getattr(rel_def, "target_types", None) or [])
 
                     def _ok(entity: str, allowed: List[str]) -> bool:
-                        return (not allowed) or ("*" in allowed) or (entity in allowed)
+                        # Case-insensitive membership: a discovered graph's entity type
+                        # may be cased differently than the ontology's canonical id.
+                        return (not allowed) or ("*" in allowed) or (entity.upper() in {a.upper() for a in allowed})
 
                     if not (_ok(parent_entity_type, src) and _ok(str(request.entity_type), tgt)):
                         return CreateNodeResult(

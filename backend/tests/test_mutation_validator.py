@@ -81,6 +81,47 @@ class TestValidateNodeMutationCreate:
         assert r.ok is False
         assert "nonexistent" in r.errors[0]
 
+    def test_can_contain_membership_is_case_insensitive(self):
+        # entity_type and parent_entity_type both match known_types exactly (no
+        # entity-type-id normalization involved) — only the can_contain entry is
+        # cased differently ("DATASET" vs the child's known id "dataset").
+        parent_def = EntityTypeDefEntry(
+            name="domain",
+            hierarchy=EntityHierarchyData(can_contain=["DATASET"]),
+        )
+        ont = _make_ontology(entity_types=[("domain", parent_def), "dataset"])
+        r = validate_node_mutation(
+            MutationOp.CREATE, "dataset", ont, parent_entity_type="domain"
+        )
+        assert r.ok is True
+
+    def test_can_contain_membership_violation_is_still_case_insensitive(self):
+        parent_def = EntityTypeDefEntry(
+            name="domain",
+            hierarchy=EntityHierarchyData(can_contain=["PIPELINE"]),
+        )
+        ont = _make_ontology(entity_types=[("domain", parent_def), "dataset"])
+        r = validate_node_mutation(
+            MutationOp.CREATE, "dataset", ont, parent_entity_type="domain"
+        )
+        assert r.ok is False
+        assert "does not allow" in r.errors[0]
+
+    def test_parent_entity_type_lookup_is_case_insensitive(self):
+        # parent_entity_type is passed in a different case than the ontology's
+        # canonical definition key ("domain" vs "Domain") — a discovered graph's
+        # parent node type. can_contain matches the child's known id exactly, so
+        # only the parent-lookup fix is exercised.
+        parent_def = EntityTypeDefEntry(
+            name="Domain",
+            hierarchy=EntityHierarchyData(can_contain=["dataset"]),
+        )
+        ont = _make_ontology(entity_types=[("Domain", parent_def), "dataset"])
+        r = validate_node_mutation(
+            MutationOp.CREATE, "dataset", ont, parent_entity_type="domain"
+        )
+        assert r.ok is True
+
 
 class TestValidateNodeMutationUpdate:
     def test_known_type_ok(self):
@@ -153,6 +194,30 @@ class TestValidateEdgeMutationCreate:
         r = validate_edge_mutation(MutationOp.CREATE, "FLOWS_TO", "pipeline", "pipeline", ont)
         assert r.ok is False
         assert "not a valid target" in r.errors[0]
+
+    def test_source_and_target_membership_is_case_insensitive(self):
+        # A discovered graph's lowercase edge type ('flows_to') and entity types
+        # ('dataJob'/'dataset') must validate identically to the ontology-cased
+        # relationship definition ('FLOWS_TO', ['DataJob'], ['Dataset']).
+        rel = RelationshipTypeDefEntry(
+            name="FLOWS_TO",
+            source_types=["DataJob"],
+            target_types=["Dataset"],
+        )
+        ont = _make_ontology(rel_types=[("FLOWS_TO", rel)])
+        r = validate_edge_mutation(MutationOp.CREATE, "flows_to", "dataJob", "dataset", ont)
+        assert r.ok is True
+
+    def test_source_membership_violation_is_still_case_insensitive(self):
+        rel = RelationshipTypeDefEntry(
+            name="FLOWS_TO",
+            source_types=["Pipeline"],
+            target_types=["Dataset"],
+        )
+        ont = _make_ontology(rel_types=[("FLOWS_TO", rel)])
+        r = validate_edge_mutation(MutationOp.CREATE, "flows_to", "dataset", "dataset", ont)
+        assert r.ok is False
+        assert "not a valid source" in r.errors[0]
 
 
 class TestValidateEdgeMutationUpdate:
