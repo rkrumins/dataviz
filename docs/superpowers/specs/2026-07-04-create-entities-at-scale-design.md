@@ -6,7 +6,7 @@
 
 ## Scope
 
-**In scope (this spec):** the by-hand, on-canvas creation journey at scale — guided visual canvas building + a dedicated "Build Mode" panel for volume, the shared model behind them, ontology-correct containment + lineage, validation with auto-fix, and the performance work (O(n) staging, chunked transactional save, virtualization) that makes 1000s feasible.
+**In scope (this spec):** the by-hand, on-canvas creation journey at scale — guided visual canvas building + a dedicated "Build Mode" panel for volume, the shared model behind them, ontology-correct containment + lineage, validation with auto-fix, the performance work (O(n) staging, chunked transactional save, virtualization) that makes 1000s feasible, and the integration that makes it native to the app: a scalable staged-changes review, one-commit-per-build clean branch history, batch undo, bulk edit/delete/retype/reparent/move over a selection, and crash-safe draft resilience.
 
 **Explicitly out of scope (separate specs/tracks):**
 - **File import/export (CSV/Excel)** — designed strategically as its own later spec. This design leaves a clean seam (the shared row model) for it to plug into.
@@ -78,10 +78,12 @@ Errors never block valid rows. The header summarizes "N valid · M auto-fixed ·
 - build the new canvas nodes + containment edges arrays **once**;
 - one `stagedChangesStore` batch insert + one `addNodes`/`addEdges`.
 
-**Chunked transactional save** — `create_entity` is currently routed *around* the atomic `/changes` commit (each a separate HTTP call, no rollback). Fix: fold node-creates into the batched `/changes` commit, committed server-side in **chunks (~500 ops/transaction)** with:
-- a **progress stream** (per-chunk callback → Apply progress bar);
+**Chunked transactional save** — `create_entity` is currently routed *around* the atomic `/changes` commit: each create is a separate `POST /nodes/create` → its own audited commit (`saveStagedChangesToDraft.ts:56-80`), so 1000 creates = 1000 HTTP calls **and 1000 commits**. Fix: route bulk node-creates through a **single batch write** committed server-side in **chunks (~500 ops per commit)**. A batch primitive already exists — `versioned_write_provider.save_custom_graph` writes N nodes+edges as **one** `_record`/`apply_ops` commit (`versioned_write_provider.py:158-164`); we reuse it (extend if needed) rather than build new backend. Each chunk is:
+- a **progress stream** (per-chunk callback → Apply progress bar, cancelable);
 - **per-chunk atomicity** — a failing chunk rolls back; prior chunks persist; a clear report lists the failed rows with reasons;
-- temp-urn → real-urn remapping preserved across chunks (children reference parents staged earlier in the same batch).
+- temp-urn → real-urn remapping preserved across chunks (children reference parents committed earlier in the same batch).
+
+Net: a bulk build becomes **one (or a few chunked) labeled commit(s)** — "Created 1,000 entities" — not 1000, keeping branch history clean and reviewable.
 
 ### 4. Client performance
 
@@ -102,6 +104,30 @@ Build Mode is additive and reuses the existing rich flow — verified integratio
 
 Spacious canvas-docked Build panel (not the 400px rail); glass/premium idiom (`glass-panel`, `accent-primary`, `font-display`); ontology-driven icons/colors everywhere (`DynamicIcon`, `visual.icon`/`visual.color`); plain language on the default path; keyboard-first + mouse-friendly; live counts; ELK entrance animation; Apply progress bar; transparent auto-fix. Guided-canvas empty state leads; Build Mode is one click away.
 
+### 7. Versioning, changes review & history integration
+
+The create-at-scale flow must feel native to the existing versioning system (drafts, staged review, commits, branch history) — not drown it.
+- **Grouped + virtualized changes review.** `StagedChangesPanel` renders one animated row per change today (`:306-317`) — 1000 changes is an unusable wall. Add **grouping/summarization** ("Created 1,000 entities under Sales Domain · expand to see all") and **virtualize** the expanded list (reuse `VirtualizedHitList`/`react-window`, already in the app). A bulk build appears as one reviewable summary, drill-down on demand.
+- **One logical commit, clean history.** Via the batch write (§3), a bulk build is one (or few) labeled commit(s), so `ViewHistoryTimeline` and per-view/whole-graph attribution stay meaningful. **Fix draft-history pagination** (`ViewHistoryTimeline` gates "Load more" to non-draft, `:115`, while the server caps at 100 `:1555`) so a large draft's history is fully navigable.
+- **Batch undo as one unit.** Building N entities then Undo reverses the *batch* as a single action (a grouped/transaction id on the staged changes), not N steps. Also fix the O(n²) `collectStagedSubtree` discard (`stagedChangesStore.ts:149-189`) with an index.
+- **Publish/merge sanity.** A branch carrying a large bulk build publishes/merges as the existing squash path already handles — verified, not re-designed.
+
+### 8. Bulk operations (edit / delete / retype / reparent / move)
+
+Creating 1000s is incomplete without fixing 1000s. Multi-select exists but every "bulk" action is a client-side `forEach` over the single-entity path (`useCanvasInteractions.ts:510-535`) — e.g. `deleteSelected` fires N parallel cascade-preview fetches; there is **no** bulk retype/reparent/move-to-layer at all. Add **real batch operations** over a selection:
+- **Bulk delete** — one cascade-impact preview for the whole selection, one staged batch (not N fetches).
+- **Bulk retype** — select many → change type, cascade-validated via `planRetype` (reuses the type-change track).
+- **Bulk reparent / move-to-layer** — select many → one containment/layer restage.
+These share the same O(n) staging + batch-commit spine as create. A `selection.length > 1` branch in `CanvasContextMenu` surfaces them.
+
+### 9. Draft resilience (crash recovery)
+
+Staged changes are pure in-memory Zustand today (`stagedChangesStore`); a tab crash mid-build loses everything not yet Saved — only a `beforeunload` warning guards it. For a session where a user hand-builds hundreds of entities, add **local persistence** of the staged/Build-Mode state (localStorage/IndexedDB, keyed by draft+branch), restored on reload with a "Recover your unsaved work?" prompt. Belt-and-suspenders with the existing `beforeunload` guard.
+
+### 10. Navigation & orientation at scale
+
+A 1000-node model must stay navigable: fast find/jump (confirm existing search scales), expand-to-node, collapse-all/expand-level, and a minimap/overview on the graph canvases. Mostly leverages existing search/expand; the gap is scale-testing and collapse-level controls.
+
 ## Error handling
 
 - **Validation:** auto-fix safe cases, flag the rest inline (plain-language, per-row), never block valid rows.
@@ -117,8 +143,9 @@ Spacious canvas-docked Build panel (not the 400px rail); glass/premium idiom (`g
 
 ## Phasing
 
-- **Phase A — the by-hand journey (first).** Shared `BuildRow` model + input adapters (outline/grid/paste) + `validateBuildRows` (auto-fix) + Build panel + virtualization (Build panel + HierarchyCanvas) + O(n) `stageBuildRows` + guided-canvas-first empty state + on-canvas lineage parity. Delivers scale authoring on the existing per-op save.
-- **Phase B — scale persistence.** Chunked transactional bulk save + progress + backend batch-commit endpoint + partial-failure report.
+- **Phase A — the by-hand journey (first).** Shared `BuildRow` model + input adapters (outline/grid/paste) + `validateBuildRows` (auto-fix) + Build panel + virtualization (Build panel + HierarchyCanvas + the staged-changes review list) + O(n) `stageBuildRows` + guided-canvas-first empty state (delightful inline "+add" / drag-reparent) + on-canvas lineage parity + navigation/collapse-level controls + draft-resilience (local persistence + recover prompt). Delivers scale authoring + a reviewable changes list, on the existing per-op save.
+- **Phase B — scale persistence & clean history.** Route bulk creates through the one-commit batch write (reuse/extend `save_custom_graph`), chunked with progress + cancel + partial-failure report; grouped/summarized changes review; draft-history pagination fix; **batch undo** as one unit + O(n²) discard fix.
+- **Phase C — bulk operations.** Real batch delete / retype / reparent / move-to-layer over a multi-selection (shares the O(n) staging + batch-commit spine; bulk retype reuses the type-change planners).
 - **Later (separate spec):** CSV/Excel import-export onto the shared row model.
 - **Parallel tracks:** type-change Phase 2/3 (own spec) + P2 trust gaps (own plan).
 
@@ -126,5 +153,8 @@ Spacious canvas-docked Build panel (not the 400px rail); glass/premium idiom (`g
 
 1. **`useHierarchyOutline` refactor onto `BuildRow`** touches the shipped Hierarchy Builder — mitigate by making the row model a superset and migrating behind the same public hook API; existing rail behavior must be unchanged.
 2. **Chunked-save temp-urn threading** across transaction boundaries (a child in chunk 2 referencing a parent committed in chunk 1) — the chunker must order parents-before-children and carry the remap; covered by an integration test.
-3. **Backend batch endpoint** is new surface — atomicity + partial-failure semantics must be explicit and tested; coordinate with the versioning `/changes` commit path (and the separately-found gap that retype validation isn't on that path).
+3. **Batch write path** — reusing `save_custom_graph` (already commits N nodes+edges atomically) lowers risk vs new surface, but its interaction with the staged-changes review, temp-urn remapping, and the versioning-path ontology validation (the separately-found gap that retype validation isn't on the `/changes` path) must be verified and tested.
 4. **Deferred ELK** must not leave the canvas visually stale mid-authoring — preview cheaply, full layout on Apply.
+5. **Batch-undo semantics** — grouping N staged changes under one undo unit must not break the existing per-item undo/redo or the discard-cascade; covered by tests. The O(n²) `collectStagedSubtree` fix must preserve current cascade behavior exactly.
+6. **Grouped/virtualized review** must not hide individual changes a reviewer needs — summary is default, full drill-down always available; keep conflict/attribution rendering intact.
+7. **Draft local-persistence** keying (draft + branch + view) must avoid restoring stale/foreign work into the wrong branch — scope the key and validate on restore.
