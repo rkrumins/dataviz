@@ -19,10 +19,12 @@
  */
 import { useMemo } from 'react'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { useBranchStore } from '@/store/branchStore'
+import type { ChangeSet } from '@/features/versioning/model/changeModel'
 
 /**
- * PURE: the target URNs of every `create_entity` change. Extracted from the hook
- * so it is unit-testable without React or the store.
+ * PURE: the target URNs of every live-STAGED (not-yet-saved) `create_entity`
+ * change. Optimistic coverage before the draft is committed.
  */
 export function branchCreatedUrns(changes: StagedChange[]): Set<string> {
   const urns = new Set<string>()
@@ -32,8 +34,33 @@ export function branchCreatedUrns(changes: StagedChange[]): Set<string> {
   return urns
 }
 
-/** Reactive branch-created delta for the active scope. */
+/**
+ * PURE: URNs created (`added` NODE changes) and COMMITTED in the active branch,
+ * read from the branch changeset. Unlike the staged store — which clears on save —
+ * this survives reload, so a saved-then-reloaded created entity stays in the delta
+ * (the actual user bug: entities committed to the draft but invisible after save).
+ */
+export function committedCreatedUrns(changeSet: ChangeSet | null): Set<string> {
+  const urns = new Set<string>()
+  if (!changeSet) return urns
+  for (const c of changeSet.changes) {
+    if (c.status === 'added' && c.kind === 'node' && c.entityId) urns.add(c.entityId)
+  }
+  return urns
+}
+
+/**
+ * Reactive branch-created delta for the active scope: live-staged creates (optimistic)
+ * UNION committed-in-branch creates (durable across reload). Both are genuinely
+ * "created in THIS branch", so honouring the node `layerAssignment` for them in
+ * closed-scope stays leak-safe.
+ */
 export function useBranchCreatedDelta(): Set<string> {
   const changes = useStagedChangesStore((s) => s.changes)
-  return useMemo(() => branchCreatedUrns(changes), [changes])
+  const changeSet = useBranchStore((s) => s.activeChangeSet)
+  return useMemo(() => {
+    const urns = branchCreatedUrns(changes)
+    for (const u of committedCreatedUrns(changeSet)) urns.add(u)
+    return urns
+  }, [changes, changeSet])
 }

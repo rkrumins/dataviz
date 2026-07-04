@@ -10,8 +10,9 @@
  * constraint this feeds).
  */
 import { describe, it, expect } from 'vitest'
-import { branchCreatedUrns } from '../useBranchCreatedDelta'
+import { branchCreatedUrns, committedCreatedUrns } from '../useBranchCreatedDelta'
 import type { StagedChange, StagedChangeType } from '@/store/stagedChangesStore'
+import { buildChangeSet, type GraphChange } from '@/features/versioning/model/changeModel'
 
 const change = (type: StagedChangeType, targetUrn: string | undefined): StagedChange => ({
   id: `c-${type}-${targetUrn ?? 'none'}`,
@@ -57,5 +58,34 @@ describe('branchCreatedUrns', () => {
       change('create_entity', 'urn:staged:z'),
     ]
     expect([...branchCreatedUrns(changes)]).toEqual(['urn:staged:z'])
+  })
+})
+
+describe('committedCreatedUrns', () => {
+  const gc = (entityId: string, kind: GraphChange['kind'], status: GraphChange['status']): GraphChange => ({
+    entityId,
+    kind,
+    status,
+    label: entityId,
+    origin: { source: 'branch', branchId: 'b1' },
+  })
+
+  it('extracts only added NODE entityIds — ignores modified/removed, edges, and null changeset', () => {
+    const cs = buildChangeSet([
+      gc('urn:a', 'node', 'added'),
+      gc('urn:b', 'node', 'added'),
+      gc('urn:c', 'node', 'modified'), // existing entity edited, not created
+      gc('urn:d', 'node', 'removed'),  // deleted, not created
+      gc('urn:e', 'edge', 'added'),    // a created edge, not an entity
+    ])
+    expect([...committedCreatedUrns(cs)].sort()).toEqual(['urn:a', 'urn:b'])
+    expect(committedCreatedUrns(null).size).toBe(0)
+  })
+
+  it('is the durable source: survives after the staged store clears on save', () => {
+    // post-save the staged store is empty, but the committed changeset still lists the creates
+    expect(branchCreatedUrns([]).size).toBe(0)
+    const cs = buildChangeSet([gc('urn:synodic:manual:layer:15be1c2b02ba', 'node', 'added')])
+    expect([...committedCreatedUrns(cs)]).toEqual(['urn:synodic:manual:layer:15be1c2b02ba'])
   })
 })
