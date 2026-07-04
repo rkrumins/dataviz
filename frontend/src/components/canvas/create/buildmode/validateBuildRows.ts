@@ -137,8 +137,12 @@ function tryAutoPromoteParent(
 /**
  * Finds the ontology containment chain that would place `row`'s type under an
  * allowed ancestor, synthesizes the missing intermediate BuildRow(s), and
- * relinks `row` under the deepest one. Returns the ids of the new rows (in
- * root-to-nearest order) or `null` if no chain bridges the gap.
+ * relinks `row` under the deepest one. A chain level already synthesized
+ * under the same anchor for an earlier row (tracked in `insertedKeys`, keyed
+ * by `anchorId::type`) is reused instead of duplicated — sibling rows needing
+ * the same missing ancestors end up sharing one chain. Returns the ids of the
+ * newly-CREATED rows only (root-to-nearest order; empty if the whole chain
+ * was reused), or `null` if no chain bridges the gap.
  */
 function tryInsertMissingParent(
   row: BuildRow,
@@ -146,6 +150,7 @@ function tryInsertMissingParent(
   byId: Map<string, BuildRow>,
   ctx: BuildOntologyCtx,
   nextId: () => string,
+  insertedKeys: Map<string, string>,
 ): string[] | null {
   const childType = row.typeId!
   const chains = containmentChains(ctx.entityTypes, ctx.rootEntityTypes)
@@ -170,14 +175,21 @@ function tryInsertMissingParent(
   }
   if (!best) return null
 
-  const insertedIds: string[] = []
+  const newIds: string[] = []
   let anchorId = best.anchorId
   for (const t of best.missing) {
+    const key = `${anchorId ?? '(root)'}::${t.toLowerCase()}`
+    const reused = insertedKeys.get(key)
+    if (reused) {
+      anchorId = reused
+      continue
+    }
     const id = nextId()
     const newRow = makeRow({ id, name: displayName(t, ctx.entityTypes), typeId: t, parentId: anchorId })
     newRow.fixes.push({ field: 'parent', note: `Auto-inserted missing ${displayName(t, ctx.entityTypes)} level.` })
     byId.set(id, newRow)
-    insertedIds.push(id)
+    insertedKeys.set(key, id)
+    newIds.push(id)
     anchorId = id
   }
   row.parentId = anchorId
@@ -185,7 +197,7 @@ function tryInsertMissingParent(
     field: 'parent',
     note: `Placed under an auto-inserted ${displayName(best.missing[best.missing.length - 1], ctx.entityTypes)}.`,
   })
-  return insertedIds
+  return newIds
 }
 
 /**
@@ -217,37 +229,53 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     return id
   }
 
-  const output: BuildRow[] = []
+  // Pass 1: type finalization. Infer missing types top-down (a row's type can
+  // depend on its parent's), THEN let a child's now-final type promote an
+  // incompatible parent, bottom-up (a parent's need to contain a child can
+  // only be known once the child's type is settled). Placement (Pass 2) only
+  // runs once every row's type is final, so a row promoted into a valid root
+  // type never also gets a redundant synthetic parent inserted.
+  for (const id of order) {
+    const row = byId.get(id)!
+    if (row.typeId != null) continue
+    const parentRow = row.parentId != null ? (byId.get(row.parentId) ?? null) : null
+    const parentType = parentRow?.typeId ?? null
+    const candidates = [...allowedChildTypeIds(parentType, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap)]
+    if (candidates.length === 1) {
+      row.typeId = candidates[0]
+      row.fixes.push({ field: 'type', note: `Inferred type '${displayName(candidates[0], ctx.entityTypes)}'.` })
+    } else if (candidates.length > 1) {
+      const chosen = sortByLevelThenName(candidates, ctx.entityTypes)[0]
+      row.typeId = chosen
+      row.fixes.push({
+        field: 'type',
+        note: `Inferred type '${displayName(chosen, ctx.entityTypes)}' (${candidates.length} types were allowed here).`,
+      })
+    } else {
+      row.issues.push({ message: `Couldn't determine a type for '${row.name || row.id}'.` })
+    }
+  }
 
+  for (const id of [...order].reverse()) {
+    const row = byId.get(id)!
+    if (row.typeId == null) continue
+    const parentRow = row.parentId != null ? (byId.get(row.parentId) ?? null) : null
+    if (parentRow && parentRow.typeId != null && !canContainVia(parentRow.typeId, row.typeId, ctx)) {
+      tryAutoPromoteParent(parentRow, row.typeId, byId, ctx)
+    }
+  }
+
+  // Pass 2: placement. With every row's type now final, insert missing
+  // ancestors for any row still in an invalid position; sibling rows needing
+  // the same missing chain share one synthesized chain (see insertedKeys in
+  // tryInsertMissingParent) instead of each synthesizing their own.
+  const insertedKeys = new Map<string, string>()
+  const output: BuildRow[] = []
   for (const id of order) {
     const row = byId.get(id)!
     const parentRow = row.parentId != null ? (byId.get(row.parentId) ?? null) : null
 
-    // Step 1: infer a missing type from the (already-resolved) parent's type.
-    if (row.typeId == null) {
-      const parentType = parentRow?.typeId ?? null
-      const candidates = [...allowedChildTypeIds(parentType, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap)]
-      if (candidates.length === 1) {
-        row.typeId = candidates[0]
-        row.fixes.push({ field: 'type', note: `Inferred type '${displayName(candidates[0], ctx.entityTypes)}'.` })
-      } else if (candidates.length > 1) {
-        const chosen = sortByLevelThenName(candidates, ctx.entityTypes)[0]
-        row.typeId = chosen
-        row.fixes.push({
-          field: 'type',
-          note: `Inferred type '${displayName(chosen, ctx.entityTypes)}' (${candidates.length} types were allowed here).`,
-        })
-      } else {
-        row.issues.push({ message: `Couldn't determine a type for '${row.name || row.id}'.` })
-      }
-    }
-
-    // Step 2 + 3: containment check, auto-promote the parent, else insert missing levels.
     if (row.typeId != null) {
-      if (parentRow && parentRow.typeId != null && !canContainVia(parentRow.typeId, row.typeId, ctx)) {
-        tryAutoPromoteParent(parentRow, row.typeId, byId, ctx)
-      }
-
       const containmentOk = !parentRow
         ? setHasId(allowedChildTypeIds(null, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap), row.typeId)
         : parentRow.typeId == null
@@ -255,9 +283,9 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
           : canContainVia(parentRow.typeId, row.typeId, ctx)
 
       if (!containmentOk) {
-        const insertedIds = tryInsertMissingParent(row, parentRow, byId, ctx, nextId)
-        if (insertedIds) {
-          for (const insertedId of insertedIds) output.push(byId.get(insertedId)!)
+        const newIds = tryInsertMissingParent(row, parentRow, byId, ctx, nextId, insertedKeys)
+        if (newIds) {
+          for (const newId of newIds) output.push(byId.get(newId)!)
         } else {
           const childName = displayName(row.typeId, ctx.entityTypes)
           const message = parentRow
@@ -271,6 +299,7 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     output.push(row)
   }
 
+  // Pass 3: status. Plain-language issues were set during placement above.
   const finalized = output.map((r) => ({
     ...r,
     status: (r.issues.length > 0 ? 'error' : r.fixes.length > 0 ? 'fixed' : 'valid') as BuildRow['status'],

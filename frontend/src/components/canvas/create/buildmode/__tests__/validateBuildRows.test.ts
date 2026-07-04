@@ -65,7 +65,7 @@ describe('validateBuildRows', () => {
     expect(p1.fixes.map((f) => f.field)).toContain('type')
   })
 
-  it('(b) auto-promotes an attribute-typed parent to group when a child is added under it', () => {
+  it('(b) auto-promotes an attribute-typed parent to group when a child is added under it (no redundant inserted ancestor)', () => {
     const rows: BuildRow[] = [
       makeRow({ id: 'a1', name: 'Attr Parent', typeId: 'attribute', parentId: null }),
       makeRow({ id: 'a2', name: 'Attr Child', typeId: 'attribute', parentId: 'a1' }),
@@ -78,6 +78,32 @@ describe('validateBuildRows', () => {
     expect(a1.fixes.map((f) => f.field)).toContain('promote')
     expect(a2.typeId).toBe('attribute')
     expect(a2.status).toBe('valid')
+
+    // `group` is a valid root type, so the promoted a1 stays a root — it must
+    // NOT also get a synthetic parent inserted (that would be a redundant
+    // Group -> Group(promoted) -> Attribute instead of Group -> Attribute).
+    expect(result).toHaveLength(2)
+    expect(a1.parentId).toBeNull()
+    expect(a1.fixes.map((f) => f.field)).not.toContain('parent')
+  })
+
+  it('(f) two sibling rows needing the same missing ancestor chain share ONE synthesized chain', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'ds1', name: 'Orders', typeId: 'dataset', parentId: null }),
+      makeRow({ id: 'ds2', name: 'Customers', typeId: 'dataset', parentId: null }),
+    ]
+    const result = validateBuildRows(rows, ctx)
+    const ds1 = byId(result, 'ds1')
+    const ds2 = byId(result, 'ds2')
+
+    expect(ds1.parentId).not.toBeNull()
+    expect(ds1.parentId).toBe(ds2.parentId)
+
+    // exactly one synthesized domain/dataPlatform/container chain (3 new
+    // rows) is shared by both datasets, not two full chains (6).
+    const synthesized = result.filter((r) => r.id !== 'ds1' && r.id !== 'ds2')
+    expect(synthesized).toHaveLength(3)
+    expect(synthesized.map((r) => r.typeId).sort()).toEqual(['container', 'dataPlatform', 'domain'])
   })
 
   it('(c) inserts a missing parent level (dataset pasted at root gets the domain/dataPlatform/container chain)', () => {
