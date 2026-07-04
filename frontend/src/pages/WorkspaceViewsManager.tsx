@@ -71,8 +71,8 @@ export function WorkspaceViewsManager() {
   ] as const
 
   return (
-    <div className="absolute inset-0 overflow-y-auto bg-canvas p-6">
-      <div className="max-w-5xl mx-auto">
+    <div className="absolute inset-0 overflow-y-auto bg-canvas">
+      <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-6">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>

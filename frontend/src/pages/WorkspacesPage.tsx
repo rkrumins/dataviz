@@ -425,7 +425,7 @@ export function WorkspacesPage() {
     /* ── Render ── */
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-        <div className="p-8 max-w-7xl mx-auto space-y-6 animate-in fade-in duration-500">
+        <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8 space-y-6 animate-in fade-in duration-500">
             <style>{`
 @keyframes card-in {
     from { opacity: 0; transform: translateY(12px); }

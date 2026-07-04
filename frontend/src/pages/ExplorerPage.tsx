@@ -478,7 +478,7 @@ export function ExplorerPage() {
   return (
     <div className="absolute inset-0 overflow-y-auto bg-canvas custom-scrollbar">
       <style>{STAGGER_STYLE}</style>
-      <div className="px-6 md:px-10 lg:px-12 pb-28">
+      <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 pb-28">
 
         {/* ── Header ──────────────────────────────────────────── */}
         <header className="pt-8 pb-6">
@@ -720,7 +720,7 @@ export function ExplorerPage() {
               transition={{ duration: 0.15 }}
             >
               {layout === 'grid' ? (
-                <div className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6', gridGapClass)}>
+                <div className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4', gridGapClass)}>
                   {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
                 </div>
               ) : (
@@ -754,7 +754,7 @@ export function ExplorerPage() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
             >
-              <div ref={gridRef} className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 min-[1920px]:grid-cols-6', gridGapClass)}>
+              <div ref={gridRef} className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4', gridGapClass)}>
                 {views.map((v, i) => (
                   <div
                     key={v.id}

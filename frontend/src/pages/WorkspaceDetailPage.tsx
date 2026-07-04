@@ -424,7 +424,7 @@ export function WorkspaceDetailPage() {
 
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-        <div className="p-8 max-w-5xl mx-auto animate-in fade-in duration-500">
+        <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8 animate-in fade-in duration-500">
             {/* Breadcrumb */}
             <div className="flex items-center justify-between mb-6">
                 <nav aria-label="Breadcrumb" className="flex items-center gap-2 text-sm">
