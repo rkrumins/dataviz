@@ -3351,6 +3351,40 @@ class GraphVersioningService:
         base.update(await self._branch_own_payloads(s, graph_id, branch_id))
         return base
 
+    async def entity_indexes(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+        """Match indexes over a branch's composed state (plan Phase 3 — import matching).
+
+        Returns ``{"urn_to_eid": {urn: eid}, "qname_to_eid": {qualifiedName: eid},
+        "edge_to_eid": {(src_eid, tgt_eid, edge_type): eid}, "node_eids": set, "edge_eids": set}``
+        so a re-import can match file rows to EXISTING entities (nodes by ``urn``, edges by
+        endpoint-triple — the same keying :meth:`sync_ingest`'s ``_external_state`` uses; a
+        ``qualifiedName`` index resolves human-authored edge endpoints, last-writer-wins since
+        qnames aren't unique) instead of duplicating them. Composed over ``main`` ⊕ the draft, so
+        an import onto a draft still matches ``main``'s entities.
+        """
+        async with self._session() as s:
+            state = await self._composed_state(s, graph_id, branch_id)
+        urn_to_eid: Dict[str, str] = {}
+        qname_to_eid: Dict[str, str] = {}
+        edge_to_eid: Dict[tuple, str] = {}
+        node_eids: set = set()
+        edge_eids: set = set()
+        for eid, payload in state.items():
+            if payload is None:
+                continue
+            if _is_edge_payload(payload):
+                edge_eids.add(eid)
+                edge_to_eid[(payload.get("sourceEntityId"), payload.get("targetEntityId"),
+                             payload.get("edgeType"))] = eid
+            else:
+                node_eids.add(eid)
+                if payload.get("urn"):
+                    urn_to_eid[payload["urn"]] = eid
+                if payload.get("qualifiedName"):
+                    qname_to_eid[payload["qualifiedName"]] = eid
+        return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid,
+                "edge_to_eid": edge_to_eid, "node_eids": node_eids, "edge_eids": edge_eids}
+
     async def _composed_state_as_of(
         self, s, graph_id: str, branch_id: str, as_of_seq: int
     ) -> Dict[str, Optional[dict]]:
