@@ -91,6 +91,10 @@ interface StagedChangesState {
   setScope: (key: string | null) => void
 
   stage: (input: Omit<StagedChange, 'id' | 'timestamp'>) => string
+  /** Batch version of `stage` — appends a whole already-built batch of changes
+   *  (e.g. from `planBuildStaging`) in a single state update, instead of one
+   *  `set` call per change. */
+  stageMany: (batch: StagedChange[]) => void
   /** Replace an existing change for the same target — useful when the user renames the same node twice. */
   stageOrReplace: (
     matcher: (c: StagedChange) => boolean,
@@ -226,6 +230,10 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       redoStack: [],
     }))
     return id
+  },
+
+  stageMany: (batch) => {
+    set((s) => ({ changes: [...s.changes, ...batch] }))
   },
 
   stageOrReplace: (matcher, input) => {
