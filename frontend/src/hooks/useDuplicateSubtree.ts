@@ -36,6 +36,12 @@ import { planDuplicate, type DuplicateSourceNode, type DuplicateLineageEdgeInput
 const MAX_DEPTH = 50
 const MAX_LOAD_PAGES_PER_NODE = 50
 
+export interface UseDuplicateSubtreeOptions {
+  /** Fired per staged copy (root + every descendant) as it is created, so a
+   *  layered canvas can assign each copy to its original's layer. */
+  onNodeCopied?: (originalId: string, originalUrn: string, copyUrn: string) => void
+}
+
 export interface UseDuplicateSubtreeResult {
   /**
    * Duplicate `nodeId`'s entire subtree as freshly-staged entities. Returns
@@ -45,7 +51,7 @@ export interface UseDuplicateSubtreeResult {
   duplicateSubtree: (nodeId: string) => Promise<string | null>
 }
 
-export function useDuplicateSubtree(): UseDuplicateSubtreeResult {
+export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDuplicateSubtreeResult {
   const { stageEntity } = useStageEntityCreation()
   const { loadChildren } = useGraphHydration()
   const isContainmentEdge = useViewIsContainmentEdge()
@@ -170,6 +176,7 @@ export function useDuplicateSubtree(): UseDuplicateSubtreeResult {
       })
       stagedUrns.set(step.originalId, stagedUrn)
       if (step.parentOriginalId === null) rootCopyUrn = stagedUrn
+      opts?.onNodeCopied?.(step.originalId, step.originalUrn, stagedUrn)
     }
 
     // Internal lineage edges — AFTER all nodes are staged, so both endpoint
@@ -207,7 +214,7 @@ export function useDuplicateSubtree(): UseDuplicateSubtreeResult {
     }
 
     return rootCopyUrn
-  }, [stageEntity, loadChildren, isContainmentEdge])
+  }, [stageEntity, loadChildren, isContainmentEdge, opts?.onNodeCopied])
 
   return { duplicateSubtree }
 }

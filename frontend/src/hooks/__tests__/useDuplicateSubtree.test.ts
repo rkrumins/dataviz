@@ -132,4 +132,33 @@ describe('useDuplicateSubtree', () => {
     const child2Urn = child2Change.targetUrn
     expect(lineageChanges[0].after).toMatchObject({ edgeType: 'FLOWS_TO', source: child1Urn, target: child2Urn })
   })
+
+  it('fires onNodeCopied once per staged node (root + every descendant), with (originalId, originalUrn, copyUrn)', async () => {
+    const calls: Array<[string, string, string]> = []
+    const { result } = renderHook(() => useDuplicateSubtree({
+      onNodeCopied: (originalId, originalUrn, copyUrn) => calls.push([originalId, originalUrn, copyUrn]),
+    }))
+
+    let rootCopyUrn: string | null = null
+    await act(async () => {
+      rootCopyUrn = await result.current.duplicateSubtree('r')
+    })
+
+    // Subtree is r -> c1, c2: one callback per staged node.
+    expect(calls).toHaveLength(3)
+
+    const byOriginalId = new Map(calls.map(([originalId, originalUrn, copyUrn]) => [originalId, { originalUrn, copyUrn }]))
+    expect(byOriginalId.get('r')).toEqual({ originalUrn: 'r', copyUrn: rootCopyUrn })
+    expect(byOriginalId.get('c1')?.originalUrn).toBe('c1')
+    expect(byOriginalId.get('c2')?.originalUrn).toBe('c2')
+
+    // copyUrns match the staged create_entity urns for each original.
+    const changes = useStagedChangesStore.getState().changes
+    const createEntityChanges = changes.filter((c) => c.type === 'create_entity')
+    const byDisplayName = new Map(
+      createEntityChanges.map((c) => [(c.after as { displayName: string }).displayName, c]),
+    )
+    expect(byOriginalId.get('c1')?.copyUrn).toBe(byDisplayName.get('Child1')!.targetUrn)
+    expect(byOriginalId.get('c2')?.copyUrn).toBe(byDisplayName.get('Child2')!.targetUrn)
+  })
 })
