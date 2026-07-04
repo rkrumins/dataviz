@@ -33,6 +33,7 @@ import { useSearchHighlight } from './search/useSearchHighlight'
 import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
+import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
 // Editor components (shared across canvases)
 import { EditorToolbar } from './EditorToolbar'
@@ -166,9 +167,23 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   }, [trace])
 
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
+    duplicateSubtree,
+    onNodeDuplicated: (originalId, newUrn) => {
+      // Mirrors HierarchyBuilderPanel's onEntityStaged: expand the original's
+      // parent (reveals the new sibling) and the copy itself (reveals its
+      // just-staged children without a second click).
+      const parentId = parentMap.get(originalId)
+      setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(newUrn)
+        return next
+      })
+    },
     onExitTrace: exitTrace,
   })
 

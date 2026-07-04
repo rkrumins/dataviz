@@ -469,10 +469,12 @@ describe('planRetype', () => {
   // nodes that are themselves keys in `nodes` — planRetype never calls `parentTypeOf`.
   function makeTreeCtx(
     nodes: Record<string, { type: string; parent: string | null; children: string[] }>,
+    entityTypes: EntityTypeSchema[] = types,
+    relationshipTypes: RelationshipTypeSchema[] = rels,
   ): RetypeContext {
     return {
-      entityTypes: types,
-      relationshipTypes: rels,
+      entityTypes,
+      relationshipTypes,
       containmentEdgeTypes: [],
       parentTypeOf: (id) => {
         const parentId = nodes[id]?.parent ?? null
@@ -514,5 +516,87 @@ describe('planRetype', () => {
     const plan = planRetype({ id:'r', urn:'r', name:'R', type:'dataset' }, 'column', ctx)
     expect(plan.ok).toBe(false)
     expect(plan.conflicts.map(c=>c.nodeId)).toContain('x')
+  })
+
+  it('planRetype: finds a deep multi-level re-level instead of a false conflict (recursive feasibility)', () => {
+    // Reviewer's repro: Y canContain {P,Q}; P canContain nothing; Q canContain only Z.
+    // root(M)->child(M)->gc(G), retype root->Y. Valid solution: child->Q, gc->Z. The old
+    // shallow childrenStillFit gate excluded Q (Q can't DIRECTLY hold gc's current type G),
+    // reporting a false conflict; recursive feasibility must find the assignment.
+    const t = [et('Y', ['P', 'Q']), et('P', []), et('Q', ['Z']), et('Z', [])]
+    const r = [
+      rt('Y_HOLDS', ['Y'], ['P', 'Q'], { isContainment: true }),
+      rt('Q_HOLDS', ['Q'], ['Z'], { isContainment: true }),
+    ]
+    const ctx = makeTreeCtx(
+      {
+        'root': { type: 'M', parent: null, children: ['child'] },
+        'child': { type: 'M', parent: 'root', children: ['gc'] },
+        'gc': { type: 'G', parent: 'child', children: [] },
+      },
+      t,
+      r,
+    )
+    const plan = planRetype({ id: 'root', urn: 'root', name: 'root', type: 'M' }, 'Y', ctx)
+    expect(plan.ok).toBe(true)
+    expect(plan.changes.find((c) => c.nodeId === 'root')).toMatchObject({ toType: 'Y', editable: false })
+    expect(plan.changes.find((c) => c.nodeId === 'child')).toMatchObject({ toType: 'Q', editable: true })
+    expect(plan.changes.find((c) => c.nodeId === 'gc')).toMatchObject({ toType: 'Z', editable: true })
+  })
+
+  it('planRetype: reports a genuine deep conflict when no assignment resolves the subtree', () => {
+    // RootT canContain {Mid}; Mid canContain nothing. root->child->gc, retype root->RootT.
+    // child must become Mid (its only option), but then gc has nowhere to live -> real conflict.
+    const t = [et('RootT', ['Mid']), et('Mid', [])]
+    const r = [rt('ROOTT_HOLDS', ['RootT'], ['Mid'], { isContainment: true })]
+    const ctx = makeTreeCtx(
+      {
+        'root': { type: 'orig', parent: null, children: ['child'] },
+        'child': { type: 'CX', parent: 'root', children: ['gc'] },
+        'gc': { type: 'GX', parent: 'child', children: [] },
+      },
+      t,
+      r,
+    )
+    const plan = planRetype({ id: 'root', urn: 'root', name: 'root', type: 'orig' }, 'RootT', ctx)
+    expect(plan.ok).toBe(false)
+    expect(plan.conflicts.map((c) => c.nodeId)).toContain('gc')
+    expect(plan.changes).toEqual([])
+  })
+
+  it('planRetype: backtracks past a candidate that dead-ends deeper to one that resolves', () => {
+    // Base canContain {Opt1,Opt2}; Opt1 canContain {Mid1}; Opt2 canContain {Mid2};
+    // Mid1 canContain nothing; Mid2 canContain {Leaf3}. Tree R->N->K->L, retype R->Base.
+    // Opt1 sorts first for N but dead-ends TWO levels deeper (L can't nest under Mid1);
+    // true backtracking must fall back to Opt2 -> K->Mid2 -> L->Leaf3.
+    const t = [
+      et('Base', ['Opt1', 'Opt2']),
+      et('Opt1', ['Mid1']),
+      et('Opt2', ['Mid2']),
+      et('Mid1', []),
+      et('Mid2', ['Leaf3']),
+      et('Leaf3', []),
+    ]
+    const r = [
+      rt('BASE_HOLDS', ['Base'], ['Opt1', 'Opt2'], { isContainment: true }),
+      rt('OPT1_HOLDS', ['Opt1'], ['Mid1'], { isContainment: true }),
+      rt('OPT2_HOLDS', ['Opt2'], ['Mid2'], { isContainment: true }),
+      rt('MID2_HOLDS', ['Mid2'], ['Leaf3'], { isContainment: true }),
+    ]
+    const ctx = makeTreeCtx(
+      {
+        'R': { type: 'orig', parent: null, children: ['N'] },
+        'N': { type: 'NX', parent: 'R', children: ['K'] },
+        'K': { type: 'KX', parent: 'N', children: ['L'] },
+        'L': { type: 'LX', parent: 'K', children: [] },
+      },
+      t,
+      r,
+    )
+    const plan = planRetype({ id: 'R', urn: 'R', name: 'R', type: 'orig' }, 'Base', ctx)
+    expect(plan.ok).toBe(true)
+    expect(plan.changes.find((c) => c.nodeId === 'N')).toMatchObject({ toType: 'Opt2' })
+    expect(plan.changes.find((c) => c.nodeId === 'K')).toMatchObject({ toType: 'Mid2' })
+    expect(plan.changes.find((c) => c.nodeId === 'L')).toMatchObject({ toType: 'Leaf3' })
   })
 })

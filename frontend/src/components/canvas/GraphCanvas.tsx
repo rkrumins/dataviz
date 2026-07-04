@@ -77,6 +77,7 @@ import { useEdgeDetailPanel, useEdgeTypeFilters, useEdgeFiltersStore } from '@/h
 import { useSemanticZoom } from '@/hooks/useSemanticZoom'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
+import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 import { useLoadingToast, useToast } from '@/components/ui/toast'
 import { EdgeTypePickerPopover } from './edge-create/EdgeTypePickerPopover'
 import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
@@ -1221,9 +1222,23 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [trace])
 
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
+  const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
+    duplicateSubtree,
+    onNodeDuplicated: (originalId, newUrn) => {
+      // Mirrors HierarchyBuilderPanel's onEntityStaged: expand the original's
+      // parent (reveals the new sibling) and the copy itself (reveals its
+      // just-staged children without a second click).
+      const parentId = parentMap.get(originalId)
+      setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(newUrn)
+        return next
+      })
+    },
     onCloseEdgePanel: () => {
       if (isEdgePanelOpen) {
         closeEdgePanel()

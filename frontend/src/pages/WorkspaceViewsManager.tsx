@@ -166,9 +166,12 @@ export function WorkspaceViewsManager() {
                   </button>
                 </div>
 
-                {/* Updated timestamp */}
+                {/* Updated timestamp — freshest of settings-edit vs data-publish */}
                 <span className="text-[10px] text-ink-faint whitespace-nowrap">
-                  {new Date(view.updatedAt).toLocaleDateString()}
+                  {new Date(
+                    view.dataUpdatedAt && view.dataUpdatedAt > view.updatedAt
+                      ? view.dataUpdatedAt : view.updatedAt
+                  ).toLocaleDateString()}
                 </span>
               </div>
             ))}

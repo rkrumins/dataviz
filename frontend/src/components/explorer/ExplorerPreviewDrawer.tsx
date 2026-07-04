@@ -592,27 +592,44 @@ export function ExplorerPreviewDrawer({
                     }
                   />
 
-                  {/* Updated at */}
+                  {/* Updated — the view's own settings/details edits (rename, layout,
+                      description, tags). Distinct from "Data Updated" below. */}
                   <DetailRow
                     icon={Calendar}
                     label="Updated"
                     value={
-                      <span>
-                        {formatDate(view.updatedAt)}
-                        <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
+                      <span className="flex flex-col min-w-0">
+                        <span>
+                          {formatDate(view.updatedAt)}
+                          <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
+                        </span>
+                        {view.updatedByName && (
+                          <span className="text-[11px] text-ink-muted truncate">by {view.updatedByName}</span>
+                        )}
                       </span>
                     }
                   />
 
-                  {/* Last synced (placeholder — using updatedAt for now) */}
+                  {/* Data Updated — when the underlying lineage data last changed
+                      (a publish or merged change on this view's data source). This is the
+                      value that reflects "I just merged changes to this view". */}
                   <DetailRow
                     icon={RefreshCw}
-                    label="Last Synced"
+                    label="Data Updated"
                     value={
-                      <span>
-                        {formatDate(view.updatedAt)}
-                        <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
-                      </span>
+                      view.dataUpdatedAt ? (
+                        <span className="flex flex-col min-w-0">
+                          <span>
+                            {formatDate(view.dataUpdatedAt)}
+                            <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.dataUpdatedAt)})</span>
+                          </span>
+                          {view.dataUpdatedByName && (
+                            <span className="text-[11px] text-ink-muted truncate">by {view.dataUpdatedByName}</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-ink-muted">No published changes yet</span>
+                      )
                     }
                   />
                 </div>

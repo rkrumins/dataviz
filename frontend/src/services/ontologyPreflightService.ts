@@ -480,45 +480,76 @@ function typeName(id: string, ctx: RetypeContext): string {
 }
 
 /**
- * A proposed type is only usable for `childId` if its own children (if any) can still nest
- * under it — checked recursively at visit time, so here it's just whether the proposed type
- * can contain each of the child's current children.
- */
-function childrenStillFit(childId: string, proposedType: string, ctx: RetypeContext): boolean {
-  return ctx.childrenOf(childId).every((gc) => containmentAllowed(proposedType, gc.type, ctx))
-}
-
-/**
- * Given a proposed type change to `rootNode`, walks the subtree and proposes a full cascade:
- * descendants that stay validly nested under their (possibly re-typed) parent are pruned —
- * unchanged, not descended, which is what terminates the walk on recursive containment (e.g. a
- * Group that can contain Groups: a still-valid child Group is pruned rather than re-visited).
- * Descendants that no longer fit get a proposed valid `toType` (preferring their current type if
- * it still qualifies, else the first candidate sorted by hierarchy level then name); a descendant
- * with no valid re-level becomes a `conflict`. Root is `editable:false`; cascaded descendants are
- * `editable:true`. `changes` is ordered parent-before-child. Pure — the server re-validates
- * authoritatively on save.
+ * Given a proposed type change to `rootNode`, walks the subtree and proposes a full cascade.
+ * A descendant that stays validly nested under its (possibly re-typed) parent is pruned —
+ * unchanged, not descended, which terminates the walk on recursive containment (e.g. a Group that
+ * can contain Groups: a still-valid child Group is pruned rather than re-visited). A descendant
+ * that no longer fits is re-leveled to a valid type chosen by a BACKTRACKING recursive resolver:
+ * a candidate type is accepted only if EVERY child can itself be recursively resolved under it, so
+ * a candidate that becomes valid only after its own descendants are re-leveled is found (no false
+ * conflicts) and a candidate that dead-ends deeper is abandoned for a later one. A subtree with no
+ * fully-valid assignment blocks the whole retype (`ok:false`), reported as a `conflict` on the
+ * deepest node that nothing can nest. Candidates are tried in `hierarchy.level`-then-name order
+ * (deterministic). Root is `editable:false`; cascaded descendants are `editable:true`. `changes`
+ * is ordered parent-before-child. Pure — the server re-validates authoritatively on save.
  */
 export function planRetype(rootNode: RetypeNode, newType: string, ctx: RetypeContext): RetypePlan {
-  const changes: RetypeChange[] = []
-  const conflicts: RetypeConflict[] = []
-  const visit = (node: RetypeNode, proposedType: string) => {
-    changes.push({ nodeId: node.id, urn: node.urn, name: node.name, fromType: node.type, toType: proposedType, editable: node.id !== rootNode.id })
-    for (const child of ctx.childrenOf(node.id)) {
-      if (containmentAllowed(proposedType, child.type, ctx)) continue // still valid -> prune
-      const candidates = [...ctx.entityTypes]
-        .sort((a, b) => a.hierarchy.level - b.hierarchy.level || a.name.localeCompare(b.name))
-        .map((t) => t.id)
-        .filter((ct) => containmentAllowed(proposedType, ct, ctx) && childrenStillFit(child.id, ct, ctx))
-      if (candidates.length === 0) {
-        conflicts.push({ nodeId: child.id, name: child.name, reason: `Nothing valid can go inside a ${typeName(proposedType, ctx)}.` })
-        continue
+  const byLevelThenName = (a: EntityTypeSchema, b: EntityTypeSchema) =>
+    a.hierarchy.level - b.hierarchy.level || a.name.localeCompare(b.name)
+  // Valid child types under `parentType`, in deterministic (level, name) order.
+  const candidateTypes = (parentType: string): string[] =>
+    [...ctx.entityTypes]
+      .sort(byLevelThenName)
+      .map((t) => t.id)
+      .filter((ct) => containmentAllowed(parentType, ct, ctx))
+
+  // Try to place `node`'s whole subtree validly under `parentType` (or, at the root, as the forced
+  // `newType`). A still-valid non-root subtree is pruned (no change, no descent). On success this
+  // node's change is appended to `out` BEFORE its resolved children (parent-before-child) and it
+  // returns true; it returns false (appending nothing) only if no candidate makes the entire
+  // subtree valid. Recursion descends only into the finite concrete node tree, so it terminates.
+  const resolve = (node: RetypeNode, parentType: string | null, isRoot: boolean, out: RetypeChange[]): boolean => {
+    if (!isRoot && parentType != null && containmentAllowed(parentType, node.type, ctx)) return true // still valid -> prune
+    const candidates = isRoot ? [newType] : candidateTypes(parentType!)
+    for (const cand of candidates) {
+      const childOut: RetypeChange[] = []
+      let allOk = true
+      for (const child of ctx.childrenOf(node.id)) {
+        if (!resolve(child, cand, false, childOut)) {
+          allOk = false
+          break
+        }
       }
-      // preference: keep the same type if it happens to be valid; else first sorted candidate
-      const chosen = candidates.includes(child.type) ? child.type : candidates[0]
-      visit(child, chosen)
+      if (allOk) {
+        out.push({ nodeId: node.id, urn: node.urn, name: node.name, fromType: node.type, toType: cand, editable: !isRoot })
+        out.push(...childOut)
+        return true
+      }
+    }
+    return false
+  }
+
+  // Only reached when the retype is infeasible: descend the failing path to the deepest node whose
+  // parent type can nest nothing. Since every candidate of an unresolved node fails, its first
+  // candidate always has an unresolved child, so this always records at least one conflict.
+  const collectConflicts = (node: RetypeNode, parentType: string | null, isRoot: boolean, out: RetypeConflict[]): void => {
+    const candidates = isRoot ? [newType] : candidateTypes(parentType!)
+    if (candidates.length === 0) {
+      out.push({ nodeId: node.id, name: node.name, reason: `Nothing valid can go inside a ${typeName(parentType!, ctx)}.` })
+      return
+    }
+    const cand = candidates[0]
+    for (const child of ctx.childrenOf(node.id)) {
+      if (!resolve(child, cand, false, [])) collectConflicts(child, cand, false, out)
     }
   }
-  visit(rootNode, newType)
-  return { changes, conflicts, ok: conflicts.length === 0 }
+
+  const rootParentType = ctx.parentTypeOf(rootNode.id)
+  const changes: RetypeChange[] = []
+  if (resolve(rootNode, rootParentType, true, changes)) {
+    return { changes, conflicts: [], ok: true }
+  }
+  const conflicts: RetypeConflict[] = []
+  collectConflicts(rootNode, rootParentType, true, conflicts)
+  return { changes: [], conflicts, ok: false }
 }

@@ -53,6 +53,9 @@ export interface UseCanvasInteractionsOptions {
     onNodeDeleted?: (nodeId: string) => void
     /** Callback when a node is duplicated */
     onNodeDuplicated?: (originalId: string, newId: string) => void
+    /** Recreate a node's entire subtree as freshly-staged copies (see useDuplicateSubtree).
+     *  Injected by the canvas, which owns stageEntity/loadChildren/childMap access. */
+    duplicateSubtree?: (nodeId: string) => Promise<string | null>
     /** Callback when an edge is deleted */
     onEdgeDeleted?: (edgeId: string) => void
     /** Callback when inline edit is saved */
@@ -137,6 +140,7 @@ export function useCanvasInteractions(
         onNodeCreated,
         onNodeDeleted,
         onNodeDuplicated,
+        duplicateSubtree,
         onInlineEditSave,
         onEdgeDeleted,
         onTraceNode,
@@ -154,7 +158,6 @@ export function useCanvasInteractions(
         selectedEdgeIds,
         selectNode,
         clearSelection,
-        addNodes,
         updateNode,
     } = useCanvasStore()
     
@@ -264,30 +267,12 @@ export function useCanvasInteractions(
     }, [selectNode, closeContextMenu])
     
     const duplicateNode = useCallback(async (nodeId: string) => {
-        const node = nodes.find(n => n.id === nodeId)
-        if (!node) return
-        
-        const newId = `${nodeId}-copy-${Date.now()}`
-        const newUrn = `${node.data.urn}-copy-${Date.now()}`
-        
-        const newNode = {
-            ...node,
-            id: newId,
-            position: {
-                x: node.position.x + 50,
-                y: node.position.y + 50,
-            },
-            data: {
-                ...node.data,
-                urn: newUrn,
-                label: `${node.data.label} (Copy)`,
-            },
-        }
-        
-        addNodes([newNode])
-        selectNode(newId)
-        onNodeDuplicated?.(nodeId, newId)
-    }, [nodes, addNodes, selectNode, onNodeDuplicated])
+        if (!duplicateSubtree) return
+        const newUrn = await duplicateSubtree(nodeId)
+        if (!newUrn) return
+        selectNode(newUrn)
+        onNodeDuplicated?.(nodeId, newUrn)
+    }, [duplicateSubtree, selectNode, onNodeDuplicated])
     
     const deleteNode = useCallback((nodeId: string) => {
         const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
