@@ -383,3 +383,70 @@ export function deriveConnectableEdges(
       return { edgeType: rt.id, label: rt.name ?? rt.id, description: rt.description, allowed, reason }
     })
 }
+
+/** A node under consideration for a type change, for {@link typesValidForNode}. */
+export interface RetypeNode {
+  id: string
+  urn: string
+  name: string
+  type: string
+}
+
+/**
+ * Graph adjacency for `node`, supplied by the caller (store/canvas) so that
+ * {@link typesValidForNode} stays pure. `parentTypeOf`/`childrenOf` resolve
+ * containment adjacency; `incidentLineageEdges` resolves the node's drawn
+ * lineage edges (not containment).
+ */
+export interface RetypeContext {
+  entityTypes: EntityTypeSchema[]
+  relationshipTypes: RelationshipTypeSchema[]
+  containmentEdgeTypes: string[]
+  parentTypeOf: (nodeId: string) => string | null
+  childrenOf: (nodeId: string) => RetypeNode[]
+  incidentLineageEdges: (nodeId: string) => { edgeType: string; role: 'source' | 'target'; otherType: string }[]
+}
+
+/** Whether some containment relationship type can nest `childType` under `parentType`. */
+function containmentAllowed(parentType: string, childType: string, ctx: RetypeContext): boolean {
+  return deriveContainmentEdges(parentType, childType, ctx.relationshipTypes, ctx.containmentEdgeTypes).some(
+    (o) => o.allowed,
+  )
+}
+
+/**
+ * The entity type ids `node` could legally become, for the "change entity type"
+ * authoring flow. A candidate must (a) be a valid child of the node's current
+ * parent (if any), (b) be able to contain every one of the node's existing
+ * children, and (c) keep every one of the node's incident lineage edges
+ * endpoint-valid. Sorted by `hierarchy.level` then name. Pure — the server
+ * re-validates authoritatively on save.
+ */
+export function typesValidForNode(node: RetypeNode, ctx: RetypeContext): string[] {
+  const parentType = ctx.parentTypeOf(node.id)
+  const children = ctx.childrenOf(node.id)
+  const edges = ctx.incidentLineageEdges(node.id)
+  const byLevelThenName = (a: EntityTypeSchema, b: EntityTypeSchema) =>
+    a.hierarchy.level - b.hierarchy.level || a.name.localeCompare(b.name)
+  return [...ctx.entityTypes]
+    .sort(byLevelThenName)
+    .map((t) => t.id)
+    .filter((candidate) => {
+      if (parentType && !containmentAllowed(parentType, candidate, ctx)) return false
+      for (const c of children) {
+        if (!containmentAllowed(candidate, c.type, ctx)) return false
+      }
+      for (const e of edges) {
+        const opts = deriveConnectableEdges(
+          e.role === 'source' ? candidate : e.otherType,
+          e.role === 'source' ? e.otherType : candidate,
+          ctx.relationshipTypes,
+          ctx.containmentEdgeTypes,
+          ctx.entityTypes,
+        )
+        const opt = opts.find((o) => sameId(o.edgeType, e.edgeType))
+        if (opt && !opt.allowed) return false
+      }
+      return true
+    })
+}

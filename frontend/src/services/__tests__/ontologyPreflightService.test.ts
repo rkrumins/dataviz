@@ -13,8 +13,10 @@ import {
   setHasId,
   validateDrawnEdge,
   connectedEdgeTypes,
+  typesValidForNode,
 } from '../ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
+import type { RetypeContext, RetypeNode } from '../ontologyPreflightService'
 
 const et = (id: string, canContain: string[], canBeContainedBy: string[] = [], level = 0): EntityTypeSchema => ({
   id, name: id, pluralName: id, visual: {} as never, fields: [], behavior: {} as never,
@@ -376,5 +378,65 @@ describe('connectedEdgeTypes', () => {
     expect(s.has('FLOWS_TO')).toBe(true)
     expect(s.has('DERIVES_FROM')).toBe(true)
     expect(s.has('OTHER')).toBe(false)
+  })
+})
+
+describe('typesValidForNode', () => {
+  // domain(L0) contains dataPlatform,system; dataPlatform(L1) contains container;
+  // container(L2, canContain container,dataset); dataset(L3, canContain column); column(L4 leaf)
+  const types = [
+    et('domain', ['dataPlatform', 'system'], [], 0),
+    et('dataPlatform', ['container'], ['domain'], 1),
+    et('system', [], ['domain'], 1),
+    et('container', ['container', 'dataset'], ['dataPlatform', 'container'], 2),
+    et('dataset', ['column'], ['container'], 3),
+    et('column', [], ['dataset'], 4),
+  ]
+  // A single permissive containment edge covering every parent/child pair the tests below
+  // exercise, so `containmentAllowed` (relationship-driven) matches the hierarchy comment above.
+  const rels = [
+    rt(
+      'CONTAINS',
+      ['domain', 'dataPlatform', 'container', 'dataset'],
+      ['dataPlatform', 'system', 'container', 'dataset', 'column'],
+      { isContainment: true },
+    ),
+  ]
+
+  function makeCtx(opts: {
+    parentType: string | null
+    children?: RetypeNode[]
+    edges?: { edgeType: string; role: 'source' | 'target'; otherType: string }[]
+  }): RetypeContext {
+    return {
+      entityTypes: types,
+      relationshipTypes: rels,
+      containmentEdgeTypes: ['CONTAINS'],
+      parentTypeOf: () => opts.parentType,
+      childrenOf: () => opts.children ?? [],
+      incidentLineageEdges: () => opts.edges ?? [],
+    }
+  }
+
+  it('typesValidForNode: a dataset under dataPlatform can become container (valid child + can hold its column)', () => {
+    const ctx = makeCtx({ parentType: 'dataPlatform', children: [{ id: 'c', urn: 'c', name: 'id', type: 'column' }] })
+    const node = { id: 'n', urn: 'n', name: 'orders', type: 'dataset' }
+    expect(typesValidForNode(node, ctx)).toContain('container')
+  })
+  it('typesValidForNode: excludes types that cannot contain an existing child', () => {
+    const ctx = makeCtx({ parentType: 'dataPlatform', children: [{ id: 'c', urn: 'c', name: 'id', type: 'column' }] })
+    const node = { id: 'n', urn: 'n', name: 'orders', type: 'dataset' }
+    expect(typesValidForNode(node, ctx)).not.toContain('column') // column can't contain column
+  })
+  it('typesValidForNode: excludes types invalid under the parent', () => {
+    const ctx = makeCtx({ parentType: 'dataPlatform', children: [] })
+    const node = { id: 'n', urn: 'n', name: 'x', type: 'dataset' }
+    expect(typesValidForNode(node, ctx)).not.toContain('domain') // domain can't be under dataPlatform
+  })
+  it('typesValidForNode: a leaf with no children offers all types the parent can contain', () => {
+    const ctx = makeCtx({ parentType: 'dataset', children: [] })
+    const node = { id: 'n', urn: 'n', name: 'col', type: 'column' }
+    const res = typesValidForNode(node, ctx)
+    expect(res).toContain('column') // column is a valid child of dataset
   })
 })
