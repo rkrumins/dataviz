@@ -69,6 +69,7 @@ import { BlankCanvasEmptyState } from './BlankCanvasEmptyState'
 import { FirstStepsChecklist } from './FirstStepsChecklist'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
+import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
 import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 
@@ -348,9 +349,54 @@ export function ContextViewCanvas({
   // before useEdgeConnect exists) can arm connect-mode on the selected node.
   const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
 
+  // Forward-ref for the duplicate-subtree layer wiring. onNodeCopied /
+  // onNodeDuplicated fire from useDuplicateSubtree / useCanvasInteractions,
+  // both wired BEFORE nodeLayerMap / sortedLayers / assignEntityToLayer /
+  // parentMap exist in render order (mirrors startTraceRef). Keep a ref whose
+  // .current is refreshed once those are computed (below) and read it lazily
+  // inside the callbacks so they always see live layer state.
+  const duplicateWiringRef = useRef<{
+    nodeLayerMap: Map<string, string>
+    sortedLayers: ViewLayerConfig[]
+    assignEntityToLayer: (entityId: string, layerId: string) => { success: boolean }
+    parentMap: Map<string, string>
+    setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
+  } | null>(null)
+
+  // Duplicate a node's whole subtree as freshly-staged copies. onNodeCopied
+  // assigns EACH copy (root + every descendant) to its ORIGINAL's layer —
+  // ContextView only renders nodes that resolve to a layer, so without
+  // per-node assignment the descendant copies would vanish (don't rely on
+  // containment inheritance; assign explicitly). Reuses the same layer
+  // resolution the create flow's onEntityStaged uses.
+  const { duplicateSubtree } = useDuplicateSubtree({
+    onNodeCopied: (originalId, _originalUrn, copyUrn) => {
+      const wiring = duplicateWiringRef.current
+      if (!wiring) return
+      const layer = wiring.nodeLayerMap.get(originalId) ?? wiring.sortedLayers[0]?.id
+      if (layer) wiring.assignEntityToLayer(copyUrn, layer)
+    },
+  })
+
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
+    duplicateSubtree,
+    onNodeDuplicated: (originalId, rootCopyUrn) => {
+      // Reveal the copy: expand the original's parent (shows the new sibling)
+      // and the root copy itself (shows its just-staged children). Mirrors
+      // GraphCanvas's onNodeDuplicated, using this file's parentMap /
+      // setExpandedNodes (via the forward-ref).
+      const wiring = duplicateWiringRef.current
+      if (!wiring) return
+      const parentId = wiring.parentMap.get(originalId)
+      wiring.setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(rootCopyUrn)
+        return next
+      })
+    },
     onConnectMode: (nodeId) => {
       // Draft-gated on the SCOPED isDraft: on Published (or a draft open on a different data
       // source) the connect shortcut is inert — managers enter edit via the header's Edit button.
@@ -1033,6 +1079,11 @@ export function ContextViewCanvas({
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
   })
+
+  // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
+  // ref declaration near the interactions call). Read lazily by onNodeCopied /
+  // onNodeDuplicated so each duplicate action sees live layer state.
+  duplicateWiringRef.current = { nodeLayerMap, sortedLayers, assignEntityToLayer, parentMap, setExpandedNodes }
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
