@@ -158,6 +158,10 @@ export function useLayerAssignment({
     // /plans/i-want-you-to-precious-sunset.md.
     const viewHasExplicitAssignments = explicitAssignments.size > 0
 
+    // Valid layer ids in this view — a node's persisted `layerAssignment` is only
+    // honoured when it still names a layer that exists here.
+    const validLayerIds = new Set(sortedLayers.map(l => l.id))
+
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
     // Root-level nodes use the priority chain below, with closed-scope
@@ -191,6 +195,18 @@ export function useLayerAssignment({
         //    wins. The user just dropped this onto a layer; respect that
         //    immediately regardless of view config or backend state.
         const instanceAssignment = instanceAssignments.get(nodeId)
+        // Explicit, per-entity layer the app stamped on the node itself — on
+        // create (creation layer) and on an explicit move (EntityDrawer "Layer"
+        // field → an `update_entity` that rewrites `layerAssignment`). It is the
+        // ONLY assignment signal that reliably survives a reload (persisted on the
+        // node, rehydrated via toCanvasNode), so we read it HERE in the render
+        // authority rather than depending on the backend assignment engine having
+        // been re-run. Honoured below session drag + explicit view assignments,
+        // but ABOVE generic rules — a broad entity-type rule must not override an
+        // explicit per-entity placement (that made a saved move "disappear" on
+        // reload). Validated so a stale layer id can't strand the node.
+        const rawNodeLayer = nodeMap.get(nodeId)?.data?.layerAssignment as string | undefined
+        const nodeLayerId = rawNodeLayer && validLayerIds.has(rawNodeLayer) ? rawNodeLayer : undefined
         if (instanceAssignment) {
           myLayerId = instanceAssignment.layerId
         } else if (viewHasExplicitAssignments) {
@@ -198,16 +214,20 @@ export function useLayerAssignment({
           //     Only entities listed in ``explicitAssignments`` get a
           //     layer; everything else drops out. This is what makes the
           //     canvas mirror the wizard's "if you didn't drag it, it's
-          //     not in the view" mental model.
+          //     not in the view" mental model. We deliberately do NOT consult
+          //     the node's own `layerAssignment` here — it is a GLOBAL node
+          //     property, so honouring it in a closed-scope view would leak in
+          //     entities this view never assigned (cross-view contamination).
           myLayerId = explicitAssignments.get(nodeId)
         } else {
           // 2b. Open-scope mode: empty / new view with no explicit
-          //     assignments. Fall back to backend → rules → inheritance
-          //     so the user has data to start dragging from in the
-          //     wizard.
+          //     assignments. Fall back to backend → node property → rules →
+          //     inheritance so the user has data to start dragging from.
           const backendAssignment = effectiveAssignments.get(nodeId)
           if (backendAssignment?.layerId) {
             myLayerId = backendAssignment.layerId
+          } else if (nodeLayerId) {
+            myLayerId = nodeLayerId
           } else if (ruleAssignments.has(nodeId)) {
             myLayerId = ruleAssignments.get(nodeId)
           } else if (inheritedLayerId) {

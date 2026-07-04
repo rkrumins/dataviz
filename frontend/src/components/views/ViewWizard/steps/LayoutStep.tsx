@@ -13,14 +13,17 @@ import {
     Trash2,
     ChevronDown,
     ChevronRight,
-    Wand2
+    Wand2,
+    Sparkles,
+    Repeat
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
 import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
-import { useSchemaEntityTypes } from '@/store/schema'
+import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
+import { blankQuickStartTemplates, type BlankTemplate } from '../blankTemplates'
 
 // ============================================
 // Types
@@ -96,6 +99,98 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
 const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#6366f1']
 
 // ============================================
+// Blank-model Quick Start template gallery
+// ============================================
+
+/** Mini preview: up to five neutral column bars with truncated names. Deliberately
+ *  monochrome (the layers' real colors show on the canvas, not here) — five cards of
+ *  saturated bars read as noise; only the SELECTED card's bars take a soft accent. */
+function TemplatePreview({ layers, active }: { layers: ViewLayerConfig[]; active?: boolean }) {
+    if (layers.length === 0) {
+        return (
+            <div className="flex items-center justify-center h-[52px] rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-[10px] text-slate-400">
+                Empty canvas
+            </div>
+        )
+    }
+    const shown = layers.slice(0, 5)
+    const extra = layers.length - shown.length
+    return (
+        <div className="flex items-end gap-1.5">
+            {shown.map((layer, i) => (
+                <div key={layer.id ?? i} className="flex-1 min-w-0">
+                    <div className={cn(
+                        'h-8 rounded-md border',
+                        active
+                            ? 'bg-blue-100 border-blue-200 dark:bg-blue-900/40 dark:border-blue-800'
+                            : 'bg-slate-100 border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60',
+                    )} />
+                    <div className="mt-1 text-[9px] text-slate-500 dark:text-slate-400 truncate text-center" title={layer.name}>
+                        {layer.name}
+                    </div>
+                </div>
+            ))}
+            {extra > 0 && (
+                <div className="flex-none">
+                    <div className="h-8 px-1.5 rounded-md bg-slate-100 border border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60 flex items-center justify-center text-[9px] font-semibold text-slate-500 dark:text-slate-300">
+                        +{extra}
+                    </div>
+                    <div className="mt-1 text-[9px] text-transparent">.</div>
+                </div>
+            )}
+        </div>
+    )
+}
+
+/** Gallery of Quick Start templates — one card per template with a mini preview. */
+function BlankTemplateGallery({
+    templates,
+    activeId,
+    onApply,
+}: {
+    templates: BlankTemplate[]
+    activeId?: string
+    onApply: (template: BlankTemplate) => void
+}) {
+    return (
+        <div className="grid gap-3 sm:grid-cols-2">
+            {templates.map(template => {
+                const active = template.id === activeId
+                return (
+                    <button
+                        key={template.id}
+                        type="button"
+                        onClick={() => onApply(template)}
+                        className={cn(
+                            'relative text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
+                            active
+                                ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
+                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600',
+                        )}
+                    >
+                        {template.recommended && (
+                            <span className="absolute -top-2 -right-2 inline-flex items-center gap-0.5 px-2 py-0.5 text-[10px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-full shadow">
+                                <Sparkles className="w-3 h-3" /> Recommended
+                            </span>
+                        )}
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                            <h5 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{template.name}</h5>
+                            <span className="text-[10px] text-slate-400 shrink-0">
+                                {template.layers.length} layer{template.layers.length !== 1 ? 's' : ''}
+                            </span>
+                        </div>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 leading-snug mb-3">
+                            {template.description}
+                        </p>
+                        <TemplatePreview layers={template.layers} active={active} />
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+// ============================================
 // Component
 // ============================================
 
@@ -110,6 +205,34 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
         () => schemaEntityTypes.slice().sort((a, b) => a.name.localeCompare(b.name)),
         [schemaEntityTypes]
     )
+
+    // ── Blank-model Quick Start templates ─────────────────────────────────────
+    // Blank models pick their starting layers here explicitly, from a gallery.
+    // The ontology template mirrors the hydrated schema; the rest are generic.
+    const blankSchema = useSchemaStore(s => s.schema)
+    const blankTemplates = useMemo(
+        () => (blank && blankSchema ? blankQuickStartTemplates(blankSchema) : []),
+        [blank, blankSchema],
+    )
+    // Gallery stays open until a template is explicitly chosen, and re-opens when
+    // the user switches. `layoutTemplateId` persists the choice across step nav.
+    const [galleryOpen, setGalleryOpen] = useState(false)
+    const showGallery = galleryOpen || !formData.layoutTemplateId
+
+    const handleApplyBlankTemplate = useCallback((template: BlankTemplate) => {
+        updateFormData({
+            layers: template.layers.map(l => ({ ...l, entityTypes: [...(l.entityTypes ?? [])] })),
+            layoutTemplateId: template.id,
+        })
+        setGalleryOpen(false)
+    }, [updateFormData])
+
+    const handleSwitchTemplate = useCallback(() => {
+        if (formData.layers.length > 0 && !window.confirm('Switching templates will replace your current layers. Continue?')) {
+            return
+        }
+        setGalleryOpen(true)
+    }, [formData.layers.length])
 
     // ── Backend templates ────────────────────────────────────────────────────
     const [backendTemplates, setBackendTemplates] = useState<LayerTemplate[]>([])
@@ -195,6 +318,16 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
         })
     }, [updateFormData])
 
+    // What the reference-layout section renders:
+    //  - blank + gallery open → the Quick Start gallery
+    //  - blank + empty template chosen → an add-your-own prompt
+    //  - non-blank + no layers → the legacy backend/local template picker
+    //  - otherwise (layers exist) → the layer editor
+    const showBlankGallery = blank && showGallery
+    const showBlankEmptyState = blank && !showGallery && formData.layers.length === 0
+    const showOldTemplates = !blank && formData.layers.length === 0
+    const showLayerList = formData.layers.length > 0 && !showBlankGallery
+
     return (
         <div className="space-y-8">
             {/* Layout Type Selection */}
@@ -278,23 +411,67 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                         <div className="flex items-center justify-between">
                             <div>
                                 <h4 className="font-bold text-slate-900 dark:text-white">
-                                    Configure Layers
+                                    {showBlankGallery ? 'Choose a starting template' : 'Configure Layers'}
                                 </h4>
                                 <p className="text-sm text-slate-500">
-                                    Define the horizontal layers for your context view
+                                    {showBlankGallery
+                                        ? 'Pick a starting arrangement — you can refine the layers next'
+                                        : 'Define the horizontal layers for your context view'}
                                 </p>
                             </div>
-                            <button
-                                onClick={handleAddLayer}
-                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-                            >
-                                <Plus className="w-4 h-4" />
-                                Add Layer
-                            </button>
+                            <div className="flex items-center gap-2">
+                                {blank && !showGallery && (
+                                    <button
+                                        onClick={handleSwitchTemplate}
+                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                    >
+                                        <Repeat className="w-4 h-4" />
+                                        Switch template
+                                    </button>
+                                )}
+                                {!showBlankGallery && (
+                                    <button
+                                        onClick={handleAddLayer}
+                                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                                    >
+                                        <Plus className="w-4 h-4" />
+                                        Add Layer
+                                    </button>
+                                )}
+                            </div>
                         </div>
 
-                        {/* Templates — shown when no layers yet */}
-                        {formData.layers.length === 0 && (
+                        {/* Blank models: explicit Quick Start template gallery */}
+                        {showBlankGallery && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="p-4 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-xl border border-indigo-200 dark:border-indigo-800"
+                            >
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                                    <span className="font-semibold text-slate-800 dark:text-slate-200">Quick Start Templates</span>
+                                </div>
+                                <BlankTemplateGallery
+                                    templates={blankTemplates}
+                                    activeId={formData.layoutTemplateId}
+                                    onApply={handleApplyBlankTemplate}
+                                />
+                            </motion.div>
+                        )}
+
+                        {/* Blank models: empty template chosen — prompt to build layers */}
+                        {showBlankEmptyState && (
+                            <div className="flex flex-col items-center justify-center py-10 text-center rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
+                                <p className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">Starting from an empty canvas</p>
+                                <p className="text-xs text-slate-400 max-w-[280px]">
+                                    Add layers to organize your model, or switch to a template above.
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Templates — shown when no layers yet (existing-data mode) */}
+                        {showOldTemplates && (
                             <motion.div
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
@@ -338,7 +515,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                         )}
 
                         {/* Layer List */}
-                        {formData.layers.length > 0 && (
+                        {showLayerList && (
                             <Reorder.Group
                                 axis="y"
                                 values={formData.layers}

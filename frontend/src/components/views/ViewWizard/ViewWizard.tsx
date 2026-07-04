@@ -56,7 +56,7 @@ import { useWizardScope } from '@/hooks/useWizardScope'
 import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
-import { ontologyToWorkspaceSchema, deriveLayersFromOntology, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
+import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
 
 import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
@@ -123,6 +123,9 @@ export interface WizardFormData {
     /** Blank models only: last known availability of the (derived or edited)
      *  graph name — false blocks Next on Basics; server re-validates at submit. */
     graphNameAvailable?: boolean
+    /** Blank models only: the Quick Start template the user picked on Layout.
+     *  Undefined until an explicit choice is made — gates Next in blank mode. */
+    layoutTemplateId?: string
 }
 
 type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
@@ -144,8 +147,6 @@ interface ViewWizardBodyProps extends Omit<ViewWizardProps, 'initialWorkspaceId'
     /** Blank mode: provider + ontology to provision against on submit. */
     blankProviderId?: string | null
     blankOntologyId?: string | null
-    /** Blank mode: reference-layout layers derived from the chosen ontology. */
-    initialLayers?: ViewLayerConfig[]
 }
 
 const LAYOUT_TYPES = [
@@ -557,7 +558,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     // Blank-mode pickers: FalkorDB providers + published semantic layers.
     const blankOptions = useBlankScopeOptions(selectedWsId)
     const chosenProvider = useMemo(
-        () => blankOptions.providers.find(p => p.id === selectedProviderId) ?? null,
+        () => blankOptions.providers.find(o => o.provider.id === selectedProviderId)?.provider ?? null,
         [blankOptions.providers, selectedProviderId],
     )
     const chosenOntology = useMemo(
@@ -616,15 +617,12 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
         [scopeMode, workspaces, selectedWsId, selectedDsId, chosenProvider, chosenOntology],
     )
 
-    // Derive the blank model's schema + starting layers from the chosen ontology,
-    // and hydrate the schema store for the blank body's lifetime (no SchemaScope).
+    // Derive the blank model's schema from the chosen ontology and hydrate the
+    // schema store for the blank body's lifetime (no SchemaScope). Starting
+    // layers are chosen explicitly on the Layout step, not pre-filled here.
     const blankSchema = useMemo(
         () => chosenOntology ? ontologyToWorkspaceSchema(chosenOntology) : null,
         [chosenOntology],
-    )
-    const blankLayers = useMemo(
-        () => blankSchema ? deriveLayersFromOntology(blankSchema) : [],
-        [blankSchema],
     )
     const blankActive = scopeConfirmed && scopeMode === 'blank'
     const blankReady = useBlankSchemaHydration(blankActive ? blankSchema : null, selectedWsId)
@@ -703,7 +701,6 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 scopeMode="blank"
                 blankProviderId={selectedProviderId}
                 blankOntologyId={selectedOntologyId}
-                initialLayers={blankLayers}
             />
         )
     }
@@ -747,7 +744,6 @@ function ViewWizardBody({
     scopeMode = 'existing',
     blankProviderId,
     blankOntologyId,
-    initialLayers,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
@@ -760,15 +756,15 @@ function ViewWizardBody({
     const provisionRef = useRef<BlankGraphResult | null>(null)
     const [provisionError, setProvisionError] = useState<string | null>(null)
 
-    // Create-mode initial form: blank pre-fills reference layers from the ontology.
+    // Create-mode initial form: layers start empty for both existing and blank
+    // scopes — blank models choose their starting layers via a template on Layout.
     const makeCreateFormData = useCallback((): WizardFormData => {
         const base = getInitialFormData(schema)
         return {
             ...base,
-            layers: isBlank ? (initialLayers ?? base.layers) : base.layers,
             dataSourceId: resolvedDataSourceId ?? undefined,
         }
-    }, [schema, isBlank, initialLayers, resolvedDataSourceId])
+    }, [schema, resolvedDataSourceId])
 
     const fullViewQuery = useViewFull(mode === 'edit' ? viewId : null)
     const editingView = useMemo(() => {
@@ -869,7 +865,15 @@ function ViewWizardBody({
                 }
                 return true
             }
-            case 'layout': return formData.layoutType !== undefined
+            case 'layout': {
+                // Blank models must make an explicit Quick Start template choice
+                // before proceeding (empty is a valid, explicit choice). Reference
+                // layout is where templates/layers apply; other layouts pass through.
+                if (isBlank && formData.layoutType === 'reference') {
+                    return formData.layoutTemplateId !== undefined
+                }
+                return formData.layoutType !== undefined
+            }
             case 'assignment': return true
             case 'entities': return formData.visibleEntityTypes.length > 0
             case 'preview': return true

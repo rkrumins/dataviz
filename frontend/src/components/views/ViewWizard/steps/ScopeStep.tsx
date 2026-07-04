@@ -36,13 +36,15 @@ import {
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
-import type { ProviderResponse } from '@/services/providerService'
+import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
+import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import type { ScopeMode } from '../ViewWizard'
+import type { ProviderScopeOption } from '../useBlankScopeOptions'
 
 // ─── Types ─────────────────────────────────────────────────────────
 
@@ -59,8 +61,8 @@ export interface ScopeStepProps {
     // ── Blank-model mode ──────────────────────────────────────────
     scopeMode: ScopeMode
     onScopeModeChange: (mode: ScopeMode) => void
-    /** FalkorDB providers a blank model can be provisioned on (pre-filtered). */
-    providers: ProviderResponse[]
+    /** Providers (all types) a blank model can be provisioned on, enriched with counts. */
+    providers: ProviderScopeOption[]
     /** Published semantic layers a blank model can be seeded from (pre-filtered). */
     ontologies: OntologyDefinitionResponse[]
     blankOptionsLoading: boolean
@@ -590,23 +592,94 @@ function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: Sc
     )
 }
 
-/** Shared card shell for the two blank-mode pickers, matching DataSourceCard's language. */
-function PickerCard({
-    isSelected,
-    icon,
-    title,
-    onClick,
-    children,
-}: {
-    isSelected: boolean
-    icon: ReactNode
-    title: string
-    onClick: () => void
-    children?: ReactNode
-}) {
+// Provider-type visual meta — copied from admin/RegistryConnections so the
+// wizard renders the same brand tint/label without importing the admin surface.
+const PROVIDER_TYPE_META: Record<string, { label: string; color: string; desc: string }> = {
+    falkordb: { label: 'FalkorDB', color: 'text-amber-500 bg-amber-500/10 border-amber-500/20', desc: 'High-performance graph database' },
+    neo4j: { label: 'Neo4j', color: 'text-blue-500 bg-blue-500/10 border-blue-500/20', desc: 'The original graph database' },
+    datahub: { label: 'DataHub', color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', desc: 'LinkedIn metadata platform' },
+    spanner: { label: 'Google Spanner Graph', color: 'text-sky-500 bg-sky-500/10 border-sky-500/20', desc: 'Globally-distributed property graph on Spanner' },
+}
+/** Standard types always get a filter pill (disabled when count is 0). */
+const PROVIDER_TYPE_ORDER: ProviderType[] = ['falkordb', 'neo4j', 'datahub', 'spanner']
+
+function providerMeta(type: string) {
+    return PROVIDER_TYPE_META[type] ?? { label: type, color: 'text-slate-500 bg-slate-500/10 border-slate-500/20', desc: '' }
+}
+
+/** Provider registry + semantic layer management routes (used by empty states). */
+const CONNECTIONS_ROUTE = '/ingestion?tab=connections'
+const SEMANTIC_LAYERS_ROUTE = '/schema'
+
+/** Provider card — brand logo + tint, health dot, graph counts, blank-support gating. */
+function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeOption; isSelected: boolean; onSelect: () => void }) {
+    const { provider, graphCount, inUseCount, blankSupported } = option
+    const meta = providerMeta(provider.providerType)
+    const Logo = getProviderLogo(provider.providerType)
+
     return (
         <button
-            onClick={onClick}
+            type="button"
+            onClick={blankSupported ? onSelect : undefined}
+            aria-disabled={!blankSupported}
+            className={cn(
+                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
+                blankSupported ? 'hover:shadow-md' : 'cursor-default',
+                isSelected
+                    ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
+                    : blankSupported
+                        ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600'
+                        : 'border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40',
+            )}
+        >
+            {isSelected && (
+                <div className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-blue-600 flex items-center justify-center">
+                    <Check className="w-3 h-3 text-white" />
+                </div>
+            )}
+            <div className="flex items-start gap-3">
+                <div className={cn('w-10 h-10 rounded-xl border flex items-center justify-center shrink-0', meta.color)}>
+                    <Logo className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1 pr-6">
+                    <div className="flex items-center gap-1.5">
+                        <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{provider.name}</h4>
+                        <span
+                            className={cn('w-2 h-2 rounded-full shrink-0', provider.isActive ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600')}
+                            title={provider.isActive ? 'Active' : 'Inactive'}
+                        />
+                    </div>
+                    <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>{meta.label}</span>
+                        {provider.host && <span className="font-mono text-slate-400 dark:text-slate-500 truncate">· {provider.host}</span>}
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-2 text-[11px]">
+                        <span className="inline-flex items-center gap-1 text-slate-600 dark:text-slate-300">
+                            <Layers className="w-3 h-3 text-slate-400" />
+                            <span className="font-semibold">{graphCount}</span>
+                            <span className="text-slate-400">graph{graphCount !== 1 ? 's' : ''}</span>
+                        </span>
+                        {inUseCount > 0 && <span className="text-slate-400">· {inUseCount} in use</span>}
+                    </div>
+                    {!blankSupported && (
+                        <div className="mt-1.5 text-[11px] text-slate-400 dark:text-slate-500 italic">
+                            Not yet available for blank models
+                        </div>
+                    )}
+                </div>
+            </div>
+        </button>
+    )
+}
+
+/** Ontology card — semantic-layer tile, published badge, type counts, description. */
+function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDefinitionResponse; isSelected: boolean; onSelect: () => void }) {
+    const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
+    const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
+    return (
+        <button
+            type="button"
+            onClick={onSelect}
             className={cn(
                 'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
                 isSelected
@@ -620,59 +693,80 @@ function PickerCard({
                 </div>
             )}
             <div className="flex items-start gap-3">
-                <div className={cn(
-                    'w-9 h-9 rounded-lg flex items-center justify-center shrink-0',
-                    isSelected
-                        ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
-                        : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
-                )}>
-                    {icon}
+                <div className="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 text-violet-500 bg-violet-500/10 border-violet-500/20">
+                    <Sparkles className="w-5 h-5" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
-                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 break-words">{title}</h4>
-                    {children}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                        <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
+                        {ontology.isPublished && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                                <Check className="w-2.5 h-2.5" /> Published
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-3 mt-1">
+                        <div className="flex items-center gap-1 text-xs">
+                            <Layers className="w-3 h-3 text-emerald-500" />
+                            <span className="font-semibold text-slate-700 dark:text-slate-300">{entityCount}</span>
+                            <span className="text-slate-400">entities</span>
+                        </div>
+                        <div className="flex items-center gap-1 text-xs">
+                            <GitBranch className="w-3 h-3 text-violet-500" />
+                            <span className="font-semibold text-slate-700 dark:text-slate-300">{relCount}</span>
+                            <span className="text-slate-400">relationships</span>
+                        </div>
+                    </div>
+                    {ontology.description && (
+                        <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500 line-clamp-2 leading-relaxed">
+                            {ontology.description}
+                        </p>
+                    )}
                 </div>
             </div>
         </button>
     )
 }
 
-function ProviderCard({ provider, isSelected, onClick }: { provider: ProviderResponse; isSelected: boolean; onClick: () => void }) {
+/** Per-type filter pill with a count; disabled when its type has no providers. */
+function TypePill({ label, count, active, disabled, onClick }: { label: string; count: number; active: boolean; disabled: boolean; onClick: () => void }) {
     return (
-        <PickerCard isSelected={isSelected} onClick={onClick} icon={<Server className="w-4 h-4" />} title={provider.name}>
-            <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                <span className="uppercase tracking-wide">{provider.providerType}</span>
-                {provider.host && <span className="text-slate-400 dark:text-slate-500 truncate">· {provider.host}</span>}
-            </div>
-            <div className="flex items-center gap-1.5 mt-1 text-[11px]">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-                <span className="text-emerald-600 dark:text-emerald-400">Active</span>
-            </div>
-        </PickerCard>
+        <button
+            type="button"
+            disabled={disabled}
+            onClick={onClick}
+            className={cn(
+                'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors',
+                disabled
+                    ? 'opacity-40 cursor-not-allowed border-slate-200 dark:border-slate-700 text-slate-400'
+                    : active
+                        ? 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                        : 'border-slate-200 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800',
+            )}
+        >
+            {label}
+            <span className={cn('tabular-nums', active ? 'text-blue-500' : 'text-slate-400')}>{count}</span>
+        </button>
     )
 }
 
-function OntologyCard({ ontology, isSelected, onClick }: { ontology: OntologyDefinitionResponse; isSelected: boolean; onClick: () => void }) {
-    const entityCount = Object.keys(ontology.entityTypeDefinitions ?? {}).length
-    const relCount = Object.keys(ontology.relationshipTypeDefinitions ?? {}).length
+/** Skeleton grid shown while providers + semantic layers load. */
+function PickerSkeleton() {
     return (
-        <PickerCard isSelected={isSelected} onClick={onClick} icon={<Sparkles className="w-4 h-4" />} title={ontology.name}>
-            <div className="flex items-center gap-3 mt-1">
-                <div className="flex items-center gap-1 text-xs">
-                    <Layers className="w-3 h-3 text-emerald-500" />
-                    <span className="font-semibold text-slate-700 dark:text-slate-300">{entityCount}</span>
-                    <span className="text-slate-400">entities</span>
+        <div className="grid gap-3 sm:grid-cols-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="rounded-xl border-2 border-slate-200 dark:border-slate-700 p-4 animate-pulse">
+                    <div className="flex items-start gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-700 shrink-0" />
+                        <div className="flex-1 space-y-2 pt-1">
+                            <div className="h-3 w-2/3 bg-slate-200 dark:bg-slate-700 rounded" />
+                            <div className="h-2 w-1/2 bg-slate-100 dark:bg-slate-800 rounded" />
+                            <div className="h-2 w-1/3 bg-slate-100 dark:bg-slate-800 rounded" />
+                        </div>
+                    </div>
                 </div>
-                <div className="flex items-center gap-1 text-xs">
-                    <GitBranch className="w-3 h-3 text-violet-500" />
-                    <span className="font-semibold text-slate-700 dark:text-slate-300">{relCount}</span>
-                    <span className="text-slate-400">relationships</span>
-                </div>
-            </div>
-            {ontology.scope && (
-                <div className="mt-1 text-[11px] text-slate-400 dark:text-slate-500 truncate">Scope: {ontology.scope}</div>
-            )}
-        </PickerCard>
+            ))}
+        </div>
     )
 }
 
@@ -706,7 +800,7 @@ function BlankScopePickers({
     onSelectProvider,
     onSelectOntology,
 }: {
-    providers: ProviderResponse[]
+    providers: ProviderScopeOption[]
     ontologies: OntologyDefinitionResponse[]
     loading: boolean
     selectedProviderId: string | null
@@ -714,44 +808,81 @@ function BlankScopePickers({
     onSelectProvider: (id: string) => void
     onSelectOntology: (id: string) => void
 }) {
-    if (loading) {
-        return (
-            <div className="flex-1 flex items-center justify-center py-12">
-                <div className="flex items-center gap-2 text-sm text-slate-400">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Loading connections and semantic layers…
-                </div>
-            </div>
-        )
-    }
+    const [typeFilter, setTypeFilter] = useState<'all' | string>('all')
+
+    const countsByType = useMemo(() => {
+        const counts: Record<string, number> = {}
+        for (const o of providers) counts[o.provider.providerType] = (counts[o.provider.providerType] ?? 0) + 1
+        return counts
+    }, [providers])
+
+    // Standard types first, then any non-standard type that's actually present.
+    const pillTypes = useMemo(() => {
+        const extras = Object.keys(countsByType).filter(t => !PROVIDER_TYPE_ORDER.includes(t as ProviderType))
+        return [...PROVIDER_TYPE_ORDER, ...extras]
+    }, [countsByType])
+
+    const visibleProviders = useMemo(
+        () => (typeFilter === 'all' ? providers : providers.filter(o => o.provider.providerType === typeFilter)),
+        [providers, typeFilter],
+    )
+
     return (
         <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
             {/* Provider picker */}
             <section className="space-y-3">
                 <div className="flex items-center gap-2">
                     <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">FalkorDB connection</span>
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Graph connection</span>
                     <span className="text-xs text-slate-400 ml-auto">{providers.length}</span>
                 </div>
-                {providers.length === 0 ? (
+
+                {loading ? (
+                    <PickerSkeleton />
+                ) : providers.length === 0 ? (
                     <BlankPickerEmpty
                         icon={<Server className="w-6 h-6" />}
-                        title="No FalkorDB connections available"
-                        hint="Ask an admin to register a FalkorDB provider for this workspace."
-                        href="/ingestion?tab=connections"
+                        title="No connections available"
+                        hint="Ask an admin to register a graph provider for this workspace."
+                        href={CONNECTIONS_ROUTE}
                         cta="Manage connections"
                     />
                 ) : (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        {providers.map(p => (
-                            <ProviderCard
-                                key={p.id}
-                                provider={p}
-                                isSelected={p.id === selectedProviderId}
-                                onClick={() => onSelectProvider(p.id)}
+                    <>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            <TypePill label="All" count={providers.length} active={typeFilter === 'all'} disabled={false} onClick={() => setTypeFilter('all')} />
+                            {pillTypes.map(t => (
+                                <TypePill
+                                    key={t}
+                                    label={providerMeta(t).label}
+                                    count={countsByType[t] ?? 0}
+                                    active={typeFilter === t}
+                                    disabled={(countsByType[t] ?? 0) === 0}
+                                    onClick={() => setTypeFilter(t)}
+                                />
+                            ))}
+                        </div>
+                        {visibleProviders.length === 0 ? (
+                            <BlankPickerEmpty
+                                icon={<Server className="w-6 h-6" />}
+                                title={`No ${providerMeta(typeFilter).label} connections`}
+                                hint="Register one in the provider registry, or pick another type above."
+                                href={CONNECTIONS_ROUTE}
+                                cta="Manage connections"
                             />
-                        ))}
-                    </div>
+                        ) : (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                {visibleProviders.map(o => (
+                                    <ProviderCard
+                                        key={o.provider.id}
+                                        option={o}
+                                        isSelected={o.provider.id === selectedProviderId}
+                                        onSelect={() => onSelectProvider(o.provider.id)}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                    </>
                 )}
             </section>
 
@@ -762,12 +893,14 @@ function BlankScopePickers({
                     <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Published semantic layer</span>
                     <span className="text-xs text-slate-400 ml-auto">{ontologies.length}</span>
                 </div>
-                {ontologies.length === 0 ? (
+                {loading ? (
+                    <PickerSkeleton />
+                ) : ontologies.length === 0 ? (
                     <BlankPickerEmpty
                         icon={<Sparkles className="w-6 h-6" />}
                         title="No published semantic layers"
                         hint="Publish a semantic layer to seed a blank model from it."
-                        href="/schema"
+                        href={SEMANTIC_LAYERS_ROUTE}
                         cta="Manage semantic layers"
                     />
                 ) : (
@@ -777,7 +910,7 @@ function BlankScopePickers({
                                 key={o.id}
                                 ontology={o}
                                 isSelected={o.id === selectedOntologyId}
-                                onClick={() => onSelectOntology(o.id)}
+                                onSelect={() => onSelectOntology(o.id)}
                             />
                         ))}
                     </div>
