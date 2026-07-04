@@ -23,7 +23,7 @@
 
 ## File Structure
 
-All new files under `frontend/src/components/canvas/create/build/` (a focused sub-module) unless noted:
+All new files under `frontend/src/components/canvas/create/buildmode/` (a focused sub-module) unless noted:
 - `buildRow.ts` — `BuildRow` types + pure row operations (create/insertSibling/insertChild/outdent/remove/reindexDepths/parentOf). **Task 1.**
 - `validateBuildRows.ts` — pure validation + auto-fix. **Task 2.**
 - `stageBuildRows.ts` — O(n) planning (`planBuildStaging`, pure) + a thin hook (`useStageBuildRows`) that commits the plan. **Task 3.**
@@ -46,8 +46,8 @@ Modified:
 ### Task 1: `BuildRow` model + pure row operations
 
 **Files:**
-- Create: `frontend/src/components/canvas/create/build/buildRow.ts`
-- Test: `frontend/src/components/canvas/create/build/__tests__/buildRow.test.ts`
+- Create: `frontend/src/components/canvas/create/buildmode/buildRow.ts`
+- Test: `frontend/src/components/canvas/create/buildmode/__tests__/buildRow.test.ts`
 
 **Interfaces:**
 - Produces:
@@ -116,7 +116,7 @@ describe('buildRow', () => {
   })
 })
 ```
-- [ ] **Step 2: Run to verify they fail** — `cd frontend && npx vitest run src/components/canvas/create/build/__tests__/buildRow.test.ts` → FAIL (module not found).
+- [ ] **Step 2: Run to verify they fail** — `cd frontend && npx vitest run src/components/canvas/create/buildmode/__tests__/buildRow.test.ts` → FAIL (module not found).
 - [ ] **Step 3: Implement `buildRow.ts`** — pure array transforms; `reindexDepths` walks each row's `parentId` chain (guard cycles with a visited set, cap at rows.length); `removeRow` computes the descendant set via `childrenOf` recursion; `makeRow` defaults `status:'valid'`, `issues:[]`, `fixes:[]`, `typeId:null`, `parentId:null`, `depth:0`.
 - [ ] **Step 4: Run to verify PASS.**
 - [ ] **Step 5: Commit** — `git add` the two files; `feat(build): BuildRow model + pure row operations`.
@@ -126,8 +126,8 @@ describe('buildRow', () => {
 ### Task 2: `validateBuildRows` — auto-fix + status
 
 **Files:**
-- Create: `frontend/src/components/canvas/create/build/validateBuildRows.ts`
-- Test: `frontend/src/components/canvas/create/build/__tests__/validateBuildRows.test.ts`
+- Create: `frontend/src/components/canvas/create/buildmode/validateBuildRows.ts`
+- Test: `frontend/src/components/canvas/create/buildmode/__tests__/validateBuildRows.test.ts`
 
 **Interfaces:**
 - Consumes: `BuildRow` (Task 1); `allowedChildTypeIds`, `containmentChains`, `deriveContainmentEdges`, `planRetype`, `findEntityType`, `RetypeContext` (ontologyPreflightService — verify sigs).
@@ -173,9 +173,9 @@ Write concrete fixtures + assertions on `typeId`, `parentId`, `status`, `fixes[]
 ### Task 3: `stageBuildRows` — O(n) batch staging
 
 **Files:**
-- Create: `frontend/src/components/canvas/create/build/stageBuildRows.ts`
+- Create: `frontend/src/components/canvas/create/buildmode/stageBuildRows.ts`
 - Modify: `frontend/src/store/stagedChangesStore.ts` (add `stageMany`)
-- Test: `frontend/src/components/canvas/create/build/__tests__/stageBuildRows.test.ts`
+- Test: `frontend/src/components/canvas/create/buildmode/__tests__/stageBuildRows.test.ts`
 
 **Interfaces:**
 - Produces:
@@ -209,9 +209,9 @@ export function useStageBuildRows(): {
 ### Task 4: `buildRowsStore` + builder-store surface/mode extension
 
 **Files:**
-- Create: `frontend/src/components/canvas/create/build/buildRowsStore.ts`
+- Create: `frontend/src/components/canvas/create/buildmode/buildRowsStore.ts`
 - Modify: `frontend/src/components/canvas/create/hierarchyBuilderStore.ts`
-- Test: `frontend/src/components/canvas/create/build/__tests__/buildRowsStore.test.ts`
+- Test: `frontend/src/components/canvas/create/buildmode/__tests__/buildRowsStore.test.ts`
 
 **Interfaces:**
 - `buildRowsStore` (Zustand): `{ rows: BuildRow[]; setRows; addSibling(afterId); addChild(parentId); updateRow(id, patch); removeRow(id); reset() }` — the adapters (Tasks 6-8) mutate this; every mutation runs `reindexDepths`. Kept separate from `hierarchyBuilderStore` (open/scope) for single responsibility.
@@ -228,7 +228,7 @@ export function useStageBuildRows(): {
 ### Task 5: `BuildPanel` shell + canvas mounting + guided entry
 
 **Files:**
-- Create: `frontend/src/components/canvas/create/build/BuildPanel.tsx`
+- Create: `frontend/src/components/canvas/create/buildmode/BuildPanel.tsx`
 - Modify: `ContextViewCanvas.tsx`, `GraphCanvas.tsx`, `HierarchyCanvas.tsx`
 
 **Interfaces:**
@@ -248,7 +248,7 @@ export function useStageBuildRows(): {
 
 ### Task 6: `BuildOutline` adapter (keyboard outliner)
 
-**Files:** Create `build/BuildOutline.tsx`; may extract shared keyboard logic from `useHierarchyOutline.ts` (do NOT break the existing rail — keep `useHierarchyOutline`'s public API intact; factor shared helpers only if clean).
+**Files:** Create `buildmode/BuildOutline.tsx`; may extract shared keyboard logic from `useHierarchyOutline.ts` (do NOT break the existing rail — keep `useHierarchyOutline`'s public API intact; factor shared helpers only if clean).
 
 **Behavior:** renders `buildRowsStore.rows` as an indented outline (type chip via `DynamicIcon`, name input); keyboard: Enter=`addSibling`, Tab=`addChild`, Shift+Tab=`outdent`, on the active row. Live type inference shown from `validateBuildRows`. Reuse the row visuals from `FlatTreeItem`/`HierarchyBuilderPanel`. **Verification:** manual keyboard flow builds a nested tree in the store; tsc ≤ baseline. Commit `feat(build): outline adapter`.
 
@@ -256,7 +256,7 @@ export function useStageBuildRows(): {
 
 ### Task 7: `BuildGrid` adapter (virtualized spreadsheet)
 
-**Files:** Create `build/BuildGrid.tsx`; Test `build/__tests__/BuildGrid.test.tsx` (light — a render + one edit assertion).
+**Files:** Create `buildmode/BuildGrid.tsx`; Test `buildmode/__tests__/BuildGrid.test.tsx` (light — a render + one edit assertion).
 
 **Behavior:** a **virtualized** table (`@tanstack/react-virtual`, as in `LayerColumn.tsx:441`) over `buildRowsStore.rows`; columns Name / Type (typeahead with `DynamicIcon`) / Parent (row-name typeahead) / Description; row actions add-sibling/add-child/duplicate/delete; **fill-down** (set a column for a multi-row selection) and **paste-into-cell**. Indentation reflects `depth`. Every edit → store mutation → `reindexDepths`. **Verification:** vitest render mounts 1000 rows without mounting 1000 DOM rows (assert only a window renders); manual fill-down. tsc ≤ baseline. Commit `feat(build): virtualized grid adapter`.
 
@@ -264,7 +264,7 @@ export function useStageBuildRows(): {
 
 ### Task 8: `BuildPaste` adapter (parse + preview)
 
-**Files:** Create `build/BuildPaste.tsx`. Reuse the existing `parseIndentedOutline` (`create/outlineParser.ts`) + a TSV split.
+**Files:** Create `buildmode/BuildPaste.tsx`. Reuse the existing `parseIndentedOutline` (`create/outlineParser.ts`) + a TSV split.
 
 **Behavior:** a textarea → on paste/parse, produce `BuildRow[]` (map parsed rows: indent→parent chain, `Type: Name` prefix→typeId), load them into `buildRowsStore`, and show the same live validation summary + a **virtualized** preview list with per-row status/fix badges and inline correction. "Add N items" commits to the store (then the user hits Apply in the shell). **Verification:** unit test the paste→BuildRow mapping (reuse/extend `outlineParser` tests); virtualized preview; tsc ≤ baseline. Commit `feat(build): paste adapter + preview`.
 
