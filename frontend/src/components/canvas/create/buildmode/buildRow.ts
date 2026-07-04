@@ -47,23 +47,43 @@ export function reindexDepths(rows: BuildRow[]): BuildRow[] {
   return rows.map(r => ({ ...r, depth: depthOf(r.id) }))
 }
 
+// The array index of the LAST node in `id`'s subtree (the node itself + all
+// descendants). Insertions use this so a new row lands after the anchor's whole
+// subtree, keeping the flat array in valid outline order (a node's descendants
+// always immediately follow it) — otherwise a new depth-1 child could land
+// between a node and its own children.
+function lastSubtreeIndex(rows: BuildRow[], id: string): number {
+  const subtree = new Set<string>([id])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const r of rows) {
+      if (r.parentId != null && subtree.has(r.parentId) && !subtree.has(r.id)) {
+        subtree.add(r.id)
+        changed = true
+      }
+    }
+  }
+  let last = -1
+  rows.forEach((r, i) => { if (subtree.has(r.id)) last = i })
+  return last
+}
+
 export function insertSiblingAfter(rows: BuildRow[], afterId: string, row: BuildRow): BuildRow[] {
   const anchor = rows.find(r => r.id === afterId)
   const newRow: BuildRow = { ...row, parentId: anchor ? anchor.parentId : null }
-  const index = rows.findIndex(r => r.id === afterId)
-  if (index === -1) return [...rows, newRow]
-  return [...rows.slice(0, index + 1), newRow, ...rows.slice(index + 1)]
+  if (!anchor) return [...rows, newRow]
+  // after the anchor's full subtree, so the new sibling follows the anchor's descendants
+  const insertIndex = lastSubtreeIndex(rows, afterId)
+  return [...rows.slice(0, insertIndex + 1), newRow, ...rows.slice(insertIndex + 1)]
 }
 
 export function insertChildOf(rows: BuildRow[], parentId: string, row: BuildRow): BuildRow[] {
   const newRow: BuildRow = { ...row, parentId }
-  const parentIndex = rows.findIndex(r => r.id === parentId)
-  if (parentIndex === -1) return [...rows, newRow]
-  // insert after the parent's last existing descendant, or right after the parent
-  const kids = childrenOf(rows, parentId)
-  const lastChild = kids[kids.length - 1]
-  const insertAfterId = lastChild ? lastChild.id : parentId
-  const insertIndex = rows.findIndex(r => r.id === insertAfterId)
+  if (rows.findIndex(r => r.id === parentId) === -1) return [...rows, newRow]
+  // after the parent's full existing subtree, so the new child becomes the last
+  // child and lands after every existing descendant (valid outline order)
+  const insertIndex = lastSubtreeIndex(rows, parentId)
   return [...rows.slice(0, insertIndex + 1), newRow, ...rows.slice(insertIndex + 1)]
 }
 

@@ -33,4 +33,24 @@ describe('buildRow', () => {
     expect(childrenOf(rows(), 'a').map(x => x.id)).toEqual(['b'])
     expect(childrenOf(rows(), null).map(x => x.id)).toEqual(['a'])
   })
+  it('insertChildOf places the new child AFTER the parent\'s full subtree (valid outline order)', () => {
+    // d is a child of a; must land after b AND b's child c, not between b and c
+    const r = insertChildOf(rows(), 'a', makeRow({ id: 'd', name: 'D' }))
+    expect(r.map(x => x.id)).toEqual(['a', 'b', 'c', 'd'])
+  })
+  it('insertSiblingAfter places the new sibling AFTER the anchor\'s full subtree', () => {
+    // d is a sibling of b (parent a); must land after b's subtree [b, c]
+    const r = insertSiblingAfter(rows(), 'b', makeRow({ id: 'd', name: 'D' }))
+    expect(r.map(x => x.id)).toEqual(['a', 'b', 'c', 'd'])
+    expect(r.find(x => x.id === 'd')!.parentId).toBe('a')
+  })
+  it('reindexDepths does not hang on a parentId cycle', () => {
+    const cyclic: BuildRow[] = [
+      makeRow({ id: 'a', name: 'A', parentId: 'b' }),
+      makeRow({ id: 'b', name: 'B', parentId: 'a' }),
+    ]
+    const r = reindexDepths(cyclic) // must terminate
+    expect(r).toHaveLength(2)
+    expect(r.every(x => Number.isFinite(x.depth))).toBe(true)
+  })
 })
