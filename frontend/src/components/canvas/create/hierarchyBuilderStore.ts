@@ -16,7 +16,7 @@
 import { create } from 'zustand'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
 
-export type BuilderMode = 'outline' | 'paste'
+export type BuilderMode = 'outline' | 'paste' | 'grid'
 
 interface HierarchyBuilderState {
   isOpen: boolean
@@ -30,7 +30,17 @@ interface HierarchyBuilderState {
   initialMode: BuilderMode
   /** Type-id chain when opened from a template chip. */
   initialTemplate: string[] | null
+  /** Which panel is open: the current rail, or the new Build surface. */
+  surface: 'rail' | 'build'
   open: (opts?: {
+    parentUrn?: string
+    layerId?: string
+    initialTypeId?: string
+    mode?: BuilderMode
+    template?: string[]
+    surface?: 'rail' | 'build'
+  }) => void
+  openBuild: (opts?: {
     parentUrn?: string
     layerId?: string
     initialTypeId?: string
@@ -40,13 +50,14 @@ interface HierarchyBuilderState {
   close: () => void
 }
 
-export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set) => ({
+export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get) => ({
   isOpen: false,
   parentUrn: null,
   layerId: null,
   initialTypeId: null,
   initialMode: 'outline',
   initialTemplate: null,
+  surface: 'rail',
 
   open: (opts) => {
     void ensureDraftOpen()
@@ -57,8 +68,11 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set) => (
       initialTypeId: opts?.initialTypeId ?? null,
       initialMode: opts?.mode ?? 'outline',
       initialTemplate: opts?.template ?? null,
+      surface: opts?.surface ?? 'rail',
     })
   },
+
+  openBuild: (opts) => get().open({ ...opts, surface: 'build' }),
 
   close: () =>
     set({
@@ -68,5 +82,6 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set) => (
       initialTypeId: null,
       initialMode: 'outline',
       initialTemplate: null,
+      surface: 'rail',
     }),
 }))
