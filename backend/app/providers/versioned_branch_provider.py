@@ -23,8 +23,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
-    AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge, GraphNode, NodeQuery,
-    TopLevelNodesResult, TraceResult,
+    AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
+    GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult, TraceResult,
 )
 
 
@@ -178,6 +178,68 @@ class VersionedBranchProvider:
         (shared by main and every branch) and passes edge-type sets into each call. Raising here
         makes ``ContextEngine._resolve_ontology``'s graceful-degradation explicit."""
         raise NotImplementedError("VersionedBranchProvider does not introspect ontology")
+
+    # ---- stats: counts + schema summaries over the composed branch state - #
+    async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
+        """Node/edge counts + per-type breakdowns from the composed branch state.
+
+        A branch (or stale-main) is served from Postgres, not FalkorDB — there is no projection to
+        scan and no stats cache to bypass, so ``bypass_cache`` is accepted for provider-parity with
+        the FalkorDB provider (the insights collector passes it) and ignored. Types are keyed exactly
+        as the projector labels them (``_sanitize_label(entityType or "Entity")`` / ``edgeType or
+        "REL"``) so the counts are byte-identical to what FalkorDB reports once main projects."""
+        from .falkordb_provider import _sanitize_label  # reuse the projector's label sanitiser
+        state = await self._svc.materialize_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of)
+        entity_type_counts: Dict[str, int] = {}
+        for p in state["nodes"].values():
+            lbl = _sanitize_label(p.get("entityType") or "Entity")
+            entity_type_counts[lbl] = entity_type_counts.get(lbl, 0) + 1
+        edge_type_counts: Dict[str, int] = {}
+        for p in state["edges"].values():
+            t = _sanitize_label(p.get("edgeType") or "REL")
+            edge_type_counts[t] = edge_type_counts.get(t, 0) + 1
+        return {
+            "nodeCount": len(state["nodes"]),
+            "edgeCount": len(state["edges"]),
+            "entityTypeCounts": entity_type_counts,
+            "edgeTypeCounts": edge_type_counts,
+        }
+
+    async def get_schema_stats(self) -> GraphSchemaStats:
+        """One composed-state pass → the same ``GraphSchemaStats`` shape FalkorDB builds (per-label
+        counts + up-to-3 sample displayNames, per-edge-type counts, tag counts). Serves the insights
+        deep facet + graph-schema build for a branch / stale-main, which have no projection to scan."""
+        from .falkordb_provider import _sanitize_label
+        state = await self._svc.materialize_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of)
+        ent_counts: Dict[str, int] = {}
+        ent_samples: Dict[str, List[str]] = {}
+        tag_counts: Dict[str, int] = {}
+        for p in state["nodes"].values():
+            lbl = _sanitize_label(p.get("entityType") or "Entity")
+            ent_counts[lbl] = ent_counts.get(lbl, 0) + 1
+            name = p.get("displayName")
+            if name and len(ent_samples.setdefault(lbl, [])) < 3:
+                ent_samples[lbl].append(name)
+            tags = p.get("tags")
+            if isinstance(tags, list):
+                for tag in tags:
+                    if tag:
+                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        edge_counts: Dict[str, int] = {}
+        for p in state["edges"].values():
+            t = _sanitize_label(p.get("edgeType") or "REL")
+            edge_counts[t] = edge_counts.get(t, 0) + 1
+        return GraphSchemaStats(
+            totalNodes=len(state["nodes"]),
+            totalEdges=len(state["edges"]),
+            entityTypeStats=[
+                EntityTypeSummary(id=lbl, name=lbl, count=c, sampleNames=ent_samples.get(lbl, []))
+                for lbl, c in ent_counts.items()],
+            edgeTypeStats=[EdgeTypeSummary(id=t, name=t, count=c) for t, c in edge_counts.items()],
+            tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"]) for t, c in tag_counts.items()],
+        )
 
     # ---- writes: one audited commit on this branch via apply_ops -------- #
     async def _commit(self, ops: List[dict], message: str) -> Optional[str]:
