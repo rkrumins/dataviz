@@ -40,32 +40,13 @@ describe('stagedChangesToOps', () => {
     expect(ops).toEqual([{ op: 'update', kind: 'edge', id: 'e2', payload: { confidence: 0.9 } }])
   })
 
-  it('excludes create_entity (provider path) and layer changes carrying no layerId', () => {
+  it('excludes create_entity (handled via the provider path) and view-config layer changes', () => {
     const ops = stagedChangesToOps([
       sc({ type: 'create_entity', targetUrn: 'urn:new', after: { entityType: 'Table', displayName: 'X' } }),
+      sc({ type: 'assign_layer', targetId: 'n3', after: { layerId: 'L1' } }),
       sc({ type: 'move_to_layer', targetId: 'n4', after: {} }),
     ])
     expect(ops).toEqual([])
-  })
-
-  it('persists a layer move as a node update of top-level layerAssignment', () => {
-    const ops = stagedChangesToOps([
-      sc({ type: 'assign_layer', targetId: 'urn:x', after: { layerId: 'warehouse' } }),
-      sc({ type: 'move_to_layer', targetId: 'n5', targetUrn: 'urn:y', after: { layerId: 'transform' } }),
-    ])
-    expect(ops).toEqual([
-      { op: 'update', kind: 'node', id: 'urn:x', payload: { layerAssignment: 'warehouse' } },
-      { op: 'update', kind: 'node', id: 'urn:y', payload: { layerAssignment: 'transform' } },
-    ])
-  })
-
-  it('resolves a just-created entity temp urn before persisting its layer move', () => {
-    const resolve = (id: string) => (id === 'urn:staged:z' ? 'urn:real:z' : id)
-    const ops = stagedChangesToOps(
-      [sc({ type: 'assign_layer', targetId: 'urn:staged:z', after: { layerId: 'warehouse' } })],
-      resolve,
-    )
-    expect(ops).toEqual([{ op: 'update', kind: 'node', id: 'urn:real:z', payload: { layerAssignment: 'warehouse' } }])
   })
 
   it('maps create_edge to a create edge op (endpoints as sourceEntityId/targetEntityId)', () => {

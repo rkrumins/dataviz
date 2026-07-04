@@ -116,26 +116,8 @@ export function stagedChangesToOps(
         })
         break
       }
-      case 'assign_layer':
-      case 'move_to_layer': {
-        // A layer move persists as an update to the node's OWN top-level
-        // `layerAssignment` — the single source of truth the reload placement
-        // reads (useLayerAssignment + the backend assignment engine). Previously
-        // these only touched session `instanceAssignments` + the Context Model,
-        // neither of which reload placement consults, so the move silently
-        // vanished on refresh. The backend `_patch_payload` shallow-merges this
-        // onto the stored node (every other field preserved). It MUST be
-        // top-level: the reader reads top-level `layerAssignment`, and
-        // `properties.layerAssignment` is stripped as a reserved key. No
-        // baseVersion → plain patch-onto-current (no OCC conflict on a re-move).
-        const layerId = asObj(c.after).layerId
-        const id = c.targetUrn ?? c.targetId
-        if (typeof layerId === 'string' && layerId && id) {
-          ops.push({ op: 'update', kind: 'node', id: resolveId(id), payload: { layerAssignment: layerId } })
-        }
-        break
-      }
-      // create_entity → provider.createNode (handled in saveStagedChangesToDraft).
+      // create_entity → provider.createNode (handled in saveStagedChangesToDraft);
+      // assign_layer / move_to_layer → view/blueprint config (referenceModelStore), not graph entities.
       default:
         break
     }
