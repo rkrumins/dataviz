@@ -57,8 +57,10 @@ describe('blankQuickStartTemplates', () => {
     const schema = ontologyToWorkspaceSchema(makeOntology())
     const ontologyTemplate = blankQuickStartTemplates(schema).find(t => t.id === 'ontology')!
     expect(ontologyTemplate.layers).toEqual(deriveLayersFromOntology(schema))
-    // Its description names the derived layers.
-    expect(ontologyTemplate.description).toBe('Domains → Datasets')
+    // Its description explains the arrangement's PURPOSE — the gallery preview
+    // already shows the layer names, so the copy must not just repeat them.
+    expect(ontologyTemplate.description.length).toBeGreaterThan(0)
+    expect(ontologyTemplate.description).not.toContain('→')
   })
 
   it('gives every template unique layer ids and 0..n orders', () => {

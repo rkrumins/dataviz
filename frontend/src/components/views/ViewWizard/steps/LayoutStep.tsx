@@ -65,7 +65,7 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'data-flow',
         name: 'Data Flow',
-        description: 'Source → Staging → Transform → Consumption',
+        description: 'Follow data from its raw sources through staging and transformation to the reports that consume it.',
         category: 'data-engineering',
         layers: [
             { name: 'Source', description: 'Raw data sources', color: '#3b82f6', entityTypes: [] },
@@ -77,7 +77,7 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'medallion',
         name: 'Medallion',
-        description: 'Bronze → Silver → Gold',
+        description: 'The lakehouse refinement pattern: raw data lands in Bronze and is progressively refined to business-ready Gold.',
         category: 'data-engineering',
         layers: [
             { name: 'Bronze', description: 'Raw data', color: '#CD7F32', entityTypes: [] },
@@ -88,7 +88,7 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'simple',
         name: 'Simple',
-        description: 'Input → Output',
+        description: 'The minimal two-column map: what feeds in, and what comes out.',
         category: undefined,
         layers: [
             { name: 'Input', description: 'Source systems', color: '#3b82f6', entityTypes: [] },
@@ -104,8 +104,9 @@ const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#0
 // ============================================
 
 /** Mini preview: up to five neutral column bars with truncated names. Deliberately
- *  monochrome (the layers' real colors show on the canvas, not here) — five cards of
- *  saturated bars read as noise; only the SELECTED card's bars take a soft accent. */
+ *  monochrome — a grid of tinted cards reads as noise; the layers' real colors show
+ *  on the canvas. Only the SELECTED card's bars take a soft accent. Hovering a bar
+ *  shows the layer's description, so the structure stays scannable but explained. */
 function TemplatePreview({ layers, active }: { layers: ViewLayerConfig[]; active?: boolean }) {
     if (layers.length === 0) {
         return (
@@ -119,14 +120,18 @@ function TemplatePreview({ layers, active }: { layers: ViewLayerConfig[]; active
     return (
         <div className="flex items-end gap-1.5">
             {shown.map((layer, i) => (
-                <div key={layer.id ?? i} className="flex-1 min-w-0">
+                <div
+                    key={layer.id ?? i}
+                    className="flex-1 min-w-0"
+                    title={layer.description ? `${layer.name} — ${layer.description}` : layer.name}
+                >
                     <div className={cn(
                         'h-8 rounded-md border',
                         active
                             ? 'bg-blue-100 border-blue-200 dark:bg-blue-900/40 dark:border-blue-800'
                             : 'bg-slate-100 border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60',
                     )} />
-                    <div className="mt-1 text-[9px] text-slate-500 dark:text-slate-400 truncate text-center" title={layer.name}>
+                    <div className="mt-1 text-[9px] text-slate-500 dark:text-slate-400 truncate text-center">
                         {layer.name}
                     </div>
                 </div>

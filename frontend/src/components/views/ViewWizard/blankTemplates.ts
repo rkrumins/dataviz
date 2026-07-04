@@ -28,24 +28,19 @@ export interface BlankTemplate {
 const PALETTE = defaultReferenceModelLayers
 
 /** Build an ordered set of empty scaffold layers for a generic template. */
-function scaffold(templateId: string, names: string[]): ViewLayerConfig[] {
-  return names.map((name, i) => {
+function scaffold(templateId: string, columns: Array<[name: string, description: string]>): ViewLayerConfig[] {
+  return columns.map(([name, description], i) => {
     const palette = PALETTE[i % PALETTE.length]
     return {
       id: `${templateId}-${i}`,
       name,
+      description,
       color: palette.color,
       icon: palette.icon,
       entityTypes: [],
       order: i,
     }
   })
-}
-
-/** Human-readable summary of a layer set, used as a template's description. */
-function describeLayers(layers: ViewLayerConfig[]): string {
-  if (layers.length === 0) return 'No layers yet'
-  return layers.map(l => l.name).join(' → ')
 }
 
 /**
@@ -56,36 +51,50 @@ function describeLayers(layers: ViewLayerConfig[]): string {
 export function blankQuickStartTemplates(schema: WorkspaceSchema): BlankTemplate[] {
   const ontologyLayers = deriveLayersFromOntology(schema)
 
+  // Descriptions explain what each arrangement is FOR — the preview underneath
+  // already shows the structure, so repeating the layer names here is noise.
   return [
     {
       id: 'ontology',
       name: 'From your ontology',
-      description: describeLayers(ontologyLayers),
+      description: 'Columns follow your ontology’s hierarchy, with each level’s entity types already assigned.',
       recommended: true,
       layers: ontologyLayers,
     },
     {
       id: 'blank-tpl-1',
       name: 'Source to target',
-      description: 'Sources → Transformations → Targets',
-      layers: scaffold('blank-tpl-1', ['Sources', 'Transformations', 'Targets']),
+      description: 'Trace where data comes from, how it changes, and where it ends up.',
+      layers: scaffold('blank-tpl-1', [
+        ['Sources', 'Where the data originates'],
+        ['Transformations', 'How the data is shaped along the way'],
+        ['Targets', 'Where the data lands'],
+      ]),
     },
     {
       id: 'blank-tpl-2',
       name: 'Medallion',
-      description: 'Bronze → Silver → Gold',
-      layers: scaffold('blank-tpl-2', ['Bronze', 'Silver', 'Gold']),
+      description: 'The lakehouse refinement pattern: raw data lands in Bronze and is progressively refined to business-ready Gold.',
+      layers: scaffold('blank-tpl-2', [
+        ['Bronze', 'Raw data as it arrives'],
+        ['Silver', 'Cleansed and conformed'],
+        ['Gold', 'Business-ready data products'],
+      ]),
     },
     {
       id: 'blank-tpl-3',
       name: 'Data flow',
-      description: 'Producers → Pipelines → Consumers',
-      layers: scaffold('blank-tpl-3', ['Producers', 'Pipelines', 'Consumers']),
+      description: 'Map which systems produce data, the pipelines that move it, and who consumes it.',
+      layers: scaffold('blank-tpl-3', [
+        ['Producers', 'Systems that create data'],
+        ['Pipelines', 'Jobs that move and process it'],
+        ['Consumers', 'Reports, apps and teams using it'],
+      ]),
     },
     {
       id: 'empty',
       name: 'Start empty',
-      description: 'Begin with a blank canvas and add layers yourself',
+      description: 'Begin with a blank canvas and add layers yourself.',
       layers: [],
     },
   ]

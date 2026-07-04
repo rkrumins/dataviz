@@ -225,7 +225,7 @@ function WizardShell({
                 transition={{ duration: 0.12 }}
                 className={cn(
                     'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col',
-                    isWide ? 'max-w-[1180px]' : 'max-w-4xl',
+                    isWide ? 'max-w-[1180px]' : 'max-w-5xl',
                 )}
             >
                 {/* Header */}
@@ -251,20 +251,23 @@ function WizardShell({
                     </button>
                 </div>
 
-                {/* Progress Steps */}
+                {/* Progress Steps — overflow-proof: connectors flex instead of fixed
+                    widths, pills can shrink with truncating labels, and non-active
+                    labels drop out below lg so all six steps always fit the modal. */}
                 <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center min-w-0">
                         {activeSteps.map((step, index) => {
                             const isActive = step.id === currentStep
                             const isCompleted = currentStepIndex > index
                             const isClickable = isCompleted || isActive
                             return (
-                                <div key={step.id} className="flex items-center">
+                                <div key={step.id} className={cn('flex items-center min-w-0', index < activeSteps.length - 1 && 'flex-1')}>
                                     <button
                                         onClick={() => isClickable && onStepClick(step.id)}
                                         disabled={!isClickable}
+                                        title={step.label}
                                         className={cn(
-                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150',
+                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150 min-w-0 shrink',
                                             isActive
                                                 ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
                                                 : isCompleted
@@ -282,10 +285,12 @@ function WizardShell({
                                                     {index + 1}
                                                 </span>
                                             )}
-                                        {step.label}
+                                        <span className={cn('truncate', !isActive && 'hidden lg:inline')}>
+                                            {step.label}
+                                        </span>
                                     </button>
                                     {index < activeSteps.length - 1 && (
-                                        <div className="w-8 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
+                                        <div className="flex-1 min-w-2 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
                                     )}
                                 </div>
                             )
