@@ -124,6 +124,10 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 PROJECTION_VERIFY_ENABLED: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY", "1").lower() not in ("0", "false", "no")
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
+# Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
+# a full reseed is O(whole main graph), so it gets a generous budget — unlike the
+# interactive 10s post-write catch-up, which stays snappy and defers to the worker.
+REBUILD_SYNC_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_REBUILD_TIMEOUT_SECS", "900"))
 
 # Provider write-through: record every graph write as an audited versioned commit on the
 # data source's versioned graph (the audit trail + branch/version history, on by default).

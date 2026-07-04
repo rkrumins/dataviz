@@ -247,6 +247,87 @@ async def _run_legacy_null_id() -> None:
     await db.dispose_engine()
 
 
+# --------------------------------------------------------------------------- #
+# 6. Failure honesty: a dead cache instance leaves status=idle + last_error     #
+#    (no stranded spinner state), the watermark exposes it, and a later rebuild #
+#    clears it. This is the terminal-state contract the Data health UI needs.   #
+# --------------------------------------------------------------------------- #
+class ExplodingGraph(ReconcileFakeGraph):
+    """Fails every write query — a reachable-then-erroring FalkorDB."""
+
+    async def query(self, cypher: str, params: dict = None):
+        if "MERGE" in cypher or "UNWIND" in cypher:
+            raise RuntimeError("boom: cache instance unreachable")
+        return await super().query(cypher, params)
+
+
+class ExplodingFalkor(ReconcileFakeFalkor):
+    def __call__(self, name: str, provider_id=None) -> ReconcileFakeGraph:
+        return self.graphs.setdefault(name, ExplodingGraph())
+
+
+async def _run_failure_honesty() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ExplodingFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+    ], "seed")
+
+    with pytest.raises(RuntimeError):
+        await proj.project_graph(gid)
+
+    st, projected, _target = await _status(gid)
+    assert st == "idle" and projected == 0, "failed projection must not strand status or advance"
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is False and "boom" in (wm["last_error"] or ""), wm
+    assert wm["progress_done"] is None and wm["progress_total"] is None, \
+        "a failed full seed must not strand a stale progress bar"
+
+    # Recovery: healthy instance again → rebuild converges and CLEARS the error.
+    fake.graphs[name] = ReconcileFakeGraph()
+    assert await svc.request_projection_rebuild(gid) is True
+    await proj.project_graph(gid)
+    wm = await svc.projection_watermark(gid)
+    assert wm["fresh"] is True and wm["last_error"] is None, wm
+    assert wm["progress_done"] is None and wm["progress_total"] is None
+    await db.dispose_engine()
+
+
+# --------------------------------------------------------------------------- #
+# 7. Progress writer: first + final chunk always persist; the full-seed pass    #
+#    reports status=rebuilding while an incremental window reports projecting.  #
+# --------------------------------------------------------------------------- #
+async def _run_progress_writer() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = ReconcileFakeFalkor()
+    gid, proj, name = await _seed(svc, fake)
+
+    async def _progress_row():
+        async with db.graphver_session() as s:
+            ps = await s.get(ProjectionStateORM, gid)
+            return ps.progress_done, ps.progress_total
+
+    w = proj._progress_writer(gid, 10)
+    await w(4)                                            # first write bypasses the throttle
+    assert await _progress_row() == (4, 10)
+    await w(6)                                            # done == total → final write bypasses too
+    assert await _progress_row() == (10, 10)
+
+    # A successful full reseed ends with the progress columns CLEARED.
+    assert await svc.request_projection_rebuild(gid) is True
+    await proj.project_graph(gid)
+    assert await _progress_row() == (None, None)
+    assert (await _status(gid))[0] == "idle"
+    await db.dispose_engine()
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_projection_rebuild_full_replay_e2e():
     asyncio.run(_run_rebuild())
@@ -272,7 +353,18 @@ def test_projection_reconcile_legacy_null_id_e2e():
     asyncio.run(_run_legacy_null_id())
 
 
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_failure_honesty_e2e():
+    asyncio.run(_run_failure_honesty())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_projection_progress_writer_e2e():
+    asyncio.run(_run_progress_writer())
+
+
 if __name__ == "__main__":
-    for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id):
+    for _fn in (_run_rebuild, _run_drift, _run_deep, _run_rollup_hook, _run_legacy_null_id,
+                _run_failure_honesty, _run_progress_writer):
         asyncio.run(_fn())
     print("versioning projection rebuild + reconcile e2e: OK")

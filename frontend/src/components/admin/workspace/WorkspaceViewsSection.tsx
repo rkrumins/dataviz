@@ -115,7 +115,11 @@ export default function WorkspaceViewsSection({ wsId, dataSources, views }: Work
 
                             <div className="flex items-center gap-3 text-[10px] text-ink-muted">
                                 <span>{'\u2665'} {view.favouriteCount}</span>
-                                <span>{new Date(view.updatedAt).toLocaleDateString()}</span>
+                                {/* Freshest of settings-edit vs data-publish */}
+                                <span>{new Date(
+                                    view.dataUpdatedAt && view.dataUpdatedAt > view.updatedAt
+                                        ? view.dataUpdatedAt : view.updatedAt
+                                ).toLocaleDateString()}</span>
                                 {(view.createdByName || view.createdBy) && (
                                     <span className="ml-auto truncate max-w-[120px]" title={view.createdBy}>{view.createdByName ?? 'Unknown'}</span>
                                 )}

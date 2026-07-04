@@ -827,6 +827,14 @@ class ViewResponse(BaseModel):
     updated_by: Optional[str] = Field(None, alias="updatedBy")
     updated_by_name: Optional[str] = Field(None, alias="updatedByName")
     updated_by_email: Optional[str] = Field(None, alias="updatedByEmail")
+    # When/who last changed the view's UNDERLYING DATA (a publish / PR merge /
+    # revert on its data source) — separate from updated_* (settings edits) so
+    # both stories stay truthful. NULL until the first post-migration publish;
+    # the name resolves in the same batched user lookup as created_by.
+    data_updated_at: Optional[str] = Field(None, alias="dataUpdatedAt")
+    data_updated_by: Optional[str] = Field(None, alias="dataUpdatedBy")
+    data_updated_by_name: Optional[str] = Field(None, alias="dataUpdatedByName")
+    data_updated_by_email: Optional[str] = Field(None, alias="dataUpdatedByEmail")
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
     favourite_count: int = Field(0, alias="favouriteCount")

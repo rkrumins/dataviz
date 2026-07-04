@@ -43,6 +43,13 @@ export interface View {
     updatedByName?: string | null
     /** Editor's email, surfaced for tooltip / hover detail. */
     updatedByEmail?: string | null
+    /** When/who last changed the view's UNDERLYING DATA (publish / PR merge on its
+     *  data source) — separate from updatedAt/updatedBy (settings edits) so both
+     *  stories stay truthful. Null until the first post-migration publish. */
+    dataUpdatedAt?: string | null
+    dataUpdatedBy?: string | null
+    dataUpdatedByName?: string | null
+    dataUpdatedByEmail?: string | null
     tags?: string[]
     isPinned: boolean
     favouriteCount: number

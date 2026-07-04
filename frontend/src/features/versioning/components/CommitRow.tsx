@@ -3,13 +3,18 @@
  * squash, the contributors who actually edited), time, create/modify/remove stats, and an
  * expandable per-commit hierarchical diff (lazy — loaded only when opened). Shared by the
  * view History timeline and the pre-merge "Commits" list in the PR review drawer.
+ *
+ * With `allowSquashDrilldown`, a squash/publish row's "merged N commits" badge becomes a
+ * toggle that lazily lists the raw draft commits it squashed (so the published "This view"
+ * timeline stays short — same granularity as the whole-graph log — while every squash
+ * remains fully auditable on demand). Nested rows are themselves diffable.
  */
-import { useCallback } from 'react'
-import { ChevronRight, User } from 'lucide-react'
+import { useCallback, useState } from 'react'
+import { ChevronRight, User, Loader2, Layers } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
-import { useCommitDiffSummary } from '../hooks/useVersioning'
+import { useCommitDiffSummary, useSquashedCommits } from '../hooks/useVersioning'
 import { kindMeta } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 import { NodeDiffBadge } from './NodeDiffBadge'
@@ -35,11 +40,55 @@ function StatChips({ stats }: { stats: Record<string, unknown> }) {
   )
 }
 
+/** The raw draft commits squashed into one publish/merge, lazily loaded on expand. Each child
+ *  is a full CommitRow (its own diff drills down further); squash-in-squash isn't possible, so
+ *  children never drill down again. */
+function SquashedCommitList({
+  wsId, graphId, commitId, userNames,
+}: {
+  wsId: string; graphId: string; commitId: string; userNames?: Record<string, string>
+}) {
+  const q = useSquashedCommits(wsId, graphId, commitId)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const toggle = useCallback((id: string) => setExpandedId((p) => (p === id ? null : id)), [])
+  const commits = (q.data?.commits ?? []) as Array<Record<string, unknown>>
+
+  if (q.isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-[11px] text-ink-muted py-2 pl-4">
+        <Loader2 className="w-3 h-3 animate-spin" /> Loading squashed commits…
+      </div>
+    )
+  }
+  if (commits.length === 0) {
+    return <p className="text-[11px] text-ink-muted/70 py-2 pl-4">No underlying commits.</p>
+  }
+  return (
+    <ol className="mt-2 ml-1 border-l border-dashed border-glass-border space-y-3 pl-4">
+      {commits.map((c, i) => {
+        const cid = (c.commit_id as string) ?? String(i)
+        return (
+          <CommitRow
+            key={cid}
+            commit={c}
+            wsId={wsId}
+            graphId={graphId}
+            userNames={userNames ?? q.data?.userNames}
+            expanded={expandedId === cid}
+            onToggle={toggle}
+          />
+        )
+      })}
+    </ol>
+  )
+}
+
 export function CommitRow({
   commit,
   wsId,
   graphId,
   originatingViewLabel = null,
+  allowSquashDrilldown = false,
   userNames,
   expanded,
   onToggle,
@@ -48,6 +97,8 @@ export function CommitRow({
   wsId: string
   graphId: string
   originatingViewLabel?: string | null
+  /** Show the "merged N commits" badge as a toggle that lists the squashed draft commits. */
+  allowSquashDrilldown?: boolean
   /** actor/contributor id → resolved display name (the commit log wrapper's map). */
   userNames?: Record<string, string>
   expanded: boolean
@@ -61,6 +112,8 @@ export function CommitRow({
   const others = contributors.filter((c) => c && c !== commit.actor)
   // How many draft checkpoints this merge/publish squashed — so Main reads as a merge history.
   const squashed = num(commit.source_commit_count)
+  const drilldownable = allowSquashDrilldown && squashed > 1
+  const [showSquashed, setShowSquashed] = useState(false)
   // Only fetch the diff once the row is opened (immutable commit → long staleTime).
   const summaryQ = useCommitDiffSummary(wsId, graphId, expanded ? commitId : null)
   const fetchChildren = useCallback(
@@ -94,9 +147,25 @@ export function CommitRow({
           <span>·</span>
           <span>{timeAgo(commit.created_at as string)}</span>
           {squashed > 1 && (
-            <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Draft checkpoints squashed into this merge">
-              merged {squashed} commits
-            </span>
+            drilldownable ? (
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={(e) => { e.stopPropagation(); setShowSquashed((v) => !v) }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setShowSquashed((v) => !v) }
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/20 cursor-pointer transition-colors"
+                title="Show the draft commits squashed into this publish"
+              >
+                <ChevronRight className={cn('w-3 h-3 transition-transform', showSquashed && 'rotate-90')} />
+                <Layers className="w-3 h-3" /> merged {squashed} commits
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Draft checkpoints squashed into this merge">
+                merged {squashed} commits
+              </span>
+            )
           )}
           {originatingViewLabel && (
             <span className="px-1.5 py-0.5 rounded bg-ink/5 text-ink-muted" title="Originating view">
@@ -115,6 +184,11 @@ export function CommitRow({
             emptyHint="No changes in this commit."
             summaryFirst
           />
+        </div>
+      )}
+      {drilldownable && showSquashed && (
+        <div className="pl-5">
+          <SquashedCommitList wsId={wsId} graphId={graphId} commitId={commitId} userNames={userNames} />
         </div>
       )}
     </li>

@@ -142,6 +142,8 @@ def _to_response(
     created_by_email: Optional[str] = None,
     updated_by_name: Optional[str] = None,
     updated_by_email: Optional[str] = None,
+    data_updated_by_name: Optional[str] = None,
+    data_updated_by_email: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
 ) -> ViewResponse:
@@ -172,6 +174,10 @@ def _to_response(
         updatedBy=row.updated_by,
         updatedByName=updated_by_name,
         updatedByEmail=updated_by_email,
+        dataUpdatedAt=getattr(row, 'data_updated_at', None),
+        dataUpdatedBy=getattr(row, 'data_updated_by', None),
+        dataUpdatedByName=data_updated_by_name,
+        dataUpdatedByEmail=data_updated_by_email,
         tags=json.loads(row.tags) if row.tags else None,
         isPinned=bool(row.is_pinned) if row.is_pinned else False,
         favouriteCount=favourite_count,
@@ -197,11 +203,14 @@ async def _to_enriched_response(
     ws_name = await _get_workspace_name(session, row.workspace_id)
     ds_name = await _get_data_source_name(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id)
-    # Resolve creator AND modifier in one batched lookup (dedupes when
-    # they're the same principal).
-    user_map = await _resolve_user_ids(session, {row.created_by, row.updated_by})
+    # Resolve creator, modifier AND data-publisher in one batched lookup
+    # (dedupes when they're the same principal).
+    user_map = await _resolve_user_ids(
+        session, {row.created_by, row.updated_by, getattr(row, 'data_updated_by', None)})
     creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
     modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
+    publisher_name, publisher_email = user_map.get(
+        getattr(row, 'data_updated_by', None) or "", (None, None))
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     return _to_response(
@@ -213,6 +222,8 @@ async def _to_enriched_response(
         created_by_email=creator_email,
         updated_by_name=modifier_name,
         updated_by_email=modifier_email,
+        data_updated_by_name=publisher_name,
+        data_updated_by_email=publisher_email,
         favourite_count=fav_count,
         is_favourited=fav,
     )
@@ -273,7 +284,8 @@ async def _batch_enrich_rows(
     ds_ids: Set[str] = {r.data_source_id for r in rows if r.data_source_id}
     cm_ids: Set[str] = {r.context_model_id for r in rows if r.context_model_id}
     user_ids: Set[Optional[str]] = {
-        uid for r in rows for uid in (r.created_by, r.updated_by)
+        uid for r in rows
+        for uid in (r.created_by, r.updated_by, getattr(r, 'data_updated_by', None))
     }
     view_ids: List[str] = [r.id for r in rows]
 
@@ -331,6 +343,7 @@ async def _batch_enrich_rows(
     for row in rows:
         creator = user_map.get(row.created_by or "", (None, None))
         modifier = user_map.get(row.updated_by or "", (None, None))
+        publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None))
         responses.append(_to_response(
             row,
             workspace_name=ws_map.get(row.workspace_id) if row.workspace_id else None,
@@ -340,6 +353,8 @@ async def _batch_enrich_rows(
             created_by_email=creator[1],
             updated_by_name=modifier[0],
             updated_by_email=modifier[1],
+            data_updated_by_name=publisher[0],
+            data_updated_by_email=publisher[1],
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
         ))

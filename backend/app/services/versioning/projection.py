@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import literal, select
@@ -232,10 +233,18 @@ class FalkorProjector:
                 # normal path. ``project_pending`` applies the same filter in SQL so the poll loop
                 # doesn't churn on these rows; this guard covers direct nudges.
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "unpinned"}
-            ps.status = "projecting"
+            # Honest lifecycle label: a full replay (explicit rebuild, first seed, repin)
+            # reports "rebuilding"; an incremental window reports "projecting".
+            ps.status = "rebuilding" if from_seq <= 0 else "projecting"
             main_id = await self._svc._main_branch_id(s, graph_id)
             is_fork = graph.fork_parent_graph_id is not None
             changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
+            total_items = sum(len(c) for c in changes)
+            if from_seq <= 0:
+                # Live rebuild progress: the total is known upfront (all items are computed
+                # before the apply); per-chunk writes are throttled by _progress_writer.
+                ps.progress_done = 0
+                ps.progress_total = total_items
             # Incremental :AGGREGATED rollup maintenance (windows only — a full seed wipes
             # rollups with the graph and is healed by the on_rollups_stale hook instead).
             # Skipped for forks: their containment chains span the parent graph's rows, so
@@ -256,6 +265,8 @@ class FalkorProjector:
             # build (a genuine suspension point), so a cancellation here must ALSO reset the
             # already-committed "projecting" row rather than strand it.
             client = await self._graph_client(name, provider_id)
+            progress = (self._progress_writer(graph_id, total_items)
+                        if from_seq <= 0 and total_items else None)
             if from_seq <= 0:
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
                 # committed main exactly. The seed only MERGEs the live state, so without this an entity
@@ -280,7 +291,7 @@ class FalkorProjector:
                             "proceeding to MERGE — prior deletions may not have cleared: %s",
                             name, graph_id, exc,
                         )
-            await self._apply(client, *changes)
+            await self._apply(client, *changes, progress=progress)
             if rollup_pairs and rollup_pairs != "stale":
                 # After the raw upserts, so pair endpoints exist. Idempotent per window
                 # (gvSeq guard), so a retried window can't double-count weights. A rollup
@@ -307,6 +318,8 @@ class FalkorProjector:
                 ps.falkor_graph_name = name
                 ps.last_projected_at = _now()
                 ps.last_error = verify_error
+                ps.progress_done = None                  # full-seed progress is over either way
+                ps.progress_total = None
         except (Exception, asyncio.CancelledError) as exc:
             # Reset the "projecting" row committed above so it is not stranded — a stranded row
             # spins the UI's "Refreshing…" badge forever AND blocks the manual rebuild escape
@@ -330,6 +343,8 @@ class FalkorProjector:
                         ps.status = "idle"
                         ps.last_error = ("projection cancelled (timeout)" if cancelled
                                          else str(exc)[:500])
+                        ps.progress_done = None          # don't strand a stale progress bar
+                        ps.progress_total = None
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
             # abort the write and re-strand the row; catch a Postgres error so it can't replace the
@@ -839,7 +854,32 @@ class FalkorProjector:
         for chunk in _batches(list(edge_ids), self._batch):
             await client.query(_DELETE_EDGES, params={"ids": list(chunk)})
 
-    async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes) -> None:
+    def _progress_writer(self, graph_id: str, total: int):
+        """Throttled full-seed progress: accumulates per-chunk counts and persists to
+        ``projection_state.progress_done/total`` at most ~1/s (always on the final item),
+        so the Data health poll sees live movement without a DB write per chunk.
+        Best-effort by design — a progress write must never fail the projection."""
+        state = {"done": 0, "last": 0.0}
+
+        async def _on_chunk(n: int) -> None:
+            state["done"] += n
+            now = time.monotonic()
+            if now - state["last"] < 1.0 and state["done"] < total:
+                return
+            state["last"] = now
+            try:
+                async with self._session() as s:
+                    ps = await s.get(ProjectionStateORM, graph_id)
+                    if ps is not None:
+                        ps.progress_done = state["done"]
+                        ps.progress_total = total
+            except Exception:                            # pragma: no cover - infra
+                logger.debug("progress write failed for %s", graph_id, exc_info=True)
+
+        return _on_chunk
+
+    async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
+                     progress=None) -> None:
         # Nodes in (grouped by label), edges in (grouped by type), edges out, nodes out.
         by_label: Dict[str, list] = {}
         for eid, urn, p in node_upserts:
@@ -849,6 +889,8 @@ class FalkorProjector:
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):
                 await client.query(_node_merge_cypher(label), params={"batch": chunk})
+                if progress:
+                    await progress(len(chunk))
 
         by_rel: Dict[str, list] = {}
         for eid, su, tu, p in edge_upserts:
@@ -858,11 +900,17 @@ class FalkorProjector:
         for rel, items in by_rel.items():
             for chunk in _batches(items, self._batch):
                 await client.query(_edge_merge_cypher(rel), params={"batch": chunk})
+                if progress:
+                    await progress(len(chunk))
 
         for chunk in _batches(edge_deletes, self._batch):
             await client.query(_DELETE_EDGES, params={"ids": list(chunk)})
+            if progress:
+                await progress(len(chunk))
         for chunk in _batches(node_deletes, self._batch):
             await client.query(_DELETE_NODES, params={"urns": list(chunk)})
+            if progress:
+                await progress(len(chunk))
 
 
 def make_falkor_graph_factory() -> Callable[..., object]:

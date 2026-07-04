@@ -184,6 +184,43 @@ async def project_now(graph_id: str) -> None:
         await nudge_projection(graph_id)
 
 
+# Per-graph in-process guard for EXPLICIT rebuilds: a full reseed is a long-running background
+# task; a second concurrent one for the same graph is redundant load and would race the first's
+# clean wipe. Check + add have no await between them, so they're atomic on the event loop.
+_rebuild_inflight: set = set()
+
+
+async def rebuild_now(graph_id: str) -> None:
+    """Run an operator-requested FULL rebuild in-process, with a budget a real reseed can
+    actually finish under (`REBUILD_SYNC_TIMEOUT_SECS`, default 15 min) — unlike `project_now`,
+    whose 10s ceiling exists to keep post-write catch-ups snappy but cancels any non-trivial
+    full reseed. NEVER raises: on failure/timeout `project_graph`'s own handler has already
+    reset status→idle and recorded `last_error`, which the watermark endpoint now surfaces —
+    the Data health UI converges to a terminal failed state instead of spinning forever."""
+    if graph_id in _rebuild_inflight:
+        return
+    _rebuild_inflight.add(graph_id)
+    try:
+        proj = _get_projector()
+        if proj is None:
+            await nudge_projection(graph_id)             # worker deployments pick it up
+            return
+        await asyncio.wait_for(
+            proj.project_graph(graph_id), vconfig.REBUILD_SYNC_TIMEOUT_SECS)
+    except (Exception, asyncio.CancelledError) as exc:
+        # `except Exception` alone would let the wait_for timeout (CancelledError, a
+        # BaseException) escape into the BackgroundTasks runner unlogged — the old
+        # silent-death mode of the 10s path. status/last_error are already reset by
+        # project_graph's handler; here we only log and hand off to the async worker.
+        logger.warning("explicit rebuild for %s did not complete: %s", graph_id, exc)
+        try:
+            await nudge_projection(graph_id)
+        except Exception:                                # pragma: no cover - infra
+            pass
+    finally:
+        _rebuild_inflight.discard(graph_id)
+
+
 async def _bump_main_cache(graph_id: str) -> None:
     """Invalidate the canvas read-cache for a graph's MAIN after a main-advancing write, so a merged
     change (a delete included) shows immediately instead of being served stale from Redis for the
@@ -203,6 +240,41 @@ async def _bump_main_cache(graph_id: str) -> None:
         await cache.bump_generation(CacheScope(ws, ds, main_id))
     except Exception as exc:
         logger.warning("read-cache invalidation for %s skipped: %s", graph_id, exc)
+
+
+async def _touch_views_data_updated(graph_id: str, actor: str) -> None:
+    """Stamp ``data_updated_at``/``data_updated_by`` on every live view of the graph's data
+    source after a main-advancing write (publish / MR merge / fork-PR merge / revert), so
+    Explorer's "last updated" reflects DATA changes, not just settings edits. One bulk indexed
+    UPDATE (idx_view_data_source); awaited inline like ``_bump_main_cache``. Best-effort by
+    contract — the graphver commit already landed and the management DB may be a separate
+    instance (no 2PC), so a failure here logs and never fails the user's write; the staleness
+    self-corrects on the next publish. Interactive main write-throughs (``/graph/changes`` on
+    main) are deliberately excluded — the canvas requires a draft, so every user-visible data
+    change reaches one of the four call sites."""
+    try:
+        svc = get_versioning_service()
+        meta = await svc.get_graph(graph_id)
+        ds = str(meta.get("data_source_id") or "") if meta else ""
+        if not ds:
+            return
+        from sqlalchemy import update as sa_update
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.models import ViewORM, _now
+        async with get_async_session() as session:
+            await session.execute(
+                sa_update(ViewORM)
+                .where(ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None))
+                # Self-assign updated_at so SQLAlchemy's column onupdate=_now does NOT
+                # fire on this Core UPDATE — data freshness must not masquerade as a
+                # settings edit (the whole reason these fields are separate).
+                .values(data_updated_at=_now(), data_updated_by=actor,
+                        updated_at=ViewORM.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.warning("view data-freshness stamp for %s skipped: %s", graph_id, exc)
 
 
 async def graph_in_workspace(
@@ -486,6 +558,7 @@ class DraftRefModel(_ApiModel):
     branch_id: str = Field(alias="branchId")
     head_commit_id: Optional[str] = Field(default=None, alias="headCommitId")
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
+    originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
 
 
 class ResolveResponse(_ApiModel):
@@ -557,6 +630,14 @@ class WatermarkModel(_ApiModel):
     # the cache is ACTIVELY catching up — the "refreshing…" badge keys off this, not bare staleness
     # (an idle-but-behind graph just means no FalkorDB worker is running; reads use Postgres).
     status: str = "idle"
+    # Failure surface + live progress for the Data health tab: `target` is the seq the projection
+    # is catching up TO; `last_error` is why the last pass stopped (idle && !fresh && last_error =
+    # a failed rebuild, not a pending one); progress_* report an in-flight full reseed.
+    target: int = 0
+    last_error: Optional[str] = Field(default=None, alias="lastError")
+    last_projected_at: Optional[str] = Field(default=None, alias="lastProjectedAt")
+    progress_done: Optional[int] = Field(default=None, alias="progressDone")
+    progress_total: Optional[int] = Field(default=None, alias="progressTotal")
 
 
 class RebuildResponse(_ApiModel):
@@ -1212,6 +1293,7 @@ async def publish(
             containment_edge_types=cset, ontology_rules=rules,
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
+    await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
@@ -1266,14 +1348,17 @@ async def get_watermark(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
-    wm = await svc.projection_watermark(graph_id)
-    return {"committed": wm["committed"], "projected": wm["projected"],
-            "fresh": wm["fresh"], "status": wm["status"]}
+    return _watermark_model(await svc.projection_watermark(graph_id))
 
 
 def _watermark_model(wm: dict) -> WatermarkModel:
     return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
-                          fresh=wm["fresh"], status=wm["status"])
+                          fresh=wm["fresh"], status=wm["status"],
+                          target=wm.get("target", 0),
+                          last_error=wm.get("last_error"),
+                          last_projected_at=wm.get("last_projected_at"),
+                          progress_done=wm.get("progress_done"),
+                          progress_total=wm.get("progress_total"))
 
 
 @router.post("/graphs/{graph_id}/projection/rebuild", response_model=RebuildResponse)
@@ -1301,8 +1386,10 @@ async def rebuild_projection(
         raise HTTPException(status_code=409, detail="no FalkorDB projection target for this graph")
     started = await svc.request_projection_rebuild(graph_id)
     # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
-    # project_now is an idempotent catch-up, so a status stranded by a lost worker self-heals.
-    background.add_task(project_now, graph_id)            # catch the cache up in-process (async worker fallback)
+    # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
+    # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the
+    # rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed actually finish.
+    background.add_task(rebuild_now, graph_id)
     return RebuildResponse(started=started, already_running=not started,
                            watermark=_watermark_model(await svc.projection_watermark(graph_id)))
 
@@ -1358,6 +1445,7 @@ async def revert_commit(
             graph_id=graph_id, commit_id=commit_id, actor=user.id, message=body.message,
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
+    await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": new_commit_id}
 
@@ -1417,6 +1505,7 @@ async def get_commit_log(
     ws_id: str, graph_id: str,
     branch_id: Optional[str] = Query(None, alias="branchId"),
     originating_view_id: Optional[str] = Query(None, alias="originatingViewId"),
+    published_only: bool = Query(False, alias="publishedOnly"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -1425,12 +1514,34 @@ async def get_commit_log(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Commit log for a branch (default ``main``), or — with ``originatingViewId`` — the
-    change history attributed to one view across branches."""
+    """Commit log for a branch (default ``main``), or — with ``originatingViewId`` — one
+    view's history. ``publishedOnly=true`` returns the view's PUBLISHED (main) timeline
+    (its squash-publishes + shared graph-level events), each drillable via the ``/squashed``
+    endpoint; without it, every raw draft commit attributed to the view across branches."""
     with _domain_errors():
         commits = await svc.commit_log(
             graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
-            limit=limit, offset=offset, viewer=viewer)
+            published_only=published_only, limit=limit, offset=offset, viewer=viewer)
+    payload = {"commits": commits}
+    await _attach_user_names(session, commits, wrapper=payload)
+    return payload
+
+
+@router.get("/graphs/{graph_id}/commits/{commit_id}/squashed", response_model=CommitLogResponse)
+async def get_squashed_commits(
+    ws_id: str, graph_id: str, commit_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The raw draft commits squashed into a publish/merge commit — the drill-down behind
+    the "merged N commits" affordance. Empty for a non-squash commit."""
+    with _domain_errors():
+        commits = await svc.squashed_commits(
+            graph_id=graph_id, commit_id=commit_id, limit=limit, offset=offset)
     payload = {"commits": commits}
     await _attach_user_names(session, commits, wrapper=payload)
     return payload
@@ -1897,6 +2008,7 @@ async def merge_pull_request(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
+    await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     background.add_task(project_now, str(_pr["target_graph_id"]))   # base graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}
 
@@ -2123,5 +2235,6 @@ async def merge_merge_request(
             containment_edge_types=cset, ontology_rules=rules,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
+    await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}

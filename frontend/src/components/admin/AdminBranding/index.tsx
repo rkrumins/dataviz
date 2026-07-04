@@ -193,7 +193,7 @@ export function AdminBranding() {
     const previewLogo = hasUploadedLogo ? resolvedLogo : form.logoUrl
 
     return (
-        <div className="max-w-6xl mx-auto p-8 animate-in fade-in duration-500">
+        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
             {/* Page header */}
             <div className="flex items-start gap-4 mb-8">
                 <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 shrink-0">

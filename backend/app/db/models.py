@@ -649,6 +649,12 @@ class ViewORM(Base):
     # created_by). NULL on legacy rows and until the first edit after the
     # updated_by migration; the API resolves it to a display name.
     updated_by = Column(Text, nullable=True)
+    # When/who last changed the view's UNDERLYING DATA (publish / PR merge /
+    # revert on its data source's versioned graph) — separate from
+    # updated_at/updated_by so data freshness never clobbers settings-edit
+    # attribution. Stamped by the versioning endpoints' view fan-out.
+    data_updated_at = Column(Text, nullable=True)
+    data_updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)

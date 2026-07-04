@@ -2,7 +2,9 @@
  * ViewHistoryTimeline — change history with up to three scopes:
  *  • This draft  — the active draft's own checkpoints, so you can review your individual commits
  *    before raising a PR (shown only while on a draft).
- *  • This view   — commits attributed to this view across branches (its drafts + merges).
+ *  • This view   — the view's PUBLISHED timeline: its publishes + shared graph-level events, at
+ *    the SAME granularity as Whole graph (identical for a single-view source). Each "merged N
+ *    commits" publish drills down to the raw draft commits it squashed.
  *  • Whole graph — the graph's full `main` log (every merge / import / genesis).
  * Each commit is expandable (lazy per-commit diff) via the shared {@link CommitRow}.
  */
@@ -50,6 +52,10 @@ export function ViewHistoryTimeline({
     scope === 'draft' ? 'No commits on this draft yet — make a change and save it.'
       : scope === 'graph' ? 'No commits yet.'
         : 'No changes from this view yet.'
+  const emptyHint =
+    scope === 'view'
+      ? 'Publishes made from other views on this data source appear under Whole graph.'
+      : null
 
   return (
     <div className="space-y-3">
@@ -78,6 +84,7 @@ export function ViewHistoryTimeline({
       ) : commits.length === 0 ? (
         <div className="py-10 text-center">
           <p className="text-sm text-ink-muted">{emptyMsg}</p>
+          {emptyHint && <p className="mt-1.5 text-xs text-ink-muted/70">{emptyHint}</p>}
         </div>
       ) : (
         <>
@@ -95,6 +102,9 @@ export function ViewHistoryTimeline({
                   wsId={wsId}
                   graphId={graphId}
                   originatingViewLabel={originatingViewLabel}
+                  // "This view" and "Whole graph" show the published timeline, so a squash
+                  // drills down to its raw commits. "This draft" already IS raw commits.
+                  allowSquashDrilldown={scope !== 'draft'}
                   userNames={q.data?.userNames}
                   expanded={expandedId === cid}
                   onToggle={toggle}

@@ -148,7 +148,7 @@ export function AdminOverview() {
     }
 
     return (
-        <div className="max-w-6xl mx-auto p-8 animate-in fade-in duration-500">
+        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
             {/* Header */}
             <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-3">

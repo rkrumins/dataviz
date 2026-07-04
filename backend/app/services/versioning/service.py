@@ -863,6 +863,7 @@ class GraphVersioningService:
                     commit_seq=await self._next_seq(s, graph_id, draft.id),
                     parent_commit_id=draft.head_commit_id, kind="checkpoint",
                     message=message, actor=actor,
+                    originating_view_id=draft.originating_view_id,
                 )
                 s.add(commit)
                 await s.flush()
@@ -1609,6 +1610,12 @@ class GraphVersioningService:
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
                 "fresh": projected >= committed,
+                # Failure reason + last success + live full-reseed progress — the Data
+                # health UI needs these to converge to an honest done/failed state.
+                "last_error": ps.last_error if ps else None,
+                "last_projected_at": ps.last_projected_at if ps else None,
+                "progress_done": ps.progress_done if ps else None,
+                "progress_total": ps.progress_total if ps else None,
             }
 
     async def ensure_projection_target(
@@ -2533,17 +2540,38 @@ class GraphVersioningService:
 
     async def commit_log(
         self, *, graph_id: str, branch_id: Optional[str] = None,
-        originating_view_id: Optional[str] = None, limit: int = 100, offset: int = 0,
-        viewer: Optional[Viewer] = None,
+        originating_view_id: Optional[str] = None, published_only: bool = False,
+        limit: int = 100, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> List[dict]:
         """Newest-first commit log for a graph (plan §7). Default: a branch (``main`` if
-        unset). When ``originating_view_id`` is given, scope to commits attributed to that
-        view across branches instead (the view's change history). A fork's log holds only its
-        own divergence — inherited history lives on the parent. With a ``viewer``, a draft branch
-        is gated (owner/manager/member/PR-reviewer) and the view-scoped log drops non-viewable drafts."""
+        unset). When ``originating_view_id`` is given, scope to that view's history.
+
+        Two view-scoped modes:
+        - ``published_only=False`` (raw): every commit attributed to the view across ALL
+          branches — the draft checkpoints/edits plus the squash on main. Fine-grained but
+          noisy; a single-view graph shows far more rows than the graph's ``main`` log.
+        - ``published_only=True`` (the "This view" default): only the PUBLISHED (``main``)
+          timeline as it originated from this view — the view's squash-publishes PLUS the
+          graph-level events every view shares (genesis / import / revert, which carry no
+          view). For a single-view data source this equals the whole-graph log by
+          construction; each squash then drills down to its raw commits via
+          :meth:`squashed_commits`. Scales cleanly: reads the bounded ``main`` timeline
+          (covered by ``uq_commits_branch_seq``), not every draft commit ever made.
+
+        A fork's log holds only its own divergence — inherited history lives on the parent.
+        With a ``viewer``, a draft branch is gated (owner/manager/member/PR-reviewer) and the
+        raw view-scoped log drops non-viewable drafts (published_only rows are all on the
+        readable ``main``)."""
         async with self._session() as s:
             stmt = select(CommitORM).where(CommitORM.graph_id == graph_id)
-            if originating_view_id is not None:
+            if originating_view_id is not None and published_only:
+                main_id = await self._main_branch_id(s, graph_id)
+                stmt = stmt.where(
+                    CommitORM.branch_id == main_id,
+                    or_(CommitORM.originating_view_id == originating_view_id,
+                        CommitORM.originating_view_id.is_(None)),
+                )
+            elif originating_view_id is not None:
                 stmt = stmt.where(CommitORM.originating_view_id == originating_view_id)
             else:
                 if branch_id is None:
@@ -2553,9 +2581,29 @@ class GraphVersioningService:
             rows = (await s.execute(
                 stmt.order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset)
             )).scalars().all()
-            if viewer is not None and not viewer.can_manage and originating_view_id is not None:
+            if (viewer is not None and not viewer.can_manage
+                    and originating_view_id is not None and not published_only):
                 ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
                 rows = [r for r in rows if r.branch_id in ok]
+            return [self._commit_meta(r) for r in rows]
+
+    async def squashed_commits(
+        self, *, graph_id: str, commit_id: str, limit: int = 100, offset: int = 0,
+    ) -> List[dict]:
+        """The raw draft commits squashed into a squash/merge commit — its provenance,
+        newest-first and paginated. Reads the squash's stored ``source_commit_ids`` (the
+        draft's own checkpoints/edits, retained after publish) and fetches that bounded set.
+        Empty for a non-squash commit (genesis/edit/import have no source commits). This is
+        the drill-down behind the "merged N commits" affordance so the published "This view"
+        timeline stays short while every squash remains fully auditable on demand."""
+        async with self._session() as s:
+            ids = (await s.execute(select(CommitORM.source_commit_ids).where(
+                CommitORM.graph_id == graph_id, CommitORM.id == commit_id))).scalar_one_or_none()
+            if not ids:
+                return []
+            rows = (await s.execute(select(CommitORM).where(
+                CommitORM.graph_id == graph_id, CommitORM.id.in_(list(ids)),
+            ).order_by(CommitORM.commit_seq.desc()).limit(limit).offset(offset))).scalars().all()
             return [self._commit_meta(r) for r in rows]
     async def diff_commits(
         self, *, graph_id: str, branch_id: str, from_seq: int, to_seq: int,
@@ -2969,7 +3017,8 @@ class GraphVersioningService:
     @staticmethod
     def _draft_ref(b: BranchORM) -> dict:
         return {"branch_id": b.id, "head_commit_id": b.head_commit_id,
-                "base_commit_seq": b.base_commit_seq}
+                "base_commit_seq": b.base_commit_seq,
+                "originating_view_id": b.originating_view_id}
 
     async def resolve_graph(
         self, *, data_source_id: str, actor: str, workspace_id: Optional[str] = None,
@@ -2994,6 +3043,13 @@ class GraphVersioningService:
                     BranchORM.kind == "draft", BranchORM.status == "open",
                 ).order_by(BranchORM.created_at.desc())
             )).scalars().first()
+            # Claim-if-null: a draft opened before view tracking (or from a path that
+            # couldn't name its view) adopts the caller's view on the next editing
+            # resolve. Only POST /resolve passes a view id, so reads never mutate;
+            # an already-attributed draft is never re-assigned.
+            if (draft is not None and originating_view_id
+                    and draft.originating_view_id is None):
+                draft.originating_view_id = originating_view_id
             my_draft = self._draft_ref(draft) if draft is not None else None
         if my_draft is None and open_draft_if_absent:
             branch_id = await self.open_draft(
@@ -4018,6 +4074,9 @@ class GraphVersioningService:
                 graph_id=graph_id, branch_id=bid, commit_seq=new_seq,
                 parent_commit_id=branch.head_commit_id, kind="edit",
                 message=message, actor=actor,
+                # Attribute to the draft's view (NULL on main write-throughs) so the
+                # per-view history filter sees interactive canvas saves too.
+                originating_view_id=branch.originating_view_id,
             )
             s.add(commit)
             await s.flush()

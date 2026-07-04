@@ -245,10 +245,20 @@ export function ExplorerListRow({
           {view.favouriteCount}
         </span>
 
-        {/* ── Updated ── */}
-        <span className="text-xs text-ink-muted">
-          {timeAgo(view.updatedAt)}
-        </span>
+        {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both ── */}
+        {(() => {
+          const dataAt = view.dataUpdatedAt ?? null
+          const freshest = dataAt && dataAt > view.updatedAt ? dataAt : view.updatedAt
+          const title = [
+            dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
+            `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
+          ].filter(Boolean).join('\n')
+          return (
+            <span className="text-xs text-ink-muted" title={title}>
+              {timeAgo(freshest)}
+            </span>
+          )
+        })()}
 
         {/* ── Actions ── */}
         <div className="flex items-center justify-end gap-0.5">

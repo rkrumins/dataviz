@@ -201,7 +201,7 @@ export function AdminPermissions() {
 
 
     return (
-        <div className="max-w-7xl mx-auto p-8 animate-in fade-in duration-500">
+        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
             {/* Hero */}
             <div className="flex items-center justify-between mb-8">
                 <div className="flex items-center gap-3">

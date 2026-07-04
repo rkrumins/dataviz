@@ -585,14 +585,24 @@ export function ExplorerViewCard({
             )
           })()}
 
-          {/* Sync indicator — right */}
+          {/* Sync indicator — right. Freshest of settings-edit vs data-publish, with both
+              stories in the tooltip ("Data updated … by X" / "Settings edited … by Y"). */}
           {(() => {
-            const ageDays = (Date.now() - new Date(view.updatedAt).getTime()) / (1000 * 60 * 60 * 24)
+            const dataAt = view.dataUpdatedAt ?? null
+            const freshest = dataAt && dataAt > view.updatedAt ? dataAt : view.updatedAt
+            const ageDays = (Date.now() - new Date(freshest).getTime()) / (1000 * 60 * 60 * 24)
             const syncColor = ageDays <= 7 ? 'text-emerald-500' : ageDays <= 30 ? 'text-amber-500' : 'text-red-500'
+            const title = [
+              dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
+              `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
+            ].filter(Boolean).join('\n')
             return (
-              <span className={cn('inline-flex items-center gap-1 text-[10px] font-medium ml-auto', syncColor)}>
+              <span
+                className={cn('inline-flex items-center gap-1 text-[10px] font-medium ml-auto', syncColor)}
+                title={title}
+              >
                 <RefreshCw className="h-2.5 w-2.5" />
-                {timeAgo(view.updatedAt)}
+                {timeAgo(freshest)}
               </span>
             )
           })()}

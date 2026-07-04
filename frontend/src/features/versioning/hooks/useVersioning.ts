@@ -43,6 +43,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
+  squashedCommits: (ws?: string, gid?: string | null, cid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'squashed', ws, gid, cid] as const,
   projectionWatermark: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'watermark', ws, gid] as const,
 }
@@ -82,13 +84,20 @@ export function useBranchState(wsId?: string, graphId?: string | null, branchId?
 /** Poll a graph's projection freshness; drives the "refreshing…" badge. Polls every 3s ONLY while a
  *  projection is actively catching up (status projecting/rebuilding), then stops. A graph that is
  *  merely behind-and-idle (no FalkorDB worker running) is not polled — otherwise it would poll
- *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up. */
-export function useProjectionWatermark(wsId?: string, graphId?: string | null) {
+ *  forever. A merge/publish invalidates this query, so a freshly-started projection is picked up.
+ *  `opts.force` keeps the poll alive REGARDLESS of status — the Data health rebuild flow needs to
+ *  observe the terminal transition (idle + lastError = failed), which the status-gated poll would
+ *  stop one tick short of. */
+export function useProjectionWatermark(
+  wsId?: string, graphId?: string | null, opts?: { force?: boolean },
+) {
+  const force = opts?.force ?? false
   return useQuery({
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
     refetchInterval: (q) => {
+      if (force) return 3_000
       const d = q.state.data
       const active = d?.status === 'projecting' || d?.status === 'rebuilding'
       return d && d.fresh === false && active ? 3_000 : false
@@ -230,7 +239,10 @@ export function useViewPrCounts(wsId?: string, viewId?: string | null) {
   })
 }
 
-/** A view's change history — view-scoped (across branches) or graph-wide (`main`). */
+/** A view's change history. "This view" (default) shows the view's PUBLISHED timeline
+ *  (its squash-publishes + shared graph-level events) — equal to the whole-graph log for a
+ *  single-view source, with each squash drillable via {@link useSquashedCommits}. Graph-wide
+ *  shows the full `main` log. */
 export function useViewCommitLog(
   wsId?: string, graphId?: string | null,
   opts: { viewId?: string | null; graphWide?: boolean; limit?: number } = {},
@@ -239,9 +251,25 @@ export function useViewCommitLog(
   return useQuery({
     queryKey: VERSIONING_KEYS.viewCommitLog(wsId, graphId, viewId, graphWide, limit),
     queryFn: () =>
-      api.getCommitLog(wsId!, graphId!, graphWide || !viewId ? { limit } : { originatingViewId: viewId, limit }),
+      api.getCommitLog(wsId!, graphId!,
+        graphWide || !viewId
+          ? { limit }
+          : { originatingViewId: viewId, publishedOnly: true, limit }),
     enabled: !!wsId && !!graphId && (graphWide || !!viewId),
     staleTime: 15_000,
+  })
+}
+
+/** The raw draft commits squashed into a publish/merge commit — lazily loaded when the user
+ *  expands a "merged N commits" row. Immutable once published, so cache it long. */
+export function useSquashedCommits(
+  wsId?: string, graphId?: string | null, commitId?: string | null, enabled = true,
+) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.squashedCommits(wsId, graphId, commitId),
+    queryFn: () => api.getSquashedCommits(wsId!, graphId!, commitId!, { limit: 100 }),
+    enabled: !!wsId && !!graphId && !!commitId && enabled,
+    staleTime: 5 * 60_000,
   })
 }
 

@@ -7,14 +7,18 @@
  * switching branches reloads the canvas, so opening a draft after staging
  * would discard the in-progress edit.
  *
- * No-op when already in a draft. Resumes the caller's existing draft when the
- * backend reports one (`resolveGraph().myDraft`) instead of opening a
- * duplicate. Returns the branch id, or null when no draft can be opened (the
+ * No-op when already in a draft. Opens-or-resumes atomically via
+ * `POST /resolve` (`resolveAndOpenDraft`), passing the ACTIVE VIEW's id so the
+ * draft — and every commit made on it — is attributed to the view it was
+ * opened from (branch-level attribution: a draft belongs to one view). The
+ * server also claim-fills attribution onto a resumed draft that predates view
+ * tracking. Returns the branch id, or null when no draft can be opened (the
  * graph context isn't resolved yet, or the caller lacks `:manage`) — callers
  * treat null as "cannot edit"; Published is read-only.
  */
 import { useBranchStore } from '@/store/branchStore'
-import { openDraft, resolveGraph } from '@/services/versioningApiService'
+import { useSchemaStore } from '@/store/schema'
+import { resolveAndOpenDraft } from '@/services/versioningApiService'
 import { VERSIONING_KEYS } from '../hooks/useVersioning'
 
 /** The branches/resolve caches must reflect a draft the moment it exists — the
@@ -32,23 +36,22 @@ function invalidateVersioningCaches(): void {
 export async function ensureDraftOpen(): Promise<string | null> {
   const s = useBranchStore.getState()
   if (s.isDraftMode()) return s.currentBranchId
-  const { workspaceId, dataSourceId, graphId, originatingViewId } = s
+  const { workspaceId, dataSourceId, graphId } = s
   if (!workspaceId || !dataSourceId || !graphId) return null
+  // The read side (Changes & Reviews, per-view PRs) filters by the ACTIVE view's
+  // id — resolve it from the same source so write-time attribution matches.
+  const activeViewId = useSchemaStore.getState().getActiveView()?.id ?? s.originatingViewId ?? null
   try {
-    // Resume before creating — the caller may already have an open draft
-    // (e.g. from a previous session); opening blindly would mint duplicates.
-    const r = await resolveGraph(workspaceId, dataSourceId)
-    if (r.myDraft?.branchId) {
-      useBranchStore.getState().switchToDraft(r.myDraft.branchId, originatingViewId)
-      invalidateVersioningCaches()
-      return r.myDraft.branchId
-    }
-    const { branchId } = await openDraft(workspaceId, graphId, {
-      originatingViewId: originatingViewId ?? undefined,
+    const r = await resolveAndOpenDraft(workspaceId, {
+      dataSourceId,
+      originatingViewId: activeViewId ?? undefined,
     })
-    useBranchStore.getState().switchToDraft(branchId, originatingViewId)
+    if (!r.myDraft?.branchId) return null
+    useBranchStore
+      .getState()
+      .switchToDraft(r.myDraft.branchId, r.myDraft.originatingViewId ?? activeViewId)
     invalidateVersioningCaches()
-    return branchId
+    return r.myDraft.branchId
   } catch {
     // Missing :manage or a transient failure — no draft, so no editing.
     return null

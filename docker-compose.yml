@@ -236,6 +236,14 @@ services:
       # CORS — allow the frontend container + local dev
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3080,http://localhost:5173,http://localhost:3000}
 
+      # Versioned-graph read layer: run the reconciling projection worker
+      # in-process so the FalkorDB cache continuously self-heals toward the
+      # Postgres source of truth (missed post-publish syncs, failed rebuilds).
+      # Without it, a graph that misses its one-shot interactive sync stays
+      # behind until someone opens Data health. Set 0 when running the
+      # standalone worker (`python -m backend.app.services.versioning`).
+      GRAPHVER_PROJECTION_INPROCESS: "${GRAPHVER_PROJECTION_INPROCESS:-1}"
+
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:

@@ -1,6 +1,6 @@
 export function SkeletonCards() {
   return (
-    <div className="max-w-6xl mx-auto p-8 animate-in fade-in duration-500">
+    <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
       <div className="flex items-center justify-between mb-10">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-black/5 dark:bg-white/10 animate-pulse" />

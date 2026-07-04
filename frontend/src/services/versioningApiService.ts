@@ -23,6 +23,9 @@ export interface DraftRef {
   branchId: string
   headCommitId?: string | null
   baseCommitSeq?: number | null
+  /** The view the draft was opened from (branch-level attribution; null for
+   *  drafts that predate view tracking until their owner next edits from a view). */
+  originatingViewId?: string | null
 }
 
 export interface ResolveResponse {
@@ -108,6 +111,15 @@ export interface Watermark {
   projected: number
   fresh: boolean
   status?: string   // idle | projecting | rebuilding | evicted — only projecting/rebuilding = actively catching up
+  /** Seq the projection is catching up TO (0 when no projection state exists). */
+  target?: number
+  /** Why the last projection pass stopped — `idle && !fresh && lastError` = it FAILED
+   *  (not merely pending); the Data health UI surfaces this as a terminal state. */
+  lastError?: string | null
+  lastProjectedAt?: string | null
+  /** Live full-rebuild progress (items applied / total); null unless a full seed is running. */
+  progressDone?: number | null
+  progressTotal?: number | null
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
@@ -621,15 +633,36 @@ export function getCommitState(wsId: string, graphId: string, commitId: string):
 export function getCommitLog(
   wsId: string,
   graphId: string,
-  params: { branchId?: string; originatingViewId?: string; limit?: number; offset?: number } = {},
+  params: {
+    branchId?: string; originatingViewId?: string; publishedOnly?: boolean
+    limit?: number; offset?: number
+  } = {},
 ): Promise<CommitLogResponse> {
   const sp = new URLSearchParams()
   if (params.branchId) sp.set('branchId', params.branchId)
   if (params.originatingViewId) sp.set('originatingViewId', params.originatingViewId)
+  if (params.publishedOnly) sp.set('publishedOnly', 'true')
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
   const qs = sp.toString()
   return vfetch<CommitLogResponse>(`${base(wsId)}/graphs/${graphId}/commits${qs ? `?${qs}` : ''}`)
+}
+
+/** The raw draft commits squashed into a publish/merge commit — the "merged N commits"
+ *  drill-down. Empty for a non-squash commit. */
+export function getSquashedCommits(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+  params: { limit?: number; offset?: number } = {},
+): Promise<CommitLogResponse> {
+  const sp = new URLSearchParams()
+  if (params.limit != null) sp.set('limit', String(params.limit))
+  if (params.offset != null) sp.set('offset', String(params.offset))
+  const qs = sp.toString()
+  return vfetch<CommitLogResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/squashed${qs ? `?${qs}` : ''}`,
+  )
 }
 
 export function getEntityHistory(

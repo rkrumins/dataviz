@@ -479,8 +479,8 @@ export function RegistryJobHistory() {
     return (
         <div className="flex flex-col h-full animate-in fade-in duration-300">
             {/* ── Pinned toolbar: header + KPIs + filters ── */}
-            <div className="shrink-0 px-8 pt-6 pb-4 space-y-4 border-b border-glass-border/40 bg-canvas">
-                <div className="max-w-7xl mx-auto space-y-4">
+            <div className="shrink-0 pt-6 pb-4 border-b border-glass-border/40 bg-canvas">
+                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 space-y-4">
                     {/* Header */}
                     <div className="flex items-center gap-3">
                         <div className="flex-shrink-0 w-9 h-9 rounded-xl bg-indigo-500/10 flex items-center justify-center">
@@ -565,7 +565,7 @@ export function RegistryJobHistory() {
 
             {/* ── Scrollable content area ── */}
             <div className="flex-1 min-h-0 overflow-y-auto">
-                <div className="px-8 py-4 max-w-7xl mx-auto">
+                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-4">
 
             {/* ── Grouped View ── */}
             {viewMode === 'grouped' && (

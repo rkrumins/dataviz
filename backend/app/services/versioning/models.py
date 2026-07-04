@@ -235,6 +235,11 @@ class ProjectionStateORM(VersioningBase):
     shard_map = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
+    # Live progress of an in-flight FULL reseed (items applied / total), written
+    # throttled by the projector and cleared on completion/failure — drives the
+    # Data health rebuild progress bar. NULL when no full seed is running.
+    progress_done = Column(BigInteger, nullable=True)
+    progress_total = Column(BigInteger, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = _plain(

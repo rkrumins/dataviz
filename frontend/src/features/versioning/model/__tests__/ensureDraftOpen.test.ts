@@ -1,14 +1,22 @@
 /**
- * ensureDraftOpen — resume-before-create contract: an existing draft reported
- * by resolveGraph is switched to (never duplicated), a fresh draft is opened
- * only when none exists, and null means "cannot edit" (unresolved context or
- * API failure). Uses the real branchStore; only the API service is mocked.
+ * ensureDraftOpen — atomic open-or-resume contract via POST /resolve
+ * (resolveAndOpenDraft): the active view's id is sent so the draft is
+ * attributed to the view it was opened from, the server's attribution wins on
+ * resume (claim-if-null happens server-side), and null means "cannot edit"
+ * (unresolved context or API failure). Uses the real branchStore; the API
+ * service and schema store are mocked.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/versioningApiService', () => ({
-  resolveGraph: vi.fn(),
-  openDraft: vi.fn(),
+  resolveAndOpenDraft: vi.fn(),
+}))
+
+// ensureDraftOpen reads the ACTIVE view from the schema store (the same source
+// the read-side filters use) — mock the store, not the whole schema machinery.
+const getActiveView = vi.fn()
+vi.mock('@/store/schema', () => ({
+  useSchemaStore: { getState: () => ({ getActiveView }) },
 }))
 
 // ensureDraftOpen invalidates the versioning query caches through @/main's
@@ -19,22 +27,21 @@ vi.mock('@/main', () => ({
   getQueryClient: () => ({ invalidateQueries }),
 }))
 
-import { openDraft, resolveGraph } from '@/services/versioningApiService'
+import { resolveAndOpenDraft } from '@/services/versioningApiService'
 import { useBranchStore } from '@/store/branchStore'
 import { ensureDraftOpen } from '../ensureDraftOpen'
 
-const resolveGraphMock = vi.mocked(resolveGraph)
-const openDraftMock = vi.mocked(openDraft)
+const resolveAndOpenDraftMock = vi.mocked(resolveAndOpenDraft)
 
 beforeEach(() => {
   vi.clearAllMocks()
+  getActiveView.mockReturnValue({ id: 'view1' })
   useBranchStore.getState().reset()
   useBranchStore.setState({
     workspaceId: 'ws1',
     dataSourceId: 'ds1',
     graphId: 'g1',
     mainBranchId: 'br_main',
-    originatingViewId: 'view1',
   })
 })
 
@@ -43,48 +50,77 @@ describe('ensureDraftOpen', () => {
     useBranchStore.setState({ currentBranchId: 'br_open' })
 
     await expect(ensureDraftOpen()).resolves.toBe('br_open')
-    expect(resolveGraphMock).not.toHaveBeenCalled()
-    expect(openDraftMock).not.toHaveBeenCalled()
+    expect(resolveAndOpenDraftMock).not.toHaveBeenCalled()
   })
 
-  it('resumes the existing draft reported by resolveGraph instead of opening a duplicate', async () => {
-    resolveGraphMock.mockResolvedValue({
+  it('opens-or-resumes atomically, sending the active view id for attribution', async () => {
+    resolveAndOpenDraftMock.mockResolvedValue({
       graphId: 'g1',
       mainBranchId: 'br_main',
       mainHeadCommitSeq: 5,
-      myDraft: { branchId: 'br_mine' },
+      myDraft: { branchId: 'br_mine', originatingViewId: 'view1' },
     })
 
     await expect(ensureDraftOpen()).resolves.toBe('br_mine')
-    expect(openDraftMock).not.toHaveBeenCalled()
+    expect(resolveAndOpenDraftMock).toHaveBeenCalledWith('ws1', {
+      dataSourceId: 'ds1',
+      originatingViewId: 'view1',
+    })
     expect(useBranchStore.getState().currentBranchId).toBe('br_mine')
     expect(useBranchStore.getState().originatingViewId).toBe('view1')
   })
 
-  it('opens a new draft when the user has none', async () => {
-    resolveGraphMock.mockResolvedValue({
+  it("keeps the server's attribution when resuming a draft opened from another view", async () => {
+    resolveAndOpenDraftMock.mockResolvedValue({
       graphId: 'g1',
       mainBranchId: 'br_main',
       mainHeadCommitSeq: 5,
-      myDraft: null,
+      myDraft: { branchId: 'br_mine', originatingViewId: 'viewOther' },
     })
-    openDraftMock.mockResolvedValue({ branchId: 'br_new' })
+
+    await expect(ensureDraftOpen()).resolves.toBe('br_mine')
+    expect(useBranchStore.getState().originatingViewId).toBe('viewOther')
+  })
+
+  it('falls back to the branch-store view id when no active view exists', async () => {
+    getActiveView.mockReturnValue(undefined)
+    useBranchStore.setState({ originatingViewId: 'viewStored' })
+    resolveAndOpenDraftMock.mockResolvedValue({
+      graphId: 'g1',
+      mainBranchId: 'br_main',
+      mainHeadCommitSeq: 5,
+      myDraft: { branchId: 'br_new', originatingViewId: null },
+    })
 
     await expect(ensureDraftOpen()).resolves.toBe('br_new')
-    expect(openDraftMock).toHaveBeenCalledWith('ws1', 'g1', { originatingViewId: 'view1' })
-    expect(useBranchStore.getState().currentBranchId).toBe('br_new')
+    expect(resolveAndOpenDraftMock).toHaveBeenCalledWith('ws1', {
+      dataSourceId: 'ds1',
+      originatingViewId: 'viewStored',
+    })
+    expect(useBranchStore.getState().originatingViewId).toBe('viewStored')
   })
 
   it('returns null when the graph context is not resolved yet', async () => {
     useBranchStore.setState({ graphId: null })
 
     await expect(ensureDraftOpen()).resolves.toBeNull()
-    expect(resolveGraphMock).not.toHaveBeenCalled()
-    expect(openDraftMock).not.toHaveBeenCalled()
+    expect(resolveAndOpenDraftMock).not.toHaveBeenCalled()
+  })
+
+  it('returns null when the response carries no draft', async () => {
+    resolveAndOpenDraftMock.mockResolvedValue({
+      graphId: 'g1',
+      mainBranchId: 'br_main',
+      mainHeadCommitSeq: 5,
+      myDraft: null,
+    })
+
+    await expect(ensureDraftOpen()).resolves.toBeNull()
+    expect(useBranchStore.getState().currentBranchId).toBeNull()
   })
 
   it('returns null when the API fails (missing :manage or transient error)', async () => {
-    resolveGraphMock.mockRejectedValue(new Error('403'))
+    resolveAndOpenDraftMock.mockRejectedValue(new Error('403'))
 
     await expect(ensureDraftOpen()).resolves.toBeNull()
     expect(useBranchStore.getState().currentBranchId).toBeNull()

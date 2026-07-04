@@ -34,6 +34,7 @@ export function ViewPrList({
     const list: PullRequest[] = q.data ?? []
     return activeOnly ? list.filter((p) => !TERMINAL.has(p.status)) : list
   }, [q.data, activeOnly])
+  const hiddenByFilter = (q.data?.length ?? 0) - rows.length
 
   return (
     <div className="space-y-3">
@@ -69,6 +70,15 @@ export function ViewPrList({
           <p className="text-sm text-ink-muted">
             {wide ? 'No pull requests on this data source.' : 'No pull requests raised from this view yet.'}
           </p>
+          {hiddenByFilter > 0 ? (
+            <p className="mt-1.5 text-xs text-ink-muted/70">
+              {hiddenByFilter} merged or closed {hiddenByFilter === 1 ? 'request is' : 'requests are'} hidden — untick "Active only" to see {hiddenByFilter === 1 ? 'it' : 'them'}.
+            </p>
+          ) : !wide ? (
+            <p className="mt-1.5 text-xs text-ink-muted/70">
+              Requests raised before view tracking was enabled, or from other views, appear under Whole data source.
+            </p>
+          ) : null}
         </div>
       ) : (
         <div className="space-y-1.5">
