@@ -11,7 +11,7 @@
  */
 import { useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { Plus, ClipboardList, Sparkles, ChevronRight } from 'lucide-react'
+import { Plus, LayoutGrid, Sparkles, ChevronRight } from 'lucide-react'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useViewEntityTypes, useViewRootEntityTypes } from '@/hooks/useViewSchema'
 import { containmentChains } from '@/services/ontologyPreflightService'
@@ -64,14 +64,14 @@ export function BuilderEmptyState() {
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-lg shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
           >
             <Plus className="w-4 h-4" />
-            Add entities
+            Add your first entity
           </button>
           <button
-            onClick={() => useHierarchyBuilderStore.getState().open({ mode: 'paste' })}
+            onClick={() => useHierarchyBuilderStore.getState().openBuild()}
             className="btn btn-ghost px-4 py-2.5 text-sm text-ink"
           >
-            <ClipboardList className="w-4 h-4" />
-            Paste a list
+            <LayoutGrid className="w-4 h-4" />
+            Build a lot at once
           </button>
         </div>
 

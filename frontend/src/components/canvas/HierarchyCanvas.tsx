@@ -40,6 +40,7 @@ import { EditorToolbar } from './EditorToolbar'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 import { BuilderEmptyState } from './create/BuilderEmptyState'
+import { BuildPanel } from './create/buildmode/BuildPanel'
 import { EntityDrawer } from '../panels/EntityDrawer'
 import { SearchMapPanel } from './search/SearchMapPanel'
 import { PropertyManagerDrawer } from './property-manager/PropertyManagerDrawer'
@@ -110,8 +111,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   useDisplayRuleEngine(activeView?.id ?? null)
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
 
-  // Edit Mode State (shared across canvases)
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen)
+  // Edit Mode State (shared across canvases). `surface` distinguishes the
+  // 400px rail from the wider Build Mode panel — only one mounts at a time.
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
   // Build containment hierarchy using shared hook (must precede trace + traceContextSet)
@@ -371,6 +374,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => useHierarchyBuilderStore.getState().open()}
+          onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
           onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
@@ -528,7 +532,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             }}
           />
         )}
-        {!builderOpen && (
+        {buildOpen && (
+          <BuildPanel onClose={() => useHierarchyBuilderStore.getState().close()} />
+        )}
+        {!builderOpen && !buildOpen && (
           <EntityDrawer
             onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
             onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}

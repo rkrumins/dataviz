@@ -43,6 +43,8 @@ interface LayerColumnProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onAddToLayer?: (layerId: string) => void
+  /** "Build a lot at once" scoped to this layer — a quieter sibling of onAddToLayer. */
+  onBuildToLayer?: (layerId: string) => void
   /** When set (draft/authoring mode), enables the hover connection handle on cards. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
   /** Right-click on empty space in this layer column (draft/authoring mode). */
@@ -95,6 +97,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onDoubleClick,
   onAddChild,
   onAddToLayer,
+  onBuildToLayer,
   onBeginConnect,
   onLayerContextMenu,
   traceFocusId,
@@ -824,6 +827,18 @@ export const LayerColumn = React.memo(function LayerColumn({
                     title={`Add entity to ${layer.name}`}
                   >
                     <LucideIcons.Plus className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                {onBuildToLayer && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onBuildToLayer(layer.id)
+                    }}
+                    className="p-1.5 rounded-lg bg-accent-lineage/10 hover:bg-accent-lineage/20 text-accent-lineage transition-all duration-200 hover:scale-110 active:scale-95"
+                    title={`Build a lot at once in ${layer.name}`}
+                  >
+                    <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
                   </button>
                 )}
               </div>

@@ -63,6 +63,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
 import { BuilderEmptyState } from './create/BuilderEmptyState'
+import { BuildPanel } from './create/buildmode/BuildPanel'
 
 // Hooks
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -151,7 +152,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   // Hierarchy Builder open state — drives right-rail mutual exclusion with the
   // inspectors ("creation takes the rail"). Selector, not getState-in-render.
-  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen)
+  // `surface` distinguishes the 400px rail from the wider Build Mode panel —
+  // only one of the two (never both) mounts at a time.
+  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail')
+  const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build')
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
@@ -1296,6 +1300,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
           onAddNode={() => useHierarchyBuilderStore.getState().open()}
+          onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
           onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
@@ -1531,8 +1536,11 @@ export function GraphCanvas({ className }: { className?: string }) {
           }}
         />
       )}
+      {buildOpen && (
+        <BuildPanel onClose={() => useHierarchyBuilderStore.getState().close()} />
+      )}
       <AnimatePresence>
-        {!builderOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
@@ -1541,7 +1549,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </AnimatePresence>
-      {!builderOpen && (
+      {!builderOpen && !buildOpen && (
         <EntityDrawer
           onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
           onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}

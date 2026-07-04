@@ -309,6 +309,18 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const doAdd = useCallback(() => { commitSibling(); focusName() }, [commitSibling, focusName])
   const doAddNest = useCallback(() => { clearConsumedClick(); commitAndNest(); focusName() }, [clearConsumedClick, commitAndNest, focusName])
 
+  // Expand ⤢ — hand the same scope off to the wider Build Mode surface for
+  // adding a lot at once. Carries the rail's ORIGINAL scope (scopeParentUrn/
+  // layerId), not the outline's live `active.parentUrn` (which may have been
+  // retargeted to a staged row) — Build's rootParentUrn must be a real canvas
+  // urn or null.
+  const expandToBuild = useCallback(() => {
+    useHierarchyBuilderStore.getState().openBuild({
+      parentUrn: scopeParentUrn ?? undefined,
+      layerId: layerId ?? undefined,
+    })
+  }, [scopeParentUrn, layerId])
+
   // ── Keyboard model (unchanged from v1). Tab routing is load-bearing:
   //    non-blank name → commitAndNest(); blank name → indent(). ──
   const onNameKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -377,9 +389,19 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                   <p className="text-xs text-ink-muted">Build the hierarchy — save when you&rsquo;re done</p>
                 </div>
               </div>
-              <button onClick={onClose} title="Close" aria-label="Close" className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
-                <LucideIcons.X className="w-5 h-5 text-ink-muted" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={expandToBuild}
+                  title="Expand to Build mode — add a lot at once"
+                  aria-label="Expand to Build mode"
+                  className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+                >
+                  <LucideIcons.Maximize2 className="w-4 h-4 text-ink-muted" />
+                </button>
+                <button onClick={onClose} title="Close" aria-label="Close" className="p-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors">
+                  <LucideIcons.X className="w-5 h-5 text-ink-muted" />
+                </button>
+              </div>
             </div>
 
             <div className="mt-3 relative">

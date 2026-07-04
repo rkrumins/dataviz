@@ -49,6 +49,7 @@ import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetai
 import { EntityDrawer } from '../../panels/EntityDrawer'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
+import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -567,8 +568,12 @@ export function ContextViewCanvas({
   // add-child, right-click create, palette, 'N' key) opens the shared
   // Hierarchy Builder; its store centralizes scope + the ensureDraftOpen
   // guard. Subscribed via selectors so unrelated store writes don't re-render.
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen)
+  // `surface` distinguishes the 400px rail from the wider Build Mode panel —
+  // only one of the two (never both) mounts at a time.
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
   const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
+  const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
 
   // Assignment warning state (shown when user tries to assign child to different layer)
   const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
@@ -2475,6 +2480,9 @@ export function ContextViewCanvas({
                 onAddToLayer={isDraft ? (layerId) => {
                   useHierarchyBuilderStore.getState().open({ layerId })
                 } : undefined}
+                onBuildToLayer={isDraft ? (layerId) => {
+                  useHierarchyBuilderStore.getState().openBuild({ layerId })
+                } : undefined}
                 onBeginConnect={isDraft ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
                   type: 'canvas',
@@ -2536,7 +2544,24 @@ export function ContextViewCanvas({
             }}
           />
         )}
-        {!builderOpen && drawerNodeId && (
+        {buildOpen && (
+          <BuildPanel
+            key="build-panel"
+            onClose={() => useHierarchyBuilderStore.getState().close()}
+            onRowStaged={(_rowId, urn) => {
+              // Same 3-tier layer resolution as onEntityStaged above, evaluated
+              // once per batch from the session's fixed scope (Build's
+              // parentUrn/layerId don't change mid-Apply, unlike the rail's
+              // per-row live retarget) — the creation layer → else the root
+              // parent's layer → else the first layer.
+              const layer = builderLayerId
+                ?? (builderParentUrn ? nodeLayerMap.get(builderParentUrn) : undefined)
+                ?? sortedLayers[0]?.id
+              if (layer) assignEntityToLayer(urn, layer)
+            }}
+          />
+        )}
+        {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
@@ -2546,7 +2571,7 @@ export function ContextViewCanvas({
             onLocateMany={locateManyOnCanvas}
           />
         )}
-        {!builderOpen && !drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
