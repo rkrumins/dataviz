@@ -80,6 +80,22 @@ describe('planDuplicate', () => {
     expect(childStep.properties.duplicatedFrom).toBe('urn:real:child')
   })
 
+  it('folds each node\'s description into properties.description so it survives the copy', () => {
+    const childMap = new Map([['root', ['child']]])
+    const nodeData = new Map([
+      ['root', src({ urn: 'root', description: 'Root description', properties: { color: 'blue' } })],
+      ['child', src({ urn: 'child' })], // no description
+    ])
+
+    const plan = planDuplicate('root', childMap, nodeData, [])
+
+    const rootStep = plan.nodes.find((n) => n.originalId === 'root')!
+    const childStep = plan.nodes.find((n) => n.originalId === 'child')!
+    expect(rootStep.properties.description).toBe('Root description')
+    expect(rootStep.properties.color).toBe('blue') // other properties still preserved
+    expect(childStep.properties).not.toHaveProperty('description') // absent when the source had none
+  })
+
   it('plans an edge step for a lineage edge with both endpoints inside the subtree', () => {
     const childMap = new Map([['root', ['a', 'b']]])
     const nodeData = new Map([

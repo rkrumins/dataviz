@@ -7,6 +7,8 @@ export interface LineageNode extends Node {
     label: string
     businessLabel?: string
     technicalLabel?: string
+    /** The entity's description (mapped from GraphNode.description in toCanvasNode). */
+    description?: string
     urn: string
     type: string // Allow any entity type
     lensId?: string

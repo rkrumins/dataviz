@@ -17,6 +17,12 @@ export interface DuplicateSourceNode {
   tags?: string[]
   properties?: Record<string, unknown>
   /**
+   * The entity's description. Stored top-level on the read model but persisted
+   * via `properties.description` (backend create_node reads it from there), so
+   * it is folded into the copy's properties to survive the duplicate.
+   */
+  description?: string
+  /**
    * The containment edge type connecting this node's ORIGINAL parent to this
    * node (undefined when the node has no containment parent, e.g. a
    * top-level root). Reused on the corresponding parentCopy→copy edge for
@@ -102,7 +108,13 @@ export function planDuplicate(
       entityType: source.entityType,
       displayName: isRoot ? `${source.displayName} (Copy)` : source.displayName,
       tags: source.tags ?? [],
-      properties: { ...(source.properties ?? {}), duplicatedFrom: source.urn },
+      properties: {
+        ...(source.properties ?? {}),
+        // Top-level description wins over any stale properties.description; the
+        // backend persists it from properties.description on create.
+        ...(source.description != null ? { description: source.description } : {}),
+        duplicatedFrom: source.urn,
+      },
       parentOriginalId,
       containmentEdgeType: source.containmentEdgeType,
     })

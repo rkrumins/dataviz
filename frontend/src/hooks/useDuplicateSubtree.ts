@@ -133,6 +133,7 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
         displayName: n.data.label as string,
         tags: (n.data.classifications as string[]) ?? [],
         properties: (n.data.properties as Record<string, unknown>) ?? {},
+        description: n.data.description as string | undefined,
         containmentEdgeType: incomingContainmentType.get(id),
       })
     }
