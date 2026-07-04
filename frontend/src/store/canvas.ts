@@ -11,6 +11,9 @@ export interface LineageNode extends Node {
     type: string // Allow any entity type
     lensId?: string
     classifications?: string[]
+    /** The entity's own persisted layer (Context View). Single source of truth
+     *  for layer placement — set on create and on a layer move; see toCanvasNode. */
+    layerAssignment?: string
     confidence?: number
     metadata?: Record<string, unknown>
     /** Editable property bag (the canvas convention; see toCanvasNode). */

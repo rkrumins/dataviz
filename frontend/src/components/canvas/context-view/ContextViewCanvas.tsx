@@ -536,6 +536,8 @@ export function ContextViewCanvas({
     const targetLayer = storeLayers.find(l => l.id === layerId)
     const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const entityName = (entity?.data?.label as string) ?? entityId
+    // The node's own persisted layer BEFORE the move — restored on discard.
+    const prevNodeLayer = entity?.data?.layerAssignment as string | undefined
 
     const result = assignEntityToLayer(entityId, layerId)
     if (!result.success && result.conflict?.type === 'containment_locked') {
@@ -546,19 +548,31 @@ export function ContextViewCanvas({
       return
     }
 
-    // Surface the assignment in the staged-changes review panel.
-    // Apply is a no-op because saveToBackend (referenceModelStore) is what
-    // actually flushes layer assignments — calling it here would double-write.
+    // Stamp the node's OWN `layerAssignment` — the single source of truth the
+    // reload placement reads (useLayerAssignment + the backend assignment
+    // engine). `assignEntityToLayer` only updates session `instanceAssignments`
+    // and the Context Model, neither of which reload placement consults, so
+    // without this the move is silently lost on refresh. The matching graph-op
+    // that persists this to the draft is emitted by stagedChangesToOps.
+    useCanvasStore.getState().updateNode(entityId, { layerAssignment: layerId })
+
+    // Surface the assignment in the staged-changes review panel. On Save this
+    // change is translated by stagedChangesToOps into a node `update` op that
+    // writes the entity's own `layerAssignment` to the draft — which is what
+    // makes the move survive a reload.
     const stagedChanges = useStagedChangesStore.getState()
     stagedChanges.stageOrReplace(
       (c) => c.type === 'assign_layer' && c.targetId === entityId,
       {
         type: 'assign_layer',
         targetId: entityId,
+        targetUrn: (entity?.data?.urn as string) ?? entityId,
         before: { layerId: prevLayerId, layerName: prevLayer?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
         discard: () => {
+          // Restore both the node's own layer stamp and the session assignment.
+          useCanvasStore.getState().updateNode(entityId, { layerAssignment: prevNodeLayer })
           if (prevLayerId) {
             useReferenceModelStore.getState().assignEntityToLayer(entityId, prevLayerId)
           } else {
