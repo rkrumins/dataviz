@@ -34,6 +34,7 @@ import { validateBuildRows, summarize, type BuildOntologyCtx } from './validateB
 import { useStageBuildRows } from './stageBuildRows'
 import { filterStageableRows } from './applyBuild'
 import { BuildOutline } from './BuildOutline'
+import { BuildGrid } from './BuildGrid'
 
 export interface BuildPanelProps {
   onClose: () => void
@@ -193,13 +194,15 @@ export function BuildPanel({ onClose, onRowStaged }: BuildPanelProps) {
             })}
           </div>
 
-          {/* ── Body — Task 7/8 mount BuildGrid/BuildPaste here, reading/writing
-              useBuildRowsStore directly (still stubbed). Task 6's BuildOutline
-              reads the same `validated` view the footer summary below uses, so
-              its type chips/status always match. ── */}
-          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+          {/* ── Body — Task 8 mounts BuildPaste here, reading/writing
+              useBuildRowsStore directly (still stubbed). Both BuildOutline and
+              BuildGrid read the same `validated` view the footer summary below
+              uses, so their type chips/status always match. ── */}
+          <div className={cn('flex-1 min-h-0', activeTab === 'grid' ? 'overflow-hidden' : 'overflow-y-auto custom-scrollbar')}>
             {activeTab === 'outline' ? (
               <BuildOutline rows={validated} typeById={typeById} />
+            ) : activeTab === 'grid' ? (
+              <BuildGrid rows={validated} typeById={typeById} />
             ) : (
               <div className="h-full flex items-center justify-center text-center px-8">
                 <div className="max-w-xs space-y-1.5">
