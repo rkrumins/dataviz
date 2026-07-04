@@ -1773,6 +1773,18 @@ async def apply_graph_changes(
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+
+    # Invalidate the draft branch's read cache so the client's NEXT read reflects
+    # this commit immediately. Without this, the cached reads for this branch
+    # (nodes / children / top-level / layer assignments) keep serving the
+    # pre-commit state until their TTL (~30-60s) expires — which is exactly the
+    # "my saved change reverts on refresh, then reappears ~20s later" symptom.
+    # Draft reads key on CacheScope(ws, ds, branch), so we bump that exact scope.
+    # bump_generation swallows Redis errors and never raises, so this can't fail
+    # the user's write.
+    await get_graph_cache().bump_generation(
+        CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
+    )
     return {"commitId": commit_id, "assigned": assigned}
 
 
