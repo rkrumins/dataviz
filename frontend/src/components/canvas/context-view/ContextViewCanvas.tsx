@@ -1783,12 +1783,22 @@ export function ContextViewCanvas({
           for (const id of subtreeIds) next.delete(id)
           return next
         })
-      } else {
-        removeEdgesByNodeIds(
-          subtreeIds,
-          trace.isTracing ? trace.addedEdgeIds : undefined,
-        )
+      } else if (trace.isTracing) {
+        // Trace mode: keep the merged lineage/containment edges (addedEdgeIds);
+        // useTraceFilteredHierarchy hides non-context nodes.
+        removeEdgesByNodeIds(subtreeIds, trace.addedEdgeIds)
       }
+      // else — the subtree carries UNSAVED work: leave it FULLY intact in the
+      // store (no node or edge removal). The visual collapse is driven by
+      // `expandedNodes` alone, so the rows are hidden regardless; keeping every
+      // containment edge means no SAVED descendant is orphaned. Dropping the
+      // saved edges here (the old `removeEdgesByNodeIds` fallback) is exactly
+      // what re-homed those descendants as root-level siblings — the
+      // expand/collapse "scramble" that recurs whenever the subtree mixes saved
+      // nodes with new/renamed (pending) ones. Re-expand re-renders straight from
+      // the intact store (loadChildren short-circuits on the already-satisfied
+      // childCount, nothing duplicates), and every in-progress create / rename /
+      // reparent survives.
 
       // Synchronous companion: drop matching entries in the aggregated-edge
       // map too. Otherwise stale child-level aggregated edges linger for up
