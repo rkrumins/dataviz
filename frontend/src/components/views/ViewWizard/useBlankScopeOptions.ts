@@ -8,12 +8,13 @@
  * but only FalkorDB providers can actually back a blank model today (the backend
  * 422s the rest) — that gate travels on each option as `blankSupported`.
  */
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { useOntologies } from '@/features/ontology/hooks/useOntologies'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useProviderStatusStore } from '@/store/providerStatus'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 /** A provider surfaced in the blank picker, enriched with catalog + usage counts. */
@@ -57,6 +58,13 @@ export function useBlankScopeOptions(wsId: string | null): BlankScopeOptions {
     staleTime: 30_000,
   })
   const ontologiesQuery = useOntologies()
+
+  // Freshen provider health the moment the picker opens, so a provider that went
+  // down since the last background poll shows offline immediately rather than up to
+  // a poll-interval later. The global poll (every ~30s) keeps it current afterward.
+  useEffect(() => {
+    void useProviderStatusStore.getState().refresh()
+  }, [])
 
   // The wizard already loads the workspaces list; reuse it to count how many
   // existing data sources are built on each provider ("M in use").

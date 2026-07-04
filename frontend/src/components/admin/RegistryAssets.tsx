@@ -24,6 +24,7 @@ import {
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
+import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
@@ -62,6 +63,53 @@ const PROVIDER_TYPES = [
 ]
 function getProviderConfig(type: string) {
     return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
+}
+
+/** One provider row in the left rail. Renders the SAME live health dot (from the
+ *  shared `providerHealthModel`) as the Providers tab and the view wizard, so a
+ *  provider that's down looks down everywhere — not silently blank here. */
+function ProviderRailItem({
+    provider, counts, isActive, onSelect,
+}: {
+    provider: ProviderResponse
+    counts?: { total: number; registered: number }
+    isActive: boolean
+    onSelect: () => void
+}) {
+    const config = getProviderConfig(provider.providerType)
+    const health = useProviderHealth(provider.id)
+    const healthMeta = PROVIDER_HEALTH_META[health.state]
+    return (
+        <button
+            onClick={onSelect}
+            className={cn(
+                'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-colors duration-150',
+                isActive
+                    ? 'bg-indigo-500/8 border-indigo-500/30 shadow-sm'
+                    : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
+            )}
+        >
+            <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', config.color)}>
+                <config.Logo className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                    <p className="text-sm font-semibold text-ink truncate">{provider.name}</p>
+                    <span
+                        className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
+                        title={health.error ?? healthMeta.label}
+                    />
+                </div>
+                <p className="text-[11px] text-ink-muted">{config.label}</p>
+            </div>
+            {counts && (
+                <div className="text-right shrink-0">
+                    <p className="text-xs font-bold text-emerald-500">{counts.registered}</p>
+                    <p className="text-[10px] text-ink-muted">/{counts.total}</p>
+                </div>
+            )}
+        </button>
+    )
 }
 
 // Stable palette of subtle indicator colours cycling for type chips
@@ -1154,37 +1202,15 @@ export function RegistryAssets() {
                         </Link>
                     </div>
                 ) : (
-                    providers.map(p => {
-                        const config = getProviderConfig(p.providerType)
-                        const counts = providerAssetCounts[p.id]
-                        const isActive = selectedProviderId === p.id
-                        return (
-                            <button
-                                key={p.id}
-                                onClick={() => handleSelectProvider(p.id)}
-                                className={cn(
-                                    'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-colors duration-150 duration-150',
-                                    isActive
-                                        ? 'bg-indigo-500/8 border-indigo-500/30 shadow-sm'
-                                        : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
-                                )}
-                            >
-                                <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', config.color)}>
-                                    <config.Logo className="w-4 h-4" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-semibold text-ink truncate">{p.name}</p>
-                                    <p className="text-[11px] text-ink-muted">{config.label}</p>
-                                </div>
-                                {counts && (
-                                    <div className="text-right shrink-0">
-                                        <p className="text-xs font-bold text-emerald-500">{counts.registered}</p>
-                                        <p className="text-[10px] text-ink-muted">/{counts.total}</p>
-                                    </div>
-                                )}
-                            </button>
-                        )
-                    })
+                    providers.map(p => (
+                        <ProviderRailItem
+                            key={p.id}
+                            provider={p}
+                            counts={providerAssetCounts[p.id]}
+                            isActive={selectedProviderId === p.id}
+                            onSelect={() => handleSelectProvider(p.id)}
+                        />
+                    ))
                 )}
 
                 {/* Global stats pill */}

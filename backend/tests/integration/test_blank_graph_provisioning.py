@@ -64,6 +64,7 @@ async def _seed_management(ws_id: str):
         )
     suffix = os.urandom(3).hex()
     ids = {"falkor": f"prov_fk_{suffix}", "neo4j": f"prov_n4_{suffix}",
+           "down": f"prov_dn_{suffix}",
            "published": f"bp_pub_{suffix}", "draft": f"bp_draft_{suffix}"}
     async with get_session_factory(PoolRole.WEB)() as s:
         if await s.get(WorkspaceORM, ws_id) is None:
@@ -72,6 +73,10 @@ async def _seed_management(ws_id: str):
                           host="falkordb", port=6379))
         s.add(ProviderORM(id=ids["neo4j"], name="neo-a", provider_type="neo4j",
                           host="neo4j", port=7687))
+        # A FalkorDB provider that is enabled (is_active) but unreachable — used to
+        # prove the reachability gate blocks provisioning, not just the isActive flag.
+        s.add(ProviderORM(id=ids["down"], name="broke", provider_type="falkordb",
+                          host="broke", port=6379))
         s.add(OntologyORM(id=ids["published"], name="Pub Ontology", is_published=True,
                           entity_type_definitions=json.dumps({"Dataset": {"name": "Dataset"}}),
                           relationship_type_definitions=json.dumps(
@@ -101,7 +106,27 @@ async def _run() -> None:
     base = f"/api/v1/{ws}/versioning"
     c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
+    # Pin provider health deterministically via the warmup cache the reachability
+    # gate reads: the good provider is 'ready' (skips the live probe → hermetic),
+    # the "broke" provider is confirmed down. Restored in the finally.
+    from backend.app.providers.manager import provider_manager
+    provider_manager.warmup_cache[ids["falkor"]] = {"ok": True}
+    provider_manager.warmup_cache[ids["down"]] = {"ok": False, "reason": "host not found"}
+
     async with c:
+        # ── offline provider is REFUSED (isActive true, but unreachable) ──────
+        r = await c.post(f"{base}/blank-graphs", headers=_hdr(), json={
+            "name": "Doomed", "providerId": ids["down"], "ontologyId": ids["published"]})
+        assert r.status_code == 422 and r.json()["detail"]["type"] == "provider_unreachable", r.text
+        # and nothing was provisioned for it
+        from backend.app.db.engine import PoolRole, get_session_factory
+        from backend.app.db.models import WorkspaceDataSourceORM
+        from sqlalchemy import select
+        async with get_session_factory(PoolRole.WEB)() as s:
+            leaked = (await s.execute(select(WorkspaceDataSourceORM).where(
+                WorkspaceDataSourceORM.provider_id == ids["down"]))).scalars().all()
+            assert leaked == [], [d.id for d in leaked]
+
         # ── no manage permission → 403 ───────────────────────────────────────
         r = await c.post(f"{base}/blank-graphs", headers=_hdr(""), json={
             "name": "My Model", "providerId": ids["falkor"], "ontologyId": ids["published"]})
@@ -219,6 +244,9 @@ async def _run() -> None:
                 WorkspaceDataSourceORM.workspace_id == ws))).scalars().all()
             assert doomed == [], [d.id for d in doomed]
 
+    # Don't leak the pinned health verdicts onto the process-global manager.
+    provider_manager.warmup_cache.pop(ids["falkor"], None)
+    provider_manager.warmup_cache.pop(ids["down"], None)
     await db.dispose_engine()
 
 

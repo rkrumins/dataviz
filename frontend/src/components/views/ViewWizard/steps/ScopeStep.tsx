@@ -32,9 +32,11 @@ import {
     ChevronDown,
     X,
     Sparkles,
+    WifiOff,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
 import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -611,25 +613,36 @@ function providerMeta(type: string) {
 const CONNECTIONS_ROUTE = '/ingestion?tab=connections'
 const SEMANTIC_LAYERS_ROUTE = '/schema'
 
-/** Provider card — brand logo + tint, health dot, graph counts, blank-support gating. */
+/** Provider card — brand logo + tint, LIVE health dot, graph counts, and the two
+ *  gates that decide whether you can build here: blank-support (FalkorDB only today)
+ *  and reachability (a confirmed-offline provider is never selectable — you can't
+ *  create data in something that's down). */
 function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeOption; isSelected: boolean; onSelect: () => void }) {
     const { provider, graphCount, inUseCount, blankSupported } = option
     const meta = providerMeta(provider.providerType)
     const Logo = getProviderLogo(provider.providerType)
+    const health = useProviderHealth(provider.id)
+    const healthMeta = PROVIDER_HEALTH_META[health.state]
+    const isOffline = health.state === 'offline'
+    // Both gates must pass to build here. Offline is the hard, universal block; the
+    // blank-support gate is the existing "FalkorDB only" limitation.
+    const selectable = blankSupported && healthMeta.selectable
 
     return (
         <button
             type="button"
-            onClick={blankSupported ? onSelect : undefined}
-            aria-disabled={!blankSupported}
+            onClick={selectable ? onSelect : undefined}
+            aria-disabled={!selectable}
             className={cn(
                 'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
-                blankSupported ? 'hover:shadow-md' : 'cursor-default',
+                selectable ? 'hover:shadow-md' : 'cursor-default',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
-                    : blankSupported
-                        ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600'
-                        : 'border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40',
+                    : isOffline
+                        ? 'border-red-200 dark:border-red-900/40 bg-red-50/30 dark:bg-red-950/10'
+                        : selectable
+                            ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600'
+                            : 'border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/40',
             )}
         >
             {isSelected && (
@@ -645,8 +658,8 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
                     <div className="flex items-center gap-1.5">
                         <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{provider.name}</h4>
                         <span
-                            className={cn('w-2 h-2 rounded-full shrink-0', provider.isActive ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600')}
-                            title={provider.isActive ? 'Active' : 'Inactive'}
+                            className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
+                            title={health.error ?? healthMeta.label}
                         />
                     </div>
                     <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
@@ -661,11 +674,18 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
                         </span>
                         {inUseCount > 0 && <span className="text-slate-400">· {inUseCount} in use</span>}
                     </div>
-                    {!blankSupported && (
+                    {/* Reachability blocks first (you can't build on a down provider),
+                        then the blank-support limitation. */}
+                    {isOffline ? (
+                        <div className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-red-600 dark:text-red-400">
+                            <WifiOff className="w-3 h-3 shrink-0" />
+                            <span className="truncate">Offline — can’t create here until it’s reachable</span>
+                        </div>
+                    ) : !blankSupported ? (
                         <div className="mt-1.5 text-[11px] text-slate-400 dark:text-slate-500 italic">
                             Not yet available for blank models
                         </div>
-                    )}
+                    ) : null}
                 </div>
             </div>
         </button>

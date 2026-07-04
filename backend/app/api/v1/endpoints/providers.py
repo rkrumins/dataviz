@@ -19,6 +19,7 @@ from backend.app.db.engine import (
 from backend.app.auth.dependencies import requires, get_permission_claims
 from backend.app.db.repositories import provider_repo
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
+from backend.app.providers.reachability import resolve_provider_status
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.workspace_visibility import compute_visible_provider_ids
 from backend.common.models.management import (
@@ -246,65 +247,36 @@ async def list_provider_statuses(
     warmup_cache = getattr(provider_registry, "warmup_cache", {}) or {}
 
     def _resolve_status(provider) -> dict:
-        if not provider.is_active:
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "unknown",
-                "lastCheckedAt": None,
-            }
-
-        # 1. Authoritative breaker state when present — this reflects
-        #    real traffic, the highest-fidelity signal.
-        breaker_key_match = next(
-            (k for k in breaker_states if k.startswith(f"{provider.id}:")),
-            None,
+        # Status decision is shared with the blank-model provisioning gate
+        # (``resolve_provider_status``) so the /status endpoint and the "can I
+        # build here?" check can never disagree. The endpoint layer only adds
+        # the display fields (name, lastCheckedAt).
+        status, error = resolve_provider_status(
+            is_active=provider.is_active,
+            provider_id=provider.id,
+            breaker_states=breaker_states,
+            warmup_cache=warmup_cache,
         )
-        breaker = breaker_states.get(breaker_key_match) if breaker_key_match else None
-        if breaker == "healthy":
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "ready",
-                "lastCheckedAt": _iso_now(),
-            }
-        if breaker in ("unavailable", "instantiation_failed"):
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "unavailable",
-                "lastCheckedAt": _iso_now(),
-                "error": f"Provider circuit: {breaker}",
-            }
-        if breaker == "degraded":
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "unavailable",
-                "lastCheckedAt": _iso_now(),
-                "error": "Provider in degraded state (half-open)",
-            }
-
-        # 2. Fallback to warmup cache — populated by the background
-        #    loop, so even un-visited providers carry a status.
-        warmup = warmup_cache.get(provider.id)
-        if warmup is not None:
-            return {
-                "id": provider.id,
-                "name": provider.name,
-                "status": "ready" if warmup.get("ok") else "unavailable",
-                "lastCheckedAt": _iso_timestamp(warmup.get("checked_at")),
-                "error": (None if warmup.get("ok") else warmup.get("reason")),
-            }
-
-        # 3. Truly unknown — registered but never probed (e.g. very new
-        #    or warmup loop hasn't reached it yet).
-        return {
+        # lastCheckedAt: a breaker verdict was just observed → now; a warmup-only
+        # verdict carries its own timestamp; unknown/inactive has none.
+        last_checked = None
+        if status != "unknown":
+            warmup = warmup_cache.get(provider.id)
+            breaker_key_match = next(
+                (k for k in breaker_states if k.startswith(f"{provider.id}:")), None)
+            if breaker_key_match and breaker_states.get(breaker_key_match):
+                last_checked = _iso_now()
+            elif warmup is not None:
+                last_checked = _iso_timestamp(warmup.get("checked_at"))
+        out = {
             "id": provider.id,
             "name": provider.name,
-            "status": "unknown",
-            "lastCheckedAt": None,
+            "status": status,
+            "lastCheckedAt": last_checked,
         }
+        if error:
+            out["error"] = error
+        return out
 
     return [_resolve_status(p) for p in providers]
 

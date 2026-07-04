@@ -1037,6 +1037,52 @@ async def create_blank_graph(
     if "*" not in permitted and ws_id not in permitted:
         raise HTTPException(status_code=403, detail="provider not permitted in this workspace")
 
+    # 1b) Provider must be REACHABLE, not merely enabled. A model is worthless if its
+    #     backing store is down, and a full projection would fail — so refuse up front.
+    #     First the cached breaker/warmup verdict (the SAME signal the UI's status dot
+    #     shows, via resolve_provider_status — zero I/O); then, only when that signal is
+    #     'unknown' (never warmed up), one bounded live probe so a genuinely-down but
+    #     un-observed provider can't slip through.
+    from backend.app.providers.manager import provider_manager as _provider_mgr
+    from backend.app.providers.reachability import resolve_provider_status
+    try:
+        _breakers = _provider_mgr.report_provider_states()
+    except Exception:
+        _breakers = {}
+    _warmup = getattr(_provider_mgr, "warmup_cache", {}) or {}
+    _status, _status_err = resolve_provider_status(
+        is_active=prov.is_active, provider_id=prov.id,
+        breaker_states=_breakers, warmup_cache=_warmup)
+    if _status == "unavailable":
+        raise HTTPException(status_code=422, detail={
+            "type": "provider_unreachable",
+            "message": f"'{prov.name}' is currently offline ({_status_err or 'connection failed'}). "
+                       "Reconnect it, then try again."})
+    if _status == "unknown":
+        # Never observed — probe live (bounded ~2.5s) rather than assume healthy.
+        try:
+            from backend.app.api.v1.endpoints.providers import _run_connectivity_probe
+            _creds = await provider_repo.get_credentials(session, prov.id)
+            try:
+                _extra = json.loads(prov.extra_config) if prov.extra_config else None
+            except (ValueError, TypeError):
+                _extra = None
+            _probe = await _run_connectivity_probe(
+                provider_type=prov.provider_type, host=prov.host, port=prov.port,
+                tls_enabled=prov.tls_enabled, creds=_creds, extra_config=_extra)
+            if not _probe.success:
+                raise HTTPException(status_code=422, detail={
+                    "type": "provider_unreachable",
+                    "message": f"'{prov.name}' could not be reached ({_probe.error or 'connection failed'}). "
+                               "Check the connection, then try again."})
+        except HTTPException:
+            raise
+        except Exception:
+            # Probe machinery unavailable (e.g. import/config issue) — don't hard-fail
+            # provisioning on a maybe-healthy provider; the cached gate already caught
+            # confirmed-down providers, and the first projection surfaces real errors.
+            logger.exception("blank-graph live reachability probe errored for %s", prov.id)
+
     # 2) Ontology must exist and be published — blank models are ontology-governed.
     ont = await ontology_definition_repo.get_ontology(session, body.ontology_id)
     if ont is None or getattr(ont, "deleted_at", None):
