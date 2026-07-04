@@ -536,6 +536,8 @@ export function ContextViewCanvas({
     const targetLayer = storeLayers.find(l => l.id === layerId)
     const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
     const entityName = (entity?.data?.label as string) ?? entityId
+    // The node's own persisted layer BEFORE the move — restored on discard.
+    const prevNodeLayer = entity?.data?.layerAssignment as string | undefined
 
     const result = assignEntityToLayer(entityId, layerId)
     if (!result.success && result.conflict?.type === 'containment_locked') {
@@ -546,19 +548,26 @@ export function ContextViewCanvas({
       return
     }
 
-    // Surface the assignment in the staged-changes review panel.
-    // Apply is a no-op because saveToBackend (referenceModelStore) is what
-    // actually flushes layer assignments — calling it here would double-write.
+    // Stamp the node's OWN `layerAssignment` so the move is consistent locally
+    // (drawer, node-property placement fallback) and matches what gets persisted.
+    useCanvasStore.getState().updateNode(entityId, { layerAssignment: layerId })
+
+    // Surface the assignment in the staged-changes review panel. On Save it is
+    // persisted by saveStagedChangesToDraft Phase 3 as an ISOLATED node update to
+    // this entity's `layerAssignment` — outside the atomic structural batch, so a
+    // layer failure can never take other edits down.
     const stagedChanges = useStagedChangesStore.getState()
     stagedChanges.stageOrReplace(
       (c) => c.type === 'assign_layer' && c.targetId === entityId,
       {
         type: 'assign_layer',
         targetId: entityId,
+        targetUrn: (entity?.data?.urn as string) ?? entityId,
         before: { layerId: prevLayerId, layerName: prevLayer?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
         discard: () => {
+          useCanvasStore.getState().updateNode(entityId, { layerAssignment: prevNodeLayer })
           if (prevLayerId) {
             useReferenceModelStore.getState().assignEntityToLayer(entityId, prevLayerId)
           } else {

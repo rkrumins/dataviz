@@ -108,10 +108,41 @@ export async function saveStagedChangesToDraft(
     changes.filter((c) => c.type !== 'create_entity'),
     resolve,
   )
-  if (ops.length === 0) return { commitId: null }
-  const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
+  let commitId: string | null = null
+  if (ops.length > 0) {
+    const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
+    commitId = res.commitId ?? null
+  }
+
+  // Phase 3 — layer moves persist in a SEPARATE, isolated commit AFTER the
+  // structural one. A layer move rewrites the entity's own `layerAssignment`
+  // (the single field the reload placement reads), but it MUST NOT ride in the
+  // atomic Phase-2 batch: if a layer op failed there it would roll back the
+  // user's creates/renames/containment edits too — the data-loss trap. Isolated
+  // + best-effort here, a layer failure is logged and skipped; the structural
+  // commit already succeeded and is safe.
+  const layerOps: GraphChangeOp[] = []
+  for (const c of changes) {
+    if (c.type !== 'assign_layer' && c.type !== 'move_to_layer') continue
+    const layerId = (c.after as { layerId?: string } | undefined)?.layerId
+    const rawId = c.targetUrn ?? c.targetId
+    if (!layerId || !rawId) continue
+    const id = resolve(rawId)
+    // Logical/pseudo groups have no backend entity to update — skip them.
+    if (id.startsWith('logical:')) continue
+    layerOps.push({ op: 'update', kind: 'node', id, payload: { layerAssignment: layerId } })
+  }
+  if (layerOps.length > 0) {
+    try {
+      await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, layerOps, 'Layer assignments')
+    } catch (e) {
+      // Non-fatal by design: the structural edits are already committed.
+      console.error('[saveStagedChangesToDraft] layer assignment persist failed (structural edits are safe)', e)
+    }
+  }
+
   // Rollups may have changed (lineage edges added/removed, containment moved): the server's
   // draft overlay reports adjusted aggregated edges, but only a fresh fetch shows them.
   invalidateAggregatedEdges()
-  return { commitId: res.commitId }
+  return { commitId }
 }

@@ -269,20 +269,20 @@ class TestResolveAssignmentNodeLayer:
         assert result.layer_id == "source"
         assert result.is_inherited is True
 
-    def test_rule_outranks_node_property(self):
-        """A rule (e.g. moveToLayer's urnPattern rule) must beat the node's
-        stamped property — the fallback sits BELOW rules, so moving a
-        created entity to another layer is not undone by its stale stamp."""
-        move_rule = LayerAssignmentRuleConfig(
-            id="move-x", priority=100, urnPattern="urn:x",
+    def test_explicit_node_assignment_outranks_generic_type_rule(self):
+        """Regression (a saved move "disappears" on reload): an explicit
+        per-entity assignment — the node's own `layerAssignment`, which a move
+        rewrites — MUST beat a GENERIC entity-type rule. Otherwise moving a
+        `Layer`-typed entity to "warehouse" snaps back to its type-rule layer."""
+        type_rule = LayerAssignmentRuleConfig(
+            id="type-layer-source", priority=10, entityTypes=["Layer"],
         )
         layers = [
-            ViewLayerConfig(id="source", name="Source", color="#111", order=0),
-            ViewLayerConfig(id="transform", name="Transform", color="#222", order=1),
-            ViewLayerConfig(id="warehouse", name="Warehouse", color="#333", order=2,
-                            rules=[move_rule]),
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0,
+                            rules=[type_rule]),
+            ViewLayerConfig(id="warehouse", name="Warehouse", color="#333", order=1),
         ]
         index = self.engine._build_rule_index(layers)
-        node = self._node("urn:x", "Layer", layer_assignment="transform")
+        node = self._node("urn:x", "Layer", layer_assignment="warehouse")
         result = self.engine._resolve_assignment(node, None, None, index, layers, self.lsm)
         assert result.layer_id == "warehouse"
