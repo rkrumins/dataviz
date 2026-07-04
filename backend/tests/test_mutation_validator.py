@@ -136,13 +136,107 @@ class TestValidateNodeMutationUpdate:
         assert len(r.warnings) > 0
         assert "legacy_type" in r.warnings[0]
 
-    def test_type_change_fails(self):
+    def test_type_change_with_no_parent_or_children_is_accepted(self):
+        # No hierarchy context supplied -> nothing to validate the new type
+        # against, so the change is accepted (type changes are no longer
+        # forbidden outright).
         ont = _make_ontology(entity_types=["dataset", "pipeline"])
         r = validate_node_mutation(
             MutationOp.UPDATE, "pipeline", ont, existing_entity_type="dataset"
         )
+        assert r.ok is True
+
+    def test_type_change_to_valid_child_and_container_is_accepted(self):
+        # New type "container" can be contained by "dataPlatform" and can
+        # contain "column" -> changing dataset -> container under that
+        # parent, with an existing "column" child, is accepted.
+        container_def = EntityTypeDefEntry(
+            name="container",
+            hierarchy=EntityHierarchyData(
+                can_be_contained_by=["dataPlatform"],
+                can_contain=["column"],
+            ),
+        )
+        ont = _make_ontology(
+            entity_types=[("container", container_def), "dataset", "column", "dataPlatform"]
+        )
+        r = validate_node_mutation(
+            MutationOp.UPDATE, "container", ont,
+            existing_entity_type="dataset",
+            parent_entity_type="dataPlatform",
+            child_entity_types=["column"],
+        )
+        assert r.ok is True
+
+    def test_type_change_rejected_when_new_type_invalid_under_parent(self):
+        # New type "column" cannot be contained by "dataPlatform".
+        column_def = EntityTypeDefEntry(
+            name="column",
+            hierarchy=EntityHierarchyData(
+                can_be_contained_by=["dataset"],
+                can_contain=["tag"],
+            ),
+        )
+        ont = _make_ontology(
+            entity_types=[("column", column_def), "container", "dataset", "dataPlatform", "tag"]
+        )
+        r = validate_node_mutation(
+            MutationOp.UPDATE, "column", ont,
+            existing_entity_type="container",
+            parent_entity_type="dataPlatform",
+            child_entity_types=[],
+        )
         assert r.ok is False
-        assert "Changing entity type" in r.errors[0]
+        assert "can't" in r.errors[0].lower() or "cannot" in r.errors[0].lower()
+
+    def test_type_change_rejected_when_new_type_cannot_contain_existing_child(self):
+        # New type "column" cannot contain "dataset".
+        column_def = EntityTypeDefEntry(
+            name="column",
+            hierarchy=EntityHierarchyData(
+                can_be_contained_by=["dataset"],
+                can_contain=["tag"],
+            ),
+        )
+        ont = _make_ontology(
+            entity_types=[("column", column_def), "container", "dataset", "tag"]
+        )
+        r = validate_node_mutation(
+            MutationOp.UPDATE, "column", ont,
+            existing_entity_type="container",
+            parent_entity_type="dataset",
+            child_entity_types=["dataset"],
+        )
+        assert r.ok is False
+
+    def test_type_change_is_case_insensitive(self):
+        container_def = EntityTypeDefEntry(
+            name="container",
+            hierarchy=EntityHierarchyData(
+                can_be_contained_by=["dataPlatform"],
+                can_contain=["column"],
+            ),
+        )
+        ont = _make_ontology(
+            entity_types=[("container", container_def), "dataset", "column", "dataPlatform"]
+        )
+        r = validate_node_mutation(
+            MutationOp.UPDATE, "CONTAINER", ont,
+            existing_entity_type="DATASET",
+            parent_entity_type="DATAPLATFORM",
+            child_entity_types=["COLUMN"],
+        )
+        assert r.ok is True
+
+    def test_no_ontology_fails_open_on_type_change(self):
+        ont = _make_ontology()  # no entity type definitions -> fail open
+        r = validate_node_mutation(
+            MutationOp.UPDATE, "x", ont,
+            existing_entity_type="y",
+            parent_entity_type=None,
+            child_entity_types=[],
+        )
+        assert r.ok is True
 
 
 class TestValidateNodeMutationDelete:
