@@ -76,7 +76,9 @@ export function slugifyGraphName(name: string): string {
  * distinct levels), fall back to the generic {@link defaultReferenceModelLayers}
  * so the user still gets a starting scaffold to assign types into.
  */
-export function deriveLayersFromOntology(schema: WorkspaceSchema): ViewLayerConfig[] {
+export function deriveLayersFromOntology(
+  schema: Pick<WorkspaceSchema, 'entityTypes'>,
+): ViewLayerConfig[] {
   const entityTypes = schema.entityTypes ?? []
   const levels = [...new Set(entityTypes.map(et => et.hierarchy?.level ?? 0))].sort((a, b) => a - b)
 
