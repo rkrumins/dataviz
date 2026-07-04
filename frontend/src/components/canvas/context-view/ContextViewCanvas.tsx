@@ -95,6 +95,8 @@ import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
+import { ImportDialog } from '@/features/import-export/ImportDialog'
+import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
 
 // Re-export for backward compatibility
@@ -870,6 +872,7 @@ export function ContextViewCanvas({
   const isStagedPanelOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
+  const [showImportDialog, setShowImportDialog] = useState(false)
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
   const undoStagedChange = useStagedChangesStore(s => s.undo)
@@ -2214,6 +2217,7 @@ export function ContextViewCanvas({
         onExitEdit={handleExitEdit}
         pendingChangeCount={stagedChangeList.length}
         onOpenStagedChanges={openStagedChangesPanel}
+        onImport={() => setShowImportDialog(true)}
         canUndo={stagedChangeList.length > 0}
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
@@ -2283,6 +2287,22 @@ export function ContextViewCanvas({
               &times;
             </button>
           </div>
+        )}
+        {/* Bulk import — uploads a file onto the current draft (server-side), then
+             hands off to the Changes tab where the added/updated/deleted entities are
+             reviewed and published just like manual edits. */}
+        {showImportDialog && graphId && scopeWsId && (
+          <ImportDialog
+            wsId={scopeWsId}
+            graphId={graphId}
+            branchId={useBranchStore.getState().currentBranchId ?? undefined}
+            viewId={activeView?.id}
+            onClose={() => setShowImportDialog(false)}
+            onReviewChanges={() => {
+              setShowImportDialog(false)
+              useVersioningPanelStore.getState().openPanel('changes')
+            }}
+          />
         )}
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
              or the pending-changes badge. Single source of truth for reviewing

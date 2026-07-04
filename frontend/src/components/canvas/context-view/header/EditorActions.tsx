@@ -27,6 +27,8 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   pendingChangeCount?: number
   /** Opens the staged-changes review panel (the only save path). */
   onOpenStagedChanges?: () => void
+  /** Opens the bulk-import dialog (import a file onto the current draft). */
+  onImport?: () => void
   onExitEdit: () => void
 }
 
@@ -37,6 +39,7 @@ export function EditorActions({
   onRedo,
   pendingChangeCount = 0,
   onOpenStagedChanges,
+  onImport,
   onExitEdit,
   ...tools
 }: EditorActionsProps) {
@@ -81,6 +84,19 @@ export function EditorActions({
           <LucideIcons.Redo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
         </button>
       </div>
+
+      {/* Import — bulk-create/update entities from a file onto this draft; the
+          imported changes flow into the same Review & Save pipeline. */}
+      {onImport && (
+        <button
+          onClick={onImport}
+          title="Import entities from a file (CSV, Excel, NDJSON)"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11.5px] font-semibold tracking-tight text-ink/85 border border-black/[0.10] dark:border-white/[0.08] bg-black/[0.03] dark:bg-white/[0.03] hover:bg-black/[0.06] hover:text-ink dark:hover:bg-white/[0.06] transition-all"
+        >
+          <LucideIcons.Upload className="w-3.5 h-3.5" strokeWidth={2.4} />
+          <span>Import</span>
+        </button>
+      )}
 
       {/* Review & Save — THE primary action of edit mode: filled accent,
           count chip while edits are pending, muted until there's

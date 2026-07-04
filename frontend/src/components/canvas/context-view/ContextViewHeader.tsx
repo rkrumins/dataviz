@@ -121,6 +121,8 @@ export interface ContextViewHeaderProps {
   pendingChangeCount?: number
   /** Opens the staged-changes review panel (Review & Save click). */
   onOpenStagedChanges?: () => void
+  /** Opens the bulk-import dialog (Edit mode). */
+  onImport?: () => void
 
   // Undo / Redo
   canUndo?: boolean
@@ -180,6 +182,7 @@ export function ContextViewHeader({
   onRetrySync,
   pendingChangeCount = 0,
   onOpenStagedChanges,
+  onImport,
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -300,6 +303,7 @@ export function ContextViewHeader({
                 onRedo={onRedo}
                 pendingChangeCount={pendingChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
+                onImport={onImport}
                 onExitEdit={onExitEdit}
               />
             </motion.div>

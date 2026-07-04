@@ -1967,7 +1967,7 @@ async def get_import(
     ie=Depends(get_import_export_service),
 ):
     job = await ie.get_job(job_id)
-    if job is None or job.get("graph_id") != graph_id:
+    if job is None or job.get("graphId") != graph_id:
         raise HTTPException(status_code=404, detail="import job not found")
     return job
 
@@ -1982,7 +1982,7 @@ async def get_import_preview(
     """Summary counts + a bounded sample of resolved rows. The full field-level diff is the
     draft-vs-main diff served by the existing versioning endpoints."""
     preview = await ie.get_preview(job_id)
-    if preview is None or preview["job"].get("graph_id") != graph_id:
+    if preview is None or preview["job"].get("graphId") != graph_id:
         raise HTTPException(status_code=404, detail="import job not found")
     return preview
 
@@ -2039,7 +2039,7 @@ async def get_export(
     ie=Depends(get_import_export_service),
 ):
     job = await ie.get_job(job_id)
-    if job is None or job.get("graph_id") != graph_id:
+    if job is None or job.get("graphId") != graph_id:
         raise HTTPException(status_code=404, detail="export job not found")
     return job
 
@@ -2053,12 +2053,12 @@ async def download_export(
 ):
     from fastapi.responses import StreamingResponse
     result = await ie.open_result(job_id)
-    if result is None or result[0].get("graph_id") != graph_id:
+    if result is None or result[0].get("graphId") != graph_id:
         raise HTTPException(status_code=404, detail="export not found")
     job, stream = result
     if job.get("status") != "completed":
         raise HTTPException(status_code=409, detail={"type": "not_ready", "status": job.get("status")})
-    fmt = job.get("import_format") or "ndjson"
+    fmt = job.get("importFormat") or "ndjson"
     return StreamingResponse(
         stream, media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="export-{job_id}.{fmt}"'})

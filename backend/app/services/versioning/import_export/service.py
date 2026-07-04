@@ -120,8 +120,8 @@ class ImportExportService:
                        "status": r.status, "matchedEntityId": r.matched_entity_id,
                        "reasons": r.reasons or []} for r in rows]
         return {"job": job, "summary": job.get("summary"), "sample": sample,
-                "previewDownloadUrl": job.get("preview_uri"),
-                "rejectedDownloadUrl": job.get("report_uri")}
+                "previewDownloadUrl": job.get("previewUri"),
+                "rejectedDownloadUrl": job.get("reportUri")}
 
     async def list_jobs(
         self, *, graph_id: Optional[str] = None, data_source_id: Optional[str] = None,
@@ -138,11 +138,11 @@ class ImportExportService:
                 q = q.where(JobORM.job_type == job_type)
             q = q.order_by(JobORM.created_at.desc()).limit(limit)
             rows = (await s.execute(q)).scalars().all()
-            return [{"job_id": r.id, "job_type": r.job_type, "status": r.status,
-                     "branch_id": r.branch_id, "import_format": r.import_format,
-                     "reconcile_mode": r.reconcile_mode, "summary": r.summary,
-                     "scope_view_id": r.scope_view_id, "created_at": r.created_at,
-                     "completed_at": r.completed_at, "error_message": r.error_message}
+            return [{"jobId": r.id, "jobType": r.job_type, "status": r.status,
+                     "branchId": r.branch_id, "importFormat": r.import_format,
+                     "reconcileMode": r.reconcile_mode, "summary": r.summary,
+                     "scopeViewId": r.scope_view_id, "createdAt": r.created_at,
+                     "completedAt": r.completed_at, "errorMessage": r.error_message}
                     for r in rows]
 
     async def run_import(self, job_id: str) -> Dict[str, int]:
@@ -190,21 +190,22 @@ class ImportExportService:
         job = await self.get_job(job_id)
         if job is None or not job.get("result_uri"):
             return None
-        return job, self._store.open_stream(job["result_uri"])
+        return job, self._store.open_stream(job["resultUri"])
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Job as a camelCase dict (frontend wire shape)."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             if row is None:
                 return None
             return {
-                "job_id": row.id, "job_type": row.job_type, "status": row.status,
-                "graph_id": row.graph_id, "branch_id": row.branch_id,
-                "workspace_id": row.workspace_id, "data_source_id": row.data_source_id,
-                "provider_id": row.provider_id, "scope_view_id": row.scope_view_id,
-                "reconcile_mode": row.reconcile_mode, "import_format": row.import_format,
-                "source_uri": row.source_uri, "preview_uri": row.preview_uri,
-                "report_uri": row.report_uri, "result_uri": row.result_uri,
-                "summary": row.summary, "error_message": row.error_message,
-                "created_at": row.created_at, "completed_at": row.completed_at,
+                "jobId": row.id, "jobType": row.job_type, "status": row.status,
+                "graphId": row.graph_id, "branchId": row.branch_id,
+                "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id,
+                "providerId": row.provider_id, "scopeViewId": row.scope_view_id,
+                "reconcileMode": row.reconcile_mode, "importFormat": row.import_format,
+                "sourceUri": row.source_uri, "previewUri": row.preview_uri,
+                "reportUri": row.report_uri, "resultUri": row.result_uri,
+                "summary": row.summary, "errorMessage": row.error_message,
+                "createdAt": row.created_at, "completedAt": row.completed_at,
             }
