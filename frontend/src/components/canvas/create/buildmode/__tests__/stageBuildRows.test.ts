@@ -122,6 +122,13 @@ describe('stageMany', () => {
     expect(useStagedChangesStore.getState().changes).toHaveLength(3)
     expect(renderCount).toBe(1) // one set() call, not one per change
   })
+
+  it('clears the redo stack — a fresh batch invalidates redo history (matches stage())', () => {
+    // seed a redoable entry, as if a change had been undone
+    useStagedChangesStore.setState({ redoStack: [change('undone')] })
+    useStagedChangesStore.getState().stageMany([change('c1')])
+    expect(useStagedChangesStore.getState().redoStack).toHaveLength(0)
+  })
 })
 
 describe('useStageBuildRows', () => {

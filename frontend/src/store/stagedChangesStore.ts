@@ -233,7 +233,10 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   },
 
   stageMany: (batch) => {
-    set((s) => ({ changes: [...s.changes, ...batch] }))
+    // Same invariant as stage(): a fresh batch of changes invalidates the redo
+    // stack — a previously-discarded change can't be cleanly redone once the
+    // canvas has moved on (e.g. a bulk create-at-scale apply).
+    set((s) => ({ changes: [...s.changes, ...batch], redoStack: [] }))
   },
 
   stageOrReplace: (matcher, input) => {
