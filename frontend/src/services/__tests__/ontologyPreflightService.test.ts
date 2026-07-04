@@ -14,6 +14,7 @@ import {
   validateDrawnEdge,
   connectedEdgeTypes,
   typesValidForNode,
+  planRetype,
 } from '../ontologyPreflightService'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import type { RetypeContext, RetypeNode } from '../ontologyPreflightService'
@@ -438,5 +439,80 @@ describe('typesValidForNode', () => {
     const node = { id: 'n', urn: 'n', name: 'col', type: 'column' }
     const res = typesValidForNode(node, ctx)
     expect(res).toContain('column') // column is a valid child of dataset
+  })
+})
+
+describe('planRetype', () => {
+  // database(L0, canContain table) -> table(L1, canContain column) -> column(L2, leaf)
+  // dataPlatform(L0, canContain container) -> container(L1, canContain container,dataset) -> dataset(L2, canContain column)
+  // group(L0, canContain group only) -> attribute(L1, leaf; NOT directly containable by group)
+  const types = [
+    et('database', ['table'], [], 0),
+    et('table', ['column'], ['database'], 1),
+    et('column', [], ['table', 'dataset'], 2),
+    et('dataPlatform', ['container'], [], 0),
+    et('container', ['container', 'dataset'], ['dataPlatform', 'container'], 1),
+    et('dataset', ['column'], ['container'], 2),
+    et('group', ['group'], [], 0),
+    et('attribute', [], ['group'], 1),
+  ]
+  const rels = [
+    rt('CONTAINS_TABLE', ['database'], ['table'], { isContainment: true }),
+    rt('CONTAINS_COLUMN_IN_TABLE', ['table'], ['column'], { isContainment: true }),
+    rt('CONTAINS_IN_CONTAINER', ['dataPlatform', 'container'], ['container', 'dataset'], { isContainment: true }),
+    rt('CONTAINS_COLUMN_IN_DATASET', ['dataset'], ['column'], { isContainment: true }),
+    rt('CONTAINS_GROUP', ['group'], ['group'], { isContainment: true }),
+  ]
+
+  // `childrenOf` returns NESTED children (unlike `makeCtx`'s flat single-level list above),
+  // so the cascade can walk more than one level deep. `parent` only needs to resolve for
+  // nodes that are themselves keys in `nodes` — planRetype never calls `parentTypeOf`.
+  function makeTreeCtx(
+    nodes: Record<string, { type: string; parent: string | null; children: string[] }>,
+  ): RetypeContext {
+    return {
+      entityTypes: types,
+      relationshipTypes: rels,
+      containmentEdgeTypes: [],
+      parentTypeOf: (id) => {
+        const parentId = nodes[id]?.parent ?? null
+        return parentId ? (nodes[parentId]?.type ?? null) : null
+      },
+      childrenOf: (id) =>
+        (nodes[id]?.children ?? []).map((childId) => ({
+          id: childId,
+          urn: childId,
+          name: childId,
+          type: nodes[childId].type,
+        })),
+      incidentLineageEdges: () => [],
+    }
+  }
+
+  it('planRetype: uniform up-shift — table->database re-levels columns->tables', () => {
+    // fixture where database canContain table; table canContain column; column leaf
+    const ctx = makeTreeCtx({ 'db':{type:'table',parent:null,children:['t']}, 't':{type:'column',parent:'db',children:[]} })
+    const plan = planRetype({ id:'db', urn:'db', name:'DB', type:'table' }, 'database', ctx)
+    expect(plan.ok).toBe(true)
+    expect(plan.changes.find(c=>c.nodeId==='db')).toMatchObject({ toType:'database', editable:false })
+    expect(plan.changes.find(c=>c.nodeId==='t')).toMatchObject({ toType:'table', editable:true })
+  })
+  it('planRetype: prunes descendants that stay valid', () => {
+    const ctx = makeTreeCtx({ 'r':{type:'container',parent:'dataPlatform',children:['d']}, 'd':{type:'dataset',parent:'r',children:[]} })
+    // container->container is still a valid parent of dataset, so no cascade
+    const plan = planRetype({ id:'r', urn:'r', name:'R', type:'container' }, 'container', ctx)
+    expect(plan.changes.map(c=>c.nodeId)).toEqual(['r'])
+  })
+  it('planRetype: recursive Group->Group cascade terminates', () => {
+    const ctx = makeTreeCtx({ 'g':{type:'attribute',parent:'group',children:['g2']}, 'g2':{type:'attribute',parent:'g',children:[]} })
+    const plan = planRetype({ id:'g', urn:'g', name:'G', type:'attribute' }, 'group', ctx)
+    expect(plan.ok).toBe(true) // group canContain group, so g2->group is valid; terminates
+  })
+  it('planRetype: unresolvable child becomes a conflict, ok=false', () => {
+    const ctx = makeTreeCtx({ 'r':{type:'dataset',parent:'dataPlatform',children:['x']}, 'x':{type:'column',parent:'r',children:[]} })
+    // retype r->column: column can't contain anything -> x has no valid re-level
+    const plan = planRetype({ id:'r', urn:'r', name:'R', type:'dataset' }, 'column', ctx)
+    expect(plan.ok).toBe(false)
+    expect(plan.conflicts.map(c=>c.nodeId)).toContain('x')
   })
 })

@@ -450,3 +450,75 @@ export function typesValidForNode(node: RetypeNode, ctx: RetypeContext): string[
       return true
     })
 }
+
+/** A single node's proposed type change in a {@link RetypePlan}. */
+export interface RetypeChange {
+  nodeId: string
+  urn: string
+  name: string
+  fromType: string
+  toType: string
+  editable: boolean
+}
+
+/** A descendant with no valid re-level under the cascade. */
+export interface RetypeConflict {
+  nodeId: string
+  name: string
+  reason: string
+}
+
+/** The result of {@link planRetype}: the proposed changes plus any unresolvable conflicts. */
+export interface RetypePlan {
+  changes: RetypeChange[]
+  conflicts: RetypeConflict[]
+  ok: boolean
+}
+
+function typeName(id: string, ctx: RetypeContext): string {
+  return findEntityType(id, ctx.entityTypes)?.name ?? id
+}
+
+/**
+ * A proposed type is only usable for `childId` if its own children (if any) can still nest
+ * under it — checked recursively at visit time, so here it's just whether the proposed type
+ * can contain each of the child's current children.
+ */
+function childrenStillFit(childId: string, proposedType: string, ctx: RetypeContext): boolean {
+  return ctx.childrenOf(childId).every((gc) => containmentAllowed(proposedType, gc.type, ctx))
+}
+
+/**
+ * Given a proposed type change to `rootNode`, walks the subtree and proposes a full cascade:
+ * descendants that stay validly nested under their (possibly re-typed) parent are pruned —
+ * unchanged, not descended, which is what terminates the walk on recursive containment (e.g. a
+ * Group that can contain Groups: a still-valid child Group is pruned rather than re-visited).
+ * Descendants that no longer fit get a proposed valid `toType` (preferring their current type if
+ * it still qualifies, else the first candidate sorted by hierarchy level then name); a descendant
+ * with no valid re-level becomes a `conflict`. Root is `editable:false`; cascaded descendants are
+ * `editable:true`. `changes` is ordered parent-before-child. Pure — the server re-validates
+ * authoritatively on save.
+ */
+export function planRetype(rootNode: RetypeNode, newType: string, ctx: RetypeContext): RetypePlan {
+  const changes: RetypeChange[] = []
+  const conflicts: RetypeConflict[] = []
+  const visit = (node: RetypeNode, proposedType: string) => {
+    changes.push({ nodeId: node.id, urn: node.urn, name: node.name, fromType: node.type, toType: proposedType, editable: node.id !== rootNode.id })
+    for (const child of ctx.childrenOf(node.id)) {
+      if (containmentAllowed(proposedType, child.type, ctx)) continue // still valid -> prune
+      const candidates = [...ctx.entityTypes]
+        .sort((a, b) => a.hierarchy.level - b.hierarchy.level || a.name.localeCompare(b.name))
+        .map((t) => t.id)
+        .filter((ct) => containmentAllowed(proposedType, ct, ctx) && childrenStillFit(child.id, ct, ctx))
+      if (candidates.length === 0) {
+        conflicts.push({ nodeId: child.id, name: child.name, reason: `Nothing valid can go inside a ${typeName(proposedType, ctx)}.` })
+        continue
+      }
+      // preference: keep the same type if it happens to be valid; else first sorted candidate
+      const chosen = candidates.includes(child.type) ? child.type : candidates[0]
+      visit(child, chosen)
+    }
+  }
+  visit(rootNode, newType)
+  return { changes, conflicts, ok: conflicts.length === 0 }
+}
