@@ -282,9 +282,32 @@ class JobORM(VersioningBase):
     updated_at = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
 
+    # --- Import/Export (bulk CRUD) — plan Phase 0.3 -------------------------- #
+    # Full traceability metadata: a job is attributable to workspace/data source/provider/graph.
+    data_source_id = Column(Text, nullable=True)          # logical ref (management DB)
+    provider_id = Column(Text, nullable=True)             # logical ref (management DB)
+    scope_view_id = Column(Text, nullable=True)           # NULL = whole data source
+    branch_id = Column(Text, nullable=True)               # the import's draft branch
+    reconcile_mode = Column(Text, nullable=True)          # upsert | replace
+    identity_strategy = Column(Text, nullable=True)       # auto | entity_id | urn
+    on_invalid = Column(Text, nullable=True)              # quarantine | auto_fix | reject_all
+    import_format = Column(Text, nullable=True)           # ndjson|csv|tsv|xlsx|json|zip
+    field_scope = Column(JSONB, nullable=True)            # E4: allow-list of columns to write
+    auto_publish = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    source_uri = Column(Text, nullable=True)              # uploaded file
+    preview_uri = Column(Text, nullable=True)             # full field-level diff artifact
+    report_uri = Column(Text, nullable=True)              # rejected/invalid rows report
+    result_uri = Column(Text, nullable=True)              # export artifact
+    base_commit_seq = Column(BigInteger, nullable=True)   # main head at parse time (OCC)
+    preview_digest = Column(Text, nullable=True)
+    as_of_seq = Column(BigInteger, nullable=True)         # E5: point-in-time export
+    # {new,updated,deleted,unchanged,invalid,auto_fixed} tallies (avoids column sprawl).
+    summary = Column(JSONB, nullable=True)
+
     __table_args__ = _plain(
         Index("ix_jobs_graph_status", "graph_id", "status"),
         Index("ix_jobs_type_status", "job_type", "status"),
+        Index("ix_jobs_ds", "data_source_id", "status"),
         Index(
             "ix_jobs_idem_active",
             "graph_id",
@@ -297,8 +320,38 @@ class JobORM(VersioningBase):
             name="ck_jobs_status",
         ),
         CheckConstraint(
-            "job_type IN ('ingest','projection','rebuild')", name="ck_jobs_type"
+            "job_type IN ('ingest','projection','rebuild','export')", name="ck_jobs_type"
         ),
+    )
+
+
+class ImportRowORM(VersioningBase):
+    """Normalized staging row for an async import (plan Phase 0.2).
+
+    The uploaded file is parsed ONCE into this table (cursor-ordered by ``row_index``), then the
+    worker resolves/diffs/builds it onto the draft by streaming keyset scan — resumable across a
+    crash and reused by both preview and apply, so re-runs are idempotent. Plain (non-partitioned)
+    and GC'd by job after a terminal state (rows are transient, keyed by ``job_id`` not ``graph_id``)."""
+
+    __tablename__ = "import_rows"
+
+    job_id = Column(Text, nullable=False)
+    row_index = Column(BigInteger, nullable=False)        # parse-order cursor
+    kind = Column(Text, nullable=False)                   # node | edge
+    raw = Column(JSONB, nullable=False)                   # normalized (bulk_ingest) row shape
+    match_key = Column(Text, nullable=True)               # urn | endpoint-triple | qualifiedName
+    matched_entity_id = Column(Text, nullable=True)       # resolved at the resolve phase
+    resolved_op = Column(Text, nullable=True)             # create|update|delete|unchanged|invalid
+    status = Column(Text, nullable=True)                  # new|updated|unchanged|deleted|invalid|auto_fixed
+    reasons = Column(JSONB, nullable=True)                # violations / suggestions
+    content_hash = Column(Text, nullable=True)            # of the normalized payload
+    base_content_hash = Column(Text, nullable=True)       # echoed OCC token from the file
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("job_id", "row_index", name="pk_import_rows"),
+        Index("ix_import_rows_match", "job_id", "kind", "match_key"),
+        Index("ix_import_rows_status", "job_id", "status"),
+        CheckConstraint("kind IN ('node','edge')", name="ck_import_rows_kind"),
     )
 
 

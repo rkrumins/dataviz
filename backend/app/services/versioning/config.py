@@ -194,6 +194,37 @@ EPHEMERAL_TTL_SECS: int = int(os.getenv("GRAPHVER_EPHEMERAL_TTL_SECS", "900"))
 TRACE_LEASE_TTL_SECS: int = int(os.getenv("GRAPHVER_TRACE_LEASE_TTL_SECS", "120"))
 
 
+# --------------------------------------------------------------------------- #
+# Import / Export (bulk CRUD) — object store + pipeline tunables               #
+# --------------------------------------------------------------------------- #
+def object_store_backend() -> str:
+    """Which ObjectStore backend serves import/export artifacts: local | s3 | gcs.
+
+    LocalFS in v1 (a mounted volume); S3/GCS are drop-in behind the same Protocol."""
+    return os.getenv("OBJECT_STORE_BACKEND", "local").lower()
+
+
+def import_store_root() -> str:
+    """Filesystem root for the LocalFs object store (a mounted volume in prod).
+
+    Artifacts live under ``{root}/{workspace}/{data_source}/{graph}/{job}/{name}`` so any file
+    is attributable to its workspace/data source/graph/job at a glance."""
+    return os.getenv("IMPORT_STORE_ROOT", "/tmp/synodic-import-store")
+
+
+# Accepted deltas per windowed ``checkpoint`` commit the import worker writes onto the draft.
+IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "50000"))
+# Rows returned inline in a preview before the full diff must be downloaded.
+PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
+# Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above
+# it run the async worker.
+INLINE_IMPORT_MAX: int = int(os.getenv("INLINE_IMPORT_MAX", "5000"))
+# Hard ceiling on rows in one import (guardrail); 0 = unlimited.
+IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
+# Retain import/export artifacts + staging rows this many days after a terminal job.
+STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
+
+
 def _selftest() -> None:
     assert PARTITIONS >= 1 and MERKLE_DEPTH >= 1
     h1 = hash_parts(b"ab", b"c")
