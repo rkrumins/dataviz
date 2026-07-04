@@ -33,6 +33,7 @@ import { useBuildRowsStore } from './buildRowsStore'
 import { validateBuildRows, summarize, type BuildOntologyCtx } from './validateBuildRows'
 import { useStageBuildRows } from './stageBuildRows'
 import { filterStageableRows } from './applyBuild'
+import { BuildOutline } from './BuildOutline'
 
 export interface BuildPanelProps {
   onClose: () => void
@@ -192,16 +193,22 @@ export function BuildPanel({ onClose, onRowStaged }: BuildPanelProps) {
             })}
           </div>
 
-          {/* ── Body — Task 6/7/8 mount BuildOutline/BuildGrid/BuildPaste here,
-              reading/writing useBuildRowsStore directly. Stubbed for this task. ── */}
+          {/* ── Body — Task 7/8 mount BuildGrid/BuildPaste here, reading/writing
+              useBuildRowsStore directly (still stubbed). Task 6's BuildOutline
+              reads the same `validated` view the footer summary below uses, so
+              its type chips/status always match. ── */}
           <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-            <div className="h-full flex items-center justify-center text-center px-8">
-              <div className="max-w-xs space-y-1.5">
-                <DynamicIcon name={activeSpec.icon} className="w-6 h-6 mx-auto text-ink-muted/40" />
-                <p className="text-sm text-ink-muted">{activeSpec.blurb}</p>
-                <p className="text-[11px] text-ink-muted/60">This tab is coming soon.</p>
+            {activeTab === 'outline' ? (
+              <BuildOutline rows={validated} typeById={typeById} />
+            ) : (
+              <div className="h-full flex items-center justify-center text-center px-8">
+                <div className="max-w-xs space-y-1.5">
+                  <DynamicIcon name={activeSpec.icon} className="w-6 h-6 mx-auto text-ink-muted/40" />
+                  <p className="text-sm text-ink-muted">{activeSpec.blurb}</p>
+                  <p className="text-[11px] text-ink-muted/60">This tab is coming soon.</p>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           {/* ── Live validation summary ── */}
