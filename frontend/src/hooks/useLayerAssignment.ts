@@ -17,6 +17,7 @@ import {
   type EntityType,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
+import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 
 // ============================================
 // Types
@@ -31,6 +32,14 @@ export interface UseLayerAssignmentOptions {
   nodeMap: Map<string, any>
   childMap: Map<string, string[]>
   parentMap: Map<string, string>
+  /**
+   * URNs of entities CREATED in the active branch's draft. In a CLOSED-SCOPE
+   * view these — and ONLY these — may be placed by their durable, view-valid
+   * global `layerAssignment` (leak-safe: no arbitrary global-property node is
+   * pulled in). Defaults to the live branch-created delta when omitted; passed
+   * explicitly only in tests.
+   */
+  branchCreatedUrns?: Set<string>
 }
 
 export interface UseLayerAssignmentResult {
@@ -57,7 +66,13 @@ export function useLayerAssignment({
   nodeMap,
   childMap,
   parentMap,
+  branchCreatedUrns: branchCreatedUrnsOption,
 }: UseLayerAssignmentOptions): UseLayerAssignmentResult {
+
+  // Branch-created delta: URNs created in the active branch's draft. Read from
+  // the staged-changes store by default; an explicit option overrides it (tests).
+  const liveBranchCreatedUrns = useBranchCreatedDelta()
+  const branchCreatedDelta = branchCreatedUrnsOption ?? liveBranchCreatedUrns
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -219,6 +234,17 @@ export function useLayerAssignment({
           //     property, so honouring it in a closed-scope view would leak in
           //     entities this view never assigned (cross-view contamination).
           myLayerId = explicitAssignments.get(nodeId)
+          // 2a-delta. LEAK-SAFE exception: an entity CREATED IN THIS BRANCH's
+          //     draft (its urn is in `branchCreatedDelta`) has no persisted
+          //     `entityAssignment` yet, so the rule above drops it and it would
+          //     never render. Honour its durable, view-valid `layerAssignment`
+          //     (already validated into `nodeLayerId`) — scoped STRICTLY to the
+          //     delta, so no arbitrary global-property node can leak in. Explicit
+          //     entityAssignments (above) still win.
+          if (!myLayerId && nodeLayerId) {
+            const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
+            if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
+          }
         } else {
           // 2b. Open-scope mode: empty / new view with no explicit
           //     assignments. Fall back to backend → node property → rules →
@@ -416,7 +442,7 @@ export function useLayerAssignment({
 
     return grouped
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {
