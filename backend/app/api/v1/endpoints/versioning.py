@@ -1889,6 +1889,182 @@ async def sync_ingest(
 
 
 # --------------------------------------------------------------------------- #
+# Bulk import / export (per data source / view) — plan Phases 1, 6, 7          #
+# Backend-driven + automation-friendly: the same endpoints power the UI and a  #
+# scripted client. Independent of the aggregation/ingestion worker.            #
+# --------------------------------------------------------------------------- #
+_ie_service = None
+
+
+def get_import_export_service():
+    """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
+    global _ie_service
+    if _ie_service is None:
+        from backend.app.services.versioning.import_export.service import ImportExportService
+        _ie_service = ImportExportService(versioning=_service)
+    return _ie_service
+
+
+class CreateImportResponse(_ApiModel):
+    jobId: str
+    branchId: str
+    sourceUri: str
+    status: str
+
+
+@router.post("/graphs/{graph_id}/imports", response_model=CreateImportResponse, status_code=202)
+async def create_import(
+    ws_id: str, graph_id: str,
+    request: Request,
+    background: BackgroundTasks,
+    format: str = Query("ndjson"),
+    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Create a bulk import: open/append the user's working **draft**, stream the uploaded file to
+    the object store, and dispatch the worker. The file is the raw request body (ndjson/csv/…);
+    params are query args, so a client can drive the whole thing with one authenticated ``curl``.
+    Review + publish/PR happen through the existing draft endpoints — this never writes to ``main``.
+    ``branchId`` stacks onto an existing draft (repeat imports, like manual edits)."""
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    try:
+        get_adapter(format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    with _domain_errors():
+        created = await ie.create_import_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
+            branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
+            idempotency_key=idempotency_key)
+    await ie.store.put_stream(created["source_uri"], request.stream())
+    background.add_task(ie.run_import_safe, created["job_id"])
+    return {"jobId": created["job_id"], "branchId": created["branch_id"],
+            "sourceUri": created["source_uri"], "status": "running"}
+
+
+@router.get("/graphs/{graph_id}/imports")
+async def list_imports(
+    ws_id: str, graph_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Import job history for this graph/data source (the per-view/data-source surface)."""
+    return await ie.list_jobs(graph_id=graph_id, job_type="ingest")
+
+
+@router.get("/graphs/{graph_id}/imports/{job_id}")
+async def get_import(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    job = await ie.get_job(job_id)
+    if job is None or job.get("graph_id") != graph_id:
+        raise HTTPException(status_code=404, detail="import job not found")
+    return job
+
+
+@router.get("/graphs/{graph_id}/imports/{job_id}/preview")
+async def get_import_preview(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Summary counts + a bounded sample of resolved rows. The full field-level diff is the
+    draft-vs-main diff served by the existing versioning endpoints."""
+    preview = await ie.get_preview(job_id)
+    if preview is None or preview["job"].get("graph_id") != graph_id:
+        raise HTTPException(status_code=404, detail="import job not found")
+    return preview
+
+
+class CreateExportResponse(_ApiModel):
+    jobId: str
+    resultUri: str
+    status: str
+
+
+@router.post("/graphs/{graph_id}/exports", response_model=CreateExportResponse, status_code=202)
+async def create_export(
+    ws_id: str, graph_id: str,
+    background: BackgroundTasks,
+    format: str = Query("ndjson"),
+    as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Export the graph (or an as-of snapshot, E5) to a downloadable, re-importable artifact.
+    A whole-data-source export doubles as a backup. Async: dispatches the worker, poll status."""
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    try:
+        get_adapter(format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    with _domain_errors():
+        created = await ie.create_export_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+            actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
+            provider_id=meta.get("provider_id"), idempotency_key=idempotency_key)
+    background.add_task(ie.run_export_safe, created["job_id"])
+    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": "running"}
+
+
+@router.get("/graphs/{graph_id}/exports")
+async def list_exports(
+    ws_id: str, graph_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    return await ie.list_jobs(graph_id=graph_id, job_type="export")
+
+
+@router.get("/graphs/{graph_id}/exports/{job_id}")
+async def get_export(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    job = await ie.get_job(job_id)
+    if job is None or job.get("graph_id") != graph_id:
+        raise HTTPException(status_code=404, detail="export job not found")
+    return job
+
+
+@router.get("/graphs/{graph_id}/exports/{job_id}/download")
+async def download_export(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    from fastapi.responses import StreamingResponse
+    result = await ie.open_result(job_id)
+    if result is None or result[0].get("graph_id") != graph_id:
+        raise HTTPException(status_code=404, detail="export not found")
+    job, stream = result
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=409, detail={"type": "not_ready", "status": job.get("status")})
+    fmt = job.get("import_format") or "ndjson"
+    return StreamingResponse(
+        stream, media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="export-{job_id}.{fmt}"'})
+
+
+# --------------------------------------------------------------------------- #
 # Forking + pull requests                                                      #
 # --------------------------------------------------------------------------- #
 @router.post("/graphs/{graph_id}/forks", response_model=ForkResponse, status_code=201)
