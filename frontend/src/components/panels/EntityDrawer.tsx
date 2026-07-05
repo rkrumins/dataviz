@@ -51,7 +51,8 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
-import { useResolveGraph } from '@/features/versioning/hooks/useVersioning'
+import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
 import { cn } from '@/lib/utils'
@@ -127,6 +128,22 @@ export function EntityDrawer({
   )
 
   const isOpen = !!selectedNode
+
+  // Real "last updated" timestamp — the most recent COMMIT that touched this entity (source of
+  // truth), not the stale `lastSyncedAt` (which is set at sync/creation and doesn't move on edits).
+  // Shared query with the History section (no extra fetch).
+  const entityHistory = useEntityHistory(historyWsId, historyGraphId, selectedNode?.id ?? undefined)
+  const lastUpdatedAt = useMemo(() => {
+    const versions = (entityHistory.data?.versions ?? []) as Array<{ created_at?: string; commit_seq?: number }>
+    if (!versions.length) return undefined
+    return [...versions].sort((a, b) => (b.commit_seq ?? 0) - (a.commit_seq ?? 0))[0]?.created_at
+  }, [entityHistory.data])
+  // "Synced" = when the live read layer (FalkorDB) last caught up — always >= the last update, so it
+  // never conflicts with "Updated". While actively catching up we show a live "Syncing…" state.
+  const watermark = useProjectionWatermark(historyWsId, historyGraphId)
+  const syncing = watermark.data?.fresh === false
+    && (watermark.data?.status === 'projecting' || watermark.data?.status === 'rebuilding')
+  const lastSyncedAt = watermark.data?.lastProjectedAt ?? undefined
 
   // Local state
   const [viewMode, setViewMode] = useState<ViewMode>('view')
@@ -628,10 +645,24 @@ export function EntityDrawer({
         <div className="flex-shrink-0 p-4 border-t border-glass-border/50 bg-canvas-elevated/50">
           {viewMode === 'view' ? (
             <div className="flex items-center justify-between text-xs text-ink-muted">
-              <div className="flex items-center gap-1.5">
-                <LucideIcons.Calendar className="w-3.5 h-3.5" />
-                <span>Last synced 5 min ago</span>
-                <ComingSoonChip />
+              <div className="flex items-center gap-3 min-w-0">
+                {lastUpdatedAt ? (
+                  <span className="flex items-center gap-1.5 whitespace-nowrap" title={`Last changed ${new Date(lastUpdatedAt).toLocaleString()}`}>
+                    <LucideIcons.Clock className="w-3.5 h-3.5" />
+                    Updated {timeAgo(lastUpdatedAt)}
+                  </span>
+                ) : entityHistory.isLoading ? (
+                  <span className="flex items-center gap-1.5"><LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" />Loading…</span>
+                ) : null}
+                {formData.lastSyncedAt && (
+                  <span className="flex items-center gap-1.5 whitespace-nowrap" title={`Last synced from source ${new Date(String(formData.lastSyncedAt)).toLocaleString()}`}>
+                    <LucideIcons.RefreshCw className="w-3.5 h-3.5" />
+                    Synced {timeAgo(String(formData.lastSyncedAt))}
+                  </span>
+                )}
+                {!lastUpdatedAt && !entityHistory.isLoading && !formData.lastSyncedAt && (
+                  <span className="flex items-center gap-1.5"><LucideIcons.Calendar className="w-3.5 h-3.5" />No changes yet</span>
+                )}
               </div>
               {externalUrl && (
                 <button
@@ -757,16 +788,6 @@ function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
       </div>
       {flush ? <div className="-mx-3">{children}</div> : children}
     </div>
-  )
-}
-
-// Subtle "Coming soon" chip for sections that show placeholder data until
-// the backend lands (activity log, lineage counts, last-synced timestamp).
-function ComingSoonChip() {
-  return (
-    <span className="px-2 py-0.5 rounded-md text-[10px] font-medium uppercase tracking-wider bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-      Coming soon
-    </span>
   )
 }
 
