@@ -42,13 +42,17 @@ class ImportExportService:
         versioning: Optional[GraphVersioningService] = None,
         store=None,
         scope_resolver=None,
+        ontology_resolver=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
         # Optional async ``(workspace_id, data_source_id, view_id) -> scope dict | None`` — resolves
-        # a view's scope for view-scoped export. Injected at the API layer (management-DB access),
-        # so the worker stays decoupled.
+        # a view's scope for view-scoped export AND view-scoped replace. Injected at the API layer
+        # (management-DB access), so the worker stays decoupled.
         self._scope_resolver = scope_resolver
+        # Optional async ``(workspace_id, data_source_id) -> {node_types, edge_types} | None`` — the
+        # live ontology types for the per-row import gate. Injected the same way.
+        self._ontology_resolver = ontology_resolver
 
     @property
     def store(self):
@@ -158,8 +162,20 @@ class ImportExportService:
                     for r in rows]
 
     async def run_import(self, job_id: str) -> Dict[str, int]:
-        """Run the import job to completion in-process (v1 dispatch)."""
-        return await ImportWorker(self._svc, self._store).run(job_id)
+        """Run the import job to completion in-process (v1 dispatch). Resolves the live ontology
+        types (per-row gate) and — for a view-scoped **replace** — the view's scope, so absence-
+        deletes stay confined to the view's own entities."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            ws, ds, view_id, mode = ((row.workspace_id, row.data_source_id, row.scope_view_id,
+                                      row.reconcile_mode) if row else (None, None, None, None))
+        scope = None
+        if mode == "replace" and view_id and self._scope_resolver is not None:
+            scope = await self._scope_resolver(ws, ds, view_id)
+        ontology = None
+        if self._ontology_resolver is not None:
+            ontology = await self._ontology_resolver(ws, ds)
+        return await ImportWorker(self._svc, self._store, scope=scope, ontology=ontology).run(job_id)
 
     async def create_export_job(
         self,

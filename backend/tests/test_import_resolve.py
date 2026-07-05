@@ -105,6 +105,21 @@ def _run() -> None:
     assert ops7 == [{"op": "update", "entity_kind": "node", "entity_id": "ent_A",
                      "payload": {"properties": {"logicalDataType": "string"}}}], ops7
 
+    # ---- per-row ontology gate: unknown node/edge types are quarantined; casing tolerated ----
+    ont = {"node_types": ["Table", "Column"], "edge_types": ["LINEAGE"]}
+    o_ops, o_res = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:bad",
+         "entityType": "Bogus", "displayName": "x", "qualifiedName": "qx"},
+        {"_row_index": 1, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:ok",
+         "entityType": "table", "displayName": "y", "qualifiedName": "qy"},          # case-tolerant
+        {"_row_index": 2, "kind": "edge", "op": "upsert", "entity_id": "",
+         "edgeType": "MADE_UP", "sourceQualifiedName": "qy", "targetQualifiedName": "qy"},
+    ], _indexes(), mint_id=lambda: "nid", ontology=ont)
+    by_row = {r["_row_index"]: r for r in o_res}
+    assert by_row[0]["resolved_op"] == "invalid" and "Bogus" in by_row[0]["reasons"][0]
+    assert by_row[1]["resolved_op"] == "create", by_row[1]          # 'table' ~ 'Table'
+    assert by_row[2]["resolved_op"] == "invalid" and "MADE_UP" in by_row[2]["reasons"][0]
+
 
 def test_import_resolve():
     _run()

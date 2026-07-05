@@ -1937,12 +1937,38 @@ async def _resolve_export_view_scope(workspace_id, data_source_id, view_id):
         return None
 
 
+async def _resolve_ontology_types(workspace_id, data_source_id):
+    """The CURRENT ontology's valid node + edge types for the **per-row import gate** — resolved
+    live from the ontology service (management DB), never a stored snapshot. Returns
+    ``{node_types, edge_types}`` or ``None`` (fail-open → gate skipped) when the ontology defines
+    no types. Runs in the worker's background context, so it opens its own session."""
+    try:
+        from backend.app.db.engine import get_async_session
+        from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from backend.app.ontology.service import LocalOntologyService
+        async with get_async_session() as session:
+            resolved = await LocalOntologyService(SQLAlchemyOntologyRepository(session)).resolve(
+                workspace_id=workspace_id, data_source_id=data_source_id)
+        node_types = list(getattr(resolved, "entity_type_definitions", {}) or {})
+        edge_types = list(getattr(resolved, "relationship_type_definitions", {}) or {})
+        edge_types += list(getattr(resolved, "containment_edge_types", []) or [])
+        edge_types += list(getattr(resolved, "lineage_edge_types", []) or [])
+        if not node_types and not edge_types:
+            return None
+        return {"node_types": node_types, "edge_types": edge_types}
+    except Exception:
+        logger.exception("ontology type resolution failed for import (ds=%s)", data_source_id)
+        return None
+
+
 def get_import_export_service():
     """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
     global _ie_service
     if _ie_service is None:
         from backend.app.services.versioning.import_export.service import ImportExportService
-        _ie_service = ImportExportService(versioning=_service, scope_resolver=_resolve_export_view_scope)
+        _ie_service = ImportExportService(
+            versioning=_service, scope_resolver=_resolve_export_view_scope,
+            ontology_resolver=_resolve_ontology_types)
     return _ie_service
 
 

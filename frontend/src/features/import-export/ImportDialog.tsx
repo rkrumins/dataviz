@@ -139,7 +139,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               file={file} setFile={handleFile} dragging={dragging} setDragging={setDragging} onDrop={onDrop}
               inputRef={inputRef} reconcileMode={reconcileMode} setReconcileMode={setReconcileMode}
               format={format} setFormat={(f) => { setFormat(f); setAutoDetected(false) }} autoDetected={autoDetected}
-              warning={warning}
+              warning={warning} viewScoped={!!viewId}
               onDownloadTemplate={() => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, 'csv'), 'import-template.csv')}
             />
           )}
@@ -198,11 +198,12 @@ function ChooseStep(props: {
   setFormat: (f: ImportFormat) => void
   autoDetected: boolean
   warning: string | null
+  viewScoped: boolean
   onDownloadTemplate: () => void
 }) {
   const {
     file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode,
-    format, setFormat, autoDetected, warning,
+    format, setFormat, autoDetected, warning, viewScoped,
   } = props
   return (
     <div className="grid md:grid-cols-2">
@@ -310,13 +311,17 @@ function ChooseStep(props: {
               desc="Creates new items and updates matching ones. Never deletes — safe default." />
             <ModeCard active={reconcileMode === 'replace'} onClick={() => setReconcileMode('replace')}
               icon={<ShieldAlert className="w-4 h-4" />} title="Replace (authoritative)" tone="amber"
-              desc="The file becomes the source of truth — items missing from it are deleted." />
+              desc={viewScoped
+                ? "The file is the source of truth for this view — its items missing from the file are deleted."
+                : "The file becomes the source of truth — items missing from it are deleted."} />
           </div>
           {reconcileMode === 'replace' && (
             <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2 animate-in fade-in duration-150">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
               <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                You'll see exactly what would be deleted in the review before anything is published.
+                {viewScoped
+                  ? "Only entities in this view can be deleted — the rest of the data source is untouched. You'll review the exact count before publishing."
+                  : "You'll see exactly what would be deleted in the review before anything is published."}
               </p>
             </div>
           )}
@@ -424,6 +429,23 @@ function DoneStep({ summary, invalidRows }: { summary: ImportSummary | null; inv
         <p className="mt-3 text-[11px] text-ink-muted">
           {s.unchanged} row{s.unchanged === 1 ? ' was' : 's were'} already up to date — only real changes are staged.
         </p>
+      )}
+
+      {/* Deletions are destructive — name the exact count and route the user to review before they
+          publish. Nothing is removed from the published model until then. */}
+      {s && s.deleted > 0 && (
+        <div className="mt-5 rounded-xl border border-rose-300 dark:border-rose-800/60 bg-rose-50/60 dark:bg-rose-950/25 px-4 py-3 flex items-start gap-2.5">
+          <Trash2 className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs font-semibold text-rose-700 dark:text-rose-400">
+              {s.deleted} {s.deleted === 1 ? 'entity' : 'entities'} will be deleted when you publish
+            </p>
+            <p className="text-[11px] text-ink-muted mt-0.5">
+              Replace removes items not in your file. They're only staged for now — review every deletion
+              in the Changes tab before you publish; nothing is removed until then.
+            </p>
+          </div>
+        </div>
       )}
 
       {/* What couldn't be applied — with the exact reason, so a shifted column or bad value is

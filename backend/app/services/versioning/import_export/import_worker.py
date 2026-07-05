@@ -38,18 +38,51 @@ def _chunks(seq: List[Any], size: int):
         yield seq[i:i + size]
 
 
-def _append_replace_deletes(ops, resolutions, indexes):
-    """Replace mode = the file is the authoritative snapshot: every EXISTING entity that no file row
-    matched is deleted (reviewed on the draft before publish; ``apply_ops`` cascades containment /
-    incident edges). Upsert never deletes on absence — this is the deliberate override. Returns
-    ``(ops, delete_count)``. Derived deletes aren't file rows, so they're counted here, not staged
-    into ``import_rows``."""
+def _view_scope_eids(indexes, scope):
+    """The view's in-scope entity ids from its layer assignments — the SAME rule as export's
+    ``filter_to_scope``: each assigned urn + its containment descendants (when the assignment
+    inherits children); an edge is in-scope when both endpoints are. Computed from entity_indexes'
+    ``urn_to_eid`` + ``edge_to_eid`` (endpoint-triple keys), so no payloads are needed."""
+    assigned = set(scope.get("assigned_urns") or [])
+    inherit = set(scope.get("inherit_urns") or [])
+    cont = {str(t).upper() for t in (scope.get("containment_types") or [])}
+    urn_to_eid = indexes.get("urn_to_eid") or {}
+    edge_to_eid = indexes.get("edge_to_eid") or {}
+    children: Dict[str, List[str]] = {}
+    for (src, _tgt, etype) in edge_to_eid:
+        if str(etype).upper() in cont:
+            children.setdefault(src, []).append(_tgt)
+    keep, seen = set(), set()
+    stack = [(urn_to_eid[u], u in inherit) for u in assigned if u in urn_to_eid]
+    while stack:
+        eid, descend = stack.pop()
+        if eid in seen:
+            continue
+        seen.add(eid)
+        keep.add(eid)
+        if descend:
+            for child in children.get(eid, []):
+                stack.append((child, True))
+    scope_edges = {eid for (src, tgt, _), eid in edge_to_eid.items() if src in keep and tgt in keep}
+    return keep, scope_edges
+
+
+def _append_replace_deletes(ops, resolutions, indexes, scope_nodes=None, scope_edges=None):
+    """Replace mode = the file is the authoritative snapshot for its scope: every EXISTING entity in
+    scope that no file row matched is deleted (reviewed on the draft before publish; ``apply_ops``
+    cascades containment / incident edges). Upsert never deletes on absence — this is the deliberate
+    override. ``scope_nodes``/``scope_edges`` (view-scoped replace) restrict the universe so only
+    the view's own entities can be deleted, never the rest of the data source; ``None`` = whole
+    graph. Returns ``(ops, delete_count)``. Derived deletes aren't file rows, so they're counted
+    here, not staged into ``import_rows``."""
     matched_nodes = {r["matched_entity_id"] for r in resolutions
                      if r.get("matched_entity_id") and r.get("kind") == "node"}
     matched_edges = {r["matched_entity_id"] for r in resolutions
                      if r.get("matched_entity_id") and r.get("kind") == "edge"}
-    absent_edges = set(indexes.get("edge_eids") or ()) - matched_edges
-    absent_nodes = set(indexes.get("node_eids") or ()) - matched_nodes
+    universe_nodes = scope_nodes if scope_nodes is not None else set(indexes.get("node_eids") or ())
+    universe_edges = scope_edges if scope_edges is not None else set(indexes.get("edge_eids") or ())
+    absent_edges = universe_edges - matched_edges
+    absent_nodes = universe_nodes - matched_nodes
     for eid in absent_edges:      # edges first, then nodes (apply_ops also cascades either way)
         ops.append({"op": "delete", "entity_kind": "edge", "entity_id": eid, "payload": None})
     for eid in absent_nodes:
@@ -58,9 +91,11 @@ def _append_replace_deletes(ops, resolutions, indexes):
 
 
 class ImportWorker:
-    def __init__(self, versioning, store) -> None:
+    def __init__(self, versioning, store, scope=None, ontology=None) -> None:
         self._svc = versioning
         self._store = store
+        self._scope = scope          # view scope for scoped replace ({assigned_urns, ...}) | None
+        self._ontology = ontology    # {node_types, edge_types} for the per-row gate | None
 
     async def run(self, job_id: str) -> Dict[str, int]:
         job = await self._load_running(job_id)
@@ -146,11 +181,16 @@ class ImportWorker:
             norm_rows = [{**r.raw, "_row_index": r.row_index} for r in rows]
 
         indexes = await self._svc.entity_indexes(graph_id=graph_id, branch_id=branch_id)
-        ops, resolutions = resolve_rows(norm_rows, indexes, mint_id=lambda: prefixed_id("ent"))
+        ops, resolutions = resolve_rows(norm_rows, indexes,
+                                        mint_id=lambda: prefixed_id("ent"), ontology=self._ontology)
 
         deleted_extra = 0
         if reconcile_mode == "replace":
-            ops, deleted_extra = _append_replace_deletes(ops, resolutions, indexes)
+            scope_nodes, scope_edges = (None, None)
+            if self._scope:                        # view-scoped replace: only the view's own entities
+                scope_nodes, scope_edges = _view_scope_eids(indexes, self._scope)
+            ops, deleted_extra = _append_replace_deletes(
+                ops, resolutions, indexes, scope_nodes, scope_edges)
 
         await self._persist_resolutions(job_id, resolutions)
 

@@ -15,7 +15,7 @@ model: an unresolvable row is quarantined (``invalid`` with a reason), never fat
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 _NODE_FIELDS = (
     "urn", "entityType", "displayName", "qualifiedName",
@@ -93,18 +93,32 @@ def _resolution(row: Mapping[str, Any], resolved_op: str, eid: str | None, *, re
     }
 
 
+def _lc(values) -> Optional[set]:
+    """Lowercased set for case-tolerant type matching, or ``None`` when empty (skip the gate)."""
+    s = {str(v).strip().lower() for v in (values or []) if str(v).strip()}
+    return s or None
+
+
 def resolve_rows(
     rows: Sequence[Mapping[str, Any]],
     indexes: Mapping[str, Any],
     *,
     mint_id: Callable[[], str],
+    ontology: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[dict], List[dict]]:
-    """Return ``(ops, resolutions)`` for the given normalized ``rows``."""
+    """Return ``(ops, resolutions)`` for the given normalized ``rows``.
+
+    ``ontology`` (optional ``{"node_types": [...], "edge_types": [...]}``) enables the **per-row
+    ontology gate**: a node whose ``entityType`` / an edge whose ``edgeType`` isn't a type the
+    ontology defines is quarantined (invalid) rather than written — partial acceptance, so a few bad
+    rows don't fail the batch. Absent/empty type lists → the gate is skipped (best-effort)."""
     urn_to_eid: Dict[str, str] = dict(indexes.get("urn_to_eid") or {})
     qname_to_eid: Dict[str, str] = dict(indexes.get("qname_to_eid") or {})
     edge_to_eid: Dict[tuple, str] = dict(indexes.get("edge_to_eid") or {})
     node_eids: set = set(indexes.get("node_eids") or set())
     current: Dict[str, dict] = dict(indexes.get("current") or {})   # eid -> current payload
+    node_types = _lc(ontology.get("node_types")) if ontology else None   # lowercased valid sets | None
+    edge_types = _lc(ontology.get("edge_types")) if ontology else None
 
     ops: List[dict] = []
     resolutions: List[dict] = []
@@ -124,6 +138,10 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "delete", matched_eid))
             else:
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete target not found"]))
+            continue
+        if node_types is not None and row.get("entityType") and str(row["entityType"]).strip().lower() not in node_types:
+            resolutions.append(_resolution(row, "invalid", None,
+                reasons=[f"'{row['entityType']}' is not a valid entity type in this ontology"]))
             continue
         if matched_eid:
             changed = _changed_fields(_node_payload(row), current.get(matched_eid) or {})
@@ -149,6 +167,10 @@ def resolve_rows(
     for row in edge_rows:
         if row.get("op") == "invalid":
             resolutions.append(_resolution(row, "invalid", None, reasons=[row.get("op_error") or "invalid row"]))
+            continue
+        if edge_types is not None and row.get("edgeType") and str(row["edgeType"]).strip().lower() not in edge_types:
+            resolutions.append(_resolution(row, "invalid", None,
+                reasons=[f"'{row['edgeType']}' is not a valid edge type in this ontology"]))
             continue
         seid = _resolve_endpoint(row, "source", node_eids, qname_to_eid, urn_to_eid)
         teid = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid)
