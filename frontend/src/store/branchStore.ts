@@ -108,19 +108,17 @@ export const useBranchStore = create<BranchState>((set, get) => ({
         graphId: r.graphId,
         mainBranchId: r.mainBranchId,
         mainHeadCommitSeq: r.mainHeadCommitSeq,
-        // Entering a *different* scope (data source OR view) rebinds the active branch to THAT
-        // view's own open draft — the backend resolved it by originating_view_id (branch-per-view)
-        // and returns it as `myDraft`. So returning to a view restores its unpublished work, while
-        // a view with no draft opens Published (read). On a *same-scope* refetch we leave the
-        // active branch untouched, so a background resolve never overrides the user's explicit
-        // switch to Published or to another draft.
+        // Entering a *different* scope (data source OR view) ALWAYS opens Published — a
+        // view-switch is never a silent resume, even when the backend reports this view's own
+        // open draft as `myDraft`. The user explicitly resumes it by clicking Edit, which goes
+        // through `ensureDraftOpen`/`switchToDraft` (re-resolves + binds THIS view's draft). On a
+        // *same-scope* refetch we leave the active branch untouched, so a background resolve
+        // never overrides the user's explicit switch to Published or to another draft.
         ...(sameScope
           ? {}
           : {
-              currentBranchId: r.myDraft?.branchId ?? null,
-              originatingViewId: r.myDraft
-                ? r.myDraft.originatingViewId ?? scope.viewId
-                : null,
+              currentBranchId: null,
+              originatingViewId: null,
               activeChangeSet: null,
             }),
       }

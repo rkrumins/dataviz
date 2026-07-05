@@ -144,11 +144,17 @@ class JsonAdapter:
         yield json.dumps(rows).encode("utf-8")
 
 
+def _xlsx_adapter():
+    from .xlsx_adapter import XlsxAdapter   # lazy: needs openpyxl; a missing lib won't break others
+    return XlsxAdapter()
+
+
 _ADAPTERS = {
     "ndjson": lambda: NdjsonAdapter(),
     "json": lambda: JsonAdapter(),
     "csv": lambda: DelimitedAdapter("csv", ","),
     "tsv": lambda: DelimitedAdapter("tsv", "\t"),
+    "xlsx": _xlsx_adapter,
 }
 
 

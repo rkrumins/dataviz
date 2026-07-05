@@ -31,13 +31,12 @@ export interface ImportDialogProps {
 type Phase = 'choose' | 'running' | 'done' | 'failed'
 
 const FORMATS: { id: ImportFormat; label: string }[] = [
-  { id: 'csv', label: 'CSV' }, { id: 'tsv', label: 'TSV' },
+  { id: 'xlsx', label: 'Excel' }, { id: 'csv', label: 'CSV' }, { id: 'tsv', label: 'TSV' },
   { id: 'ndjson', label: 'NDJSON' }, { id: 'json', label: 'JSON' },
 ]
 
 const UNSUPPORTED: Record<string, string> = {
-  xlsx: 'Excel workbook', xlsm: 'Excel workbook', xls: 'Excel workbook',
-  numbers: 'Numbers file', parquet: 'Parquet file', zip: 'Zip archive',
+  xls: 'legacy Excel file', numbers: 'Numbers file', parquet: 'Parquet file', zip: 'Zip archive',
 }
 
 function unsupportedReason(name: string): string | null {
@@ -216,7 +215,7 @@ function ChooseStep(props: {
         <ol className="space-y-3">
           <Step n={1} title="Download a starter template" body="Prefilled with your current data so you learn the columns instantly." />
           <Step n={2} title="Edit it anywhere" body="Excel, Google Sheets, or any editor. Add rows to create, edit cells to update." />
-          <Step n={3} title="Upload it here" body="Any CSV, TSV, NDJSON or JSON — the format is detected automatically." />
+          <Step n={3} title="Upload it here" body="Excel, CSV, TSV, NDJSON or JSON — the format is detected automatically." />
           <Step n={4} title="Review every change" body="See exactly what's new, updated or deleted on a draft before it's live." />
           <Step n={5} title="Publish or open a PR" body="Nothing touches the published model until you approve it." />
         </ol>
@@ -258,7 +257,7 @@ function ChooseStep(props: {
             </div>
             <div className="text-center">
               <p className="text-sm font-semibold text-ink">{dragging ? 'Drop to upload' : 'Drop a file, or click to browse'}</p>
-              <p className="text-[11px] text-ink-muted mt-1">CSV, TSV, NDJSON or JSON · up to millions of rows</p>
+              <p className="text-[11px] text-ink-muted mt-1">Excel, CSV, TSV, NDJSON or JSON · up to millions of rows</p>
             </div>
           </button>
         ) : (

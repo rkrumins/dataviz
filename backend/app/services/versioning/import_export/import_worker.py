@@ -38,6 +38,25 @@ def _chunks(seq: List[Any], size: int):
         yield seq[i:i + size]
 
 
+def _append_replace_deletes(ops, resolutions, indexes):
+    """Replace mode = the file is the authoritative snapshot: every EXISTING entity that no file row
+    matched is deleted (reviewed on the draft before publish; ``apply_ops`` cascades containment /
+    incident edges). Upsert never deletes on absence — this is the deliberate override. Returns
+    ``(ops, delete_count)``. Derived deletes aren't file rows, so they're counted here, not staged
+    into ``import_rows``."""
+    matched_nodes = {r["matched_entity_id"] for r in resolutions
+                     if r.get("matched_entity_id") and r.get("kind") == "node"}
+    matched_edges = {r["matched_entity_id"] for r in resolutions
+                     if r.get("matched_entity_id") and r.get("kind") == "edge"}
+    absent_edges = set(indexes.get("edge_eids") or ()) - matched_edges
+    absent_nodes = set(indexes.get("node_eids") or ()) - matched_nodes
+    for eid in absent_edges:      # edges first, then nodes (apply_ops also cascades either way)
+        ops.append({"op": "delete", "entity_kind": "edge", "entity_id": eid, "payload": None})
+    for eid in absent_nodes:
+        ops.append({"op": "delete", "entity_kind": "node", "entity_id": eid, "payload": None})
+    return ops, len(absent_edges) + len(absent_nodes)
+
+
 class ImportWorker:
     def __init__(self, versioning, store) -> None:
         self._svc = versioning
@@ -49,7 +68,8 @@ class ImportWorker:
         actor = await self._branch_owner(graph_id, branch_id)
 
         await self._parse(job_id, job["source_uri"], job["import_format"])
-        summary = await self._resolve_and_build(job_id, graph_id, branch_id, actor)
+        summary = await self._resolve_and_build(
+            job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
 
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
@@ -94,7 +114,8 @@ class ImportWorker:
             return  # only the first chunk is needed to sniff the file type
 
     async def _parse(self, job_id: str, source_uri: str, fmt: str) -> int:
-        await self._reject_binary(source_uri)
+        if (fmt or "").lower() != "xlsx":
+            await self._reject_binary(source_uri)   # xlsx IS a zip (PK); its adapter reads it natively
         adapter = get_adapter(fmt)
         batch: List[ImportRowORM] = []
         idx = 0
@@ -116,7 +137,8 @@ class ImportWorker:
         async with db.graphver_session() as s:
             s.add_all(batch)
 
-    async def _resolve_and_build(self, job_id, graph_id, branch_id, actor) -> Dict[str, int]:
+    async def _resolve_and_build(self, job_id, graph_id, branch_id, actor,
+                                 reconcile_mode: str = "upsert") -> Dict[str, int]:
         async with db.graphver_session() as s:
             rows = (await s.execute(
                 select(ImportRowORM).where(ImportRowORM.job_id == job_id)
@@ -125,6 +147,10 @@ class ImportWorker:
 
         indexes = await self._svc.entity_indexes(graph_id=graph_id, branch_id=branch_id)
         ops, resolutions = resolve_rows(norm_rows, indexes, mint_id=lambda: prefixed_id("ent"))
+
+        deleted_extra = 0
+        if reconcile_mode == "replace":
+            ops, deleted_extra = _append_replace_deletes(ops, resolutions, indexes)
 
         await self._persist_resolutions(job_id, resolutions)
 
@@ -136,6 +162,7 @@ class ImportWorker:
         summary: Dict[str, int] = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}
         for res in resolutions:
             summary[res["status"]] = summary.get(res["status"], 0) + 1
+        summary["deleted"] += deleted_extra    # replace-mode delete-on-absence (not file rows)
         return summary
 
     async def _persist_resolutions(self, job_id: str, resolutions) -> None:

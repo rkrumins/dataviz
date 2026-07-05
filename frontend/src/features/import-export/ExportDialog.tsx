@@ -23,7 +23,8 @@ export interface ExportDialogProps {
 type Phase = 'choose' | 'running' | 'done' | 'failed'
 
 const FORMATS: { id: ImportFormat; label: string; hint: string }[] = [
-  { id: 'csv', label: 'CSV', hint: 'Opens in Excel / Sheets · best for editing' },
+  { id: 'xlsx', label: 'Excel', hint: 'Nodes + Edges sheets, locked columns · best for editing' },
+  { id: 'csv', label: 'CSV', hint: 'Universal · opens in any spreadsheet or editor' },
   { id: 'tsv', label: 'TSV', hint: 'Tab-separated · safest for text with commas' },
   { id: 'ndjson', label: 'NDJSON', hint: 'One JSON object per line · streams at scale' },
   { id: 'json', label: 'JSON', hint: 'A single JSON array · for tools & scripts' },

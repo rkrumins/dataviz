@@ -12,7 +12,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, Search, Plus, GitBranch, Loader2, Settings2, Archive, Rocket,
-  ArrowRight, Eye, Inbox,
+  ArrowRight, Eye, Inbox, Layers,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -51,7 +51,12 @@ export function BranchManager({
   onClose: () => void
 }) {
   const { showToast } = useToast()
-  const branchesQ = useBranches(wsId, graphId)
+  const hasView = !!viewId
+  // Branch-per-view: default to THIS view's own drafts. "Show all data-source drafts" is an
+  // explicit, secondary toggle (default OFF) for the data-source-wide rollup — mirrors the
+  // "this view / whole data source" pattern in ViewPrList/ViewHistoryTimeline.
+  const [allDataSource, setAllDataSource] = useState(false)
+  const branchesQ = useBranches(wsId, graphId, hasView && !allDataSource ? viewId : undefined)
   const openDraft = useOpenDraft(wsId, graphId)
 
   const [query, setQuery] = useState('')
@@ -149,6 +154,32 @@ export function BranchManager({
               <option value="name">Name</option>
             </select>
           </div>
+
+          {hasView && (
+            <div className="px-5 py-2 border-b border-glass-border/40">
+              <div className="inline-flex rounded-lg border border-glass-border overflow-hidden text-[11px]">
+                <button
+                  onClick={() => setAllDataSource(false)}
+                  className={cn(
+                    'px-2.5 py-1 font-medium inline-flex items-center gap-1',
+                    !allDataSource ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+                  )}
+                >
+                  <Eye className="w-3 h-3" /> This view
+                </button>
+                <button
+                  onClick={() => setAllDataSource(true)}
+                  title="Show every draft on this data source, across all views"
+                  className={cn(
+                    'px-2.5 py-1 font-medium border-l border-glass-border inline-flex items-center gap-1',
+                    allDataSource ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+                  )}
+                >
+                  <Layers className="w-3 h-3" /> All data source drafts
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* List */}
           <div className="flex-1 overflow-y-auto custom-scrollbar px-3 py-3 space-y-2">

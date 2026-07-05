@@ -50,7 +50,10 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // Branch-per-view: the switcher lists only THIS view's own drafts (the backend filters by
   // originating_view_id + the viewer's visibility), not every draft on the data source. A data
   // source powering dozens of views no longer shows all of their branches in each view.
-  const branchesQ = useBranches(workspaceId, graphId, originatingViewId)
+  // Passing graphId=null when originatingViewId hasn't resolved yet disables the query (its own
+  // `enabled: !!graphId` check) — a momentary null activeView mid-switch pauses the list rather
+  // than falling back to graph-wide for a tick.
+  const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
 
   const currentBranchId = useBranchStore((s) => s.currentBranchId)
@@ -74,7 +77,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // Deep-link: apply ?branch=<id> on load (permission-gated) + keep the URL in step with the
   // active branch, so a view+branch is a shareable link.
   useBranchDeepLink({
-    enabled: !!graphId && !!dataSourceId,
+    enabled: !!graphId && !!dataSourceId && !!originatingViewId,
     branches: branchesQ.data,
     listRefreshing: branchesQ.isFetching,
     currentBranchId,

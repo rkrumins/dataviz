@@ -13,12 +13,16 @@ const openMutate = vi.fn()
 
 let branchesData: unknown[] = []
 
+const useBranchesMock = vi.fn(
+  (_wsId?: string, _gid?: string | null, _viewId?: string | null) => ({ data: branchesData, isLoading: false }),
+)
+
 vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
 vi.mock('../PullLatestButton', () => ({ PullLatestButton: () => null }))
 vi.mock('../BranchSettingsModal', () => ({ BranchSettingsModal: () => null }))
 vi.mock('../CommitDialog', () => ({ CommitDialog: () => null }))
 vi.mock('../../hooks/useVersioning', () => ({
-  useBranches: () => ({ data: branchesData, isLoading: false }),
+  useBranches: (wsId?: string, gid?: string | null, viewId?: string | null) => useBranchesMock(wsId, gid, viewId),
   useOpenDraft: () => ({ mutate: openMutate, isPending: false }),
   useAbandonDraft: () => ({ mutate: abandonMutate, isPending: false }),
   useDiffVsMain: () => ({ data: undefined, isLoading: false }),
@@ -44,7 +48,24 @@ const renderManager = () =>
 
 describe('BranchManager', () => {
   beforeEach(() => {
-    showToast.mockClear(); abandonMutate.mockClear(); openMutate.mockClear()
+    showToast.mockClear(); abandonMutate.mockClear(); openMutate.mockClear(); useBranchesMock.mockClear()
+  })
+
+  it('defaults to this view\'s drafts (passes viewId to useBranches)', () => {
+    branchesData = []
+    renderManager()
+    expect(useBranchesMock).toHaveBeenCalledWith('ws1', 'g1', 'v1')
+  })
+
+  it('toggling "All data source drafts" fetches without a viewId filter', () => {
+    branchesData = []
+    renderManager()
+    fireEvent.click(screen.getByText('All data source drafts'))
+    expect(useBranchesMock).toHaveBeenLastCalledWith('ws1', 'g1', undefined)
+
+    // Toggling back to "This view" restores the per-view filter.
+    fireEvent.click(screen.getByText('This view'))
+    expect(useBranchesMock).toHaveBeenLastCalledWith('ws1', 'g1', 'v1')
   })
 
   it('lists open drafts by name', () => {

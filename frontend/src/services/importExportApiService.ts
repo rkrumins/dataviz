@@ -15,7 +15,7 @@ import { authFetch } from './apiClient'
 const base = (wsId: string) => `/api/v1/${wsId}/versioning`
 
 export type ReconcileMode = 'upsert' | 'replace'
-export type ImportFormat = 'ndjson' | 'csv' | 'tsv' | 'json'
+export type ImportFormat = 'ndjson' | 'csv' | 'tsv' | 'json' | 'xlsx'
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface ImportSummary {
@@ -91,6 +91,7 @@ const TERMINAL: JobStatus[] = ['completed', 'failed', 'cancelled']
 /** Infer the import format from a file name; defaults to ndjson. */
 export function inferFormat(fileName: string): ImportFormat {
   const ext = fileName.toLowerCase().split('.').pop() || ''
+  if (ext === 'xlsx' || ext === 'xlsm') return 'xlsx'
   if (ext === 'csv') return 'csv'
   if (ext === 'tsv') return 'tsv'
   if (ext === 'json') return 'json'
@@ -175,7 +176,12 @@ export function triggerBrowserDownload(url: string, filename: string): void {
 /** Detect a file's format from its CONTENT (universal — never relies on the extension, which may
  *  be missing after a download). Reads the first line and classifies json-lines vs csv vs tsv. */
 export async function detectFormat(file: File): Promise<ImportFormat> {
+  // xlsx is a binary zip (PK signature) — detect by extension/magic BEFORE any text read.
+  const ext = file.name.toLowerCase().split('.').pop() || ''
+  if (ext === 'xlsx' || ext === 'xlsm') return 'xlsx'
   try {
+    const sig = new Uint8Array(await file.slice(0, 4).arrayBuffer())
+    if (sig[0] === 0x50 && sig[1] === 0x4b) return 'xlsx'   // "PK" → an Excel workbook
     const head = (await file.slice(0, 8192).text()).replace(/^﻿/, '')
     const firstLine = (head.split(/\r?\n/).find((l) => l.trim().length > 0) || '').trim()
     if (firstLine.startsWith('{') || firstLine.startsWith('[')) {
