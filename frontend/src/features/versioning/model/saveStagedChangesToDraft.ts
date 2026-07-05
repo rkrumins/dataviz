@@ -119,8 +119,11 @@ function reconcileCreatedNode(c: StagedChange, resolveRef: (id: string) => strin
     }])
   }
   const after = (c.after ?? {}) as { parentUrn?: string; containmentEdgeType?: string }
-  if (after.parentUrn) {
-    const et = after.containmentEdgeType ?? 'CONTAINS'
+  // Rebuild the containment edge with the ONTOLOGY-resolved type carried on the staged change — never
+  // a fabricated default. No type ⇒ the ontology defines no containment relationship for this pairing
+  // ⇒ no edge (matches what stagedChangesToOps sent to the backend).
+  if (after.parentUrn && after.containmentEdgeType) {
+    const et = after.containmentEdgeType
     cs.addEdges([{
       id: resolveRef(`contains-${tempUrn}`),
       source: resolveRef(after.parentUrn),

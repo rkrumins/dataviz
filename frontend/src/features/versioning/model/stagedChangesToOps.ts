@@ -128,13 +128,18 @@ export function stagedChangesToOps(
         if (after.tags !== undefined) payload.tags = after.tags
         if (after.properties !== undefined) payload.properties = after.properties
         ops.push({ op: 'create', kind: 'node', ref, payload })
-        if (after.parentUrn != null) {
+        // Containment edge to the parent. The edge TYPE is whatever the ONTOLOGY resolved at staging
+        // (carried on `after.containmentEdgeType` — see `containmentEdgeTypeFor` / `useContainmentEdgeTypes`),
+        // never a fabricated default. If the ontology defines no containment relationship for this
+        // pairing there is no type, so no edge is emitted — the node is created at the root and the
+        // commit-boundary ontology gate stays authoritative on whether that placement is valid.
+        if (after.parentUrn != null && after.containmentEdgeType) {
           ops.push({
             op: 'create',
             kind: 'edge',
             ref: `contains-${ref}`,
             payload: {
-              edgeType: after.containmentEdgeType ?? 'CONTAINS',
+              edgeType: after.containmentEdgeType,
               sourceEntityId: resolveId(String(after.parentUrn)),
               targetEntityId: ref,
             },
