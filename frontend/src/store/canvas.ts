@@ -32,6 +32,9 @@ export interface LineageNode extends Node {
     _rollupData?: Record<string, unknown>
     /** Pending change marker — drives the visual badge on the canvas. */
     isPending?: 'create' | 'delete' | 'modify'
+    /** Reconstructed committed-deletion node (draft-vs-main). Read-only; rendered as a rose ghost
+     *  until the draft is merged or the deletion is restored. See features/versioning/canvas/deletionGhosts. */
+    isGhost?: boolean
   }
 }
 

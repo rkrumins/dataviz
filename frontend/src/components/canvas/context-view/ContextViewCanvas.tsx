@@ -78,6 +78,7 @@ import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
+import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
@@ -478,6 +479,9 @@ export function ContextViewCanvas({
   // global store — without this, a view switch could keep reading the prior view's gate).
   const effectiveBranchId = useEffectiveBranchId(scopeWsId ?? '', dataSourceId, activeView?.id ?? null)
   const isDraft = !!effectiveBranchId
+  // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
+  // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
+  useDeletionGhosts(isDraft)
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
   const canEnterEdit = !!graphId
