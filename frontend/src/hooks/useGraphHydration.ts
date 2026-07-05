@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
@@ -16,6 +16,8 @@ import {
 import type { GraphNode, GraphEdge, EntityTypeDefinition } from '@/providers/GraphDataProvider'
 import { BoundedQueue } from '@/lib/concurrency'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
+import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
+import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -95,6 +97,26 @@ interface UseGraphHydrationOptions {
 export { toCanvasNode, toCanvasEdge }
 
 /**
+ * PURE: the closed-scope by-URN load set for a reference/Context Model view.
+ *
+ * A closed-scope view (persisted `entityAssignments`) loads ONLY `assignedUrns`
+ * by default — an entity created in the active branch's draft has no persisted
+ * assignment yet, so it would never be fetched (never rendered). In a DRAFT,
+ * union the branch-created delta (`useBranchCreatedDelta`) into the load set so
+ * those entities fetch too. Outside a draft (main/published) — or with an empty
+ * delta — the set is unchanged: assigned-only. This is the mandatory regression
+ * guard: a view with NO branch-created entities loads EXACTLY as before.
+ */
+export function closedScopeLoadUrns(
+    assignedUrns: Set<string>,
+    delta: Set<string>,
+    isDraft: boolean,
+): string[] {
+    if (!isDraft || delta.size === 0) return [...assignedUrns]
+    return [...new Set([...assignedUrns, ...delta])]
+}
+
+/**
  * Compute the "view-scoped root types" for a reference/context view.
  *
  * A type is a VIEW ROOT if none of its canBeContainedBy parents appear in
@@ -135,6 +157,30 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const schemaEntityTypes = useViewEntityTypes()
     const isSchemaReady = useViewSchemaIsReady()
     const activeView = useActiveView()
+    // Branch-created delta: URNs created in the active branch's draft (see
+    // useBranchCreatedDelta.ts). Unioned into the closed-scope by-URN load set
+    // below, ONLY in a draft, so freshly-created entities fetch even before
+    // they land in the view's persisted `entityAssignments`.
+    const branchCreatedDelta = useBranchCreatedDelta()
+    const isDraft = useIsDraftMode()
+    // The COMMITTED-in-branch half of the delta comes from `activeChangeSet`,
+    // which is fetched asynchronously (CanvasVersioningBar's diff-vs-main query)
+    // and is still null on the render where this hook's mount effect first
+    // fires — so a real page reload would otherwise permanently miss
+    // previously-committed created entities (the closure below never re-runs).
+    // Re-derive a content-stable key from JUST the committed portion (sorted,
+    // joined) and use it as an extra effect dependency so hydration re-runs
+    // once when that async diff resolves. Deliberately NOT keyed on the
+    // live-staged portion: a staged (unsaved) create is already rendered
+    // optimistically (`isPending: 'create'` in the canvas store, see
+    // loadChildren above) and re-hydrating would clear+refetch the whole
+    // canvas, wiping that not-yet-saved node (it doesn't exist server-side
+    // yet, so the refetch wouldn't bring it back).
+    const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
+    const committedDeltaKey = useMemo(
+        () => (isDraft ? [...committedCreatedUrns(activeChangeSet)].sort().join('|') : ''),
+        [isDraft, activeChangeSet],
+    )
 
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
@@ -226,13 +272,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     setHydrationPhase('roots')
 
                     let allNodes: GraphNode[] = []
+                    // Count of branch-created URNs unioned into the assigned set below
+                    // (0 outside a draft / with an empty delta) — logging only.
+                    let deltaLoadedCount = 0
 
                     if (hasExplicitAssignments) {
                         // ── Assignment-driven loading ──
-                        // Load the specific entities assigned to layers by URN.
-                        // This is precise: only what the user configured appears.
+                        // Load the specific entities assigned to layers by URN,
+                        // UNIONED (in a draft) with entities created in this
+                        // branch — they have no persisted entityAssignment yet
+                        // and would otherwise never be fetched. Empty delta /
+                        // non-draft ⇒ assigned-only, identical to before.
                         const urnBatches: string[][] = []
-                        const urnArray = [...assignedUrns]
+                        const urnArray = closedScopeLoadUrns(assignedUrns, branchCreatedDelta, isDraft)
+                        deltaLoadedCount = urnArray.length - assignedUrns.size
                         // Batch URNs to avoid overly large queries
                         for (let i = 0; i < urnArray.length; i += 100) {
                             urnBatches.push(urnArray.slice(i, i + 100))
@@ -319,7 +372,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         allEdges.map(e => toCanvasEdge(e)),
                     )
 
-                    console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned), ${allEdges.length} edges`)
+                    console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
                 } else {
                     // ── Hierarchy / Graph view ──────────────────────────
                     // Mirrors old App.tsx behavior: load roots, then first-level
@@ -440,7 +493,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaReady])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaReady, committedDeltaKey])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
