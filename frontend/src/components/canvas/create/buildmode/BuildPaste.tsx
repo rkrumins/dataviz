@@ -183,8 +183,8 @@ export function BuildPaste({ ctx, typeById, rootParentType }: BuildPasteProps) {
         <div className="text-center py-8 space-y-1.5">
           <DynamicIcon name="ClipboardList" className="w-6 h-6 mx-auto text-ink-muted/40" />
           <p className="text-sm text-ink-muted">
-            Paste an indented list — each line becomes an entity, nested lines become its children, each placed in
-            the column that matches its type.
+            Paste an indented list — each line becomes an entity and nested lines become its children. Top-level
+            entities go to their column; nested items stay under their parent.
           </p>
         </div>
       )}
