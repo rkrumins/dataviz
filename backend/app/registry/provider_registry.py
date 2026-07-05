@@ -290,16 +290,16 @@ class ProviderRegistry:
         ptype = provider_type.lower()
 
         if ptype == "falkordb":
-            from backend.app.providers.falkordb_provider import FalkorDBProvider
-            from backend.app.providers.manager import apply_local_dev_falkordb_override
+            from backend.app.providers.falkordb_provider import FalkorDBProvider, resolve_falkordb_target
             # Mirror ProviderManager._create_provider_instance: this path
             # (used by ContextEngine / the stats collector / the viz read +
             # trace path) previously dropped credentials AND extra_config,
             # so FalkorDB auth and Sentinel/Cluster topology never reached
-            # the provider on the read side. Plumb them through. The shared
-            # host-override helper makes the insights stats collector honor
-            # LOCAL_DEV_FALKORDB_OVERRIDE like every other path.
-            host, port = apply_local_dev_falkordb_override(host, port)
+            # the provider on the read side. Plumb them through. The SINGLE
+            # shared resolver (local-dev override + host normalization)
+            # guarantees this read path resolves the SAME instance as the
+            # projection — no future drift can reintroduce read≠projection.
+            host, port = resolve_falkordb_target(host, port)
             creds = credentials or {}
             _falkor_conn = (extra_config or {}).get("falkordbConnection")
             # Per-provider auth gate (default enabled). When false, the
