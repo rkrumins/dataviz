@@ -96,9 +96,9 @@ describe('planBuildStaging', () => {
     expect(rootEdge?.source).toBe('urn:real:existing-parent')
   })
 
-  it('stamps a durable layerAssignment (mirrors the rail) into every row\'s node.data.properties AND the create_entity\'s after.properties, when layerId is provided', () => {
+  it('stamps a durable layerAssignment (mirrors the rail) into every row\'s node.data.properties AND the create_entity\'s after.properties, when layerIdForRow resolves one', () => {
     const rows = threeLevelRows()
-    const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor, layerId: 'layer-objects' })
+    const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor, layerIdForRow: () => 'layer-objects' })
 
     for (const node of plan.nodes) {
       expect((node.data.properties as Record<string, unknown>).layerAssignment).toBe('layer-objects')
@@ -109,7 +109,35 @@ describe('planBuildStaging', () => {
     }
   })
 
-  it('does not add a layerAssignment when layerId is omitted (Graph/Hierarchy canvases, unchanged)', () => {
+  it('stamps EACH row its OWN resolved layer (per-row, not one for the whole batch)', () => {
+    const rows = threeLevelRows() // domain -> platform -> dataset
+    const layerByType: Record<string, string> = {
+      domain: 'layer-domain',
+      platform: 'layer-platform',
+      dataset: 'layer-dataset',
+    }
+    const plan = planBuildStaging(rows, {
+      rootParentUrn: null,
+      containmentEdgeTypeFor,
+      layerIdForRow: (row) => layerByType[row.typeId ?? ''],
+    })
+
+    const nodeByUrn = new Map(plan.nodes.map((n) => [n.id, n]))
+    const layerOf = (rowId: string) =>
+      (nodeByUrn.get(plan.rowUrn.get(rowId)!)!.data.properties as Record<string, unknown>).layerAssignment
+    expect(layerOf('d1')).toBe('layer-domain')
+    expect(layerOf('p1')).toBe('layer-platform')
+    expect(layerOf('ds1')).toBe('layer-dataset')
+
+    // Also durable in the create_entity's after.properties, per row.
+    const changeByUrn = new Map(plan.changes.map((c) => [c.targetUrn, c]))
+    const afterLayerOf = (rowId: string) =>
+      (changeByUrn.get(plan.rowUrn.get(rowId)!)!.after as { properties?: Record<string, unknown> }).properties?.layerAssignment
+    expect(afterLayerOf('p1')).toBe('layer-platform')
+    expect(afterLayerOf('ds1')).toBe('layer-dataset')
+  })
+
+  it('does not add a layerAssignment when layerIdForRow is omitted (Graph/Hierarchy canvases, unchanged)', () => {
     const rows = threeLevelRows()
     const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor })
 
@@ -122,11 +150,20 @@ describe('planBuildStaging', () => {
     }
   })
 
+  it('does not add a layerAssignment when layerIdForRow returns undefined for a row (unmapped, no fallback)', () => {
+    const rows = threeLevelRows()
+    const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor, layerIdForRow: () => undefined })
+
+    for (const node of plan.nodes) {
+      expect((node.data.properties as Record<string, unknown>).layerAssignment).toBeUndefined()
+    }
+  })
+
   it('preserves existing row properties alongside the stamped layerAssignment', () => {
     const rows: BuildRow[] = [
       { ...makeRow({ id: 'd1', name: 'Domain', typeId: 'domain', parentId: null }), depth: 0, properties: { description: 'hello' } },
     ]
-    const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor, layerId: 'layer-objects' })
+    const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor, layerIdForRow: () => 'layer-objects' })
 
     const props = plan.nodes[0].data.properties as Record<string, unknown>
     expect(props.description).toBe('hello')
@@ -194,7 +231,7 @@ describe('useStageBuildRows', () => {
     await act(async () => {
       rowUrn = await result.current.stageBuildRows(rows, {
         rootParentUrn: null,
-        onRowStaged: (rowId, urn) => calls.push([rowId, urn]),
+        onRowStaged: (row, urn) => calls.push([row.id, urn]),
       })
     })
 
@@ -212,12 +249,12 @@ describe('useStageBuildRows', () => {
     expect(calls.find(([rowId]) => rowId === 'd1')?.[1]).toBe(rowUrn.get('d1'))
   })
 
-  it('threads StageBuildRowsOptions.layerId through to every staged create_entity + optimistic node', async () => {
+  it('threads StageBuildRowsOptions.layerIdForRow through to every staged create_entity + optimistic node', async () => {
     const { result } = renderHook(() => useStageBuildRows())
     const rows = threeLevelRows()
 
     await act(async () => {
-      await result.current.stageBuildRows(rows, { rootParentUrn: null, layerId: 'layer-objects' })
+      await result.current.stageBuildRows(rows, { rootParentUrn: null, layerIdForRow: () => 'layer-objects' })
     })
 
     const nodes = useCanvasStore.getState().nodes

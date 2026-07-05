@@ -32,18 +32,24 @@ import { useHierarchyBuilderStore } from '../hierarchyBuilderStore'
 import { useBuildRowsStore } from './buildRowsStore'
 import { validateBuildRows, summarize, type BuildOntologyCtx } from './validateBuildRows'
 import { useStageBuildRows } from './stageBuildRows'
+import { resolveRowLayer } from './resolveRowLayer'
+import type { BuildRow } from './buildRow'
 import { filterStageableRows } from './applyBuild'
 import { BuildOutline } from './BuildOutline'
 import { BuildGrid } from './BuildGrid'
 
 export interface BuildPanelProps {
   onClose: () => void
-  /** Target layer id (Context View only) — stamped durably into every staged
-   *  row's create_entity (see `stageBuildRows`). Omitted on non-layered
-   *  canvases (Graph/Hierarchy). */
+  /** FALLBACK layer id (Context View only) — used when a row's TYPE maps to no
+   *  column. Omitted on non-layered canvases (Graph/Hierarchy). */
   layerId?: string
-  /** Fired per staged row so the canvas can assign layers / expand parents. */
-  onRowStaged?: (rowId: string, urn: string) => void
+  /** `typeId → layerId` map (Context View only) — the auto-by-type placement,
+   *  derived from the view's `sortedLayers[].entityTypes`. Each staged row's
+   *  durable layer is resolved from this (else `layerId`). */
+  typeLayerMap?: Map<string, string>
+  /** Fired per staged row (full row + urn) so the canvas can make the matching
+   *  optimistic layer assignment / expand parents. */
+  onRowStaged?: (row: BuildRow, urn: string) => void
 }
 
 type BuildTab = 'outline' | 'grid' | 'paste'
@@ -66,7 +72,7 @@ function TypeChip({ type }: { type?: EntityTypeSchema }) {
   )
 }
 
-export function BuildPanel({ onClose, layerId, onRowStaged }: BuildPanelProps) {
+export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: BuildPanelProps) {
   const parentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const [activeTab, setActiveTab] = useState<BuildTab>(initialMode === 'paste' || initialMode === 'grid' ? initialMode : 'outline')
@@ -113,7 +119,11 @@ export function BuildPanel({ onClose, layerId, onRowStaged }: BuildPanelProps) {
     if (!canApply) return
     setApplying(true)
     try {
-      await stageBuildRows(stageable, { rootParentUrn: parentUrn, layerId, onRowStaged })
+      // Auto-by-type: each row's durable layer is its TYPE's column (else the
+      // fallback). Shared with the canvas's optimistic `onRowStaged` assignment.
+      const layerIdForRow = (row: BuildRow) =>
+        resolveRowLayer(row, { typeLayerMap: typeLayerMap ?? new Map(), fallbackLayerId: layerId })
+      await stageBuildRows(stageable, { rootParentUrn: parentUrn, layerIdForRow, onRowStaged })
       reset()
       onClose()
     } finally {

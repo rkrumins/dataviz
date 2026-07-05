@@ -42,11 +42,14 @@ export interface PlanBuildStagingOptions {
    *  `parentType` is `''` for a batch-root row (no BuildRow parent) — the
    *  caller resolves `rootParentUrn`'s real type itself, if it needs one. */
   containmentEdgeTypeFor: (parentType: string, childType: string) => string
-  /** Target layer id (Context View only) — stamped into every row's
+  /** Resolves the target layer id for a SINGLE row (Context View only) —
+   *  auto-by-type via `resolveRowLayer`, so each entity lands in the column
+   *  configured for ITS type. Its result is stamped into that row's
    *  `properties.layerAssignment` so it persists through `createNode`,
-   *  mirroring `useHierarchyOutline`'s rail create path. Omitted for
-   *  non-layered canvases (Graph/Hierarchy). */
-  layerId?: string
+   *  mirroring `useHierarchyOutline`'s rail create path. Return `undefined`
+   *  (or omit the callback entirely) for non-layered canvases (Graph/Hierarchy)
+   *  or an unmapped row with no fallback. */
+  layerIdForRow?: (row: BuildRow) => string | undefined
 }
 
 /**
@@ -88,10 +91,13 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
     const containmentEdgeId = parentUrn ? `contains-${parentUrn}-${tempUrn}` : null
 
     const tags = row.tags ?? []
-    // Durable layer stamp (rail parity — useHierarchyOutline.stageRows):
-    // goes into the create_entity's properties bag, which createNode passes
-    // through to context_engine.create_node's `layerAssignment=` kwarg.
-    const properties = { ...(row.properties ?? {}), ...(opts.layerId ? { layerAssignment: opts.layerId } : {}) }
+    // Durable PER-ROW layer stamp (rail parity — useHierarchyOutline.stageRows):
+    // each row's OWN type-derived layer goes into its create_entity's properties
+    // bag, which createNode passes through to context_engine.create_node's
+    // `layerAssignment=` kwarg. A mixed-type batch therefore spreads across
+    // columns instead of collapsing into the Build-open one.
+    const rowLayerId = opts.layerIdForRow?.(row)
+    const properties = { ...(row.properties ?? {}), ...(rowLayerId ? { layerAssignment: rowLayerId } : {}) }
 
     nodes.push({
       id: tempUrn,
@@ -185,11 +191,13 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
 export interface StageBuildRowsOptions {
   /** Real canvas urn the batch's root rows attach under, or null for a top-level create. */
   rootParentUrn: string | null
-  /** Target layer id (Context View only) — stamped durably into every
-   *  staged row; see `PlanBuildStagingOptions.layerId`. */
-  layerId?: string
-  /** Fired per staged row (in no particular order) so the caller can assign layers. */
-  onRowStaged?: (rowId: string, urn: string) => void
+  /** Resolves each row's durable target layer (Context View only) — auto-by-type;
+   *  see `PlanBuildStagingOptions.layerIdForRow`. */
+  layerIdForRow?: (row: BuildRow) => string | undefined
+  /** Fired per staged row (in no particular order) so the caller can make the
+   *  matching optimistic session assignment (`assignEntityToLayer`) using the
+   *  SAME per-row resolver. Receives the full row, not just its id. */
+  onRowStaged?: (row: BuildRow, urn: string) => void
 }
 
 export function useStageBuildRows(): {
@@ -220,7 +228,7 @@ export function useStageBuildRows(): {
       const plan = planBuildStaging(rows, {
         rootParentUrn: opts.rootParentUrn,
         containmentEdgeTypeFor,
-        layerId: opts.layerId,
+        layerIdForRow: opts.layerIdForRow,
       })
 
       useCanvasStore.getState().addNodes(plan.nodes)
@@ -229,7 +237,7 @@ export function useStageBuildRows(): {
 
       for (const row of rows) {
         const urn = plan.rowUrn.get(row.id)
-        if (urn) opts.onRowStaged?.(row.id, urn)
+        if (urn) opts.onRowStaged?.(row, urn)
       }
 
       return plan.rowUrn

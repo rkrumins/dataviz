@@ -50,6 +50,7 @@ import { EntityDrawer } from '../../panels/EntityDrawer'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
+import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -2162,6 +2163,10 @@ export function ContextViewCanvas({
   const buildLayerId = builderLayerId
     ?? (builderParentUrn ? nodeLayerMap.get(builderParentUrn) : undefined)
     ?? sortedLayers[0]?.id
+  // Auto-by-type placement: each Build row lands in the column configured for
+  // ITS type (falling back to buildLayerId). Derived from the view's own layer
+  // config — ontology-agnostic.
+  const buildTypeLayerMapMemo = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
 
   return (
     <div
@@ -2629,12 +2634,13 @@ export function ContextViewCanvas({
             key="build-panel"
             onClose={() => useHierarchyBuilderStore.getState().close()}
             layerId={buildLayerId}
-            onRowStaged={(_rowId, urn) => {
-              // Durable layerAssignment is already stamped into the
-              // create_entity at stage time (via the `layerId` prop above).
-              // This is just the optimistic session assignment for immediate
-              // display before save/reload.
-              if (buildLayerId) assignEntityToLayer(urn, buildLayerId)
+            typeLayerMap={buildTypeLayerMapMemo}
+            onRowStaged={(row, urn) => {
+              // Optimistic session assignment for immediate display (the durable
+              // per-row layerAssignment is already stamped at stage time). Resolve
+              // the SAME auto-by-type layer as the durable stamp, per row.
+              const layer = resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
+              if (layer) assignEntityToLayer(urn, layer)
             }}
           />
         )}
