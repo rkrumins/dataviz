@@ -47,10 +47,18 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const resolve = useResolveGraph(workspaceId, dataSourceId, originatingViewId)
   const graphId = resolve.data?.graphId ?? null
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
-  const branchesQ = useBranches(workspaceId, graphId)
+  // Branch-per-view: the switcher lists only THIS view's own drafts (the backend filters by
+  // originating_view_id + the viewer's visibility), not every draft on the data source. A data
+  // source powering dozens of views no longer shows all of their branches in each view.
+  const branchesQ = useBranches(workspaceId, graphId, originatingViewId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
 
   const currentBranchId = useBranchStore((s) => s.currentBranchId)
+  // The view the branch store has RESOLVED (setResolved's scope). The deep-link only syncs
+  // ?branch= ↔ store while this equals the active view — during a view switch the store lags
+  // the route for a tick, and syncing then would stamp the prior view's branch into this
+  // view's URL (the "branch is global across views" bug).
+  const scopeViewId = useBranchStore((s) => s.viewId)
   const setResolved = useBranchStore((s) => s.setResolved)
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const switchToDraft = useBranchStore((s) => s.switchToDraft)
@@ -70,6 +78,8 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
     branches: branchesQ.data,
     listRefreshing: branchesQ.isFetching,
     currentBranchId,
+    scopeViewId,
+    activeViewId: originatingViewId,
     switchToDraft,
   })
 

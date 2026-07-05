@@ -472,8 +472,17 @@ export function bootstrapGraph(wsId: string, dataSourceId: string): Promise<Boot
 // Branches / drafts
 // ============================================
 
-export function listBranches(wsId: string, graphId: string): Promise<Branch[]> {
-  return vfetch<Branch[]>(`${base(wsId)}/graphs/${graphId}/branches`)
+/** Branches on a graph. Graph-wide (every view — the Data-Source rollup) by DEFAULT; pass
+ *  `viewId` to get only that Context View's own branches (branch-per-view). The backend also
+ *  scopes a non-manager to their own + shared drafts, so the switcher lists what the user owns
+ *  or was invited to — not everyone's private drafts. */
+export function listBranches(
+  wsId: string, graphId: string, opts: { viewId?: string | null } = {},
+): Promise<Branch[]> {
+  const q = new URLSearchParams()
+  if (opts.viewId) q.set('viewId', opts.viewId)
+  const qs = q.toString()
+  return vfetch<Branch[]>(`${base(wsId)}/graphs/${graphId}/branches${qs ? `?${qs}` : ''}`)
 }
 
 export function openDraft(

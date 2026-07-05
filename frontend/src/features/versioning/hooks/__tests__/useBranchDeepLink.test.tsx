@@ -6,7 +6,7 @@
  */
 import React from 'react'
 import { renderHook } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { describe, it, expect, vi } from 'vitest'
 
 const showToast = vi.fn()
@@ -17,6 +17,23 @@ import { useBranchDeepLink } from '../useBranchDeepLink'
 const wrap = (initial: string) =>
   function Wrapper({ children }: { children: React.ReactNode }) {
     return <MemoryRouter initialEntries={[initial]}>{children}</MemoryRouter>
+  }
+
+// A wrapper that also mirrors the live URL search string into `probe.search`, so a test can
+// assert whether the store→URL effect stamped (or cleared) the ?branch= param.
+const probe = { search: '' }
+const wrapWithProbe = (initial: string) =>
+  function Wrapper({ children }: { children: React.ReactNode }) {
+    function LocationProbe() {
+      probe.search = useLocation().search
+      return null
+    }
+    return (
+      <MemoryRouter initialEntries={[initial]}>
+        {children}
+        <LocationProbe />
+      </MemoryRouter>
+    )
   }
 
 const draft = (branchId: string) =>
@@ -58,6 +75,41 @@ describe('useBranchDeepLink', () => {
     // Branches arrive → the still-present param is honoured (proves it survived the loading phase).
     rerender({ branches: [draft('br_1')] })
     expect(switchToDraft).toHaveBeenCalledWith('br_1', null)
+  })
+
+  it('defers adoption until the store has resolved the ACTIVE view (branch-per-view scope gate)', () => {
+    showToast.mockClear()
+    const switchToDraft = vi.fn()
+    const { rerender } = renderHook(
+      ({ scopeViewId }: { scopeViewId: string | null }) =>
+        useBranchDeepLink({
+          enabled: true, branches: [draft('br_1')], currentBranchId: null,
+          scopeViewId, activeViewId: 'v1', switchToDraft,
+        }),
+      { wrapper: wrap('/views/v1?branch=br_1'), initialProps: { scopeViewId: 'v0' } },
+    )
+    // Store still resolved for the PREVIOUS view (mid view-switch) → must not adopt or toast.
+    expect(switchToDraft).not.toHaveBeenCalled()
+    expect(showToast).not.toHaveBeenCalled()
+    // Once the store has resolved the active view, the link is honoured.
+    rerender({ scopeViewId: 'v1' })
+    expect(switchToDraft).toHaveBeenCalledWith('br_1', null)
+  })
+
+  it('does NOT stamp the branch into the URL while the store scope lags the active view', () => {
+    probe.search = ''
+    renderHook(
+      () =>
+        useBranchDeepLink({
+          enabled: true, branches: [draft('br_1')], currentBranchId: 'br_1',
+          scopeViewId: 'v0', activeViewId: 'v1', switchToDraft: vi.fn(),
+        }),
+      { wrapper: wrapWithProbe('/views/v1') },
+    )
+    // currentBranchId is set but it belongs to the PREVIOUS view (scope v0 ≠ active v1), so the
+    // ?branch= param must NOT be written onto this view's URL — that was the "branch leaks across
+    // views" bug. It only syncs once scope catches up to the active view.
+    expect(probe.search).toBe('')
   })
 
   it('does nothing when there is no ?branch param', () => {

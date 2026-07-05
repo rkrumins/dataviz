@@ -17,7 +17,11 @@ export const VERSIONING_KEYS = {
     viewId
       ? ([...VERSIONING_KEYS.all, 'resolve', ws, ds, viewId] as const)
       : ([...VERSIONING_KEYS.all, 'resolve', ws, ds] as const),
-  branches: (ws?: string, gid?: string | null) => [...VERSIONING_KEYS.all, 'branches', ws, gid] as const,
+  // `viewId` is appended only when given, so graph-wide callers keep their existing cache key.
+  branches: (ws?: string, gid?: string | null, viewId?: string | null) =>
+    viewId
+      ? ([...VERSIONING_KEYS.all, 'branches', ws, gid, viewId] as const)
+      : ([...VERSIONING_KEYS.all, 'branches', ws, gid] as const),
   branchState: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'state', ws, gid, bid] as const,
   diffVsMain: (ws?: string, gid?: string | null, bid?: string | null) =>
@@ -69,10 +73,12 @@ export function useResolveGraph(wsId?: string, dataSourceId?: string | null, vie
   })
 }
 
-export function useBranches(wsId?: string, graphId?: string | null) {
+/** Branches on a graph. Omit `viewId` for the graph-wide (Data-Source) list; pass the active
+ *  Context View's id to list only THAT view's branches (branch-per-view — what the switcher shows). */
+export function useBranches(wsId?: string, graphId?: string | null, viewId?: string | null) {
   return useQuery({
-    queryKey: VERSIONING_KEYS.branches(wsId, graphId),
-    queryFn: () => api.listBranches(wsId!, graphId!),
+    queryKey: VERSIONING_KEYS.branches(wsId, graphId, viewId),
+    queryFn: () => api.listBranches(wsId!, graphId!, { viewId }),
     enabled: !!wsId && !!graphId,
     staleTime: 15_000,
   })
