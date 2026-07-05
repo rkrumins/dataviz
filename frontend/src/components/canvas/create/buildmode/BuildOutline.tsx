@@ -158,7 +158,7 @@ export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
           <DynamicIcon name="List" className="w-6 h-6 mx-auto text-ink-muted/40" />
           <p className="text-sm text-ink-muted">
             Add entities one at a time, keyboard-first — type a name, press Enter for the next, Tab to nest a child
-            inside it. Each one is placed in the column that matches its type.
+            inside it. Top-level entities go to their column; nested items stay under their parent.
           </p>
           <button
             type="button"
