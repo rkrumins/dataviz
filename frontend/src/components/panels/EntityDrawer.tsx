@@ -644,33 +644,31 @@ export function EntityDrawer({
         {/* Footer */}
         <div className="flex-shrink-0 p-4 border-t border-glass-border/50 bg-canvas-elevated/50">
           {viewMode === 'view' ? (
-            <div className="flex items-center justify-between text-xs text-ink-muted">
-              <div className="flex items-center gap-3 min-w-0">
-                {lastUpdatedAt ? (
-                  <span className="flex items-center gap-1.5 whitespace-nowrap" title={`Last changed ${new Date(lastUpdatedAt).toLocaleString()}`}>
-                    <LucideIcons.Clock className="w-3.5 h-3.5" />
-                    Updated {timeAgo(lastUpdatedAt)}
-                  </span>
-                ) : entityHistory.isLoading ? (
-                  <span className="flex items-center gap-1.5"><LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin" />Loading…</span>
-                ) : null}
-                {formData.lastSyncedAt && (
-                  <span className="flex items-center gap-1.5 whitespace-nowrap" title={`Last synced from source ${new Date(String(formData.lastSyncedAt)).toLocaleString()}`}>
-                    <LucideIcons.RefreshCw className="w-3.5 h-3.5" />
-                    Synced {timeAgo(String(formData.lastSyncedAt))}
-                  </span>
-                )}
-                {!lastUpdatedAt && !entityHistory.isLoading && !formData.lastSyncedAt && (
-                  <span className="flex items-center gap-1.5"><LucideIcons.Calendar className="w-3.5 h-3.5" />No changes yet</span>
-                )}
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <TimeStat
+                  icon={<LucideIcons.PencilLine className="w-4 h-4" />}
+                  label="Updated" iso={lastUpdatedAt} tone="indigo"
+                  loading={entityHistory.isLoading} emptyText="No changes yet"
+                />
+                <TimeStat
+                  icon={syncing
+                    ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+                    : <LucideIcons.RefreshCcw className="w-4 h-4" />}
+                  label={syncing ? 'Syncing' : 'Synced'}
+                  iso={syncing ? undefined : lastSyncedAt}
+                  tone={syncing ? 'amber' : 'emerald'}
+                  live={!syncing && watermark.data?.fresh === true}
+                  overrideValue={syncing ? 'In progress…' : undefined}
+                  emptyText="—"
+                />
               </div>
               {externalUrl && (
                 <button
                   onClick={() => window.open(externalUrl, '_blank')}
-                  className="text-accent-lineage hover:underline flex items-center gap-1"
+                  className="w-full flex items-center justify-center gap-1 pt-0.5 text-[11px] text-accent-lineage hover:underline"
                 >
-                  View in DataHub
-                  <LucideIcons.ArrowUpRight className="w-3 h-3" />
+                  View in DataHub <LucideIcons.ArrowUpRight className="w-3 h-3" />
                 </button>
               )}
             </div>
@@ -787,6 +785,55 @@ function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
         {action}
       </div>
       {flush ? <div className="-mx-3">{children}</div> : children}
+    </div>
+  )
+}
+
+// A rich freshness stat — icon chip + label (with an optional live pulse) + the relative time, and
+// the exact UTC timestamp on hover. Used for "Updated" (last change) and "Synced" (live layer).
+const TIMESTAT_TONES = {
+  indigo: {
+    box: 'bg-indigo-50/70 dark:bg-indigo-950/25 border-indigo-100 dark:border-indigo-900/40',
+    chip: 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-500',
+    label: 'text-indigo-600/70 dark:text-indigo-400/70',
+  },
+  emerald: {
+    box: 'bg-emerald-50/70 dark:bg-emerald-950/25 border-emerald-100 dark:border-emerald-900/40',
+    chip: 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-500',
+    label: 'text-emerald-600/70 dark:text-emerald-400/70',
+  },
+  amber: {
+    box: 'bg-amber-50/70 dark:bg-amber-950/25 border-amber-100 dark:border-amber-900/40',
+    chip: 'bg-amber-100 dark:bg-amber-900/50 text-amber-500',
+    label: 'text-amber-600/70 dark:text-amber-400/70',
+  },
+} as const
+
+function TimeStat({ icon, label, iso, tone, loading, live, overrideValue, emptyText }: {
+  icon: React.ReactNode
+  label: string
+  iso?: string
+  tone: keyof typeof TIMESTAT_TONES
+  loading?: boolean
+  live?: boolean
+  overrideValue?: string
+  emptyText?: string
+}) {
+  const t = TIMESTAT_TONES[tone]
+  const value = loading ? 'Loading…' : (overrideValue ?? (iso ? timeAgo(iso) : (emptyText ?? '—')))
+  return (
+    <div
+      className={cn('flex items-center gap-2.5 px-3 py-2 rounded-xl border transition-colors', t.box)}
+      title={iso ? formatUtc(iso) : undefined}
+    >
+      <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0', t.chip)}>{icon}</div>
+      <div className="min-w-0">
+        <div className={cn('text-[10px] font-semibold uppercase tracking-wide flex items-center gap-1', t.label)}>
+          {label}
+          {live && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
+        </div>
+        <div className="text-xs font-bold text-ink truncate">{value}</div>
+      </div>
     </div>
   )
 }
