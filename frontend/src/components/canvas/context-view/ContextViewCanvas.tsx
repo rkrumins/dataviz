@@ -37,7 +37,7 @@ import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branch
 import { usePermission, useAuthStore } from '@/store/auth'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
-import { VERSIONING_KEYS, useResolveGraph } from '@/features/versioning/hooks/useVersioning'
+import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -893,6 +893,19 @@ export function ContextViewCanvas({
     invalidateAggregatedEdges()
     useBranchStore.getState().bumpMainEpoch()
   }, [queryClient])
+  // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
+  // Properties panel read) catches up ASYNCHRONOUSLY. The immediate post-merge re-hydration reads
+  // the still-stale projection, so merged properties don't appear until a later refresh. Watch the
+  // projection watermark: when it finishes (fresh false→true), re-hydrate so the canvas reflects the
+  // freshly-projected state with no manual refresh.
+  const projFresh = useProjectionWatermark(scopeWsId ?? undefined, graphId).data?.fresh
+  const prevProjFreshRef = useRef<boolean | undefined>(undefined)
+  useEffect(() => {
+    if (prevProjFreshRef.current === false && projFresh === true) {
+      useBranchStore.getState().bumpMainEpoch()
+    }
+    prevProjFreshRef.current = projFresh
+  }, [projFresh])
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
 

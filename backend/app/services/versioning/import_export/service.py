@@ -195,19 +195,30 @@ class ImportExportService:
         branch_id: Optional[str] = None,
         provider_id: Optional[str] = None,
         extra_props: Optional[List[str]] = None,
+        select_ids: Optional[List[str]] = None,
+        select_types: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
         ``branch_id`` exports that working branch's composed state (main + committed + draft),
-        defaulting to published main. ``extra_props`` = property names to emit as empty columns."""
+        defaulting to published main. Export options (``props``/``ids``/``types``) ride in
+        ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
+        row-scope to just those entities / entity types."""
+        options: Dict[str, Any] = {}
+        if extra_props:
+            options["props"] = extra_props
+        if select_ids:
+            options["ids"] = select_ids
+        if select_types:
+            options["types"] = select_types
         async with db.graphver_session() as s:
             job = JobORM(
                 job_type="export", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, provider_id=provider_id,
                 scope_view_id=scope_view_id, branch_id=branch_id,
                 import_format=export_format, as_of_seq=as_of_seq,
-                field_scope=extra_props or None, idempotency_key=idempotency_key, status="pending",
+                field_scope=options or None, idempotency_key=idempotency_key, status="pending",
             )
             s.add(job)
             await s.flush()
@@ -220,13 +231,12 @@ class ImportExportService:
     async def run_export(self, job_id: str) -> Dict[str, int]:
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            ws, ds, view_id, extra_props = ((row.workspace_id, row.data_source_id, row.scope_view_id,
-                                             row.field_scope) if row else (None, None, None, None))
+            ws, ds, view_id, options = ((row.workspace_id, row.data_source_id, row.scope_view_id,
+                                         row.field_scope) if row else (None, None, None, None))
         scope = None
         if view_id and self._scope_resolver is not None:
             scope = await self._scope_resolver(ws, ds, view_id)
-        return await ExportWorker(self._svc, self._store, scope=scope,
-                                  extra_props=extra_props or []).run(job_id)
+        return await ExportWorker(self._svc, self._store, scope=scope, options=options or {}).run(job_id)
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)

@@ -159,14 +159,41 @@ def filter_to_scope(nodes: Dict[str, dict], edges: Dict[str, dict], scope: Dict[
     return fnodes, fedges
 
 
+def filter_to_selection(nodes, edges, ids=None, types=None):
+    """Row-scoped export: keep only nodes matching an explicit id/urn set and/or an entity-type set
+    (intersection when both given), plus edges whose endpoints are both kept. Lets a user pull just
+    'these 50 entities' or 'all Tables' to edit — never the whole graph. Composes after view scope."""
+    id_set = set(ids or [])
+    type_set = {str(t).strip().lower() for t in (types or []) if str(t).strip()}
+    if not id_set and not type_set:
+        return nodes, edges
+
+    def keep(p, eid):
+        if id_set and eid not in id_set and p.get("urn") not in id_set:
+            return False
+        if type_set and str(p.get("entityType") or "").strip().lower() not in type_set:
+            return False
+        return True
+
+    kept = {eid for eid, p in nodes.items() if keep(p, eid)}
+    fnodes = {eid: p for eid, p in nodes.items() if eid in kept}
+    fedges = {eid: p for eid, p in edges.items()
+              if p.get("sourceEntityId") in kept and p.get("targetEntityId") in kept}
+    return fnodes, fedges
+
+
 class ExportWorker:
     def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None,
-                 extra_props: Optional[List[str]] = None) -> None:
+                 options: Optional[Dict[str, Any]] = None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope
-        # Property names the user wants as (initially empty) columns to fill — "add a new property".
-        self._extra_props = [p for p in (extra_props or []) if str(p).strip()]
+        options = options or {}
+        # Property names to emit as (empty) columns — "add a new property".
+        self._extra_props = [p for p in (options.get("props") or []) if str(p).strip()]
+        # Row-scoping: an explicit id/urn set and/or entity types to include.
+        self._select_ids = options.get("ids") or []
+        self._select_types = options.get("types") or []
 
     async def run(self, job_id: str) -> Dict[str, int]:
         async with db.graphver_session() as s:
@@ -187,6 +214,7 @@ class ExportWorker:
         nodes, edges = state["nodes"], state["edges"]
         if self._scope:                                   # view-scoped export (Phase 4)
             nodes, edges = filter_to_scope(nodes, edges, self._scope)
+        nodes, edges = filter_to_selection(nodes, edges, self._select_ids, self._select_types)
         records = records_from_state(nodes, edges)
         # Every property is its own column: existing ones (unioned in column_order) + any the user
         # asked to add, so a brand-new property is an empty column ready to fill.
