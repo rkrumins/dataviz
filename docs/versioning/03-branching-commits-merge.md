@@ -412,7 +412,7 @@ in-memory rebuild for **draft checkpoints and fork mains** (`service.py:615`, `1
 
 ## 3.13 Concurrency model
 
-Three mechanisms keep concurrent writers correct without a global lock.
+Four mechanisms keep concurrent writers correct without a global lock.
 
 ```mermaid
 flowchart TD
@@ -431,14 +431,29 @@ flowchart TD
    against current main. Different graphs never contend — no cross-graph latency. Wraps publish, merge_mr,
    merge_pr.
 2. **`commit_seq` retry.** `_retry_seq` (`service.py:3912`) re-runs the whole thunk — which re-fetches
-   state and recomputes against the *current* head — on a `uq_commits_branch_seq` `IntegrityError`, up to
-   `COMMIT_MAX_RETRIES` (5) with exponential backoff, else `ConcurrencyError`. This fixes both the crash
-   *and* the read-stale-then-write race. Wraps checkpoint, publish, merge_mr, merge_pr, apply_ops.
+   state and recomputes against the *current* head — on a `uq_commits_branch_seq` `IntegrityError` (or a
+   head-CAS miss, §4 below), up to `COMMIT_MAX_RETRIES` (5) with exponential backoff, else
+   `ConcurrencyError`. For the **lock-holding** paths (publish/merge/rebase) this closes the
+   read-stale-then-write race outright, because state is read *under* the lock, so any intervening commit
+   forces the seq collision. Wraps checkpoint, publish, merge_mr, merge_pr, apply_ops.
 3. **OCC, three ways.** (a) Direct-edit `base_version` token → a 3-way merge in `_apply_ops_once` turns a
    stale same-field edit into a conflict, not an overwrite. (b) Shared-draft staged `base_content_hash` →
    `_fold_shared` merges each edit against the value it was staged against. (c) Sync base-snapshot 3-way in
    `sync_ingest` ([10](10-authoritative-sources-datahub-openmetadata.md)). Proof:
    `test_versioning_occ_concurrency.py`, `test_versioning_shared.py`.
+4. **Per-entity head compare-and-swap** (`_write_deltas(occ_guard=True)`). The lock-free `apply_ops` path
+   (interactive canvas / provider write-through / import) takes **no** advisory lock, so its state read and
+   its `commit_seq` allocation are separate statements — a concurrent same-branch commit that lands
+   *between* them would get a non-colliding next seq and (with only §2) silently overwrite the other
+   writer's entity from stale state. Closed by a CAS on the mutable head pointer: the `entity_heads` upsert
+   advances an entity only if its `content_hash` is still the pre-image this commit read
+   (`content_hash == prev`, empty-state/tombstone-aware so a legit delete→re-create resurrects while a
+   concurrent *live* create misses). A miss updates 0 rows → `_StaleHead` → `_retry_seq` re-runs against
+   fresh state (auto-rebase; a genuine same-field clash then surfaces as `MergeConflict` via §3a). Because
+   version rows are **append-only**, the head pointer is the *only* contended resource, so guarding just its
+   transition makes same-branch concurrent writes **lose-free without serializing the graph** — two writers
+   on different entities never contend. Proof: `test_versioning_lost_update.py` (forces the exact
+   read-stale-then-write interleaving and asserts no lost update).
 
 ---
 

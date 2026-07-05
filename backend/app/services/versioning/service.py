@@ -65,6 +65,19 @@ _NODE_DENORM = {
 }
 
 
+# content_hash of the empty/absent state — exactly what a tombstone (deleted) head row stores, and
+# the pre-image a "create" logically reads (the entity was absent). Used by the head CAS below.
+_HASH_NONE = content_hash(None)
+
+
+class _StaleHead(Exception):
+    """Internal retry signal: a per-entity head compare-and-swap missed — the entity's head moved
+    between this commit's state read and its write (a concurrent same-branch writer won the race, or
+    a concurrent create beat us). Caught by ``_retry_seq``, which re-runs the whole commit against
+    fresh state (auto-rebase; a genuine same-field clash then surfaces as ``MergeConflict``). This is
+    what makes same-branch concurrent writes lose-free without a coarse per-graph lock."""
+
+
 class ConcurrencyError(RuntimeError):
     """Raised when a publish would violate referential integrity (e.g. a
     surviving edge points at a node the merge tombstoned). A stale base is *not*
@@ -3910,7 +3923,10 @@ class GraphVersioningService:
         for attempt in range(config.COMMIT_MAX_RETRIES):
             try:
                 return await fn()
-            except IntegrityError:
+            except (IntegrityError, _StaleHead):
+                # IntegrityError = commit_seq collision; _StaleHead = per-entity head CAS miss. Both
+                # mean "the branch moved under us" — re-run the thunk, which re-reads current state
+                # and recomputes (auto-rebase / 3-way merge) against the new head.
                 if attempt + 1 >= config.COMMIT_MAX_RETRIES:
                     raise ConcurrencyError(f"{label} commit-seq contention")
                 await asyncio.sleep(0.02 * (2 ** attempt))
@@ -4134,7 +4150,8 @@ class GraphVersioningService:
             )
             s.add(commit)
             await s.flush()
-            await self._write_deltas(s, graph_id, bid, commit, deltas, kind_by_entity, actor)
+            await self._write_deltas(s, graph_id, bid, commit, deltas, kind_by_entity, actor,
+                                     occ_guard=True)
             branch.head_commit_id = commit.id
             commit.merkle_root = await self._commit_merkle(s, graph_id, bid, commit, deltas)
             commit.stats = _delta_stats(deltas)
@@ -4240,7 +4257,8 @@ class GraphVersioningService:
         return out
 
     async def _write_deltas(
-        self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor
+        self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor,
+        *, occ_guard: bool = False,
     ) -> None:
         for d in deltas:
             kind = kind_by_entity.get(d.entity_id, "node")
@@ -4278,8 +4296,20 @@ class GraphVersioningService:
                 set_={"head_version_id": vid, "content_hash": d.content_hash,
                       "is_tombstone": (d.op == "delete"), "entity_kind": kind,
                       "updated_at": _now()},
+                # Per-entity compare-and-swap (when occ_guard): advance the head ONLY if it is still
+                # the pre-image this commit read. Under concurrent same-branch writes a
+                # stale-read-then-write becomes a no-op we detect below and retry — closing the
+                # lost-update window without a coarse lock. Versions are append-only; the mutable
+                # head pointer is the only contended resource, and this is its CAS. A create reads the
+                # entity as absent, so its pre-image is the empty-state hash (content_hash(None)) —
+                # which is exactly what a tombstone head stores, so a legit delete→re-create
+                # (resurrect) MATCHES, while a concurrent LIVE create (different hash) correctly misses.
+                where=(EntityHeadORM.content_hash == (d.prev_content_hash or _HASH_NONE)
+                       if occ_guard else None),
             )
-            await s.execute(stmt)
+            res = await s.execute(stmt)
+            if occ_guard and res.rowcount == 0:
+                raise _StaleHead(d.entity_id)
 
     async def _branch_contributors(self, s, graph_id, branch_id) -> List[str]:
         rows = (await s.execute(
