@@ -23,6 +23,13 @@ export interface BuildOntologyCtx {
   hierarchyMap: Record<string, { canContain?: string[]; canBeContainedBy?: string[] }>
   relationshipTypes: RelationshipTypeSchema[]
   containmentEdgeTypes: string[]
+  /** Type of the real canvas node Build is scoped under (entity-scoped Build,
+   *  e.g. `BuildPanel`'s `parentUrn`) — a depth-0 row (no parentId within the
+   *  row tree) is then a CHILD of this parent, not a genuine top-level root,
+   *  so its containment legality is checked against THIS type instead of
+   *  `null`. Omit/undefined when Build is unscoped or only layer-scoped —
+   *  depth-0 rows are then validated as true top-level roots (unchanged). */
+  rootParentType?: string
 }
 
 export interface BuildValidationSummary {
@@ -373,7 +380,10 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     const row = byId.get(id)!
     if (row.typeId != null) continue
     const parentRow = row.parentId != null ? (byId.get(row.parentId) ?? null) : null
-    const parentType = parentRow?.typeId ?? null
+    // A depth-0 row (no parentRow) is a genuine top-level root UNLESS Build is
+    // entity-scoped (`ctx.rootParentType` set), in which case it's really a
+    // child of that scoped parent (Fix 3).
+    const parentType = parentRow?.typeId ?? ctx.rootParentType ?? null
     const candidates = ctx.entityTypes.map((t) => t.id).filter((c) => isLegalChild(parentType, c, ctx))
     if (candidates.length === 1) {
       row.typeId = candidates[0]
@@ -417,7 +427,9 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
 
     if (row.typeId != null) {
       const containmentOk = !parentRow
-        ? isLegalChild(null, row.typeId, ctx)
+        // Fix 3: a depth-0 row validates against the scoped Build's parent
+        // type when set, else true top level (unchanged).
+        ? isLegalChild(ctx.rootParentType ?? null, row.typeId, ctx)
         : parentRow.typeId == null
           ? true // parent's own type is unresolved/errored — don't cascade a second error onto this row
           : isLegalChild(parentRow.typeId, row.typeId, ctx)

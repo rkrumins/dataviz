@@ -95,10 +95,6 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
   const hierarchyMap = useViewEntityTypeHierarchyMap()
   const relationshipTypes = useViewRelationshipTypes()
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
-  const ctx = useMemo<BuildOntologyCtx>(
-    () => ({ entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes }),
-    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes],
-  )
 
   // Scope banner — "Adding inside X", resolved from a real canvas node (Build's
   // parentUrn is always a real canvas urn or null, never a staged row).
@@ -109,6 +105,15 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
     [parentUrn, canvasNodes],
   )
   const parentType = parentNode ? typeById.get(parentNode.data?.type as string) : undefined
+
+  // A depth-0 build row is a CHILD of `parentType` when Build is entity-scoped
+  // (not a genuine top-level root) — threaded into validation ctx as
+  // `rootParentType` so it's checked against the scoped parent instead of true
+  // top level (undefined when unscoped/layer-only-scoped, unchanged).
+  const ctx = useMemo<BuildOntologyCtx>(
+    () => ({ entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, rootParentType: parentType?.id }),
+    [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, parentType],
+  )
 
   // Live validation — recomputed from the latest rows/ctx on every render, so
   // Apply (which reads this same value) always validates before staging.
@@ -135,7 +140,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
       const name = layerNameById.get([...targets][0])
       if (name) return `These land in ${name}.`
     }
-    return 'Entities are placed in the column that matches their type.'
+    return 'Top-level entities go to their column; nested items stay under their parent.'
   }, [typeLayerMap, layerId, validated, layerNameById])
 
   const { stageBuildRows } = useStageBuildRows()

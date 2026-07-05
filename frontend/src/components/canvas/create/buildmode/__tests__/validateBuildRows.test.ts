@@ -416,3 +416,39 @@ describe('validateBuildRows — empty canBeContainedBy end-to-end (buildfix2)', 
     expect(a1.issues).toHaveLength(0)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fix 3: scoped Build (opened UNDER a real canvas parent entity) passes that
+// parent's TYPE as `ctx.rootParentType`. A depth-0 BuildRow (no parentId
+// within the row tree — its REAL parent is the scoped canvas node, outside
+// the tree) must then be validated as a legal CHILD of `rootParentType`, not
+// as a genuine top-level root. `dataPlatform` is a legal child of `domain`
+// but is NOT itself a declared root type, so it's the right fixture: without
+// scoping it's illegal at "true top level" (today's behavior — an ancestor
+// chain gets auto-inserted); with `rootParentType: 'domain'` it's simply valid.
+describe('validateBuildRows — Fix 3: scoped Build depth-0 rows validate against rootParentType', () => {
+  it('a depth-0 row whose type is a legal CHILD of the scoped rootParentType is valid — no synthesized ancestor, no error', () => {
+    const scopedCtx: BuildOntologyCtx = { ...ctx, rootParentType: 'domain' }
+    const rows: BuildRow[] = [makeRow({ id: 'p1', name: 'Platform', typeId: 'dataPlatform', parentId: null })]
+    const result = validateBuildRows(rows, scopedCtx)
+
+    expect(result).toHaveLength(1) // no auto-inserted domain ancestor — the real parent is the scoped node
+    const p1 = byId(result, 'p1')
+    expect(p1.status).toBe('valid')
+    expect(p1.issues).toHaveLength(0)
+    expect(p1.fixes).toHaveLength(0)
+    expect(p1.parentId).toBeNull() // unchanged — the scope parent isn't a row in this tree
+  })
+
+  it('(unchanged) without rootParentType, the same depth-0 non-root type is validated as today — treated as a true top-level root and auto-fixed via an inserted ancestor chain', () => {
+    const rows: BuildRow[] = [makeRow({ id: 'p1', name: 'Platform', typeId: 'dataPlatform', parentId: null })]
+    const result = validateBuildRows(rows, ctx) // ctx has no rootParentType
+
+    expect(result).toHaveLength(2) // synthesized 'domain' ancestor inserted above it
+    const p1 = byId(result, 'p1')
+    expect(p1.status).toBe('fixed')
+    expect(p1.fixes.map((f) => f.field)).toContain('parent')
+    expect(p1.parentId).not.toBeNull()
+    expect(byId(result, p1.parentId!).typeId).toBe('domain')
+  })
+})

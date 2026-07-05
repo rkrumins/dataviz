@@ -25,12 +25,16 @@
  * multi-line clipboard text into a Name/Description cell fills each
  * subsequent row (`computeDownIds`) instead of collapsing into one cell.
  *
- * Layer column: each row's Layer cell defaults to the auto-by-type target —
- * derived from the view's own layers (`useLayers()`) via the same
- * `buildTypeLayerMap` the resolver (`resolveRowLayer.ts`) uses, falling back
- * to `fallbackLayerId` for an unmapped type (via `resolveRowLayer` itself, so
- * the two can't drift) — and can be overridden per row
- * (`buildRowsStore.setRowLayer`); clearing the override reverts to auto.
+ * Layer column: only a TOP-LEVEL (depth 0) row is actually placed by column —
+ * its Layer cell defaults to the auto-by-type target, derived from the
+ * view's own layers (`useLayers()`) via the same `buildTypeLayerMap` the
+ * resolver (`resolveRowLayer.ts`) uses, falling back to `fallbackLayerId` for
+ * an unmapped type (via `resolveRowLayer` itself, so the two can't drift) —
+ * and can be overridden per row (`buildRowsStore.setRowLayer`); clearing the
+ * override reverts to auto. A NESTED row (depth > 0) always nests under its
+ * parent instead (the containment tree, never a per-type break-out — see
+ * 961293a), so its Layer cell shows a read-only "nested" indicator rather
+ * than an editable target it wouldn't actually honor.
  * Ontology-agnostic: no type/layer names here.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -274,7 +278,11 @@ function BuildGridRow({
   // Layer cell: same resolution `resolveRowLayer` uses at Apply time — type-derived
   // layer, else `fallbackLayerId` for an unmapped type — overridden by row.layerId
   // when set (Task 2). Reusing the resolver here keeps the Grid's displayed
-  // default from drifting out of sync with actual placement.
+  // default from drifting out of sync with actual placement. This is only true
+  // for a TOP-LEVEL row, though: a containment child always nests under its
+  // parent (never breaks out to its own type-column), so a NESTED row's cell
+  // reflects that instead (below).
+  const isNested = row.depth > 0
   const layerNameById = useMemo(() => new Map(layers.map((l) => [l.id, l.name])), [layers])
   const autoLayerId = (row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined) ?? fallbackLayerId
   const autoLayerName = autoLayerId ? layerNameById.get(autoLayerId) : undefined
@@ -368,24 +376,35 @@ function BuildGridRow({
       </div>
 
       <div className="w-28 flex-shrink-0 relative">
-        <button
-          type="button"
-          disabled={isSynthetic}
-          onClick={() => setOpenPicker('layer')}
-          aria-label={`Layer for ${row.name || 'row'}`}
-          className="w-full flex items-center px-1.5 py-1 rounded text-[11px] text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 truncate disabled:opacity-60 disabled:cursor-default disabled:hover:bg-transparent text-left"
-        >
-          <span className="truncate">{effectiveLayerName ?? '—'}</span>
-        </button>
-        {openPicker === 'layer' && (
-          <LayerPickerPopover
-            layers={layers}
-            selectedId={row.layerId ?? null}
-            autoLabel={autoLayerName ?? '—'}
-            onPick={(id) => { onSetLayer(id); setOpenPicker(null) }}
-            onClear={() => { onSetLayer(undefined); setOpenPicker(null) }}
-            onClose={() => setOpenPicker(null)}
-          />
+        {isNested ? (
+          <span
+            title="Nests under its parent — placement follows the parent, not its own type."
+            className="w-full flex items-center px-1.5 py-1 text-[11px] italic text-ink-muted/60 truncate"
+          >
+            ↳ nested
+          </span>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={isSynthetic}
+              onClick={() => setOpenPicker('layer')}
+              aria-label={`Layer for ${row.name || 'row'}`}
+              className="w-full flex items-center px-1.5 py-1 rounded text-[11px] text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 truncate disabled:opacity-60 disabled:cursor-default disabled:hover:bg-transparent text-left"
+            >
+              <span className="truncate">{effectiveLayerName ?? '—'}</span>
+            </button>
+            {openPicker === 'layer' && (
+              <LayerPickerPopover
+                layers={layers}
+                selectedId={row.layerId ?? null}
+                autoLabel={autoLayerName ?? '—'}
+                onPick={(id) => { onSetLayer(id); setOpenPicker(null) }}
+                onClear={() => { onSetLayer(undefined); setOpenPicker(null) }}
+                onClose={() => setOpenPicker(null)}
+              />
+            )}
+          </>
         )}
       </div>
 

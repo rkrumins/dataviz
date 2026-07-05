@@ -141,6 +141,24 @@ describe('BuildGrid Layer column', () => {
 
     expect(screen.getByRole('button', { name: 'Layer for Alpha' })).toHaveTextContent('Layer Two')
   })
+
+  // Fix 2: post-revert (961293a), a containment child ALWAYS nests under its
+  // parent — it never breaks out to its own type-column — so a NESTED row's
+  // Layer cell must not show an editable per-type target it won't actually
+  // honor. Only a TOP-LEVEL (depth-0) row's Layer cell is real/editable.
+  it('a nested (depth > 0) row shows a read-only "nests under its parent" indicator, not an editable Layer target', () => {
+    useBuildRowsStore.getState().setRows([
+      makeRow({ id: 'a', name: 'Alpha', typeId: 'domain' }),
+      makeRow({ id: 'b', name: 'Beta', typeId: 'domain', parentId: 'a' }),
+    ])
+    render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} />)
+
+    // Top-level row keeps the real, editable Layer cell.
+    expect(screen.getByRole('button', { name: 'Layer for Alpha' })).toHaveTextContent('Layer One')
+    // Nested row: no editable Layer button — it isn't placed by its own type.
+    expect(screen.queryByRole('button', { name: 'Layer for Beta' })).not.toBeInTheDocument()
+    expect(screen.getByText(/nested/i)).toBeInTheDocument()
+  })
 })
 
 // Task 5: a single checked row must be actionable (delete), select-all must
