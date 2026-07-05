@@ -156,7 +156,10 @@ export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
       <div className="h-full flex items-center justify-center text-center px-8">
         <div className="max-w-xs space-y-2">
           <DynamicIcon name="List" className="w-6 h-6 mx-auto text-ink-muted/40" />
-          <p className="text-sm text-ink-muted">Type a name, press Enter for the next row, Tab to nest inside it.</p>
+          <p className="text-sm text-ink-muted">
+            Add entities one at a time, keyboard-first — type a name, press Enter for the next, Tab to nest a child
+            inside it. Each one is placed in the column that matches its type.
+          </p>
           <button
             type="button"
             onClick={() => { armFocusNext(); addSibling('') }}

@@ -616,7 +616,10 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
       <div className="h-full flex items-center justify-center text-center px-8">
         <div className="max-w-xs space-y-2">
           <DynamicIcon name="LayoutGrid" className="w-6 h-6 mx-auto text-ink-muted/40" />
-          <p className="text-sm text-ink-muted">Add rows from the Outline tab, or start typing here.</p>
+          <p className="text-sm text-ink-muted">
+            Edit many entities at once, spreadsheet-style — set each row's Type and Parent. Placement follows the
+            type automatically, same as Outline.
+          </p>
           <button
             type="button"
             onClick={() => addSibling('')}

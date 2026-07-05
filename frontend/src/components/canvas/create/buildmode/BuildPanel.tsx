@@ -1,12 +1,11 @@
 /**
  * BuildPanel — the canvas-docked "Build Mode" shell (wider than the 400px
  * `HierarchyBuilderPanel` rail — `min(720px, 55vw)` — same glass idiom).
- * Hosts the Outline/Grid/Paste tabs (stubbed placeholders here; Tasks 6-8
- * mount `BuildOutline`/`BuildGrid`/`BuildPaste`, which read/write
- * `useBuildRowsStore` directly), a live validation summary, and the Apply
- * flow. This component owns no row data itself — `useBuildRowsStore` is the
- * single source the tabs will edit; scope (parentUrn/layerId/initialMode)
- * comes from `useHierarchyBuilderStore`.
+ * Hosts the Outline/Grid/Paste tabs (`BuildOutline`/`BuildGrid`/`BuildPaste`,
+ * which read/write `useBuildRowsStore` directly), a live validation summary,
+ * and the Apply flow. This component owns no row data itself —
+ * `useBuildRowsStore` is the single source the tabs edit; scope
+ * (parentUrn/layerId/initialMode) comes from `useHierarchyBuilderStore`.
  *
  * Apply: `validateBuildRows` runs first (same as the live summary below — the
  * memo is recomputed on every render, so Apply always sees the latest rows),
@@ -37,6 +36,8 @@ import type { BuildRow } from './buildRow'
 import { filterStageableRows } from './applyBuild'
 import { BuildOutline } from './BuildOutline'
 import { BuildGrid } from './BuildGrid'
+import { BuildPaste } from './BuildPaste'
+import { useLayers } from '@/store/referenceModelStore'
 
 export interface BuildPanelProps {
   onClose: () => void
@@ -69,6 +70,15 @@ function TypeChip({ type }: { type?: EntityTypeSchema }) {
     >
       <DynamicIcon name={type?.visual?.icon ?? 'Box'} className="w-2.5 h-2.5" />
     </span>
+  )
+}
+
+/** A single key in the Task 8 keyboard-shortcut legend — a small subtle pill, matching the panel's glass idiom. */
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="px-1 py-0.5 rounded bg-black/5 dark:bg-white/10 font-sans text-[9px] font-medium text-ink not-italic">
+      {children}
+    </kbd>
   )
 }
 
@@ -111,6 +121,23 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
   )
   const [fixesOpen, setFixesOpen] = useState(false)
 
+  // Placement guidance (Task 8) — read-only: the view's own layer NAMES
+  // (never hard-coded), for whichever column(s) the current rows actually
+  // resolve to via the SAME auto-by-type resolver Apply uses.
+  const rawLayers = useLayers()
+  const layerNameById = useMemo(() => new Map(rawLayers.map((l) => [l.id, l.name])), [rawLayers])
+  const placementText = useMemo(() => {
+    if (!typeLayerMap && !layerId) return null // non-layered canvas — nothing to say about columns
+    const targets = new Set(
+      validated.map((r) => resolveRowLayer(r, { typeLayerMap: typeLayerMap ?? new Map(), fallbackLayerId: layerId })).filter((t): t is string => !!t),
+    )
+    if (targets.size === 1) {
+      const name = layerNameById.get([...targets][0])
+      if (name) return `These land in ${name}.`
+    }
+    return 'Entities are placed in the column that matches their type.'
+  }, [typeLayerMap, layerId, validated, layerNameById])
+
   const { stageBuildRows } = useStageBuildRows()
   const [applying, setApplying] = useState(false)
   const canApply = !applying && stageable.length > 0
@@ -130,8 +157,6 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
       setApplying(false)
     }
   }
-
-  const activeSpec = TABS.find((t) => t.id === activeTab)!
 
   return (
     <AnimatePresence>
@@ -188,6 +213,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
                   role="tab"
                   type="button"
                   aria-selected={isActive}
+                  title={tab.blurb}
                   onClick={() => setActiveTab(tab.id)}
                   className={cn(
                     'relative inline-flex items-center gap-2 px-3 h-8 rounded-t-lg text-sm font-medium transition-colors',
@@ -208,23 +234,28 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
             })}
           </div>
 
-          {/* ── Body — Task 8 mounts BuildPaste here, reading/writing
-              useBuildRowsStore directly (still stubbed). Both BuildOutline and
-              BuildGrid read the same `validated` view the footer summary below
-              uses, so their type chips/status always match. ── */}
+          {/* ── Keyboard-shortcut legend (Task 8) — subtle, persistent while
+              the Outline tab is active (the tab these keys actually drive).
+              Plain language, matches the panel's existing 10-11px meta-text idiom. ── */}
+          {activeTab === 'outline' && (
+            <div className="flex-shrink-0 flex items-center gap-3 px-5 py-1.5 border-b border-glass-border/60 text-[10px] text-ink-muted">
+              <span className="flex items-center gap-1"><Kbd>Enter</Kbd> next row, or new top-level</span>
+              <span className="flex items-center gap-1"><Kbd>Tab</Kbd> nest inside</span>
+              <span className="flex items-center gap-1"><Kbd>Shift</Kbd>+<Kbd>Tab</Kbd> out</span>
+            </div>
+          )}
+
+          {/* ── Body — Task 7 mounts BuildPaste here, reading/writing
+              useBuildRowsStore directly. All three tabs read the same
+              `validated` view the footer summary below uses, so their type
+              chips/status always match. ── */}
           <div className={cn('flex-1 min-h-0', activeTab === 'grid' ? 'overflow-hidden' : 'overflow-y-auto custom-scrollbar')}>
             {activeTab === 'outline' ? (
               <BuildOutline rows={validated} typeById={typeById} />
             ) : activeTab === 'grid' ? (
               <BuildGrid rows={validated} typeById={typeById} />
             ) : (
-              <div className="h-full flex items-center justify-center text-center px-8">
-                <div className="max-w-xs space-y-1.5">
-                  <DynamicIcon name={activeSpec.icon} className="w-6 h-6 mx-auto text-ink-muted/40" />
-                  <p className="text-sm text-ink-muted">{activeSpec.blurb}</p>
-                  <p className="text-[11px] text-ink-muted/60">This tab is coming soon.</p>
-                </div>
-              </div>
+              <BuildPaste ctx={ctx} typeById={typeById} rootParentType={parentType?.id ?? null} />
             )}
           </div>
 
@@ -275,15 +306,18 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
 
           {/* ── Footer ── */}
           <div className="flex-shrink-0 px-5 py-4 border-t border-glass-border bg-canvas-elevated/95 flex items-center justify-between gap-3">
-            <span className="text-[10px] text-ink-muted">
-              {rows.length === 0
-                ? 'Nothing to build yet'
-                : stageable.length === validated.length
-                  ? `${stageable.length} ready to apply`
-                  // validated.length (not rows.length) — validation can add
-                  // auto-inserted ancestor rows, so it's the true denominator.
-                  : `${stageable.length} of ${validated.length} ready to apply`}
-            </span>
+            <div className="min-w-0 flex flex-col gap-0.5">
+              {placementText && <span className="text-[10px] text-ink-muted/70 truncate">{placementText}</span>}
+              <span className="text-[10px] text-ink-muted">
+                {rows.length === 0
+                  ? 'Nothing to build yet'
+                  : stageable.length === validated.length
+                    ? `${stageable.length} ready to apply`
+                    // validated.length (not rows.length) — validation can add
+                    // auto-inserted ancestor rows, so it's the true denominator.
+                    : `${stageable.length} of ${validated.length} ready to apply`}
+              </span>
+            </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
