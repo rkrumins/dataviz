@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { makeRow, type BuildRow } from '../buildRow'
-import { validateBuildRows, summarize, type BuildOntologyCtx } from '../validateBuildRows'
+import { validateBuildRows, summarize, isLegalChild, type BuildOntologyCtx } from '../validateBuildRows'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
 // Small default-ontology-shaped fixture:
@@ -193,5 +193,154 @@ describe('validateBuildRows', () => {
       { ...makeRow({ id: '4', typeId: 'attribute' }), status: 'error' },
     ]
     expect(summarize(rows)).toEqual({ valid: 1, fixed: 2, errors: 1 })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// FIX-A: ontology-aware validation/auto-fix.
+//
+// General shape: Layer -> Object -> Attribute, OR Layer -> Object -> Group ->
+// Group(optional) -> Attribute. Layer is a genuine ROOT type (canBeContainedBy
+// === [], never legal as anyone's child). Attribute is a genuine LEAF type
+// (canContain === [], isClosedToNesting, can hold nothing). The containment
+// relationship type is deliberately WILDCARD (empty source/target — "allowed
+// everywhere") to prove the fix does NOT rely on relationship-endpoint
+// strictness alone (the old canContainVia-only check would pass ANY pairing
+// here) — legality must come from the schema's canContain/canBeContainedBy.
+const foEt = (id: string, canContain: string[], canBeContainedBy: string[], level: number): EntityTypeSchema => ({
+  id, name: id, pluralName: id, visual: {} as never, fields: [], behavior: {} as never,
+  hierarchy: { level, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
+})
+
+const foEntityTypes: EntityTypeSchema[] = [
+  foEt('Layer', ['Object'], [], 0),
+  foEt('Object', ['Group', 'Attribute'], ['Layer'], 1),
+  foEt('Group', ['Group', 'Attribute'], ['Object', 'Group'], 2),
+  foEt('Attribute', [], ['Object', 'Group'], 3),
+]
+
+const foRelationshipTypes: RelationshipTypeSchema[] = [rt('CONTAINS', [], [])]
+
+const foHierarchyMap: BuildOntologyCtx['hierarchyMap'] = Object.fromEntries(
+  foEntityTypes.map((t) => [t.id, { canContain: t.hierarchy.canContain, canBeContainedBy: t.hierarchy.canBeContainedBy }]),
+)
+
+const foCtx: BuildOntologyCtx = {
+  entityTypes: foEntityTypes,
+  rootEntityTypes: ['Layer'],
+  hierarchyMap: foHierarchyMap,
+  relationshipTypes: foRelationshipTypes,
+  containmentEdgeTypes: ['CONTAINS'],
+}
+
+describe('isLegalChild (FIX-A authoritative predicate)', () => {
+  it('a root type is legal only at the top level, never as anyone\'s child', () => {
+    expect(isLegalChild(null, 'Layer', foCtx)).toBe(true)
+    expect(isLegalChild('Object', 'Layer', foCtx)).toBe(false)
+    expect(isLegalChild('Group', 'Layer', foCtx)).toBe(false)
+  })
+
+  it('a non-root type is never legal at the top level', () => {
+    expect(isLegalChild(null, 'Object', foCtx)).toBe(false)
+    expect(isLegalChild(null, 'Group', foCtx)).toBe(false)
+    expect(isLegalChild(null, 'Attribute', foCtx)).toBe(false)
+  })
+
+  it('a leaf type can contain nothing', () => {
+    expect(isLegalChild('Attribute', 'Group', foCtx)).toBe(false)
+    expect(isLegalChild('Attribute', 'Attribute', foCtx)).toBe(false)
+    expect(isLegalChild('Attribute', 'Object', foCtx)).toBe(false)
+  })
+
+  it('legal containment: Layer->Object, Object->Group, Object->Attribute (optional-Group skip), Group->Group, Group->Attribute', () => {
+    expect(isLegalChild('Layer', 'Object', foCtx)).toBe(true)
+    expect(isLegalChild('Object', 'Group', foCtx)).toBe(true)
+    expect(isLegalChild('Object', 'Attribute', foCtx)).toBe(true)
+    expect(isLegalChild('Group', 'Group', foCtx)).toBe(true)
+    expect(isLegalChild('Group', 'Attribute', foCtx)).toBe(true)
+  })
+})
+
+describe('validateBuildRows (FIX-A ontology-aware validation/auto-fix)', () => {
+  const foById = (rows: BuildRow[], id: string): BuildRow => {
+    const r = rows.find((row) => row.id === id)
+    if (!r) throw new Error(`row ${id} not found`)
+    return r
+  }
+
+  it('(a) a Layer typed as a child of an Object is never left as a valid/fixed Layer-under-Object: it is re-typed to a legal child or flagged an error', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'lay1', name: 'L', typeId: 'Layer', parentId: null }),
+      makeRow({ id: 'obj1', name: 'O', typeId: 'Object', parentId: 'lay1' }),
+      makeRow({ id: 'bad', name: 'Bad', typeId: 'Layer', parentId: 'obj1' }),
+    ]
+    const result = validateBuildRows(rows, foCtx)
+    const bad = foById(result, 'bad')
+    // Never stays a Layer nested under an Object.
+    expect(!(bad.typeId === 'Layer' && bad.status !== 'error')).toBe(true)
+    // A legal re-type exists here (Group, the lowest-level legal child of Object) — auto-fix takes it.
+    expect(bad.typeId).toBe('Group')
+    expect(bad.status).toBe('fixed')
+    expect(bad.fixes.map((f) => f.field)).toContain('type')
+  })
+
+  it('(b) anything placed under an Attribute (leaf) is an error — never valid or fixed', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'lay1', name: 'L', typeId: 'Layer', parentId: null }),
+      makeRow({ id: 'obj1', name: 'O', typeId: 'Object', parentId: 'lay1' }),
+      makeRow({ id: 'attr1', name: 'A', typeId: 'Attribute', parentId: 'obj1' }),
+      makeRow({ id: 'stray', name: 'Stray', typeId: 'Object', parentId: 'attr1' }),
+    ]
+    const result = validateBuildRows(rows, foCtx)
+    const stray = foById(result, 'stray')
+    expect(stray.status).toBe('error')
+    expect(stray.issues.length).toBeGreaterThan(0)
+    // The leaf parent itself must not be silently mutated to rescue an unfixable child.
+    expect(foById(result, 'attr1').typeId).toBe('Attribute')
+  })
+
+  it('(c) inference for a child of an Object never yields Layer — it yields a legal type', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'lay1', name: 'L', typeId: 'Layer', parentId: null }),
+      makeRow({ id: 'obj1', name: 'O', typeId: 'Object', parentId: 'lay1' }),
+      makeRow({ id: 'kid', name: 'Kid', typeId: null, parentId: 'obj1' }),
+    ]
+    const result = validateBuildRows(rows, foCtx)
+    const kid = foById(result, 'kid')
+    expect(kid.typeId).not.toBe('Layer')
+    expect(['Group', 'Attribute']).toContain(kid.typeId)
+    expect(kid.status).toBe('fixed')
+  })
+
+  it('(d) a fully-legal Layer->Object->Group->Group->Attribute chain (plus the optional-Group-skip Object->Attribute) has no false errors', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'lay1', name: 'L', typeId: 'Layer', parentId: null }),
+      makeRow({ id: 'obj1', name: 'O', typeId: 'Object', parentId: 'lay1' }),
+      makeRow({ id: 'grp1', name: 'G1', typeId: 'Group', parentId: 'obj1' }),
+      makeRow({ id: 'grp2', name: 'G2', typeId: 'Group', parentId: 'grp1' }),
+      makeRow({ id: 'attr1', name: 'A1', typeId: 'Attribute', parentId: 'grp2' }),
+      makeRow({ id: 'attr2', name: 'A2', typeId: 'Attribute', parentId: 'obj1' }),
+    ]
+    const result = validateBuildRows(rows, foCtx)
+    for (const id of ['lay1', 'obj1', 'grp1', 'grp2', 'attr1', 'attr2']) {
+      const row = foById(result, id)
+      expect(row.status).toBe('valid')
+      expect(row.issues).toHaveLength(0)
+      expect(row.fixes).toHaveLength(0)
+    }
+  })
+
+  it('(e) honest counts: an unfixable illegal row is `error` (never valid/fixed); a legal re-type is `fixed`', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'lay1', name: 'L', typeId: 'Layer', parentId: null }),
+      makeRow({ id: 'obj1', name: 'O', typeId: 'Object', parentId: 'lay1' }),
+      makeRow({ id: 'bad', name: 'Bad', typeId: 'Layer', parentId: 'obj1' }), // fixable -> retyped to Group
+      makeRow({ id: 'attr1', name: 'A', typeId: 'Attribute', parentId: 'obj1' }),
+      makeRow({ id: 'stray', name: 'Stray', typeId: 'Object', parentId: 'attr1' }), // unfixable -> error
+    ]
+    const result = validateBuildRows(rows, foCtx)
+    expect(summarize(result)).toEqual({ valid: 3, fixed: 1, errors: 1 })
+    expect(foById(result, 'bad').status).toBe('fixed')
+    expect(foById(result, 'stray').status).toBe('error')
   })
 })

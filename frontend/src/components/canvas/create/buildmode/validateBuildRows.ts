@@ -9,8 +9,8 @@
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 import {
   allowedChildTypeIds,
+  builderAllowedChildTypeIds,
   containmentChains,
-  deriveContainmentEdges,
   planRetype,
   setHasId,
 } from '@/services/ontologyPreflightService'
@@ -75,10 +75,49 @@ function sortByLevelThenName(ids: string[], entityTypes: EntityTypeSchema[]): st
   })
 }
 
-function canContainVia(parentType: string, childType: string, ctx: BuildOntologyCtx): boolean {
-  return deriveContainmentEdges(parentType, childType, ctx.relationshipTypes, ctx.containmentEdgeTypes).some(
-    (e) => e.allowed,
+/** Case-insensitive lookup of a type's declared `canBeContainedBy` (schema first, then hierarchyMap); `undefined` when the type is unknown to both (fail-open). */
+function childCanBeContainedBy(childType: string, ctx: BuildOntologyCtx): string[] | undefined {
+  const fromSchema = findType(childType, ctx.entityTypes)?.hierarchy.canBeContainedBy
+  if (fromSchema) return fromSchema
+  const key = childType in ctx.hierarchyMap ? childType : Object.keys(ctx.hierarchyMap).find((k) => sameId(k, childType))
+  return key ? ctx.hierarchyMap[key].canBeContainedBy : undefined
+}
+
+/** A genuine ROOT type (`canBeContainedBy === []`) — legal ONLY at the top level, never as anyone's child. */
+function isRootOnlyType(typeId: string, ctx: BuildOntologyCtx): boolean {
+  const canBeContainedBy = childCanBeContainedBy(typeId, ctx)
+  return canBeContainedBy != null && canBeContainedBy.length === 0
+}
+
+/**
+ * THE authoritative "may `childType` be created directly under `parentType` (or at the top level when
+ * `parentType` is null)?" predicate. ANDs two independent gates so illegal nesting can never slip through:
+ *  - membership: `childType` must be one of the parent's legal children per the ontology —
+ *    {@link builderAllowedChildTypeIds}'s combined canContain + containment-relationship-legality gate (which
+ *    already also implies the LEAF guard: a parent closed to nesting has an empty legal-children set) — or, at
+ *    the top level, one of the declared root types ({@link allowedChildTypeIds} with `parentType` null).
+ *  - root guard: the child's OWN `canBeContainedBy` must permit `parentType`. A genuine root type
+ *    (`canBeContainedBy === []`) is legal ONLY when `parentType` is null — no parent, however permissive its
+ *    `canContain`, may ever contain one. This is the gate `allowedChildTypeIds`'s "empty canContain = allow
+ *    everything" fallback (and any wildcard-endpoint containment relationship) would otherwise let slip past.
+ */
+export function isLegalChild(parentType: string | null, childType: string, ctx: BuildOntologyCtx): boolean {
+  if (parentType == null) {
+    return setHasId(allowedChildTypeIds(null, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap), childType)
+  }
+  const legalChildren = builderAllowedChildTypeIds(
+    parentType,
+    ctx.entityTypes,
+    ctx.rootEntityTypes,
+    ctx.hierarchyMap,
+    ctx.relationshipTypes,
+    ctx.containmentEdgeTypes,
   )
+  if (!setHasId(legalChildren, childType)) return false
+  const canBeContainedBy = childCanBeContainedBy(childType, ctx)
+  if (canBeContainedBy == null) return true // unknown type: fail open, consistent with the rest of this module
+  if (canBeContainedBy.length === 0) return false // genuine root type: never legal as anyone's child
+  return canBeContainedBy.some((p) => sameId(p, parentType))
 }
 
 function buildRetypeCtx(byId: Map<string, BuildRow>, ctx: BuildOntologyCtx): RetypeContext {
@@ -106,11 +145,10 @@ function tryAutoPromoteParent(
 ): boolean {
   if (parentRow.typeId == null) return false
   const grandparentType = parentRow.parentId != null ? (byId.get(parentRow.parentId)?.typeId ?? null) : null
-  const fitsGrandparent = allowedChildTypeIds(grandparentType, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap)
   const candidates = sortByLevelThenName(
     ctx.entityTypes
       .map((t) => t.id)
-      .filter((id) => setHasId(fitsGrandparent, id) && canContainVia(id, childTypeId, ctx)),
+      .filter((id) => isLegalChild(grandparentType, id, ctx) && isLegalChild(id, childTypeId, ctx)),
     ctx.entityTypes,
   )
   if (candidates.length === 0) return false
@@ -132,6 +170,27 @@ function tryAutoPromoteParent(
     return true
   }
   return false
+}
+
+/**
+ * Retypes `row` ITSELF (never its parent) to the lowest-level legal type under `parentType`, if one exists.
+ * Used specifically when `row`'s current type is a genuine ROOT type illegally nested under `parentType` —
+ * promoting the parent could never fix this (a root type, by definition, can never be legally contained by
+ * ANY type), so retyping the misplaced child is the only sensible remedy.
+ */
+function tryRetypeChild(row: BuildRow, parentType: string, ctx: BuildOntologyCtx): boolean {
+  const candidates = sortByLevelThenName(
+    ctx.entityTypes.map((t) => t.id).filter((id) => isLegalChild(parentType, id, ctx)),
+    ctx.entityTypes,
+  )
+  if (candidates.length === 0) return false
+  const fromType = row.typeId!
+  row.typeId = candidates[0]
+  row.fixes.push({
+    field: 'type',
+    note: `Retyped from ${displayName(fromType, ctx.entityTypes)} to ${displayName(candidates[0], ctx.entityTypes)} — ${displayName(fromType, ctx.entityTypes)} can never legally nest under ${displayName(parentType, ctx.entityTypes)}.`,
+  })
+  return true
 }
 
 /**
@@ -306,7 +365,7 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     if (row.typeId != null) continue
     const parentRow = row.parentId != null ? (byId.get(row.parentId) ?? null) : null
     const parentType = parentRow?.typeId ?? null
-    const candidates = [...allowedChildTypeIds(parentType, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap)]
+    const candidates = ctx.entityTypes.map((t) => t.id).filter((c) => isLegalChild(parentType, c, ctx))
     if (candidates.length === 1) {
       row.typeId = candidates[0]
       row.fixes.push({ field: 'type', note: `Inferred type '${displayName(candidates[0], ctx.entityTypes)}'.` })
@@ -326,8 +385,13 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     const row = byId.get(id)!
     if (row.typeId == null) continue
     const parentRow = row.parentId != null ? (byId.get(row.parentId) ?? null) : null
-    if (parentRow && parentRow.typeId != null && !canContainVia(parentRow.typeId, row.typeId, ctx)) {
-      tryAutoPromoteParent(parentRow, row.typeId, byId, ctx)
+    if (parentRow && parentRow.typeId != null && !isLegalChild(parentRow.typeId, row.typeId, ctx)) {
+      // A genuine root type can never be legally contained by ANY parent, so promoting the parent could
+      // never fix this — retyping the misplaced child is the only sensible remedy, and takes priority.
+      // Otherwise (parent's own type is simply wrong for this child), keep the existing remedy: promote
+      // the parent to something that can hold it.
+      const retyped = isRootOnlyType(row.typeId, ctx) && tryRetypeChild(row, parentRow.typeId, ctx)
+      if (!retyped) tryAutoPromoteParent(parentRow, row.typeId, byId, ctx)
     }
   }
 
@@ -344,10 +408,10 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
 
     if (row.typeId != null) {
       const containmentOk = !parentRow
-        ? setHasId(allowedChildTypeIds(null, ctx.entityTypes, ctx.rootEntityTypes, ctx.hierarchyMap), row.typeId)
+        ? isLegalChild(null, row.typeId, ctx)
         : parentRow.typeId == null
           ? true // parent's own type is unresolved/errored — don't cascade a second error onto this row
-          : canContainVia(parentRow.typeId, row.typeId, ctx)
+          : isLegalChild(parentRow.typeId, row.typeId, ctx)
 
       if (!containmentOk) {
         const newIds = tryInsertMissingParent(row, parentRow, byId, ctx, nextId, insertedKeys)
