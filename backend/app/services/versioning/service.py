@@ -3382,8 +3382,10 @@ class GraphVersioningService:
                     urn_to_eid[payload["urn"]] = eid
                 if payload.get("qualifiedName"):
                     qname_to_eid[payload["qualifiedName"]] = eid
+        current = {eid: payload for eid, payload in state.items() if payload is not None}
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid,
-                "edge_to_eid": edge_to_eid, "node_eids": node_eids, "edge_eids": edge_eids}
+                "edge_to_eid": edge_to_eid, "node_eids": node_eids, "edge_eids": edge_eids,
+                "current": current}
 
     async def _composed_state_as_of(
         self, s, graph_id: str, branch_id: str, as_of_seq: int

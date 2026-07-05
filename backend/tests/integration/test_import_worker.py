@@ -59,7 +59,7 @@ async def _run() -> None:
         branch_id = job["branch_id"]
 
         summary = await ie.run_import(job["job_id"])
-        assert summary == {"new": 2, "updated": 1, "deleted": 0, "invalid": 0}, summary
+        assert summary == {"new": 2, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 0}, summary
 
         # main is untouched — the import lives on a draft
         delta = await svc.branch_overlay_delta(graph_id=gid, branch_id=branch_id)
@@ -78,12 +78,14 @@ async def _run() -> None:
         got = await ie.get_job(job["job_id"])
         assert got["status"] == "completed" and got["summary"]["updated"] == 1
 
-        # re-import the SAME file onto the SAME draft is a no-op diff (idempotent upsert)
+        # re-import the SAME file onto the SAME draft is fully IDEMPOTENT — every row matches and
+        # nothing actually changed, so there are ZERO new/updated changes (the "81 changes when I
+        # only renamed 2" bug: unchanged rows must NOT be reported/committed as updates).
         job2 = await ie.create_import_job(
             workspace_id="ws1", data_source_id=G["graph_id"], graph_id=gid, actor="u",
             import_format="ndjson", source_uri=key, branch_id=branch_id)
         summary2 = await ie.run_import(job2["job_id"])
-        assert summary2["invalid"] == 0 and summary2["new"] == 0, summary2  # A,B,edge all matched now
+        assert summary2 == {"new": 0, "updated": 0, "unchanged": 3, "deleted": 0, "invalid": 0}, summary2
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

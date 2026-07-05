@@ -75,6 +75,36 @@ def _run() -> None:
     ], _indexes(), mint_id=lambda: "ev_x")
     assert res4[0]["resolved_op"] == "invalid" and ops4 == []
 
+    # ---- idempotent round-trip: a matched row identical to the current payload is a no-op,
+    #      even when a numeric property came back as a STRING via CSV (the "81 changes" bug). ----
+    idx = _indexes()
+    idx["current"] = {"ent_A": {"urn": "urn:A", "entityType": "Table", "displayName": "A",
+                                "qualifiedName": "a", "properties": {"rows": 5}}}
+    ops5, res5 = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:A",
+         "entityType": "Table", "displayName": "A", "qualifiedName": "a", "properties": {"rows": "5"}},
+    ], idx, mint_id=lambda: "x")
+    assert res5[0]["resolved_op"] == "unchanged" and ops5 == []
+
+    # ---- a real rename -> update carrying ONLY the changed field (clean, minimal diff) ----
+    ops6, res6 = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:A",
+         "entityType": "Table", "displayName": "A renamed", "qualifiedName": "a", "properties": {"rows": "5"}},
+    ], idx, mint_id=lambda: "x")
+    assert res6[0]["resolved_op"] == "update"
+    assert ops6 == [{"op": "update", "entity_kind": "node", "entity_id": "ent_A",
+                     "payload": {"displayName": "A renamed"}}], ops6
+
+    # ---- adding a NEW property -> update patches just that property ----
+    ops7, res7 = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:A",
+         "entityType": "Table", "displayName": "A", "qualifiedName": "a",
+         "properties": {"rows": "5", "logicalDataType": "string"}},
+    ], idx, mint_id=lambda: "x")
+    assert res7[0]["resolved_op"] == "update"
+    assert ops7 == [{"op": "update", "entity_kind": "node", "entity_id": "ent_A",
+                     "payload": {"properties": {"logicalDataType": "string"}}}], ops7
+
 
 def test_import_resolve():
     _run()

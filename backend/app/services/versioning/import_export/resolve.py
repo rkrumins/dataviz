@@ -22,7 +22,43 @@ _NODE_FIELDS = (
     "description", "sourceSystem", "layerAssignment",
 )
 
-_STATUS = {"create": "new", "update": "updated", "delete": "deleted", "invalid": "invalid"}
+_STATUS = {"create": "new", "update": "updated", "unchanged": "unchanged",
+           "delete": "deleted", "invalid": "invalid"}
+
+
+def _scalar_eq(a: Any, b: Any) -> bool:
+    """Type-tolerant equality so a CSV round-trip (which stringifies everything) is a no-op:
+    ``5 == "5"``, ``True == "True"``. Nested values (dict/list) compare exactly."""
+    if a is None or b is None:
+        return a == b
+    if isinstance(a, (dict, list)) or isinstance(b, (dict, list)):
+        return a == b
+    return str(a).strip() == str(b).strip()
+
+
+def _changed_props(new_props: Mapping[str, Any], cur_props: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Only the properties whose value actually changed (or are new) — type-tolerant."""
+    cur = cur_props or {}
+    return {k: v for k, v in (new_props or {}).items() if not _scalar_eq(v, cur.get(k))}
+
+
+def _changed_fields(new_payload: Mapping[str, Any], cur: Mapping[str, Any]) -> Dict[str, Any]:
+    """Field-level diff of a provided payload vs the current stored payload. Returns only the
+    fields that genuinely changed (empty => unchanged). ``properties`` is diffed per-key so an
+    update patches just the changed/added properties; ``tags`` compares as an unordered set."""
+    cur = cur or {}
+    changed: Dict[str, Any] = {}
+    for field, value in new_payload.items():
+        if field == "properties":
+            pc = _changed_props(value, cur.get("properties"))
+            if pc:
+                changed["properties"] = pc
+        elif field == "tags":
+            if set(value or []) != set(cur.get("tags") or []):
+                changed["tags"] = value
+        elif not _scalar_eq(value, cur.get(field)):
+            changed[field] = value
+    return changed
 
 
 def _node_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -68,6 +104,7 @@ def resolve_rows(
     qname_to_eid: Dict[str, str] = dict(indexes.get("qname_to_eid") or {})
     edge_to_eid: Dict[tuple, str] = dict(indexes.get("edge_to_eid") or {})
     node_eids: set = set(indexes.get("node_eids") or set())
+    current: Dict[str, dict] = dict(indexes.get("current") or {})   # eid -> current payload
 
     ops: List[dict] = []
     resolutions: List[dict] = []
@@ -86,8 +123,11 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete target not found"]))
             continue
         if matched_eid:
-            ops.append({"op": "update", "entity_kind": "node", "entity_id": matched_eid,
-                        "payload": _node_payload(row)})
+            changed = _changed_fields(_node_payload(row), current.get(matched_eid) or {})
+            if not changed:                                       # a true no-op (e.g. an unchanged round-trip)
+                resolutions.append(_resolution(row, "unchanged", matched_eid))
+                continue
+            ops.append({"op": "update", "entity_kind": "node", "entity_id": matched_eid, "payload": changed})
             resolutions.append(_resolution(row, "update", matched_eid))
             continue
         if not row.get("entityType"):
@@ -120,8 +160,11 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete edge not found"]))
             continue
         if matched_eid:
-            ops.append({"op": "update", "entity_kind": "edge", "entity_id": matched_eid,
-                        "payload": _edge_payload(row, seid, teid)})
+            changed = _changed_fields(_edge_payload(row, seid, teid), current.get(matched_eid) or {})
+            if not changed:
+                resolutions.append(_resolution(row, "unchanged", matched_eid))
+                continue
+            ops.append({"op": "update", "entity_kind": "edge", "entity_id": matched_eid, "payload": changed})
             resolutions.append(_resolution(row, "update", matched_eid))
         else:
             eid = mint_id()

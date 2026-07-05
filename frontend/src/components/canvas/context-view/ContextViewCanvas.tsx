@@ -96,6 +96,8 @@ import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
+import { ExportDialog } from '@/features/import-export/ExportDialog'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
 
@@ -873,6 +875,7 @@ export function ContextViewCanvas({
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const [showImportDialog, setShowImportDialog] = useState(false)
+  const [showExportDialog, setShowExportDialog] = useState(false)
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
   const undoStagedChange = useStagedChangesStore(s => s.undo)
@@ -2229,6 +2232,7 @@ export function ContextViewCanvas({
         pendingChangeCount={stagedChangeList.length}
         onOpenStagedChanges={openStagedChangesPanel}
         onImport={() => setShowImportDialog(true)}
+        onExport={() => setShowExportDialog(true)}
         canUndo={stagedChangeList.length > 0}
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
@@ -2313,6 +2317,23 @@ export function ContextViewCanvas({
               setShowImportDialog(false)
               useVersioningPanelStore.getState().openPanel('changes')
             }}
+            onImported={() => {
+              // The import committed changes to the draft SERVER-SIDE (no optimistic canvas), so
+              // refresh everything at once: the versioning surfaces (Changes tab + count chips),
+              // the lineage rollups, and re-hydrate the canvas (bumping the epoch folds into
+              // providerVersion, which re-reads the current branch with the imported changes).
+              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+              invalidateAggregatedEdges()
+              useBranchStore.getState().bumpMainEpoch()
+            }}
+          />
+        )}
+        {showExportDialog && graphId && scopeWsId && (
+          <ExportDialog
+            wsId={scopeWsId}
+            graphId={graphId}
+            viewId={activeView?.id}
+            onClose={() => setShowExportDialog(false)}
           />
         )}
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint

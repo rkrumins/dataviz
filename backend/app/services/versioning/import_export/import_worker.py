@@ -133,7 +133,7 @@ class ImportWorker:
             await self._svc.apply_ops(graph_id=graph_id, ops=window, actor=actor,
                                       branch_id=branch_id, message="import")
 
-        summary: Dict[str, int] = {"new": 0, "updated": 0, "deleted": 0, "invalid": 0}
+        summary: Dict[str, int] = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}
         for res in resolutions:
             summary[res["status"]] = summary.get(res["status"], 0) + 1
         return summary

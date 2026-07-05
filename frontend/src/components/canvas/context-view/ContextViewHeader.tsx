@@ -123,6 +123,8 @@ export interface ContextViewHeaderProps {
   onOpenStagedChanges?: () => void
   /** Opens the bulk-import dialog (Edit mode). */
   onImport?: () => void
+  /** Exports the graph to a downloadable file. */
+  onExport?: () => void
 
   // Undo / Redo
   canUndo?: boolean
@@ -183,6 +185,7 @@ export function ContextViewHeader({
   pendingChangeCount = 0,
   onOpenStagedChanges,
   onImport,
+  onExport,
   canUndo = false,
   canRedo = false,
   onUndo,
@@ -304,6 +307,7 @@ export function ContextViewHeader({
                 pendingChangeCount={pendingChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
                 onImport={onImport}
+                onExport={onExport}
                 onExitEdit={onExitEdit}
               />
             </motion.div>
