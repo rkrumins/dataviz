@@ -24,6 +24,8 @@ export const VERSIONING_KEYS = {
       : ([...VERSIONING_KEYS.all, 'branches', ws, gid] as const),
   branchState: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'state', ws, gid, bid] as const,
+  branchFreshness: (ws?: string, gid?: string | null, bid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'branchFreshness', ws, gid, bid] as const,
   diffVsMain: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'diffVsMain', ws, gid, bid] as const,
   commitLog: (ws?: string, gid?: string | null, bid?: string | null) =>
@@ -116,6 +118,20 @@ export function useProjectionWatermark(
     },
     staleTime: 2_000,
     refetchOnWindowFocus: false,
+  })
+}
+
+/** Live "is this draft behind main?" — the "notified right away" signal. Isolated by design: its OWN
+ *  query key (never shared), a CONSTANT poll interval (not a function that can thrash), and it only
+ *  runs while a draft is open (`enabled` on branchId). Structurally cannot cause a render loop. */
+export function useBranchFreshness(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.branchFreshness(wsId, graphId, branchId),
+    queryFn: () => api.getBranchFreshness(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    staleTime: 5_000,
   })
 }
 

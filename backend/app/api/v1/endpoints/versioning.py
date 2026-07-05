@@ -640,6 +640,14 @@ class WatermarkModel(_ApiModel):
     progress_total: Optional[int] = Field(default=None, alias="progressTotal")
 
 
+class BranchFreshnessModel(_ApiModel):
+    """Live collaboration signal: has main advanced under this draft (must it pull before publishing)?"""
+    behind: bool
+    behind_by: int = Field(alias="behindBy")
+    main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
+    base_commit_seq: int = Field(alias="baseCommitSeq")
+
+
 class RebuildResponse(_ApiModel):
     started: bool                                        # a fresh full replay was requested
     already_running: bool = Field(alias="alreadyRunning")  # a projection/rebuild was in flight (no-op)
@@ -1402,6 +1410,22 @@ async def get_watermark(
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
     return _watermark_model(await svc.projection_watermark(graph_id))
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
+async def get_branch_freshness(
+    ws_id: str, graph_id: str, branch_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Live "is this draft behind main?" signal — O(1), safe to poll frequently while editing so a
+    branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull."""
+    with _domain_errors():
+        f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id)
+    return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
+                                main_head_commit_seq=f["main_head_commit_seq"],
+                                base_commit_seq=f["base_commit_seq"])
 
 
 def _watermark_model(wm: dict) -> WatermarkModel:

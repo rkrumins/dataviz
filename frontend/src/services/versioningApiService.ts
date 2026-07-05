@@ -512,6 +512,19 @@ export function getWatermark(wsId: string, graphId: string): Promise<Watermark> 
   return vfetch<Watermark>(`${base(wsId)}/graphs/${graphId}/watermark`)
 }
 
+export interface BranchFreshness {
+  behind: boolean
+  behindBy: number
+  mainHeadCommitSeq: number
+  baseCommitSeq: number
+}
+
+/** Live "is this draft behind main?" — O(1), safe to poll while editing so a branch owner learns a
+ *  teammate published RIGHT AWAY (not at merge). */
+export function getBranchFreshness(wsId: string, graphId: string, branchId: string): Promise<BranchFreshness> {
+  return vfetch<BranchFreshness>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/freshness`)
+}
+
 /** Rebuild the fast read layer from the source of truth (full background replay). 409 when the graph
  *  has no fast-read-layer target. Idempotent — a rebuild already in flight returns `started:false`. */
 export function rebuildProjection(wsId: string, graphId: string): Promise<RebuildResponse> {

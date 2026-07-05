@@ -3223,6 +3223,28 @@ class GraphVersioningService:
             "created_by": b.created_by, "created_at": b.created_at, "updated_at": b.updated_at,
         }
 
+    async def branch_freshness(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+        """O(1) collaboration signal: has ``main`` advanced under this draft since it branched?
+        Compares the draft's branch point (``base_commit_seq``) to the graph's CURRENT main head
+        (which bumps in the same transaction as any publish/merge, so this is live). Deliberately
+        cheap — just two PK reads and an int compare — so a client can poll it frequently while
+        editing; the expensive 3-way merge / conflict detection runs only when the user actually
+        pulls or publishes. ``main`` (and a fork's own main) is never behind itself."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            branch = await s.get(BranchORM, branch_id)
+            if graph is None or branch is None or branch.graph_id != graph_id:
+                raise ValueError("unknown graph/branch")
+            main_head = graph.main_head_commit_seq or 0
+            base = branch.base_commit_seq or 0
+            behind_by = 0 if branch.kind == "main" else max(0, main_head - base)
+            return {
+                "behind": behind_by > 0,
+                "behind_by": behind_by,
+                "main_head_commit_seq": main_head,
+                "base_commit_seq": base,
+            }
+
     async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
         # A draft MR is "behind" when its base lags the target graph's main head; the FE gates
         # Merge on this so reviewers pull latest first (mirrors the merge_mr/publish gate). Fork

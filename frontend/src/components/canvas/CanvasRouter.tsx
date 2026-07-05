@@ -23,6 +23,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { BranchBehindBanner } from '@/features/versioning/components/BranchBehindBanner'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
@@ -133,6 +134,14 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         <CanvasVersioningBar
           workspaceId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}
+        />
+      )}
+      {activeView?.workspaceId && (
+        <BranchBehindBanner
+          wsId={activeView.workspaceId}
+          dataSourceId={activeView.dataSourceId ?? null}
+          viewId={activeView.id ?? null}
+          className="mx-4 mt-2"
         />
       )}
       <div className="relative flex-1 min-h-0">
