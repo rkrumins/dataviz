@@ -1,5 +1,9 @@
 # Versioned Graph — End-to-End Testing Guide
 
+> 📚 **Part of the [Versioned Graph documentation suite](versioning/README.md).** This guide is the
+> hands-on run/test companion; see the suite for the full architecture, engine, projection, API,
+> frontend, and design reference.
+
 The versioned-graph store (`graphver`) and its API: *git for graphs* — per-user
 **drafts**, **checkpoints**, **squash-publish** to `main`, copy-on-write
 **forks**, and **pull requests** with field-level 3-way merge. The browser never

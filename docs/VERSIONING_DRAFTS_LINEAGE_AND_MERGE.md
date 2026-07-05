@@ -1,5 +1,11 @@
 # Versioning: Draft Lineage, the Draft↔Main Read Model, Merge Data-Loss & Repair
 
+> 📚 **Part of the [Versioned Graph documentation suite](versioning/README.md).** This document is a
+> focused engineering memory of the draft-overlay design and a merge-time data-loss root-cause + repair;
+> the suite (esp. [03 · Branching, Commits & Merge](versioning/03-branching-commits-merge.md) and
+> [04 · Projection & Cache](versioning/04-projection-and-cache.md)) is the canonical, comprehensive
+> reference.
+
 > **Audience:** Engineers/agents working on the graph **versioning** subsystem (drafts, branches,
 > publish/merge, the FalkorDB projection, and the canvas read paths). Read
 > [VERSIONING_E2E.md](VERSIONING_E2E.md) and [DATA_ARCHITECTURE.md](DATA_ARCHITECTURE.md) first for the
