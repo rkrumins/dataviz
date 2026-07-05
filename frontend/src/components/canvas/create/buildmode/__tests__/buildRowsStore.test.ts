@@ -57,6 +57,31 @@ describe('buildRowsStore', () => {
     useBuildRowsStore.getState().reset()
     expect(useBuildRowsStore.getState().rows).toEqual([])
   })
+
+  it('setRowLayer sets a Layer override; setting it to undefined clears it', () => {
+    useBuildRowsStore.getState().setRows(seedRows())
+    useBuildRowsStore.getState().setRowLayer('b', 'layer-x')
+    expect(useBuildRowsStore.getState().rows.find((r) => r.id === 'b')?.layerId).toBe('layer-x')
+    useBuildRowsStore.getState().setRowLayer('b', undefined)
+    expect(useBuildRowsStore.getState().rows.find((r) => r.id === 'b')?.layerId).toBeUndefined()
+  })
+
+  it('duplicateRowSubtree clones the row and all its descendants with fresh ids', () => {
+    useBuildRowsStore.getState().setRows(seedRows()) // a -> b -> c
+    useBuildRowsStore.getState().duplicateRowSubtree('a')
+    const rows = useBuildRowsStore.getState().rows
+    const originalIds = new Set(['a', 'b', 'c'])
+    expect(rows).toHaveLength(6)
+    const clones = rows.filter((r) => !originalIds.has(r.id))
+    expect(clones).toHaveLength(3)
+    expect(new Set(clones.map((c) => c.id)).size).toBe(3)
+    // the cloned root is a sibling of 'a' (same parentId: null); the cloned
+    // chain re-threads to the CLONED parent, not the original.
+    const cloneOfA = clones.find((c) => c.parentId === null)!
+    const cloneOfB = clones.find((c) => c.parentId === cloneOfA.id)!
+    const cloneOfC = clones.find((c) => c.parentId === cloneOfB.id)!
+    expect(cloneOfC).toBeDefined()
+  })
 })
 
 // Colocated here (rather than a separate test file) because Task 4's committed

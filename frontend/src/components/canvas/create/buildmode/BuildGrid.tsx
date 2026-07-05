@@ -13,26 +13,34 @@
  * no inputs, not selectable) since there's no store row id to mutate.
  *
  * Every edit calls `buildRowsStore.updateRow`/`addSibling`/`addChild`/
- * `removeRow` directly — no local draft state. Duplicate-row is composed
- * from `addSibling` + a follow-up `updateRow` once the store reports the new
- * row's id (the store generates ids internally), the same "diff rawRows
- * after the store updates" technique `BuildOutline` uses to focus a newly
- * created row.
+ * `removeRow` directly — no local draft state. Duplicate-row clones the
+ * row's WHOLE subtree in one `duplicateRowSubtree` store action (fresh ids,
+ * re-threaded parentIds, inserted right after the original's subtree).
  *
  * Fill-down: shift-clicking a row's selection checkbox selects the visually
- * contiguous range (`computeRangeIds`); with 2+ rows selected, a bar sets
- * Type/Parent/Description on every selected row in one action. Paste-into-
- * cell: pasting multi-line clipboard text into a Name/Description cell fills
- * each subsequent row (`computeDownIds`) instead of collapsing into one cell.
+ * contiguous range (`computeRangeIds`); with 2+ rows selected, a bar also
+ * offers setting Type/Parent/Description on every selected row in one
+ * action. A single selected row (or more) exposes a delete-selected action;
+ * a header checkbox selects/clears every row. Paste-into-cell: pasting
+ * multi-line clipboard text into a Name/Description cell fills each
+ * subsequent row (`computeDownIds`) instead of collapsing into one cell.
+ *
+ * Layer column: each row's Layer cell defaults to the auto-by-type target —
+ * derived from the view's own layers (`useLayers()`) via the same
+ * `buildTypeLayerMap` the resolver (`resolveRowLayer.ts`) uses — and can be
+ * overridden per row (`buildRowsStore.setRowLayer`); clearing the override
+ * reverts to auto-by-type. Ontology-agnostic: no type/layer names here.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useViewEntityTypes } from '@/hooks/useViewSchema'
+import { useLayers } from '@/store/referenceModelStore'
 import type { EntityTypeSchema } from '@/types/schema'
 import type { BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
+import { buildTypeLayerMap } from './resolveRowLayer'
 import { computeRangeIds, computeDownIds, descendantIds } from './buildGridSelection'
 
 export interface BuildGridProps {
@@ -190,6 +198,73 @@ function ParentPickerPopover({
   )
 }
 
+/** Picker for the Layer override column — options are the view's OWN layers
+ *  (never hard-coded names); the top entry clears the override back to the
+ *  auto-by-type target. */
+function LayerPickerPopover({
+  layers, selectedId, autoLabel, onPick, onClear, onClose,
+}: {
+  layers: { id: string; name: string }[]
+  selectedId: string | null
+  autoLabel: string
+  onPick: (id: string) => void
+  onClear: () => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [q, setQ] = useState('')
+  useOutsideDismiss(ref, onClose)
+
+  const filtered = useMemo(() => {
+    if (!q.trim()) return layers
+    const s = q.toLowerCase()
+    return layers.filter((l) => l.name.toLowerCase().includes(s))
+  }, [layers, q])
+
+  return (
+    <div
+      ref={ref}
+      className="absolute left-0 top-full mt-1 z-30 w-56 bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-xl shadow-lg overflow-hidden"
+    >
+      <div className="p-1.5 border-b border-glass-border">
+        <input
+          autoFocus
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search layers…"
+          className="w-full px-2 py-1 text-xs bg-transparent focus:outline-none text-ink placeholder:text-ink-muted/50"
+        />
+      </div>
+      <div className="max-h-48 overflow-y-auto custom-scrollbar p-1 space-y-0.5">
+        <button
+          type="button"
+          onClick={onClear}
+          className={cn(
+            'w-full flex items-center gap-2 px-2 py-1 rounded-lg text-left text-xs italic transition-colors',
+            selectedId == null ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30 text-ink' : 'text-ink-muted hover:bg-black/5 dark:hover:bg-white/5',
+          )}
+        >
+          Auto ({autoLabel})
+        </button>
+        {filtered.length === 0 && <div className="text-center py-3 text-[11px] text-ink-muted">No matching layers.</div>}
+        {filtered.map((l) => (
+          <button
+            key={l.id}
+            type="button"
+            onClick={() => onPick(l.id)}
+            className={cn(
+              'w-full flex items-center gap-2 px-2 py-1 rounded-lg text-left transition-colors',
+              l.id === selectedId ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30' : 'hover:bg-black/5 dark:hover:bg-white/5',
+            )}
+          >
+            <span className="flex-1 min-w-0 text-xs text-ink truncate">{l.name}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /** Splits pasted clipboard text into lines when it looks like a multi-row spreadsheet paste. */
 function pasteLines(text: string): string[] | null {
   const lines = text.split(/\r\n|\r|\n/)
@@ -203,9 +278,14 @@ interface BuildGridRowProps {
   typeById: Map<string, EntityTypeSchema>
   entityTypes: EntityTypeSchema[]
   rawRows: BuildRow[]
+  /** The view's own layers, for the Layer override picker's options (by name). */
+  layers: { id: string; name: string }[]
+  /** `typeId → layerId` auto-by-type map (`buildTypeLayerMap`), for the Layer cell's default. */
+  typeLayerMap: Map<string, string>
   selected: boolean
   onToggleSelect: (shiftKey: boolean) => void
   onUpdate: (patch: Partial<BuildRow>) => void
+  onSetLayer: (layerId: string | undefined) => void
   onPasteDown: (field: 'name' | 'description', lines: string[]) => void
   onAddSibling: () => void
   onAddChild: () => void
@@ -214,10 +294,11 @@ interface BuildGridRowProps {
 }
 
 function BuildGridRow({
-  row, isSynthetic, type, typeById, entityTypes, rawRows, selected,
-  onToggleSelect, onUpdate, onPasteDown, onAddSibling, onAddChild, onDuplicate, onRemove,
+  row, isSynthetic, type, typeById, entityTypes, rawRows, layers, typeLayerMap, selected,
+  onToggleSelect, onUpdate, onSetLayer, onPasteDown, onAddSibling, onAddChild, onDuplicate, onRemove,
 }: BuildGridRowProps) {
-  const [openPicker, setOpenPicker] = useState<'type' | 'parent' | null>(null)
+  const [openPicker, setOpenPicker] = useState<'type' | 'parent' | 'layer' | null>(null)
+  const shiftPressedRef = useRef(false)
   const badge = STATUS_BADGE[row.status]
   const title = row.status === 'error'
     ? row.issues.map((i) => i.message).join(' ')
@@ -232,6 +313,14 @@ function BuildGridRow({
     excluded.add(row.id)
     return rawRows.filter((r) => !excluded.has(r.id))
   }, [rawRows, row.id, isSynthetic])
+
+  // Layer cell: auto-by-type target from the SAME typeId→layerId map the
+  // resolver uses, overridden by row.layerId when set (Task 2).
+  const layerNameById = useMemo(() => new Map(layers.map((l) => [l.id, l.name])), [layers])
+  const autoLayerId = row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined
+  const autoLayerName = autoLayerId ? layerNameById.get(autoLayerId) : undefined
+  const effectiveLayerId = row.layerId ?? autoLayerId
+  const effectiveLayerName = effectiveLayerId ? layerNameById.get(effectiveLayerId) : undefined
 
   const handlePaste = (field: 'name' | 'description') => (e: React.ClipboardEvent<HTMLInputElement>) => {
     const lines = pasteLines(e.clipboardData.getData('text/plain'))
@@ -254,8 +343,8 @@ function BuildGridRow({
           <input
             type="checkbox"
             checked={selected}
-            onChange={() => {}}
-            onClick={(e) => { e.preventDefault(); onToggleSelect(e.shiftKey) }}
+            onMouseDown={(e) => { shiftPressedRef.current = e.shiftKey }}
+            onChange={() => onToggleSelect(shiftPressedRef.current)}
             aria-label={`Select ${row.name || 'row'}`}
             className="w-3.5 h-3.5 accent-accent-lineage"
           />
@@ -319,6 +408,28 @@ function BuildGridRow({
         )}
       </div>
 
+      <div className="w-28 flex-shrink-0 relative">
+        <button
+          type="button"
+          disabled={isSynthetic}
+          onClick={() => setOpenPicker('layer')}
+          aria-label={`Layer for ${row.name || 'row'}`}
+          className="w-full flex items-center px-1.5 py-1 rounded text-[11px] text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 truncate disabled:opacity-60 disabled:cursor-default disabled:hover:bg-transparent text-left"
+        >
+          <span className="truncate">{effectiveLayerName ?? '—'}</span>
+        </button>
+        {openPicker === 'layer' && (
+          <LayerPickerPopover
+            layers={layers}
+            selectedId={row.layerId ?? null}
+            autoLabel={autoLayerName ?? '—'}
+            onPick={(id) => { onSetLayer(id); setOpenPicker(null) }}
+            onClear={() => { onSetLayer(undefined); setOpenPicker(null) }}
+            onClose={() => setOpenPicker(null)}
+          />
+        )}
+      </div>
+
       <div className="flex-[2] min-w-0">
         {isSynthetic ? (
           <span className="block text-xs text-ink-muted/60 truncate">—</span>
@@ -360,7 +471,7 @@ function BuildGridRow({
 }
 
 function FillDownBar({
-  count, entityTypes, typeById, rawRows, selectedIds, onApply, onClear,
+  count, entityTypes, typeById, rawRows, selectedIds, onApply, onDelete, onClear,
 }: {
   count: number
   entityTypes: EntityTypeSchema[]
@@ -368,6 +479,7 @@ function FillDownBar({
   rawRows: BuildRow[]
   selectedIds: Set<string>
   onApply: (patch: Partial<BuildRow>) => void
+  onDelete: () => void
   onClear: () => void
 }) {
   const [openPicker, setOpenPicker] = useState<'type' | 'parent' | null>(null)
@@ -382,60 +494,76 @@ function FillDownBar({
   return (
     <div className="flex-shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-b border-glass-border bg-accent-lineage/5">
       <span className="text-xs font-medium text-ink">{count} selected</span>
-      <span className="text-[11px] text-ink-muted">Fill down:</span>
 
-      <div className="relative">
-        <button
-          type="button"
-          onClick={() => setOpenPicker(openPicker === 'type' ? null : 'type')}
-          className="px-2 py-1 rounded-lg text-[11px] font-medium bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
-        >
-          Type…
-        </button>
-        {openPicker === 'type' && (
-          <TypePickerPopover
-            entityTypes={entityTypes}
-            selectedId={null}
-            onPick={(id) => { onApply({ typeId: id }); setOpenPicker(null) }}
-            onClose={() => setOpenPicker(null)}
-          />
-        )}
-      </div>
+      {/* Fill-down (Type/Parent/Description on every selected row) only makes
+          sense once there's more than one row to fill down INTO. */}
+      {count >= 2 && (
+        <>
+          <span className="text-[11px] text-ink-muted">Fill down:</span>
 
-      <div className="relative">
-        <button
-          type="button"
-          onClick={() => setOpenPicker(openPicker === 'parent' ? null : 'parent')}
-          className="px-2 py-1 rounded-lg text-[11px] font-medium bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
-        >
-          Parent…
-        </button>
-        {openPicker === 'parent' && (
-          <ParentPickerPopover
-            options={parentOptions}
-            typeById={typeById}
-            selectedId={null}
-            onPick={(id) => { onApply({ parentId: id }); setOpenPicker(null) }}
-            onClear={() => { onApply({ parentId: null }); setOpenPicker(null) }}
-            onClose={() => setOpenPicker(null)}
-          />
-        )}
-      </div>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setOpenPicker(openPicker === 'type' ? null : 'type')}
+              className="px-2 py-1 rounded-lg text-[11px] font-medium bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
+            >
+              Type…
+            </button>
+            {openPicker === 'type' && (
+              <TypePickerPopover
+                entityTypes={entityTypes}
+                selectedId={null}
+                onPick={(id) => { onApply({ typeId: id }); setOpenPicker(null) }}
+                onClose={() => setOpenPicker(null)}
+              />
+            )}
+          </div>
 
-      <form
-        onSubmit={(e) => { e.preventDefault(); onApply({ description }); setDescription('') }}
-        className="flex items-center gap-1"
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setOpenPicker(openPicker === 'parent' ? null : 'parent')}
+              className="px-2 py-1 rounded-lg text-[11px] font-medium bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
+            >
+              Parent…
+            </button>
+            {openPicker === 'parent' && (
+              <ParentPickerPopover
+                options={parentOptions}
+                typeById={typeById}
+                selectedId={null}
+                onPick={(id) => { onApply({ parentId: id }); setOpenPicker(null) }}
+                onClear={() => { onApply({ parentId: null }); setOpenPicker(null) }}
+                onClose={() => setOpenPicker(null)}
+              />
+            )}
+          </div>
+
+          <form
+            onSubmit={(e) => { e.preventDefault(); onApply({ description }); setDescription('') }}
+            className="flex items-center gap-1"
+          >
+            <input
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Description…"
+              className="w-40 px-2 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-ink placeholder:text-ink-muted/50 focus:outline-none"
+            />
+            <button type="submit" className="px-2 py-1 rounded-lg text-[11px] font-medium bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/15 transition-colors">
+              Apply
+            </button>
+          </form>
+        </>
+      )}
+
+      <button
+        type="button"
+        onClick={onDelete}
+        aria-label="Delete selected rows"
+        className="px-2 py-1 rounded-lg text-[11px] font-medium text-rose-500 hover:bg-rose-500/10 transition-colors"
       >
-        <input
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="Description…"
-          className="w-40 px-2 py-1 rounded-lg text-[11px] bg-black/5 dark:bg-white/10 text-ink placeholder:text-ink-muted/50 focus:outline-none"
-        />
-        <button type="submit" className="px-2 py-1 rounded-lg text-[11px] font-medium bg-accent-lineage/10 text-accent-lineage hover:bg-accent-lineage/15 transition-colors">
-          Apply
-        </button>
-      </form>
+        Delete
+      </button>
 
       <button type="button" onClick={onClear} className="ml-auto text-[11px] text-ink-muted hover:text-ink transition-colors">
         Clear selection
@@ -451,9 +579,19 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
   const updateRow = useBuildRowsStore((s) => s.updateRow)
   const removeRow = useBuildRowsStore((s) => s.removeRow)
   const entityTypes = useViewEntityTypes()
+  const setRowLayer = useBuildRowsStore((s) => s.setRowLayer)
+  const duplicateRowSubtree = useBuildRowsStore((s) => s.duplicateRowSubtree)
+
+  // The view's own layers (never hard-coded) — same source `resolveRowLayer`'s
+  // typeId→layerId map derives from, so the Layer column's default always
+  // matches Apply-time placement.
+  const rawLayers = useLayers()
+  const sortedLayers = useMemo(() => [...rawLayers].sort((a, b) => a.order - b.order), [rawLayers])
+  const typeLayerMap = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
 
   const rawIdSet = useMemo(() => new Set(rawRows.map((r) => r.id)), [rawRows])
   const displayIds = useMemo(() => rows.map((r) => r.id), [rows])
+  const selectableIds = useMemo(() => displayIds.filter((id) => rawIdSet.has(id)), [displayIds, rawIdSet])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -502,28 +640,22 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
     })
   }, [rawIdSet])
 
-  // Duplicate composes addSibling + a follow-up updateRow once the store's
-  // generated id for the new row is known — same "diff rawRows after the
-  // mutation" technique BuildOutline uses to focus a freshly created row.
-  const pendingDuplicateRef = useRef<{ prevIds: Set<string>; patch: Partial<BuildRow> } | null>(null)
-  useEffect(() => {
-    const pending = pendingDuplicateRef.current
-    if (!pending) return
-    pendingDuplicateRef.current = null
-    const created = rawRows.find((r) => !pending.prevIds.has(r.id))
-    if (created) updateRow(created.id, pending.patch)
-  }, [rawRows, updateRow])
-
   const handleDuplicate = (row: BuildRow) => {
-    pendingDuplicateRef.current = {
-      prevIds: new Set(rawRows.map((r) => r.id)),
-      patch: { name: row.name ? `${row.name} copy` : '', typeId: row.typeId, description: row.description },
-    }
-    addSibling(row.id)
+    duplicateRowSubtree(row.id)
   }
 
   const applyFillDown = (patch: Partial<BuildRow>) => {
     selectedIds.forEach((id) => { if (rawIdSet.has(id)) updateRow(id, patch) })
+  }
+
+  const handleDeleteSelected = () => {
+    selectedIds.forEach((id) => removeRow(id))
+    setSelectedIds(new Set())
+  }
+
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id))
+  const handleSelectAll = () => {
+    setSelectedIds(allSelected ? new Set() : new Set(selectableIds))
   }
 
   const handlePasteDown = (startId: string, field: 'name' | 'description', lines: string[]) => {
@@ -551,7 +683,7 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
 
   return (
     <div className="h-full flex flex-col">
-      {selectedIds.size >= 2 && (
+      {selectedIds.size >= 1 && (
         <FillDownBar
           count={selectedIds.size}
           entityTypes={entityTypes}
@@ -559,15 +691,26 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
           rawRows={rawRows}
           selectedIds={selectedIds}
           onApply={applyFillDown}
+          onDelete={handleDeleteSelected}
           onClear={() => setSelectedIds(new Set())}
         />
       )}
 
       <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-glass-border text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-        <span className="w-5 flex-shrink-0" />
+        <span className="w-5 flex-shrink-0 flex items-center justify-center">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            disabled={selectableIds.length === 0}
+            onChange={handleSelectAll}
+            aria-label="Select all rows"
+            className="w-3.5 h-3.5 accent-accent-lineage normal-case"
+          />
+        </span>
         <span className="flex-[2] min-w-0">Name</span>
         <span className="w-32 flex-shrink-0">Type</span>
         <span className="w-32 flex-shrink-0">Parent</span>
+        <span className="w-28 flex-shrink-0">Layer</span>
         <span className="flex-[2] min-w-0">Description</span>
         <span className="w-4 flex-shrink-0" />
         <span className="w-[92px] flex-shrink-0" />
@@ -600,9 +743,12 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
                   typeById={typeById}
                   entityTypes={entityTypes}
                   rawRows={rawRows}
+                  layers={sortedLayers}
+                  typeLayerMap={typeLayerMap}
                   selected={selectedIds.has(row.id)}
                   onToggleSelect={(shiftKey) => toggleRowSelection(row.id, shiftKey)}
                   onUpdate={(patch) => updateRow(row.id, patch)}
+                  onSetLayer={(layerId) => setRowLayer(row.id, layerId)}
                   onPasteDown={(field, lines) => handlePasteDown(row.id, field, lines)}
                   onAddSibling={() => addSibling(row.id)}
                   onAddChild={() => addChild(row.id)}
