@@ -130,6 +130,17 @@ describe('BuildGrid Layer column', () => {
     rerender(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} />)
     expect(screen.getByRole('button', { name: 'Layer for Alpha' })).toHaveTextContent('Layer One')
   })
+
+  // The type used here ('widget') is deliberately absent from every layer's
+  // `entityTypes`, so `typeLayerMap` has no entry for it — the Grid must fall
+  // back to `fallbackLayerId` (mirroring `resolveRowLayer`'s Apply-time
+  // placement) instead of showing an empty '—' default.
+  it('defaults an unmapped type\'s Layer cell to fallbackLayerId, matching Apply-time placement', () => {
+    useBuildRowsStore.getState().setRows([makeRow({ id: 'a', name: 'Alpha', typeId: 'widget' })])
+    render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} fallbackLayerId="layer-2" />)
+
+    expect(screen.getByRole('button', { name: 'Layer for Alpha' })).toHaveTextContent('Layer Two')
+  })
 })
 
 // Task 5: a single checked row must be actionable (delete), select-all must

@@ -253,7 +253,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
             {activeTab === 'outline' ? (
               <BuildOutline rows={validated} typeById={typeById} />
             ) : activeTab === 'grid' ? (
-              <BuildGrid rows={validated} typeById={typeById} />
+              <BuildGrid rows={validated} typeById={typeById} fallbackLayerId={layerId} />
             ) : (
               <BuildPaste ctx={ctx} typeById={typeById} rootParentType={parentType?.id ?? null} />
             )}

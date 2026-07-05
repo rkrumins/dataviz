@@ -27,9 +27,11 @@
  *
  * Layer column: each row's Layer cell defaults to the auto-by-type target —
  * derived from the view's own layers (`useLayers()`) via the same
- * `buildTypeLayerMap` the resolver (`resolveRowLayer.ts`) uses — and can be
- * overridden per row (`buildRowsStore.setRowLayer`); clearing the override
- * reverts to auto-by-type. Ontology-agnostic: no type/layer names here.
+ * `buildTypeLayerMap` the resolver (`resolveRowLayer.ts`) uses, falling back
+ * to `fallbackLayerId` for an unmapped type (via `resolveRowLayer` itself, so
+ * the two can't drift) — and can be overridden per row
+ * (`buildRowsStore.setRowLayer`); clearing the override reverts to auto.
+ * Ontology-agnostic: no type/layer names here.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -40,7 +42,7 @@ import { useLayers } from '@/store/referenceModelStore'
 import type { EntityTypeSchema } from '@/types/schema'
 import type { BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
-import { buildTypeLayerMap } from './resolveRowLayer'
+import { buildTypeLayerMap, resolveRowLayer } from './resolveRowLayer'
 import { computeRangeIds, computeDownIds, descendantIds } from './buildGridSelection'
 import { TypePickerPopover } from './TypePickerPopover'
 
@@ -48,6 +50,11 @@ export interface BuildGridProps {
   /** Validated rows (BuildPanel's `validateBuildRows(rows, ctx)`) — live type inference + status. */
   rows: BuildRow[]
   typeById: Map<string, EntityTypeSchema>
+  /** Layer for a type that maps to no column — the Build-open layer
+   *  (`buildLayerId`, Context View only). Folded into the Layer cell's
+   *  default via `resolveRowLayer` so the Grid's displayed default always
+   *  matches Apply-time placement (`resolveRowLayer.ts`). */
+  fallbackLayerId?: string
 }
 
 const ROW_HEIGHT = 44
@@ -230,6 +237,8 @@ interface BuildGridRowProps {
   layers: { id: string; name: string }[]
   /** `typeId → layerId` auto-by-type map (`buildTypeLayerMap`), for the Layer cell's default. */
   typeLayerMap: Map<string, string>
+  /** Layer for a type that maps to no column — see `BuildGridProps.fallbackLayerId`. */
+  fallbackLayerId?: string
   selected: boolean
   onToggleSelect: (shiftKey: boolean) => void
   onUpdate: (patch: Partial<BuildRow>) => void
@@ -242,7 +251,7 @@ interface BuildGridRowProps {
 }
 
 function BuildGridRow({
-  row, isSynthetic, type, typeById, entityTypes, rawRows, layers, typeLayerMap, selected,
+  row, isSynthetic, type, typeById, entityTypes, rawRows, layers, typeLayerMap, fallbackLayerId, selected,
   onToggleSelect, onUpdate, onSetLayer, onPasteDown, onAddSibling, onAddChild, onDuplicate, onRemove,
 }: BuildGridRowProps) {
   const [openPicker, setOpenPicker] = useState<'type' | 'parent' | 'layer' | null>(null)
@@ -262,12 +271,14 @@ function BuildGridRow({
     return rawRows.filter((r) => !excluded.has(r.id))
   }, [rawRows, row.id, isSynthetic])
 
-  // Layer cell: auto-by-type target from the SAME typeId→layerId map the
-  // resolver uses, overridden by row.layerId when set (Task 2).
+  // Layer cell: same resolution `resolveRowLayer` uses at Apply time — type-derived
+  // layer, else `fallbackLayerId` for an unmapped type — overridden by row.layerId
+  // when set (Task 2). Reusing the resolver here keeps the Grid's displayed
+  // default from drifting out of sync with actual placement.
   const layerNameById = useMemo(() => new Map(layers.map((l) => [l.id, l.name])), [layers])
-  const autoLayerId = row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined
+  const autoLayerId = (row.typeId ? typeLayerMap.get(row.typeId.toLowerCase()) : undefined) ?? fallbackLayerId
   const autoLayerName = autoLayerId ? layerNameById.get(autoLayerId) : undefined
-  const effectiveLayerId = row.layerId ?? autoLayerId
+  const effectiveLayerId = resolveRowLayer(row, { typeLayerMap, fallbackLayerId })
   const effectiveLayerName = effectiveLayerId ? layerNameById.get(effectiveLayerId) : undefined
 
   const handlePaste = (field: 'name' | 'description') => (e: React.ClipboardEvent<HTMLInputElement>) => {
@@ -520,7 +531,7 @@ function FillDownBar({
   )
 }
 
-export function BuildGrid({ rows, typeById }: BuildGridProps) {
+export function BuildGrid({ rows, typeById, fallbackLayerId }: BuildGridProps) {
   const rawRows = useBuildRowsStore((s) => s.rows)
   const addSibling = useBuildRowsStore((s) => s.addSibling)
   const addChild = useBuildRowsStore((s) => s.addChild)
@@ -696,6 +707,7 @@ export function BuildGrid({ rows, typeById }: BuildGridProps) {
                   rawRows={rawRows}
                   layers={sortedLayers}
                   typeLayerMap={typeLayerMap}
+                  fallbackLayerId={fallbackLayerId}
                   selected={selectedIds.has(row.id)}
                   onToggleSelect={(shiftKey) => toggleRowSelection(row.id, shiftKey)}
                   onUpdate={(patch) => updateRow(row.id, patch)}
