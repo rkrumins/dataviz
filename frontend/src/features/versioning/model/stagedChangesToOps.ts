@@ -116,8 +116,34 @@ export function stagedChangesToOps(
         })
         break
       }
-      // create_entity → provider.createNode (handled in saveStagedChangesToDraft);
-      // assign_layer / move_to_layer → view/blueprint config (referenceModelStore), not graph entities.
+      case 'create_entity': {
+        // The collapsed save sends creates in the SAME atomic batch as everything else. The node
+        // carries NO urn — the backend mints it (entity_id == urn), exactly like /nodes/create — and
+        // is referenced by its temp urn (`ref`) so a nested child's containment edge (or a user-drawn
+        // edge) can point at it within the one commit. The parent is passed by ref too (a staged temp
+        // urn OR an existing real urn); the backend resolves it in the same batch.
+        const after = asObj(c.after)
+        const ref = c.targetUrn ?? c.targetId
+        const payload: Record<string, unknown> = { entityType: after.entityType, displayName: after.displayName }
+        if (after.tags !== undefined) payload.tags = after.tags
+        if (after.properties !== undefined) payload.properties = after.properties
+        ops.push({ op: 'create', kind: 'node', ref, payload })
+        if (after.parentUrn != null) {
+          ops.push({
+            op: 'create',
+            kind: 'edge',
+            ref: `contains-${ref}`,
+            payload: {
+              edgeType: after.containmentEdgeType ?? 'CONTAINS',
+              sourceEntityId: resolveId(String(after.parentUrn)),
+              targetEntityId: ref,
+            },
+          })
+        }
+        break
+      }
+      // assign_layer / move_to_layer → folded into the same batch by saveStagedChangesToDraft as
+      // node `layerAssignment` updates (not view-config here).
       default:
         break
     }

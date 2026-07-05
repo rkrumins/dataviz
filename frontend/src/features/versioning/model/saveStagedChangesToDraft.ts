@@ -1,19 +1,20 @@
 /**
- * saveStagedChangesToDraft — the draft "Save" path. Two phases so every edit type
- * actually persists to the draft branch:
- *   1. create_entity runs through its proven `provider.createNode` apply hook (the
- *      provider is branch-scoped, so it writes to the draft; this also constructs the
- *      urn + containment edge and remaps the optimistic temp id).
- *   2. everything else (rename/update/delete node, edit/delete/reverse edge) is folded
- *      into ONE atomic, server-merged commit via `/graph/changes`.
+ * saveStagedChangesToDraft — the draft "Save" path, as ONE atomic commit.
  *
- * This replaces the old per-change `applyAll` for drafts, where most change types had
- * no working apply hook (or hit the unscoped endpoint) and so never persisted.
+ * Every staged edit — creates (the backend mints the urn + resolves temp refs), user-drawn and
+ * containment edges, renames/updates/deletes, AND layer moves — is translated to `/graph/changes`
+ * ops and sent in a SINGLE batch, so one Review & Save lands as exactly one commit on the draft
+ * (not one commit per created entity). The commit is atomic: on any failure nothing is persisted.
+ *
+ * After the commit succeeds there is NO reload — the canvas keeps its optimistic nodes — so we
+ * reconcile it in place from the batch's ref→id map: each create swaps its temp node for the real
+ * one (via its `reconcile` hook, childCount-safe), layer assignments are re-keyed temp→real, and
+ * user-drawn edges are re-pointed at the real endpoints.
  */
 import { applyGraphChanges, type GraphChangeOp } from '@/services/versioningApiService'
-import { useStagedChangesStore, type ApplyContext, type StagedChange } from '@/store/stagedChangesStore'
+import type { StagedChange } from '@/store/stagedChangesStore'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
-import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { useCanvasStore } from '@/store/canvas'
 import { stagedChangesToOps } from './stagedChangesToOps'
 
 export interface DraftSaveTarget {
@@ -23,10 +24,8 @@ export interface DraftSaveTarget {
   provider: GraphDataProvider
   message?: string
   /**
-   * Re-key view-config (layer) assignments from a created entity's temp urn onto its
-   * real urn. Called the instant each create resolves in Phase 1 — coupled to the
-   * optimistic node swap — so the assignment is never lost if a later create or the
-   * Phase-2 commit throws, and the node never flashes out of its layer mid-save.
+   * Re-key view-config (layer) assignments from a created entity's temp urn onto its real urn,
+   * so a node created in a layer keeps its column after the save reconciles.
    */
   remapEntityId?: (oldId: string, newId: string) => void
 }
@@ -35,114 +34,99 @@ export async function saveStagedChangesToDraft(
   changes: StagedChange[],
   target: DraftSaveTarget,
 ): Promise<{ commitId?: string | null }> {
-  const tempIdMap = new Map<string, string>()
-  const ctx: ApplyContext = {
-    provider: target.provider,
-    wsId: target.wsId,
-    resolveTempId: (t) => tempIdMap.get(t),
-    registerTempIdResolution: (t, r) => tempIdMap.set(t, r),
-  }
-
-  // Phase 1 — creates via the proven branch-scoped provider path. Each create is
-  // attempted independently so an ontology rejection (e.g. an illegal containment
-  // relationship) is attributed to its specific entity rather than aborting the
-  // batch opaquely. If ANY create fails we drop the ones that already persisted
-  // (so a retry can't duplicate them), skip children of a failed parent, flag the
-  // failures, and stop before the mutation commit — never persist a partial hierarchy.
-  const succeeded: string[] = []
-  const failures: { id: string; name: string; message: string }[] = []
-  // Temp urns of creates that failed or were skipped — their descendants can't resolve a parent.
-  const blockedParentUrns = new Set<string>()
-  for (const c of changes) {
-    if (c.type !== 'create_entity' || !c.apply) continue
-    const after = c.after as { displayName?: string; parentUrn?: string } | undefined
-    const name = after?.displayName || c.targetId
-    const parentUrn = after?.parentUrn
-    // A child of a staged parent that already failed can never resolve its parent —
-    // skip it with a clear message instead of a raw backend "Parent not found".
-    if (parentUrn && parentUrn.startsWith('urn:staged:') && blockedParentUrns.has(parentUrn)) {
-      failures.push({ id: c.id, name, message: 'Skipped — its parent could not be created.' })
-      if (c.targetUrn) blockedParentUrns.add(c.targetUrn)
-      continue
-    }
-    try {
-      await c.apply(ctx)
-      succeeded.push(c.id)
-      // Re-key this entity's layer assignment temp→real NOW, in the same tick as the
-      // apply hook's node swap — so it survives a later create/Phase-2 failure and the
-      // node never drops out of its layer column during the save. (No-op if unassigned.)
-      const realUrn = c.targetUrn ? tempIdMap.get(c.targetUrn) : undefined
-      if (c.targetUrn && realUrn) target.remapEntityId?.(c.targetUrn, realUrn)
-    } catch (e) {
-      failures.push({ id: c.id, name, message: (e as Error).message })
-      if (c.targetUrn) blockedParentUrns.add(c.targetUrn)
-    }
-  }
-  if (failures.length > 0) {
-    const succeededSet = new Set(succeeded)
-    const failedIds = new Set(failures.map((f) => f.id))
-    const msgById = new Map(failures.map((f) => [f.id, f.message]))
-    useStagedChangesStore.setState((s) => ({
-      // Drop already-persisted creates (retry-safe) and flag the failures so the
-      // review panel highlights exactly the offending entities.
-      changes: s.changes
-        .filter((c) => !succeededSet.has(c.id))
-        .map((c) => (failedIds.has(c.id) ? { ...c, error: msgById.get(c.id) } : c)),
-      applyStatus: 'partial-error',
-      lastApplyResult: { ok: succeeded.length, failed: failures.length },
-    }))
-    const summary =
-      failures.length === 1
-        ? failures[0].message
-        : `${failures.length} entities couldn't be created:\n` +
-          failures.map((f) => `• ${f.name}: ${f.message}`).join('\n')
-    throw new Error(summary)
-  }
-
-  // Phase 2 — mutations + user-drawn edges as one atomic, server-merged commit.
-  // Resolve edge endpoints through Phase 1's temp-id map: an edge between two
-  // freshly-created nodes references their temp urns until the creates above
-  // register the real ones.
-  const resolve = (id: string) => tempIdMap.get(id) ?? id
-  const ops: GraphChangeOp[] = stagedChangesToOps(
-    changes.filter((c) => c.type !== 'create_entity'),
-    resolve,
-  )
-  let commitId: string | null = null
-  if (ops.length > 0) {
-    const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
-    commitId = res.commitId ?? null
-  }
-
-  // Phase 3 — layer moves persist in a SEPARATE, isolated commit AFTER the
-  // structural one. A layer move rewrites the entity's own `layerAssignment`
-  // (the single field the reload placement reads), but it MUST NOT ride in the
-  // atomic Phase-2 batch: if a layer op failed there it would roll back the
-  // user's creates/renames/containment edits too — the data-loss trap. Isolated
-  // + best-effort here, a layer failure is logged and skipped; the structural
-  // commit already succeeded and is safe.
-  const layerOps: GraphChangeOp[] = []
-  for (const c of changes) {
+  // ── Build ONE op batch ──────────────────────────────────────────────────────────────────────
+  const ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes
+  for (const c of changes) {                                 // fold layer moves into the SAME batch
     if (c.type !== 'assign_layer' && c.type !== 'move_to_layer') continue
     const layerId = (c.after as { layerId?: string } | undefined)?.layerId
     const rawId = c.targetUrn ?? c.targetId
-    if (!layerId || !rawId) continue
-    const id = resolve(rawId)
-    // Logical/pseudo groups have no backend entity to update — skip them.
-    if (id.startsWith('logical:')) continue
-    layerOps.push({ op: 'update', kind: 'node', id, payload: { layerAssignment: layerId } })
-  }
-  if (layerOps.length > 0) {
-    try {
-      await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, layerOps, 'Layer assignments')
-    } catch (e) {
-      // Non-fatal by design: the structural edits are already committed.
-      console.error('[saveStagedChangesToDraft] layer assignment persist failed (structural edits are safe)', e)
-    }
+    // Logical/pseudo groups have no backend entity. A fresh node's temp urn stays as-is and resolves
+    // server-side against the batch's creates.
+    if (!layerId || !rawId || rawId.startsWith('logical:')) continue
+    ops.push({ op: 'update', kind: 'node', id: rawId, payload: { layerAssignment: layerId } })
   }
 
-  // Rollups may have changed (lineage edges added/removed, containment moved): the server's
-  // draft overlay reports adjusted aggregated edges, but only a fresh fetch shows them.
-  invalidateAggregatedEdges()
-  return { commitId }
+  if (ops.length === 0) return { commitId: null }
+
+  // ── One atomic commit ───────────────────────────────────────────────────────────────────────
+  // On any failure NOTHING is persisted (no partial state). The error propagates to the caller,
+  // which surfaces it; the staged changes stay put for a clean retry.
+  const res = await applyGraphChanges(target.wsId, target.dataSourceId, target.branchId, ops, target.message)
+  const assigned = res.assigned ?? {}
+  const resolveRef = (id: string) => assigned[id] ?? id
+
+  // ── Reconcile the optimistic canvas in place (no post-save reload) ────────────────────────────
+  // Capture user-drawn edges BEFORE the create swaps: canvas.removeNode CASCADES (drops every edge
+  // touching the node), so an edge between two fresh nodes would otherwise be silently dropped.
+  const cs = useCanvasStore.getState()
+  const userEdges = changes.flatMap((c) => {
+    if (c.type !== 'create_edge') return []
+    const opt = cs.edges.find((e) => e.id === c.targetId)
+    return opt ? [{ c, opt }] : []
+  })
+
+  for (const c of changes) {
+    // create_entity: swap the optimistic temp node for the real minted id. Cosmetic canvas surgery —
+    // a glitch here must never fail an already-committed save.
+    if (c.type === 'create_entity') {
+      try { reconcileCreatedNode(c, resolveRef) } catch { /* noop */ }
+    }
+    const tempUrn = c.targetUrn
+    if (tempUrn && resolveRef(tempUrn) !== tempUrn) target.remapEntityId?.(tempUrn, resolveRef(tempUrn))
+  }
+
+  // Re-add user-drawn edges with the real edge id + resolved endpoints (the swapped nodes now carry
+  // their real urns).
+  if (userEdges.length > 0) {
+    useCanvasStore.getState().addEdges(userEdges.map(({ c, opt }) => ({
+      ...opt,
+      id: resolveRef(c.targetId),
+      source: resolveRef(opt.source),
+      target: resolveRef(opt.target),
+      data: { ...opt.data, isPending: undefined },
+    })))
+  }
+
+  return { commitId: res.commitId ?? null }
+}
+
+/** Swap a just-created entity's optimistic temp node for its real minted id — generic over how the
+ *  create was staged (single-add via useStageEntityCreation OR build/paste via planBuildStaging;
+ *  both put the same shape on `c.after`). Preserves the childCount patch so the post-save
+ *  collapse→expand cycle never orphans this node's children, and re-points its containment edge at
+ *  the real parent/child. `canvas.removeNode` already drops the optimistic containment edge via its
+ *  cascade, so we only re-add the resolved one. Called parent-before-child (staging order), so every
+ *  node re-adds its own upward edge with endpoints resolved to real ids. */
+function reconcileCreatedNode(c: StagedChange, resolveRef: (id: string) => string): void {
+  const tempUrn = c.targetUrn ?? c.targetId
+  const realUrn = resolveRef(tempUrn)
+  const cs = useCanvasStore.getState()
+  const opt = cs.nodes.find((n) => n.id === tempUrn)
+  const stagedChildCount = cs.edges.filter(
+    (e) => e.source === tempUrn && e.type === 'containment' && e.data?.isPending === 'create',
+  ).length
+  cs.removeNode(tempUrn)   // cascades: drops this node's optimistic containment edges
+  if (opt) {
+    cs.addNodes([{
+      ...opt,
+      id: realUrn,
+      data: {
+        ...opt.data,
+        urn: realUrn,
+        isPending: undefined,
+        childCount: Math.max((opt.data?.childCount as number) ?? 0, stagedChildCount),
+      },
+    }])
+  }
+  const after = (c.after ?? {}) as { parentUrn?: string; containmentEdgeType?: string }
+  if (after.parentUrn) {
+    const et = after.containmentEdgeType ?? 'CONTAINS'
+    cs.addEdges([{
+      id: resolveRef(`contains-${tempUrn}`),
+      source: resolveRef(after.parentUrn),
+      target: realUrn,
+      type: 'containment',
+      data: { edgeType: et, relationship: et.toLowerCase() },
+    }])
+  }
 }

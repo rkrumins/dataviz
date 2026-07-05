@@ -40,13 +40,25 @@ describe('stagedChangesToOps', () => {
     expect(ops).toEqual([{ op: 'update', kind: 'edge', id: 'e2', payload: { confidence: 0.9 } }])
   })
 
-  it('excludes create_entity (handled via the provider path) and view-config layer changes', () => {
+  it('maps a root create_entity to a node create op (ref=tempUrn, no urn — backend mints); excludes layer changes', () => {
     const ops = stagedChangesToOps([
-      sc({ type: 'create_entity', targetUrn: 'urn:new', after: { entityType: 'Table', displayName: 'X' } }),
+      sc({ type: 'create_entity', targetUrn: 'urn:staged:new', after: { entityType: 'Table', displayName: 'X', tags: ['pii'], properties: { p: 1 } } }),
       sc({ type: 'assign_layer', targetId: 'n3', after: { layerId: 'L1' } }),
       sc({ type: 'move_to_layer', targetId: 'n4', after: {} }),
     ])
-    expect(ops).toEqual([])
+    expect(ops).toEqual([
+      { op: 'create', kind: 'node', ref: 'urn:staged:new', payload: { entityType: 'Table', displayName: 'X', tags: ['pii'], properties: { p: 1 } } },
+    ])
+  })
+
+  it('maps a nested create_entity to a node create op + a containment edge op (parent by ref — backend resolves)', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'create_entity', targetUrn: 'urn:staged:child', after: { entityType: 'Column', displayName: 'C', parentUrn: 'urn:staged:parent', containmentEdgeType: 'CONTAINS' } }),
+    ])
+    expect(ops).toEqual([
+      { op: 'create', kind: 'node', ref: 'urn:staged:child', payload: { entityType: 'Column', displayName: 'C' } },
+      { op: 'create', kind: 'edge', ref: 'contains-urn:staged:child', payload: { edgeType: 'CONTAINS', sourceEntityId: 'urn:staged:parent', targetEntityId: 'urn:staged:child' } },
+    ])
   })
 
   it('maps create_edge to a create edge op (endpoints as sourceEntityId/targetEntityId)', () => {

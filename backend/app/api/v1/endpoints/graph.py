@@ -1707,6 +1707,60 @@ class GraphChangesResponse(BaseModel):
         populate_by_name = True
 
 
+def _resolve_change_ops(request_ops, mint_id, mint_urn):
+    """Translate a batch of canvas edit ops into ONE ``apply_ops`` op list. Two passes so creates AND
+    the edges/updates/layer-moves that reference those fresh nodes (by a temp ``ref``) commit together
+    as a SINGLE atomic commit — instead of one commit per create. Pass 1 assigns a real id to every
+    create (a NODE's id IS its urn — minted via ``mint_urn`` when the collapsed save omits it, exactly
+    like ``/nodes/create``; an edge gets a plain minted id) and builds the ``ref → id`` map; pass 2
+    emits the ops, resolving temp refs in edge endpoints + update/delete target ids and stamping the
+    node urn into its payload. Returns ``(ops, assigned)`` — ``assigned`` (ref/id → real id) is echoed
+    to the client to reconcile its optimistic ids. apply_ops validates same-batch edges against these
+    creates (proved in ``test_versioning_batch_create_edge``)."""
+    endpoint_fields = ("sourceEntityId", "source_entity_id", "targetEntityId", "target_entity_id")
+    assigned: dict = {}
+    create_eid: dict = {}                      # op index → its assigned real id (reused in pass 2)
+    for i, o in enumerate(request_ops):
+        if o.op == "create":
+            if o.kind == "edge":
+                eid = o.id or mint_id("ent")
+            else:                              # a NODE's entity_id IS its urn (versioned-graph model);
+                pl = o.payload or {}           # mint one when the collapsed save omits it.
+                eid = pl.get("urn") or o.id or mint_urn(str(pl.get("entityType") or "entity"))
+            create_eid[i] = eid
+            if o.ref:
+                assigned[o.ref] = eid
+            assigned.setdefault(eid, eid)
+
+    def _ref(x):                               # temp ref → real id; pass real ids / non-strings through
+        return assigned.get(x, x) if isinstance(x, str) else x
+
+    ops: List[dict] = []
+    for i, o in enumerate(request_ops):
+        kind = "edge" if o.kind == "edge" else "node"
+        if o.op == "delete":
+            if not o.id:
+                continue
+            ops.append({"op": "delete", "entity_kind": kind, "entity_id": _ref(o.id), "payload": None})
+        elif o.op == "create":
+            eid = create_eid[i]
+            payload = dict(o.payload or {})
+            if kind == "edge":                 # an edge may point at nodes created in THIS same batch
+                for f in endpoint_fields:
+                    if f in payload:
+                        payload[f] = _ref(payload[f])
+            else:                              # node — stamp the (minted-or-given) urn into the payload
+                payload["urn"] = eid
+            ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload})
+        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
+               # authoritative field-level merge (patch onto current, or a 3-way conflict check).
+            if not o.id:
+                continue
+            ops.append({"op": "update", "entity_kind": kind, "entity_id": _ref(o.id),
+                        "payload": o.payload or {}, "base_version": o.base_version})
+    return ops, assigned
+
+
 @router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True)
 async def apply_graph_changes(
     ws_id: str,
@@ -1734,28 +1788,8 @@ async def apply_graph_changes(
         raise HTTPException(status_code=404, detail="no versioned graph for this data source")
     graph_id = g["graph_id"]
 
-    assigned: dict = {}
-    ops: List[dict] = []
-    for o in request.ops:
-        kind = "edge" if o.kind == "edge" else "node"
-        if o.op == "delete":
-            if not o.id:
-                continue
-            ops.append({"op": "delete", "entity_kind": kind, "entity_id": o.id, "payload": None})
-        elif o.op == "create":
-            eid = o.id or prefixed_id("ent")
-            if o.ref:
-                assigned[o.ref] = eid
-            assigned.setdefault(eid, eid)
-            ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": o.payload or {}})
-        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
-               # authoritative field-level merge (patch onto current, or a 3-way conflict check when a
-               # base_version is supplied). The endpoint no longer pre-merges (which baked the client's
-               # possibly-stale view of `cur` into the op before any concurrency check could see it).
-            if not o.id:
-                continue
-            ops.append({"op": "update", "entity_kind": kind, "entity_id": o.id,
-                        "payload": o.payload or {}, "base_version": o.base_version})
+    from backend.app.ontology.urn import make_urn
+    ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
 
     if not ops:
         return {"commitId": None, "assigned": assigned}

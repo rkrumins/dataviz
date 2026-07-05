@@ -2374,9 +2374,9 @@ export function ContextViewCanvas({
              and confirming a batch of staged edits before they hit the backend. */}
         <StagedChangesPanel onConfirm={async () => {
           if (!scopeWsId) return
-          // Draft mode: persist every change type to the draft branch as one atomic,
-          // server-merged commit (creates via the proven provider path, the rest via
-          // /graph/changes). This is the path that makes draft editing actually work.
+          // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
+          // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
+          // Review & Save is exactly one commit (the backend mints urns + resolves temp refs).
           const bs = useBranchStore.getState()
           if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
             try {
