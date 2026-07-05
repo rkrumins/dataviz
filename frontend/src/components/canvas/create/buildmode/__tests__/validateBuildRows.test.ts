@@ -344,3 +344,75 @@ describe('validateBuildRows (FIX-A ontology-aware validation/auto-fix)', () => {
     expect(foById(result, 'stray').status).toBe('error')
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────
+// buildfix2: empty `canBeContainedBy` is UNRESTRICTED (any parent), not
+// "root-only". Only membership in `rootEntityTypes` makes a type root-only
+// (mutation_validator.py:156-157 / resolver.py:135-168 on the backend). An
+// ontology that declares only `canContain` (never `canBeContainedBy`) on a
+// non-root type leaves it empty by default — that type must still be a legal
+// child of anything that can contain it.
+//
+//   Root (declared root, canContain=[A, B], canBeContainedBy=[])
+//   A    (non-root, canContain=[B], canBeContainedBy=[])       <- the bug: empty, but NOT root-only
+//   B    (non-root, canContain=[],  canBeContainedBy=['A'])    <- non-empty allow-list wins even though
+//                                                                  Root.canContain already permits B
+const ecEt = (id: string, canContain: string[], canBeContainedBy: string[], level: number): EntityTypeSchema => ({
+  id, name: id, pluralName: id, visual: {} as never, fields: [], behavior: {} as never,
+  hierarchy: { level, canContain, canBeContainedBy, defaultExpanded: false, rollUpFields: [] },
+})
+
+const ecEntityTypes: EntityTypeSchema[] = [
+  ecEt('Root', ['A', 'B'], [], 0),
+  ecEt('A', ['B'], [], 1),
+  ecEt('B', [], ['A'], 2),
+]
+
+const ecRelationshipTypes: RelationshipTypeSchema[] = [rt('CONTAINS', [], [])]
+
+const ecHierarchyMap: BuildOntologyCtx['hierarchyMap'] = Object.fromEntries(
+  ecEntityTypes.map((t) => [t.id, { canContain: t.hierarchy.canContain, canBeContainedBy: t.hierarchy.canBeContainedBy }]),
+)
+
+const ecCtx: BuildOntologyCtx = {
+  entityTypes: ecEntityTypes,
+  rootEntityTypes: ['Root'],
+  hierarchyMap: ecHierarchyMap,
+  relationshipTypes: ecRelationshipTypes,
+  containmentEdgeTypes: ['CONTAINS'],
+}
+
+describe('isLegalChild — empty canBeContainedBy is UNRESTRICTED, not root-only (buildfix2)', () => {
+  it('(NEW regression) a non-root type with an EMPTY canBeContainedBy is legal under any parent that can contain it', () => {
+    expect(isLegalChild('Root', 'A', ecCtx)).toBe(true)
+  })
+
+  it('a declared root with an EMPTY canBeContainedBy stays illegal as anyone\'s child', () => {
+    expect(isLegalChild('A', 'Root', ecCtx)).toBe(false)
+    expect(isLegalChild('Object', 'Layer', foCtx)).toBe(false) // original "Layer under Object" guard, unchanged
+  })
+
+  it('a NON-EMPTY canBeContainedBy is an explicit allow-list that wins regardless of root status', () => {
+    // B's canBeContainedBy is ['A'] — Root.canContain permits B directly, but B's own allow-list doesn't
+    // mention Root, so it must still be rejected.
+    expect(isLegalChild('Root', 'B', ecCtx)).toBe(false)
+    expect(isLegalChild('A', 'B', ecCtx)).toBe(true)
+  })
+
+  it('group is BOTH a declared root AND self-nestable (canBeContainedBy: ["group"]) — regression guard', () => {
+    expect(isLegalChild('group', 'group', ctx)).toBe(true)
+  })
+})
+
+describe('validateBuildRows — empty canBeContainedBy end-to-end (buildfix2)', () => {
+  it('a non-root child with an empty canBeContainedBy is valid under its declared parent (was wrongly `error` pre-fix)', () => {
+    const rows: BuildRow[] = [
+      makeRow({ id: 'root1', name: 'Root', typeId: 'Root', parentId: null }),
+      makeRow({ id: 'a1', name: 'A', typeId: 'A', parentId: 'root1' }),
+    ]
+    const result = validateBuildRows(rows, ecCtx)
+    const a1 = result.find((r) => r.id === 'a1')!
+    expect(a1.status).toBe('valid')
+    expect(a1.issues).toHaveLength(0)
+  })
+})

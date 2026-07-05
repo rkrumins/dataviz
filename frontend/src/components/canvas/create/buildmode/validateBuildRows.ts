@@ -83,10 +83,17 @@ function childCanBeContainedBy(childType: string, ctx: BuildOntologyCtx): string
   return key ? ctx.hierarchyMap[key].canBeContainedBy : undefined
 }
 
-/** A genuine ROOT type (`canBeContainedBy === []`) — legal ONLY at the top level, never as anyone's child. */
+/**
+ * A DECLARED root type — membership in `ctx.rootEntityTypes` (case-insensitive), legal ONLY at the top level,
+ * never as anyone's child. This is NOT "has an empty `canBeContainedBy`": per the backend authority
+ * (mutation_validator.py:156-157), an empty `canBeContainedBy` means UNRESTRICTED (any parent), not root-only —
+ * only explicit membership in the declared roots list makes a type root-only. In the real system the two signals
+ * never conflict (resolver.py derives `root_entity_types` as `not can_be_contained_by`), but a type can be BOTH a
+ * declared root AND separately declare a non-empty `canBeContainedBy` for self-nesting (e.g. `group`), so
+ * `rootEntityTypes` membership — not the emptiness of `canBeContainedBy` — is the authoritative root signal here.
+ */
 function isRootOnlyType(typeId: string, ctx: BuildOntologyCtx): boolean {
-  const canBeContainedBy = childCanBeContainedBy(typeId, ctx)
-  return canBeContainedBy != null && canBeContainedBy.length === 0
+  return ctx.rootEntityTypes.some((r) => sameId(r, typeId))
 }
 
 /**
@@ -96,10 +103,12 @@ function isRootOnlyType(typeId: string, ctx: BuildOntologyCtx): boolean {
  *    {@link builderAllowedChildTypeIds}'s combined canContain + containment-relationship-legality gate (which
  *    already also implies the LEAF guard: a parent closed to nesting has an empty legal-children set) — or, at
  *    the top level, one of the declared root types ({@link allowedChildTypeIds} with `parentType` null).
- *  - root guard: the child's OWN `canBeContainedBy` must permit `parentType`. A genuine root type
- *    (`canBeContainedBy === []`) is legal ONLY when `parentType` is null — no parent, however permissive its
- *    `canContain`, may ever contain one. This is the gate `allowedChildTypeIds`'s "empty canContain = allow
- *    everything" fallback (and any wildcard-endpoint containment relationship) would otherwise let slip past.
+ *  - the child's OWN `canBeContainedBy`:
+ *     - non-empty: an explicit allow-list that WINS regardless of root status — legal iff `parentType` is in it
+ *       (a type can be both a declared root and self-nestable, e.g. `group` with `canBeContainedBy: ['group']`).
+ *     - empty: UNRESTRICTED per the backend authority (mutation_validator.py:156-157) — legal under any parent
+ *       that can contain it — UNLESS `childType` is a declared root ({@link isRootOnlyType}), which can never be
+ *       legally nested under anyone.
  */
 export function isLegalChild(parentType: string | null, childType: string, ctx: BuildOntologyCtx): boolean {
   if (parentType == null) {
@@ -116,8 +125,8 @@ export function isLegalChild(parentType: string | null, childType: string, ctx: 
   if (!setHasId(legalChildren, childType)) return false
   const canBeContainedBy = childCanBeContainedBy(childType, ctx)
   if (canBeContainedBy == null) return true // unknown type: fail open, consistent with the rest of this module
-  if (canBeContainedBy.length === 0) return false // genuine root type: never legal as anyone's child
-  return canBeContainedBy.some((p) => sameId(p, parentType))
+  if (canBeContainedBy.length === 0) return !isRootOnlyType(childType, ctx) // empty = unrestricted, unless a declared root
+  return canBeContainedBy.some((p) => sameId(p, parentType)) // non-empty: explicit allow-list wins regardless of root
 }
 
 function buildRetypeCtx(byId: Map<string, BuildRow>, ctx: BuildOntologyCtx): RetypeContext {
