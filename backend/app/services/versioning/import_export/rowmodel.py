@@ -51,16 +51,32 @@ def _is_scalar_or_flat_list(v: Any) -> bool:
     return False
 
 
+# Sentinel that flows to the update patch and tells it to REMOVE the property (see
+# service._patch_payload). Chosen so it can never collide with real data. An EMPTY cell still means
+# "leave unchanged" (PATCH); deletion is always explicit — a ``\N`` token in a prop.<name> cell, or
+# a ``null`` value in properties_json.
+# Uses a Unicode Private-Use-Area char (never in real data, and — unlike a NUL byte — valid in
+# Postgres text/JSONB so the staged row persists).
+PROP_DELETE = "__nx_prop_delete__"
+_DELETE_TOKENS = {"\\n", "\\N", "\\NULL"}
+
+
 def _assemble_properties(raw: Dict[str, Any]) -> Dict[str, Any]:
     props: Dict[str, Any] = {}
     for key, val in raw.items():
-        if key.startswith(_PROP_PREFIX) and not _blank(val):
-            props[key[len(_PROP_PREFIX):]] = _clean(val)
+        if not key.startswith(_PROP_PREFIX):
+            continue
+        name = key[len(_PROP_PREFIX):]
+        if isinstance(val, str) and val.strip() in _DELETE_TOKENS:
+            props[name] = PROP_DELETE                 # explicit "delete this property"
+        elif not _blank(val):
+            props[name] = _clean(val)
     overflow = raw.get("properties_json")
     if not _blank(overflow):
         parsed = json.loads(overflow) if isinstance(overflow, str) else overflow
         if isinstance(parsed, dict):
-            props.update(parsed)
+            for k, v in parsed.items():
+                props[k] = PROP_DELETE if v is None else v   # null in properties_json = delete
     return props
 
 

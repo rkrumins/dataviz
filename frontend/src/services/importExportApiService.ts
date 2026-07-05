@@ -66,6 +66,7 @@ export interface ImportPreviewRow {
   op?: string | null
   status?: string | null
   matchedEntityId?: string | null
+  label?: string
   reasons?: string[]
 }
 

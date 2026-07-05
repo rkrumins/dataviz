@@ -129,11 +129,16 @@ class ImportExportService:
         if job is None:
             return None
         async with db.graphver_session() as s:
+            # Surface the actual CHANGES (skip unchanged noise) with a human label, so the dialog can
+            # show "T0 · updated", "orders · new", "row 13 · invalid: <reason>" — a real preview.
             rows = (await s.execute(
-                select(ImportRowORM).where(ImportRowORM.job_id == job_id)
+                select(ImportRowORM)
+                .where(ImportRowORM.job_id == job_id, ImportRowORM.status != "unchanged")
                 .order_by(ImportRowORM.row_index).limit(limit))).scalars().all()
             sample = [{"rowIndex": r.row_index, "kind": r.kind, "op": r.resolved_op,
                        "status": r.status, "matchedEntityId": r.matched_entity_id,
+                       "label": (r.raw or {}).get("displayName") or (r.raw or {}).get("qualifiedName")
+                                or (r.raw or {}).get("urn") or "",
                        "reasons": r.reasons or []} for r in rows]
         return {"job": job, "summary": job.get("summary"), "sample": sample,
                 "previewDownloadUrl": job.get("previewUri"),

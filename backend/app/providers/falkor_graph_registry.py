@@ -8,13 +8,15 @@ graph to **its data source's pinned FalkorDB instance** (``ProviderORM.host/port
 decrypted credentials), so a projection lands on the same instance the per-provider
 read path (``ProviderManager``) and the aggregation worker use.
 
-Fallback contract (never raises from the factory itself):
-- ``provider_id`` of ``None`` / ``""`` / ``"default"`` → the env-configured instance
-  (``FALKORDB_HOST`` / ``FALKORDB_PORT`` / ``FALKORDB_POOL_SIZE``) — exactly today's
-  single-instance behavior.
-- Unknown / inactive / non-falkordb provider, or any lookup failure → the env
-  instance, logged loudly (a deleted provider row silently landing writes on the
-  wrong instance is the failure mode we most want visible).
+Fallback contract:
+- ``provider_id`` of ``None`` / ``""`` / ``"default"`` (genuinely unrouted — a graph with
+  no pinned provider) → the env-configured instance (``FALKORDB_HOST`` / ``FALKORDB_PORT``
+  / ``FALKORDB_POOL_SIZE``) — exactly today's single-instance behavior. This is the ONLY
+  case that falls back to the env instance.
+- An explicitly PINNED ``provider_id`` that is unknown / inactive / non-falkordb / has no
+  host, or whose lookup raises, RAISES ``ProviderConfigurationError`` instead — landing a
+  pinned graph's writes on the wrong (env-default) instance is a data-corruption risk, not
+  something to silently paper over.
 
 The factory may return an awaitable (the first use of a provider does an async
 registry read); callers ``await`` when needed. Handles are cached per ``(host,
@@ -26,6 +28,8 @@ from __future__ import annotations
 import logging
 import os
 from typing import Callable, Optional
+
+from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
 

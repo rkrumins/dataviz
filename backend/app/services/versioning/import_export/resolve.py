@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .rowmodel import PROP_DELETE
+
 _NODE_FIELDS = (
     "urn", "entityType", "displayName", "qualifiedName",
     "description", "sourceSystem", "layerAssignment",
@@ -37,9 +39,30 @@ def _scalar_eq(a: Any, b: Any) -> bool:
 
 
 def _changed_props(new_props: Mapping[str, Any], cur_props: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Only the properties whose value actually changed (or are new) — type-tolerant."""
+    """Only the properties whose value actually changed (or are new), type-tolerant. A ``PROP_DELETE``
+    sentinel is a removal — kept only when the property currently exists (else it's a no-op)."""
     cur = cur_props or {}
-    return {k: v for k, v in (new_props or {}).items() if not _scalar_eq(v, cur.get(k))}
+    out: Dict[str, Any] = {}
+    for k, v in (new_props or {}).items():
+        if v == PROP_DELETE:
+            if k in cur:
+                out[k] = v
+        elif not _scalar_eq(v, cur.get(k)):
+            out[k] = v
+    return out
+
+
+def _no_deletes(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip PROP_DELETE sentinels from a CREATE payload — you can't delete a property on a brand-new
+    entity (the sentinel only means something against an existing entity's properties)."""
+    props = payload.get("properties")
+    if props:
+        cleaned = {k: v for k, v in props.items() if v != PROP_DELETE}
+        if cleaned:
+            payload["properties"] = cleaned
+        else:
+            payload.pop("properties", None)
+    return payload
 
 
 def _changed_fields(new_payload: Mapping[str, Any], cur: Mapping[str, Any]) -> Dict[str, Any]:
@@ -160,7 +183,8 @@ def resolve_rows(
             urn_to_eid[row["urn"]] = eid
         if row.get("qualifiedName"):
             qname_to_eid[row["qualifiedName"]] = eid
-        ops.append({"op": "create", "entity_kind": "node", "entity_id": eid, "payload": _node_payload(row)})
+        ops.append({"op": "create", "entity_kind": "node", "entity_id": eid,
+                    "payload": _no_deletes(_node_payload(row))})
         resolutions.append(_resolution(row, "create", eid))
 
     # ---- pass 2: edges ----
@@ -198,7 +222,7 @@ def resolve_rows(
             eid = mint_id()
             edge_to_eid[key] = eid
             ops.append({"op": "create", "entity_kind": "edge", "entity_id": eid,
-                        "payload": _edge_payload(row, seid, teid)})
+                        "payload": _no_deletes(_edge_payload(row, seid, teid))})
             resolutions.append(_resolution(row, "create", eid))
 
     return ops, resolutions

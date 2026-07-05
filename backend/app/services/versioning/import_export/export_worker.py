@@ -49,13 +49,23 @@ def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[D
 
 
 def column_order(records: List[Dict[str, Any]]) -> List[str]:
-    """Deterministic column order: kind + core (node then edge) + sorted prop.* + properties_json
-    + _op — the union present across ``records`` (for csv/tsv/xlsx; ndjson ignores)."""
-    base = ["kind"] + _NODE_COL_ORDER + [c for c in _EDGE_COL_ORDER if c not in _NODE_COL_ORDER]
-    props = sorted({k for r in records for k in r if k.startswith("prop.")})
-    tail = [c for c in ("properties_json", "_op") if any(c in r for r in records)]
-    cols = [c for c in base if any(c in r for r in records)]
-    return cols + props + tail
+    """Deterministic, EDIT-READY column order (csv/tsv/xlsx; ndjson ignores). Always includes the
+    full editable node schema + a ``properties_json`` surface + ``_op``, even when those cells are
+    empty, so a user can add a description/tag/layer or a NEW property without hand-adding a column
+    (the fragile step that shifts values into the wrong column). Edge columns appear only when the
+    export actually has edges. Existing ``prop.<name>`` columns are included so they edit in place."""
+    has_edge = any(r.get("kind") == "edge" for r in records)
+    cols: List[str] = ["kind"] + list(_NODE_COL_ORDER)
+    if has_edge:
+        cols += [c for c in _EDGE_COL_ORDER if c not in cols]
+    cols += sorted({k for r in records for k in r if k.startswith("prop.")})
+    cols += ["properties_json", "_op"]              # property escape hatch + op — ALWAYS present
+    seen, out = set(), []                            # dedup, preserve order
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 def example_template_records() -> List[Dict[str, Any]]:

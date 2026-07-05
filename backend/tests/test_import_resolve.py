@@ -120,6 +120,20 @@ def _run() -> None:
     assert by_row[1]["resolved_op"] == "create", by_row[1]          # 'table' ~ 'Table'
     assert by_row[2]["resolved_op"] == "invalid" and "MADE_UP" in by_row[2]["reasons"][0]
 
+    # ---- property deletion: sentinel removes an existing prop; deleting an absent prop is a no-op ----
+    from backend.app.services.versioning.import_export.rowmodel import PROP_DELETE
+    idx_d = _indexes()
+    idx_d["current"] = {"ent_A": {"urn": "urn:A", "entityType": "Table", "displayName": "A",
+                                  "qualifiedName": "a", "properties": {"owner": "alice", "keep": "x"}}}
+    ops_d, res_d = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:A",
+         "entityType": "Table", "displayName": "A", "qualifiedName": "a",
+         "properties": {"owner": PROP_DELETE, "gone": PROP_DELETE}},   # owner exists→del; gone absent→noop
+    ], idx_d, mint_id=lambda: "x")
+    assert res_d[0]["resolved_op"] == "update"
+    assert ops_d == [{"op": "update", "entity_kind": "node", "entity_id": "ent_A",
+                      "payload": {"properties": {"owner": PROP_DELETE}}}], ops_d
+
 
 def test_import_resolve():
     _run()

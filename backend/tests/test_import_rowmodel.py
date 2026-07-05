@@ -40,6 +40,13 @@ def _run() -> None:
     bad = normalize({"entity_id": "e", "displayName": "1bef", "_op": "yeehaw"}, "node")
     assert bad["op"] == "invalid" and "yeehaw" in bad["op_error"]
 
+    # ---- property DELETE tokens: a `\N` prop cell + a null in properties_json -> PROP_DELETE ----
+    from backend.app.services.versioning.import_export.rowmodel import PROP_DELETE
+    d = normalize({"entity_id": "e", "urn": "u", "prop.owner": "\\N", "prop.keep": "v",
+                   "properties_json": '{"team": null, "count": 1}'}, "node")
+    assert d["properties"]["owner"] == PROP_DELETE and d["properties"]["team"] == PROP_DELETE
+    assert d["properties"]["keep"] == "v" and d["properties"]["count"] == 1
+
     # ---- empty cells are DROPPED (a blank never blanks a field; PATCH semantics) ----
     n2 = normalize({"entity_id": "e", "urn": "u", "displayName": "", "prop.x": ""}, "node")
     assert "displayName" not in n2 and n2["properties"] == {}

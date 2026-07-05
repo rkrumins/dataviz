@@ -60,7 +60,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [resultBranch, setResultBranch] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
-  const [invalidRows, setInvalidRows] = useState<ImportPreviewRow[]>([])
+  const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleFile = useCallback((f: File | null) => {
@@ -82,7 +82,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     if (!file) return
     setPhase('running')
     setError(null)
-    setInvalidRows([])
+    setPreviewRows([])
     try {
       const created = await createImport(wsId, graphId, file, { format, reconcileMode, branchId, viewId })
       setResultBranch(created.branchId)
@@ -94,11 +94,12 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
         setJob(done)
         setPhase('done')
         onImported?.()
-        // Pull a sample of the resolved rows so we can call out anything that couldn't be applied
-        // (e.g. shifted columns landing a value in _op) — the review's "what went wrong" surface.
-        if (((done.summary as ImportSummary)?.invalid ?? 0) > 0) {
+        // Pull a sample of the resolved CHANGES so the dialog can preview exactly what was staged
+        // (added / updated / deleted) and surface anything that couldn't be applied, with reasons.
+        const sum = done.summary as ImportSummary
+        if (sum && sum.new + sum.updated + sum.deleted + sum.invalid > 0) {
           getImportPreview(wsId, graphId, created.jobId)
-            .then((p) => setInvalidRows(p.sample.filter((r) => r.status === 'invalid')))
+            .then((p) => setPreviewRows(p.sample))
             .catch(() => {})
         }
       }
@@ -144,7 +145,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
             />
           )}
           {phase === 'running' && <RunningStep job={job} fileName={file?.name} />}
-          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} invalidRows={invalidRows} />}
+          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows} />}
           {phase === 'failed' && <FailedStep error={error} />}
         </div>
 
@@ -394,7 +395,7 @@ function RunningStep({ job, fileName }: { job: Job | null; fileName?: string }) 
 }
 
 // ── done ─────────────────────────────────────────────────────────────────────
-function DoneStep({ summary, invalidRows }: { summary: ImportSummary | null; invalidRows: ImportPreviewRow[] }) {
+function DoneStep({ summary, previewRows }: { summary: ImportSummary | null; previewRows: ImportPreviewRow[] }) {
   const s = summary
   const changes = s ? s.new + s.updated + s.deleted : 0
   const nothing = s != null && changes === 0
@@ -448,41 +449,57 @@ function DoneStep({ summary, invalidRows }: { summary: ImportSummary | null; inv
         </div>
       )}
 
-      {/* What couldn't be applied — with the exact reason, so a shifted column or bad value is
-          obvious and fixable rather than silently missing from the result. */}
-      {s && s.invalid > 0 && (
-        <div className="mt-5 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50/50 dark:bg-amber-950/20 overflow-hidden">
-          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200/60 dark:border-amber-800/40">
-            <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
-            <span className="text-xs font-semibold text-amber-700 dark:text-amber-400">
-              {s.invalid} row{s.invalid === 1 ? '' : 's'} couldn't be applied
-            </span>
+      {/* A real preview of what changed — each staged add / update / delete and, with its exact
+          reason, anything that couldn't be applied. So the user sees the changes here, not a blank. */}
+      {previewRows.length > 0 && (
+        <div className="mt-5 rounded-xl border border-glass-border overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-glass-border/60 bg-black/[0.02] dark:bg-white/[0.02]">
+            <span className="text-xs font-semibold text-ink">Preview of changes</span>
           </div>
-          {invalidRows.length > 0 ? (
-            <ul className="divide-y divide-amber-200/40 dark:divide-amber-800/30">
-              {invalidRows.slice(0, 6).map((r) => (
-                <li key={r.rowIndex} className="flex items-start gap-2.5 px-4 py-2">
-                  <span className="text-[10px] font-mono font-semibold text-amber-600 dark:text-amber-500 mt-0.5 flex-shrink-0">
-                    Row {r.rowIndex + 1}
-                  </span>
-                  <span className="text-[11px] text-ink-secondary leading-relaxed">
-                    {r.reasons?.[0] || 'invalid row'}
-                  </span>
-                </li>
-              ))}
-              {invalidRows.length > 6 && (
-                <li className="px-4 py-2 text-[11px] text-ink-muted">+ {invalidRows.length - 6} more</li>
-              )}
-            </ul>
-          ) : (
-            <p className="px-4 py-2.5 text-[11px] text-ink-muted">
-              These rows were left out of the draft. Fix them in the file and import again.
-            </p>
-          )}
+          <ul className="divide-y divide-glass-border/50 max-h-64 overflow-y-auto">
+            {previewRows.slice(0, 10).map((r) => (
+              <li key={r.rowIndex} className="flex items-start gap-3 px-4 py-2">
+                <PreviewIcon status={r.status} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-xs font-medium text-ink truncate">{r.label || `Row ${r.rowIndex + 1}`}</span>
+                    <span className="text-[10px] uppercase tracking-wide text-ink-muted flex-shrink-0">{r.kind}</span>
+                  </div>
+                  {r.status === 'invalid' && r.reasons?.[0] && (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5 leading-relaxed">{r.reasons[0]}</p>
+                  )}
+                </div>
+                <span className={cn('text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 mt-0.5', PREVIEW_TONE[r.status || ''] || 'text-ink-muted')}>
+                  {PREVIEW_LABEL[r.status || ''] || r.status}
+                </span>
+              </li>
+            ))}
+            {previewRows.length > 10 && (
+              <li className="px-4 py-2 text-[11px] text-ink-muted">
+                + {previewRows.length - 10} more — see the full diff in the Changes tab
+              </li>
+            )}
+          </ul>
         </div>
       )}
     </div>
   )
+}
+
+const PREVIEW_TONE: Record<string, string> = {
+  new: 'text-emerald-500', updated: 'text-blue-500', deleted: 'text-rose-500', invalid: 'text-amber-500',
+}
+const PREVIEW_LABEL: Record<string, string> = {
+  new: 'New', updated: 'Updated', deleted: 'Deleted', invalid: 'Skipped',
+}
+
+function PreviewIcon({ status }: { status?: string | null }) {
+  const cls = 'w-3.5 h-3.5 mt-0.5 flex-shrink-0'
+  if (status === 'new') return <Plus className={cn(cls, 'text-emerald-500')} />
+  if (status === 'updated') return <Pencil className={cn(cls, 'text-blue-500')} />
+  if (status === 'deleted') return <Trash2 className={cn(cls, 'text-rose-500')} />
+  if (status === 'invalid') return <AlertTriangle className={cn(cls, 'text-amber-500')} />
+  return <span className={cn(cls, 'rounded-full bg-ink-muted/40')} />
 }
 
 function Stat({ n, label, icon, tone }: { n: number; label: string; icon: React.ReactNode; tone: 'emerald' | 'blue' | 'rose' | 'amber' }) {

@@ -4205,7 +4205,11 @@ class GraphVersioningService:
         base = base or {}
         out = {**base, **patch}
         if patch.get("properties") is not None or base.get("properties") is not None:
-            out["properties"] = {**(base.get("properties") or {}), **(patch.get("properties") or {})}
+            merged = {**(base.get("properties") or {}), **(patch.get("properties") or {})}
+            # A bulk import can explicitly REMOVE a property by patching it with this sentinel
+            # (rowmodel.PROP_DELETE — a `\N` cell / properties_json null); drop those keys. The
+            # literal never occurs in real data, so this is inert for every other write path.
+            out["properties"] = {k: v for k, v in merged.items() if v != "__nx_prop_delete__"}
         return out
 
     async def _payloads_by_content_hash(
