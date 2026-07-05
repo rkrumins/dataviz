@@ -16,6 +16,7 @@ from backend.app.services.versioning.service import (
     ApprovalRequired,
     GraphVersioningService,
     MergeConflict,
+    NotUpToDate,
 )
 
 
@@ -85,17 +86,17 @@ async def _run() -> None:
     assert await svc.merge_mr(mr_id=mr2, actor="alice", message="no-review")
     assert "C" in (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"]
 
-    # ══ C. a stale draft auto-rebases on merge when clean; a same-field clash raises MergeConflict
-    #       (the only hard stop), resolved via an explicit pull, then it merges ══
+    # ══ C. a stale draft is HARD-GATED at merge; the forced pull is where a same-field clash
+    #       surfaces and is resolved, then it merges ══
     dX = await _draft(svc, gid, "alice", [_upd("A", f=10)])
     dY = await _draft(svc, gid, "alice", [_upd("A", f=20)])                     # same base, same field
     mrX = await svc.open_draft_mr(graph_id=gid, branch_id=dX, actor="alice")
     assert await svc.merge_mr(mr_id=mrX, actor="alice", message="X")           # main A.f -> 10
     mrY = await svc.open_draft_mr(graph_id=gid, branch_id=dY, actor="alice")
     assert (await svc.get_pr(mrY))["status"] == "conflicts"                     # main advanced under dY
-    with pytest.raises(MergeConflict):                                          # same-field clash blocks the auto-rebase
+    with pytest.raises(NotUpToDate):                                            # behind → forced to pull first
         await svc.merge_mr(mr_id=mrY, actor="alice", message="Y")
-    assert (await svc.rebase_draft(graph_id=gid, branch_id=dY, actor="alice"))["clean"] is False
+    assert (await svc.rebase_draft(graph_id=gid, branch_id=dY, actor="alice"))["clean"] is False  # clash surfaces at the pull
     assert (await svc.rebase_draft(graph_id=gid, branch_id=dY, actor="alice",
             resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}}))["clean"] is True
     assert await svc.merge_mr(mr_id=mrY, actor="alice", message="Y resolved")

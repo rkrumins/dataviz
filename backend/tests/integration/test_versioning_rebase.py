@@ -13,7 +13,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.service import GraphVersioningService, MergeConflict
+from backend.app.services.versioning.service import GraphVersioningService, MergeConflict, NotUpToDate
 
 
 def _node(eid, **kw):
@@ -53,22 +53,25 @@ async def _run() -> None:
     assert await svc.merge_mr(mr_id=mr1, actor="alice", message="merge x")
     head = (await svc.get_graph(gid))["main_head_commit_seq"]
 
-    # ── the others are now behind: meta still surfaces it, but merge is no longer hard-blocked ──
+    # ── the others are now behind: meta surfaces it, and merge is HARD-GATED (pull latest first) ──
     mr2 = await svc.open_draft_mr(graph_id=gid, branch_id=d2, actor="bob")
     pr2 = await svc.get_pr(mr2)
     assert pr2["behind"] is True and pr2["behind_by"] >= 1     # meta still surfaces staleness for the UI
     _ = head
 
-    # ── d2 edits B (non-overlapping) → merge AUTO-REBASES clean in one step, no pull needed ──
+    # ── d2 edits B (non-overlapping): the later arrival is forced to PULL first; the pull is clean,
+    #    then the merge lands — end state identical to auto-rebase, but the rebase is explicit. ──
+    with pytest.raises(NotUpToDate):
+        await svc.merge_mr(mr_id=mr2, actor="bob", message="merge y")
+    assert (await svc.rebase_draft(graph_id=gid, branch_id=d2, actor="bob"))["clean"] is True
     assert await svc.merge_mr(mr_id=mr2, actor="bob", message="merge y")
     st_main = await svc.materialize_state(graph_id=gid, branch_id=main)
     assert st_main["nodes"]["A"]["f"] == 2 and st_main["nodes"]["B"]["f"] == 2   # both edits on main
 
-    # ── d3 also edited A → auto-rebase hits a same-field clash → MergeConflict (the only hard stop) ──
+    # ── d3 also edited A → gated; the forced pull is where the same-field clash surfaces & resolves ──
     mr3a = await svc.open_draft_mr(graph_id=gid, branch_id=d3, actor="carol")
-    with pytest.raises(MergeConflict):
+    with pytest.raises(NotUpToDate):
         await svc.merge_mr(mr_id=mr3a, actor="carol", message="merge z")
-    # explicit pull-latest with a resolution still works, then the merge lands ──
     rc = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol")
     assert rc["clean"] is False and rc["conflicts"][0]["entity_id"] == "A"
     rc2 = await svc.rebase_draft(graph_id=gid, branch_id=d3, actor="carol",

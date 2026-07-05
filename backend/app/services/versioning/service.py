@@ -678,16 +678,16 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
     ) -> str:
-        """Squash a draft into a single ``main`` commit, rebasing onto current
-        main with a field-level 3-way merge (plan §8) — the ungated path (admin /
-        no review). The reviewed path is :meth:`open_draft_mr` + :meth:`merge_mr`,
-        which share the squash body in :meth:`_apply_draft_squash`.
+        """Squash an UP-TO-DATE draft into a single ``main`` commit (plan §8) — the
+        ungated path (admin / no review). The reviewed path is :meth:`open_draft_mr`
+        + :meth:`merge_mr`, which share the squash body in :meth:`_apply_draft_squash`.
 
-        If ``main`` advanced under the draft, non-overlapping field edits
-        auto-merge; genuine same-field conflicts raise :class:`MergeConflict`
-        (resubmit with ``resolutions={entity_id: payload|None}``).  The same path
-        covers the no-advance case (then base == theirs, so the merge reduces to
-        the draft's own delta).
+        Require-up-to-date gate: if ``main`` advanced under the draft this raises
+        :class:`NotUpToDate` — the later arrival must :meth:`rebase_draft` (pull latest,
+        resolving any same-field clashes there) before it can publish, so what lands is
+        exactly what the user reviewed. Once up-to-date (base == current head) the squash
+        reduces to the draft's own delta; a residual clash still raises
+        :class:`MergeConflict`.
         """
         # Fold any staged-but-uncommitted edits first, so a publish never silently
         # drops working changes that were staged but not checkpointed.
@@ -707,12 +707,16 @@ class GraphVersioningService:
                 if draft.is_shared:                       # publishing a shared draft → maintainer
                     await self._require_manage(s, draft, actor, actor_groups)
                 main_id = await self._main_branch_id(s, graph_id)
-                # Auto-rebase-when-clean: if main advanced under the draft we DON'T hard-block —
-                # _compute_merge_bounded 3-way merges the draft against CURRENT main (base = main@the
-                # draft's branch point, theirs = current main head) and _apply_draft_squash writes
-                # net_delta(current main, merged) + advances the draft's base, so a conflict-free stale
-                # merge rebases-and-squashes in one step under _lock_graph. A genuine clash still raises
-                # MergeConflict for the user to resolve (the only remaining hard stop).
+                # Require-up-to-date gate (Git "update branch before merging"): a draft that is BEHIND
+                # main must explicitly pull latest (rebase_draft) before it can publish, so the user
+                # reviews the rebased result rather than having main silently folded in at publish time.
+                # This is the branch→main half of the concurrency model (the same-branch half is the
+                # per-entity head CAS in _apply_ops_once); see docs/versioning/03 §3.13. Read under
+                # _lock_graph so the head can't advance between this check and the squash below.
+                if draft.base_commit_seq < graph.main_head_commit_seq:
+                    raise NotUpToDate(branch_id, draft.base_commit_seq, graph.main_head_commit_seq)
+                # Up-to-date (base == current head) → base == theirs, so the merge reduces to the draft's
+                # own delta; a genuine same-field clash still raises MergeConflict (the only hard stop).
                 merged_state, conflicts, theirs = await self._compute_merge_bounded(
                     s, graph_id, graph, draft, main_id, dict(resolutions or {})
                 )
@@ -1505,9 +1509,12 @@ class GraphVersioningService:
                     raise ValueError("merge request endpoints missing")
                 self._require_open(draft)
                 main_id = await self._main_branch_id(s, graph.id)
-                # Auto-rebase-when-clean (see publish): a stale draft is NOT hard-blocked — the 3-way
-                # merge against current main rebases-and-squashes in one step when conflict-free; a
-                # real clash still raises MergeConflict.
+                # Require-up-to-date gate (see publish / docs 03 §3.13): a PR whose source draft is
+                # behind main must pull latest (rebase_draft) before merging, so the reviewed diff is
+                # the diff that actually lands. Read under _lock_graph so main can't advance between
+                # here and the squash.
+                if draft.base_commit_seq < graph.main_head_commit_seq:
+                    raise NotUpToDate(pr.source_branch_id, draft.base_commit_seq, graph.main_head_commit_seq)
                 merged_state, conflicts, theirs = await self._compute_merge_bounded(
                     s, graph.id, graph, draft, main_id, dict(resolutions or {})
                 )
@@ -1550,10 +1557,13 @@ class GraphVersioningService:
         merged: Dict[str, Optional[dict]] = {}
         conflicts: List[dict] = []
         for eid in sorted(set(base) | set(ours) | set(theirs)):
-            if eid in resolutions:
-                merged[eid] = _normalize_resolution(resolutions[eid])
-                continue
             out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+            if eid in resolutions:
+                # Settle only the conflicting field-paths (see _settle_conflicts) — never
+                # wholesale-replace — so the other side's non-conflicting changes survive.
+                merged[eid] = _settle_conflicts(
+                    out.merged, _normalize_resolution(resolutions[eid]), out.conflicts)
+                continue
             merged[eid] = out.merged
             for c in out.conflicts:
                 conflicts.append({
@@ -3480,10 +3490,14 @@ class GraphVersioningService:
         merged: Dict[str, Optional[dict]] = {}
         conflicts: List[dict] = []
         for eid in sorted(set(base) | set(theirs) | set(ours)):
-            if eid in resolutions:
-                merged[eid] = _normalize_resolution(resolutions[eid])
-                continue
             out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+            if eid in resolutions:
+                # Settle only the conflicting field-paths on top of the auto-merge (see
+                # _settle_conflicts) — never wholesale-replace, so the other side's non-conflicting
+                # changes to this entity are not dropped when the resolution omits them.
+                merged[eid] = _settle_conflicts(
+                    out.merged, _normalize_resolution(resolutions[eid]), out.conflicts)
+                continue
             merged[eid] = out.merged
             for c in out.conflicts:
                 conflicts.append({
@@ -3522,10 +3536,13 @@ class GraphVersioningService:
         merged: Dict[str, Optional[dict]] = {}
         conflicts: List[dict] = []
         for eid in sorted(changed):
-            if eid in resolutions:
-                merged[eid] = _normalize_resolution(resolutions[eid])
-                continue
             out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+            if eid in resolutions:
+                # Settle only the conflicting field-paths (see _settle_conflicts) — never
+                # wholesale-replace — so a non-conflicting change the other side made survives.
+                merged[eid] = _settle_conflicts(
+                    out.merged, _normalize_resolution(resolutions[eid]), out.conflicts)
+                continue
             merged[eid] = out.merged
             for c in out.conflicts:
                 conflicts.append({
@@ -4753,6 +4770,50 @@ def _collapse_empty_payloads(state: Dict[str, Optional[dict]]) -> Dict[str, Opti
         if p is not None and not p:
             state[eid] = None
     return state
+
+
+_RES_MISSING = object()
+
+
+def _settle_conflicts(auto_merged: Optional[dict], resolution: Optional[dict], conflicts) -> Optional[dict]:
+    """Apply a user conflict resolution by settling ONLY the conflicting field-paths on top of the
+    3-way auto-merge — never a whole-entity replace. Any field the OTHER branch changed that this
+    resolution didn't touch (a NON-conflicting change) therefore survives, instead of being silently
+    dropped when the resolution payload omits it. A ``None`` resolution (accept deletion) or an
+    entity-level delete/modify conflict (empty path) settles the whole entity, since the whole entity
+    is the unit that diverged."""
+    if resolution is None:
+        return None
+    if auto_merged is None or any(not c.path for c in conflicts):
+        return resolution
+    result = dict(auto_merged)
+    for c in conflicts:
+        _overlay_at_path(result, resolution, c.path)
+    return result
+
+
+def _overlay_at_path(target: dict, source, path) -> None:
+    """Overlay ``source``'s value at ``path`` onto ``target``, copy-on-writing intermediate dicts so
+    shared sub-objects are never mutated; if ``source`` lacks the path (the field was resolved to
+    'removed') the leaf is deleted from ``target``."""
+    sv = source
+    for k in path:
+        if isinstance(sv, Mapping) and k in sv:
+            sv = sv[k]
+        else:
+            sv = _RES_MISSING
+            break
+    node = target
+    for k in path[:-1]:
+        child = node.get(k)
+        child = dict(child) if isinstance(child, dict) else {}
+        node[k] = child
+        node = child
+    leaf = path[-1]
+    if sv is _RES_MISSING:
+        node.pop(leaf, None)
+    else:
+        node[leaf] = sv
 
 
 def _normalize_resolution(payload: Optional[dict]) -> Optional[dict]:

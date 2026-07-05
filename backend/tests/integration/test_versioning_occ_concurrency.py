@@ -105,7 +105,10 @@ async def _run() -> None:
     with pytest.raises(MergeConflict):
         await svc.checkpoint(graph_id=gid, branch_id=d, actor="bob")
 
-    # ── S5/S6: concurrent + sequential independent merges both land (auto-rebase when clean) ──
+    # ── S5/S6: independent non-overlapping merges both land — behind draft PULLS then publishes ──
+    # (Require-up-to-date model: a stale draft is hard-gated at publish; a clean pull rebases it and
+    # then it lands. The end state is identical to auto-rebase — both edits survive — but the pull is
+    # an explicit, reviewable step, matching the branch→main OCC gate; docs/versioning/03 §3.13.)
     gid, main = await _new_graph(svc)
     A = "urn:li:dataset:s5A_" + os.urandom(3).hex()
     B = "urn:li:dataset:s5B_" + os.urandom(3).hex()
@@ -117,7 +120,10 @@ async def _run() -> None:
     await svc.apply_ops(graph_id=gid, branch_id=dA, actor="bot", ops=[_upd(A, displayName="A2")])
     await svc.apply_ops(graph_id=gid, branch_id=dB, actor="bot", ops=[_upd(B, displayName="B2")])
     await svc.publish(graph_id=gid, branch_id=dA, actor="bot", message="A")     # main advances
-    await svc.publish(graph_id=gid, branch_id=dB, actor="bot", message="B")     # stale + clean → auto-rebase
+    with pytest.raises(NotUpToDate):                                            # dB now behind → must pull
+        await svc.publish(graph_id=gid, branch_id=dB, actor="bot", message="B")
+    assert (await svc.rebase_draft(graph_id=gid, branch_id=dB, actor="bot"))["clean"] is True  # clean pull
+    await svc.publish(graph_id=gid, branch_id=dB, actor="bot", message="B")     # up-to-date → lands
     st = await svc.materialize_state(graph_id=gid, branch_id=main)
     assert st["nodes"][A]["displayName"] == "A2" and st["nodes"][B]["displayName"] == "B2"
 

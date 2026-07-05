@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # the dev container has no pytest — direct-run pa
     pytest = _PytestStub()  # type: ignore
 
 from backend.app.services.versioning import models
-from backend.app.services.versioning.service import GraphVersioningService, OntologyViolation
+from backend.app.services.versioning.service import GraphVersioningService, OntologyViolation, NotUpToDate
 
 CET = ["CONTAINS"]
 
@@ -51,6 +51,14 @@ async def _expect_violation(coro):
     try:
         await coro
     except OntologyViolation:
+        return True
+    return False
+
+
+async def _expect_not_up_to_date(coro):
+    try:
+        await coro
+    except NotUpToDate:
         return True
     return False
 
@@ -134,6 +142,12 @@ async def _run() -> None:
     await _apply(svc, gid, dB, [_edge(f"epB_{sfx}", Q2, N)])
     await svc.publish(graph_id=gid, branch_id=dA, actor="alice", message="parent Q1",
                       containment_edge_types=CET)
+    # dB is now behind → the later arrival is HARD-GATED and must PULL first. The pull is clean
+    # (different edges), but the post-pull publish's merge-time re-check still stops the two-parent.
+    assert await _expect_not_up_to_date(
+        svc.publish(graph_id=gid, branch_id=dB, actor="bob", message="parent Q2",
+                    containment_edge_types=CET)), "behind publish was not gated!"
+    assert (await svc.rebase_draft(graph_id=gid, branch_id=dB, actor="bob"))["clean"] is True
     assert await _expect_violation(
         svc.publish(graph_id=gid, branch_id=dB, actor="bob", message="parent Q2",
                     containment_edge_types=CET)), "cross-branch merge composed a second parent!"
