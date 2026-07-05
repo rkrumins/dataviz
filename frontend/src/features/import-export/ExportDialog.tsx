@@ -31,6 +31,7 @@ const FORMATS: { id: ImportFormat; label: string; hint: string }[] = [
 
 export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogProps) {
   const [format, setFormat] = useState<ImportFormat>('csv')
+  const [scope, setScope] = useState<'view' | 'all'>(viewId ? 'view' : 'all')
   const [phase, setPhase] = useState<Phase>('choose')
   const [error, setError] = useState<string | null>(null)
 
@@ -38,7 +39,7 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
     setPhase('running')
     setError(null)
     try {
-      await exportAndDownload(wsId, graphId, { format, viewId })
+      await exportAndDownload(wsId, graphId, { format, viewId: scope === 'view' ? viewId : undefined })
       setPhase('done')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The export could not be completed.')
@@ -70,7 +71,9 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto">
-          {phase === 'choose' && <ChooseStep format={format} setFormat={setFormat} />}
+          {phase === 'choose' && (
+            <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope} hasView={!!viewId} />
+          )}
           {phase === 'running' && (
             <div className="px-8 py-16 flex flex-col items-center gap-4">
               <div className="relative w-16 h-16">
@@ -138,18 +141,21 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
   )
 }
 
-// ── choose (two columns: guide | format) ─────────────────────────────────────
-function ChooseStep({ format, setFormat }: { format: ImportFormat; setFormat: (f: ImportFormat) => void }) {
+// ── choose (two columns: guide | scope + format) ─────────────────────────────
+function ChooseStep({ format, setFormat, scope, setScope, hasView }: {
+  format: ImportFormat; setFormat: (f: ImportFormat) => void
+  scope: 'view' | 'all'; setScope: (s: 'view' | 'all') => void; hasView: boolean
+}) {
   return (
     <div className="grid md:grid-cols-2">
       {/* Left — what you're exporting */}
       <div className="px-8 py-6 border-b md:border-b-0 md:border-r border-glass-border/50 bg-gradient-to-br from-indigo-50/40 to-transparent dark:from-indigo-950/15 space-y-5">
         <div>
           <h4 className="text-sm font-bold text-ink">What you'll get</h4>
-          <p className="text-[11px] text-ink-muted mt-0.5">A complete snapshot you can edit offline and re-import.</p>
+          <p className="text-[11px] text-ink-muted mt-0.5">A snapshot you can edit offline and re-import.</p>
         </div>
         <ul className="space-y-3">
-          <Feature icon={<Database className="w-4 h-4" />} title="Every entity & relationship" body="All nodes and edges, with their full properties." />
+          <Feature icon={<Database className="w-4 h-4" />} title="Entities & relationships" body={hasView ? "Everything in your chosen scope, with full properties." : "All nodes and edges, with their full properties."} />
           <Feature icon={<Layers className="w-4 h-4" />} title="Locked identity columns" body="entity_id / urn travel with each row so a re-import matches the right items — no duplicates." />
           <Feature icon={<GitCompareArrows className="w-4 h-4" />} title="A re-importable backup" body="Restore this data source, or import into a new one to clone it. Round-trips losslessly." />
         </ul>
@@ -160,27 +166,51 @@ function ChooseStep({ format, setFormat }: { format: ImportFormat; setFormat: (f
         </div>
       </div>
 
-      {/* Right — choose a format */}
-      <div className="px-8 py-6">
-        <label className="block text-xs font-medium text-ink-secondary mb-2">Choose a format</label>
-        <div className="space-y-2">
-          {FORMATS.map((f) => (
-            <button key={f.id} onClick={() => setFormat(f.id)}
-              className={cn('w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
-                format === f.id
-                  ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
-                  : 'border-glass-border hover:border-glass-border-hover')}>
-              <div className="flex items-center gap-3">
-                <span className={cn('text-xs font-bold w-16 flex-shrink-0',
-                  format === f.id ? 'text-indigo-500' : 'text-ink-muted')}>{f.label}</span>
-                <span className="text-[11px] text-ink-muted flex-1">{f.hint}</span>
-                {format === f.id && <ArrowRight className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />}
-              </div>
-            </button>
-          ))}
+      {/* Right — scope + format */}
+      <div className="px-8 py-6 space-y-5">
+        {hasView && (
+          <div>
+            <label className="block text-xs font-medium text-ink-secondary mb-2">What to export</label>
+            <div className="grid grid-cols-2 gap-2">
+              <ScopeCard active={scope === 'view'} onClick={() => setScope('view')}
+                title="This view" desc="Only what this view contains" />
+              <ScopeCard active={scope === 'all'} onClick={() => setScope('all')}
+                title="Whole data source" desc="Every entity in the graph" />
+            </div>
+          </div>
+        )}
+        <div>
+          <label className="block text-xs font-medium text-ink-secondary mb-2">Choose a format</label>
+          <div className="space-y-2">
+            {FORMATS.map((f) => (
+              <button key={f.id} onClick={() => setFormat(f.id)}
+                className={cn('w-full text-left px-3.5 py-3 rounded-xl border-2 transition-colors duration-150',
+                  format === f.id
+                    ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10'
+                    : 'border-glass-border hover:border-glass-border-hover')}>
+                <div className="flex items-center gap-3">
+                  <span className={cn('text-xs font-bold w-16 flex-shrink-0',
+                    format === f.id ? 'text-indigo-500' : 'text-ink-muted')}>{f.label}</span>
+                  <span className="text-[11px] text-ink-muted flex-1">{f.hint}</span>
+                  {format === f.id && <ArrowRight className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />}
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </div>
+  )
+}
+
+function ScopeCard({ active, onClick, title, desc }: { active: boolean; onClick: () => void; title: string; desc: string }) {
+  return (
+    <button onClick={onClick}
+      className={cn('text-left px-3 py-2.5 rounded-xl border-2 transition-colors duration-150',
+        active ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 shadow-sm shadow-indigo-500/10' : 'border-glass-border hover:border-glass-border-hover')}>
+      <p className={cn('text-xs font-semibold', active ? 'text-ink' : 'text-ink-secondary')}>{title}</p>
+      <p className="text-[10px] text-ink-muted mt-0.5">{desc}</p>
+    </button>
   )
 }
 

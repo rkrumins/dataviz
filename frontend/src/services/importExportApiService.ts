@@ -21,6 +21,7 @@ export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancel
 export interface ImportSummary {
   new: number
   updated: number
+  unchanged: number
   deleted: number
   invalid: number
   auto_fixed?: number

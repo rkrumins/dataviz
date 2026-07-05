@@ -1903,12 +1903,46 @@ async def sync_ingest(
 _ie_service = None
 
 
+async def _resolve_export_view_scope(workspace_id, data_source_id, view_id):
+    """Resolve a view's ENTITY SET for a **view-scoped export**, from the authoritative source:
+    the view's ``context_model.instance_assignments`` (the explicit physical-entity → logical-layer
+    placements). A Context View places a top-level entity into a layer with ``inheritsChildren`` so
+    the whole subtree belongs to the view — so the scope is the assigned URNs + their containment
+    descendants (expanded in the worker, which has the graph). Returns a scope dict, or ``None``
+    (fail-open → whole data source) when the view has no explicit assignments. Runs in the worker's
+    background context, so it opens its own management-DB session."""
+    if not (workspace_id and view_id):
+        return None
+    try:
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.models import ViewORM, ContextModelORM
+        async with get_async_session() as session:
+            view = await session.get(ViewORM, view_id)
+            cm = await session.get(ContextModelORM, view.context_model_id) \
+                if view is not None and view.context_model_id else None
+            if cm is None:
+                return None
+            assignments = json.loads(cm.instance_assignments or "{}")
+            cont = await _live_containment_types(session, workspace_id, data_source_id)
+        # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
+        # pseudo-nodes, not graph entities (harmlessly skipped — they won't match a node urn).
+        assigned = [u for u, a in assignments.items() if isinstance(a, dict) and a.get("layerId")]
+        inherit = [u for u, a in assignments.items()
+                   if isinstance(a, dict) and a.get("inheritsChildren", True)]
+        if not assigned:
+            return None                              # nothing explicitly scoped → export whole DS
+        return {"assigned_urns": assigned, "inherit_urns": inherit, "containment_types": cont}
+    except Exception:
+        logger.exception("view-scope resolution failed for export (view=%s)", view_id)
+        return None
+
+
 def get_import_export_service():
     """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
     global _ie_service
     if _ie_service is None:
         from backend.app.services.versioning.import_export.service import ImportExportService
-        _ie_service = ImportExportService(versioning=_service)
+        _ie_service = ImportExportService(versioning=_service, scope_resolver=_resolve_export_view_scope)
     return _ie_service
 
 

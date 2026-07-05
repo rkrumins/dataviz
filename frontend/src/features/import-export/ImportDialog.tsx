@@ -406,8 +406,13 @@ function DoneStep({ summary }: { summary: ImportSummary | null }) {
           <Stat n={s.invalid} label="Skipped" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
         </div>
       )}
+      {s && (s.unchanged ?? 0) > 0 && (
+        <p className="mt-3 text-[11px] text-ink-muted">
+          {s.unchanged} row{s.unchanged === 1 ? ' was' : 's were'} already up to date — only real changes are staged.
+        </p>
+      )}
       {s && s.invalid > 0 && (
-        <p className="mt-3 text-[11px] text-amber-600 dark:text-amber-400">
+        <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">
           {s.invalid} row{s.invalid === 1 ? '' : 's'} were skipped (invalid) and left out of the draft.
         </p>
       )}

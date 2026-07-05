@@ -37,9 +37,18 @@ def _now() -> str:
 
 
 class ImportExportService:
-    def __init__(self, versioning: Optional[GraphVersioningService] = None, store=None) -> None:
+    def __init__(
+        self,
+        versioning: Optional[GraphVersioningService] = None,
+        store=None,
+        scope_resolver=None,
+    ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
+        # Optional async ``(workspace_id, data_source_id, view_id) -> scope dict | None`` — resolves
+        # a view's scope for view-scoped export. Injected at the API layer (management-DB access),
+        # so the worker stays decoupled.
+        self._scope_resolver = scope_resolver
 
     @property
     def store(self):
@@ -183,7 +192,14 @@ class ImportExportService:
         return {"job_id": job_id, "result_uri": result_uri}
 
     async def run_export(self, job_id: str) -> Dict[str, int]:
-        return await ExportWorker(self._svc, self._store).run(job_id)
+        scope = None
+        if self._scope_resolver is not None:
+            async with db.graphver_session() as s:
+                row = await s.get(JobORM, job_id)
+                ws, ds, view_id = (row.workspace_id, row.data_source_id, row.scope_view_id) if row else (None, None, None)
+            if view_id:
+                scope = await self._scope_resolver(ws, ds, view_id)
+        return await ExportWorker(self._svc, self._store, scope=scope).run(job_id)
 
     async def run_export_safe(self, job_id: str) -> None:
         await self._run_safe(job_id, self.run_export)

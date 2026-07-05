@@ -72,7 +72,7 @@ async def _run() -> None:
             workspace_id="ws1", data_source_id=B["graph_id"], graph_id=gB, actor="u",
             import_format="ndjson", source_uri=exp["result_uri"])
         s2 = await ie.run_import(imp["job_id"])
-        assert s2 == {"new": 3, "updated": 0, "deleted": 0, "invalid": 0}, s2
+        assert s2 == {"new": 3, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}, s2
 
         delta = await svc.branch_overlay_delta(graph_id=gB, branch_id=imp["branch_id"])
         assert {n["urn"] for n in delta["nodesUpsert"]} == {"urn:A", "urn:B"}, delta

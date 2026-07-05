@@ -12,7 +12,7 @@ that swaps ``materialize_state`` for ``reconcile._stream_pg_nodes`` without chan
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from sqlalchemy import select
 
@@ -73,10 +73,75 @@ def example_template_records() -> List[Dict[str, Any]]:
     ]
 
 
+def _containment_children(edges: Dict[str, dict], cont: set) -> Dict[str, List[str]]:
+    """Parent-entity-id -> child-entity-ids over the graph's containment edges."""
+    children: Dict[str, List[str]] = {}
+    for e in edges.values():
+        if str(e.get("edgeType") or "").upper() in cont:
+            children.setdefault(e.get("sourceEntityId"), []).append(e.get("targetEntityId"))
+    return children
+
+
+def _keep_from_assignments(nodes, edges, assigned_urns: set, inherit_urns: set, cont: set) -> set:
+    """The view's entities: each explicitly layer-assigned URN, plus (when the assignment inherits
+    children — the default for a Context View placing a subtree into a layer) all its containment
+    descendants. This is the AUTHORITATIVE 'what the view contains', taken straight from the view's
+    ``instance_assignments`` rather than a heuristic."""
+    urn_to_eid = {p.get("urn"): eid for eid, p in nodes.items() if p.get("urn")}
+    children = _containment_children(edges, cont)
+    keep, seen = set(), set()
+    stack = [(urn_to_eid[u], u in inherit_urns) for u in assigned_urns if u in urn_to_eid]
+    while stack:
+        eid, descend = stack.pop()
+        if eid in seen:
+            continue
+        seen.add(eid)
+        keep.add(eid)
+        if descend:
+            for child in children.get(eid, []):
+                stack.append((child, True))
+    return keep
+
+
+def _keep_from_filters(nodes, scope: Dict[str, Any]) -> set:
+    """Fallback scope for views defined by entity-type / layer allow-lists (empty = unrestricted)."""
+    types = {str(t).upper() for t in (scope.get("entity_types") or [])}
+    layers = set(scope.get("layers") or [])
+    if not types and not layers:
+        return set(nodes.keys())
+    keep = set()
+    for eid, p in nodes.items():
+        if types and str(p.get("entityType") or "").upper() not in types:
+            continue
+        if layers and p.get("layerAssignment") not in layers:
+            continue
+        keep.add(eid)
+    return keep
+
+
+def filter_to_scope(nodes: Dict[str, dict], edges: Dict[str, dict], scope: Dict[str, Any]):
+    """Restrict a materialized ``{nodes, edges}`` to a view's entity set (plan Phase 4).
+
+    Primary source: the view's explicit layer assignments (``context_model.instance_assignments``) —
+    the assigned URNs plus their containment descendants. Fallback: entity-type/layer allow-lists.
+    Edges are kept only when BOTH endpoints are in-scope."""
+    cont = {str(t).upper() for t in (scope.get("containment_types") or [])}
+    assigned = set(scope.get("assigned_urns") or [])
+    if assigned:
+        keep = _keep_from_assignments(nodes, edges, assigned, set(scope.get("inherit_urns") or []), cont)
+    else:
+        keep = _keep_from_filters(nodes, scope)
+    fnodes = {eid: p for eid, p in nodes.items() if eid in keep}
+    fedges = {eid: p for eid, p in edges.items()
+              if p.get("sourceEntityId") in keep and p.get("targetEntityId") in keep}
+    return fnodes, fedges
+
+
 class ExportWorker:
-    def __init__(self, versioning, store) -> None:
+    def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None) -> None:
         self._svc = versioning
         self._store = store
+        self._scope = scope
 
     async def run(self, job_id: str) -> Dict[str, int]:
         async with db.graphver_session() as s:
@@ -92,6 +157,8 @@ class ExportWorker:
         state = await self._svc.materialize_state(
             graph_id=graph_id, branch_id=main_id, as_of_seq=as_of_seq)
         nodes, edges = state["nodes"], state["edges"]
+        if self._scope:                                   # view-scoped export (Phase 4)
+            nodes, edges = filter_to_scope(nodes, edges, self._scope)
         records = records_from_state(nodes, edges)
         columns = column_order(records)
 
