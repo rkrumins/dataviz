@@ -40,7 +40,12 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
   const graphId = resolve.data?.graphId ?? null
   const bootstrap = useBootstrapGraph(workspaceId)
 
-  const branchId = useEffectiveBranchId(workspaceId, dataSourceId)
+  const activeView = useActiveView()
+  const viewId = activeView?.id ?? null
+  const viewName = activeView?.name ?? null
+  // Branch-per-view: scope the effective branch to the active view, so `isDraft` never reflects
+  // another view's draft on the same data source.
+  const branchId = useEffectiveBranchId(workspaceId, dataSourceId, viewId)
   const isDraft = !!branchId
   const committedDiffHidden = useBranchStore((s) => s.committedDiffHidden)
   const setCommittedDiffHidden = useBranchStore((s) => s.setCommittedDiffHidden)
@@ -49,9 +54,6 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
 
   const [showPublish, setShowPublish] = useState(false)
   const [panelTab, setPanelTab] = useState<ViewPanelTab | null>(null)
-  const activeView = useActiveView()
-  const viewId = activeView?.id ?? null
-  const viewName = activeView?.name ?? null
   const uncommitted = useStagedChangeCount()
 
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null)

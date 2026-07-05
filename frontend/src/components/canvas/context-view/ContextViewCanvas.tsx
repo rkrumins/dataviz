@@ -472,7 +472,10 @@ export function ContextViewCanvas({
   // the strict scope guard in useEffectiveBranchId returned null → isDraft false →
   // the whole Edit cluster went invisible. See canvasScopeWorkspaceId.
   const scopeWsId = canvasScopeWorkspaceId(activeView?.workspaceId, activeWorkspaceId)
-  const effectiveBranchId = useEffectiveBranchId(scopeWsId ?? '', dataSourceId)
+  // Branch-per-view: also scope by the active view's id, so `isDraft` never reflects a
+  // draft belonging to a DIFFERENT view on the same data source (branchStore is a single
+  // global store — without this, a view switch could keep reading the prior view's gate).
+  const effectiveBranchId = useEffectiveBranchId(scopeWsId ?? '', dataSourceId, activeView?.id ?? null)
   const isDraft = !!effectiveBranchId
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()

@@ -112,7 +112,9 @@ export function EntityDrawer({
   const historyGraphId = resolve.data?.graphId ?? null
   const historyMainBranch = resolve.data?.mainBranchId ?? null
   // The active draft (if any), so the History section also shows this branch's unmerged commits.
-  const historyBranchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null)
+  // Scoped by the active view's id (branch-per-view) so this never shows another view's draft
+  // commits on the same data source.
+  const historyBranchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
 
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open

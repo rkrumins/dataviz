@@ -105,7 +105,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
   // A brand-new blank model opens ready to build: auto-open (or resume) the
   // caller's draft once per graph per session. No-op for every other graph kind.
-  useAutoDraftForBlankModel(activeView?.workspaceId ?? null, activeView?.dataSourceId ?? null)
+  useAutoDraftForBlankModel(activeView?.workspaceId ?? null, activeView?.dataSourceId ?? null, activeView?.id ?? null)
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {

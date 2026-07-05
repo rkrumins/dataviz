@@ -92,6 +92,7 @@ export function ViewPage() {
         <ViewExecutionProvider
           workspaceId={viewWorkspaceId}
           dataSourceId={viewDataSourceId}
+          viewId={view?.id ?? null}
         >
           <CanvasRouter layoutType={layoutType} />
           <UnsavedWorkGuard />

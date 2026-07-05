@@ -17,10 +17,16 @@ import { ensureDraftOpen } from './ensureDraftOpen'
 
 const sessionKey = (graphId: string) => `synodic-auto-draft:${graphId}`
 
-export function useAutoDraftForBlankModel(workspaceId: string | null, dataSourceId: string | null) {
+export function useAutoDraftForBlankModel(
+  workspaceId: string | null,
+  dataSourceId: string | null,
+  viewId?: string | null,
+) {
   const resolve = useResolveGraph(workspaceId ?? undefined, dataSourceId)
   const canManage = usePermission('workspace:datasource:manage', workspaceId ?? undefined)
-  const branchId = useEffectiveBranchId(workspaceId ?? '', dataSourceId)
+  // Branch-per-view: scope by the active view too, so this doesn't skip auto-opening a
+  // draft for THIS view just because another view on the same data source already has one.
+  const branchId = useEffectiveBranchId(workspaceId ?? '', dataSourceId, viewId)
   const graphReady = useBranchStore((s) => !!s.graphId)
 
   const graphId = resolve.data?.graphId ?? null
