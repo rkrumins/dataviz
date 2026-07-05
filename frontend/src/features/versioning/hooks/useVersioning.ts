@@ -11,7 +11,12 @@ import { useBranchStore } from '@/store/branchStore'
 
 export const VERSIONING_KEYS = {
   all: ['versioning'] as const,
-  resolve: (ws?: string, ds?: string | null) => [...VERSIONING_KEYS.all, 'resolve', ws, ds] as const,
+  // `viewId` is appended only when given, so callers not yet threaded a view (data-source-level
+  // consumers) keep the exact same cache key as before — no unintended cache-key churn/refetch.
+  resolve: (ws?: string, ds?: string | null, viewId?: string | null) =>
+    viewId
+      ? ([...VERSIONING_KEYS.all, 'resolve', ws, ds, viewId] as const)
+      : ([...VERSIONING_KEYS.all, 'resolve', ws, ds] as const),
   branches: (ws?: string, gid?: string | null) => [...VERSIONING_KEYS.all, 'branches', ws, gid] as const,
   branchState: (ws?: string, gid?: string | null, bid?: string | null) =>
     [...VERSIONING_KEYS.all, 'state', ws, gid, bid] as const,
@@ -51,11 +56,12 @@ export const VERSIONING_KEYS = {
 
 // ── Queries ────────────────────────────────────────────────────────────────
 
-/** Resolve a data source → its graph + the caller's open draft. The switcher's spine. */
-export function useResolveGraph(wsId?: string, dataSourceId?: string | null) {
+/** Resolve a data source → its graph + the caller's open draft. The switcher's spine. Pass
+ *  `viewId` (the active Context View) to scope the draft lookup to that view (branch-per-view). */
+export function useResolveGraph(wsId?: string, dataSourceId?: string | null, viewId?: string | null) {
   return useQuery({
-    queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId),
-    queryFn: () => api.resolveGraph(wsId!, dataSourceId!),
+    queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId, viewId),
+    queryFn: () => api.resolveGraph(wsId!, dataSourceId!, viewId),
     enabled: !!wsId && !!dataSourceId,
     staleTime: 30_000,
     // A 404 means this data source has no versioned graph — don't hammer it.

@@ -395,9 +395,16 @@ const jsonBody = (data: unknown): RequestInit => ({ method: 'POST', body: JSON.s
 // Resolve / graph lifecycle
 // ============================================
 
-/** Boot lookup: resolve a data source to its versioned graph + the caller's open draft (read-only — does NOT open one). */
-export function resolveGraph(wsId: string, dataSourceId: string): Promise<ResolveResponse> {
-  return vfetch<ResolveResponse>(`${base(wsId)}/resolve?dataSourceId=${encodeURIComponent(dataSourceId)}`)
+/** Boot lookup: resolve a data source to its versioned graph + the caller's open draft
+ *  (read-only — does NOT open one). Pass `viewId` to scope the draft lookup to that Context
+ *  View (branch-per-view) — omitted, the backend falls back to its legacy most-recent-draft
+ *  behavior. */
+export function resolveGraph(
+  wsId: string, dataSourceId: string, viewId?: string | null,
+): Promise<ResolveResponse> {
+  const q = new URLSearchParams({ dataSourceId })
+  if (viewId) q.set('viewId', viewId)
+  return vfetch<ResolveResponse>(`${base(wsId)}/resolve?${q}`)
 }
 
 /**

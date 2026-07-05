@@ -40,12 +40,13 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
 
-  const resolve = useResolveGraph(workspaceId, dataSourceId)
+  // The active view — attributes a newly-created draft's commits to it (so the view's History
+  // ("This view") and the per-draft timeline populate) AND scopes the resolve below to this
+  // view's own draft (branch-per-view).
+  const originatingViewId = useActiveView()?.id ?? null
+  const resolve = useResolveGraph(workspaceId, dataSourceId, originatingViewId)
   const graphId = resolve.data?.graphId ?? null
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
-  // The view the draft is created from — attributes the draft's commits to it so the view's History
-  // ("This view") and the per-draft timeline populate.
-  const originatingViewId = useActiveView()?.id ?? null
   const branchesQ = useBranches(workspaceId, graphId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
 
@@ -54,12 +55,13 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const switchToDraft = useBranchStore((s) => s.switchToDraft)
 
-  // Sync the resolve result into the shared branch store (scoped to this data source).
+  // Sync the resolve result into the shared branch store (scoped to this data source + view —
+  // branch-per-view: switching the active view clears any other view's draft state).
   useEffect(() => {
     if (resolve.data && dataSourceId) {
-      setResolved({ workspaceId, dataSourceId }, resolve.data)
+      setResolved({ workspaceId, dataSourceId, viewId: originatingViewId }, resolve.data)
     }
-  }, [resolve.data, workspaceId, dataSourceId, setResolved])
+  }, [resolve.data, workspaceId, dataSourceId, originatingViewId, setResolved])
 
   // Deep-link: apply ?branch=<id> on load (permission-gated) + keep the URL in step with the
   // active branch, so a view+branch is a shareable link.
