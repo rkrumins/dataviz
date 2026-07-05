@@ -1838,8 +1838,10 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             result = await self._ro_query(cypher, params=params)
         except Exception as e:
+            if _is_missing_graph_error(e):
+                return []  # never-created / empty key = legitimately no data
             logger.warning(f"get_nodes query failed: {e}")
-            return []
+            raise  # connection refused / transient = surface it (breaker -> 503)
 
         nodes = []
         for row in (result.result_set or []):
@@ -2345,8 +2347,10 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             page_result = await self._ro_query(page_cypher, params=params)
         except Exception as e:
-            logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
-            page_result = None
+            if not _is_missing_graph_error(e):
+                logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
+                raise  # connection refused / transient = surface it (breaker -> 503)
+            page_result = None  # never-created / empty key = legitimately no data
 
         nodes: List[GraphNode] = []
         root_type_count = 0
@@ -2399,8 +2403,10 @@ class FalkorDBProvider(GraphDataProvider):
                 first = count_result.result_set[0]
                 total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
         except Exception as e:
-            logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
-            total_count = len(nodes)
+            if not _is_missing_graph_error(e):
+                logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
+                raise  # connection refused / transient = surface it (breaker -> 503)
+            total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
 
         return TopLevelNodesResult(
             nodes=nodes,
