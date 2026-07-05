@@ -177,17 +177,6 @@ export function useLayerAssignment({
     // honoured when it still names a layer that exists here.
     const validLayerIds = new Set(sortedLayers.map(l => l.id))
 
-    // typeId -> layerId from THIS view's layer config (case-insensitive, first
-    // layer wins) — the SAME auto-by-type mapping Build Mode uses. Drives the
-    // scoped inherit-break rule below: a containment child whose TYPE maps to a
-    // DIFFERENT existing layer than its inherited parent layer breaks out to its
-    // own column instead of collapsing into the parent's.
-    const typeLayerMap = new Map<string, string>()
-    sortedLayers.forEach(l => (l.entityTypes ?? []).forEach(t => {
-      const key = t.toLowerCase()
-      if (!typeLayerMap.has(key)) typeLayerMap.set(key, l.id)
-    }))
-
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
     // Root-level nodes use the priority chain below, with closed-scope
@@ -206,22 +195,14 @@ export function useLayerAssignment({
 
       let myLayerId: string | undefined
 
-      // Containment children inherit the parent's layer — EXCEPT (scoped
-      // relaxation) a child whose TYPE maps, via this view's layer config, to a
-      // DIFFERENT existing layer than the inherited one: that child breaks out to
-      // its own column (so a mixed-type hierarchy spreads across columns instead
-      // of collapsing into the parent's). In every other case — the child's type
-      // maps to the same layer, or to no distinct layer — it inherits exactly as
-      // before. Only root-level nodes (no containment parent) use the priority
-      // chain below.
+      // HARD RULE: containment children ALWAYS inherit the parent's layer, so a
+      // nested subtree renders together under its parent and the containment tree
+      // stays intact. Only root-level nodes (no containment parent) use the
+      // priority chain below.
       const hasContainmentParent = parentMap.has(nodeId)
 
       if (hasContainmentParent && inheritedLayerId) {
-        const childType = (nodeMap.get(nodeId)?.data?.type as string | undefined)?.toLowerCase()
-        const childTypeLayer = childType ? typeLayerMap.get(childType) : undefined
-        // Break out only to a DIFFERENT existing layer (typeLayerMap ids are all
-        // valid by construction); otherwise keep the parent's layer.
-        myLayerId = childTypeLayer && childTypeLayer !== inheritedLayerId ? childTypeLayer : inheritedLayerId
+        myLayerId = inheritedLayerId
       } else {
         // Root-level node priority chain.
         //
