@@ -268,6 +268,14 @@ class FalkorProjector:
             progress = (self._progress_writer(graph_id, total_items)
                         if from_seq <= 0 and total_items else None)
             if from_seq <= 0:
+                # NON-DESTRUCTIVE REBUILD — probe connectivity BEFORE the drop. A full seed DROPs the
+                # graph key and can only re-seed it by MERGEing from Postgres, so dropping against an
+                # unreachable/misrouted instance would WIPE the read cache with no way to repair it
+                # ("rebuild wiped all data"). A trivial read (never touches the graph) proves the
+                # resolved client is reachable; if it is not, the error propagates to the outer handler
+                # (records last_error, resets status, re-raises) with NOTHING dropped — reads keep
+                # falling back to Postgres and the existing cache is left intact.
+                await client.query("RETURN 1")
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
                 # committed main exactly. The seed only MERGEs the live state, so without this an entity
                 # a merged draft DELETED (or stale rows on a just-re-pointed graph) would survive — the
@@ -279,18 +287,16 @@ class FalkorProjector:
                     # FalkorDB raises "Invalid graph operation on empty key" when the graph key does
                     # not exist yet — the expected, benign case for a fresh graph's first projection
                     # (the MERGE below creates it). Anything ELSE means the graph DID exist and the
-                    # wipe genuinely failed, so the MERGE-only apply runs on top of stale contents and
-                    # a merged draft's DELETES would survive ("merge reverts to old state"). Keep those
-                    # two distinct so a real wipe failure isn't lost in fresh-graph noise.
+                    # wipe genuinely FAILED: proceeding to the MERGE-only apply would run on top of
+                    # stale contents (a merged draft's DELETES would survive — "merge reverts to old
+                    # state") and cannot repair the wipe. RAISE so the outer handler records the error,
+                    # leaves the watermark unmoved, and reads fall back to Postgres — never a MERGE
+                    # over a broken drop. Keep the fresh-key case distinct so it still proceeds.
                     if "empty key" in str(exc).lower():
                         logger.debug("full-seed wipe: FalkorDB graph %r for %s did not exist yet "
                                      "(fresh); MERGE will create it", name, graph_id)
                     else:
-                        logger.warning(
-                            "full-seed wipe of FalkorDB graph %r for %s FAILED on an existing graph; "
-                            "proceeding to MERGE — prior deletions may not have cleared: %s",
-                            name, graph_id, exc,
-                        )
+                        raise
             await self._apply(client, *changes, progress=progress)
             if rollup_pairs and rollup_pairs != "stale":
                 # After the raw upserts, so pair endpoints exist. Idempotent per window

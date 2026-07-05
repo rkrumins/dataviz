@@ -30,6 +30,10 @@ class _NoopGraph:
     async def query(self, cypher, params=None):
         return None
 
+    async def delete(self):
+        # GRAPH.DELETE — a healthy instance answers the full-seed drop (no-op here).
+        return None
+
 
 def _factory(_name, _provider_id=None):
     return _NoopGraph()

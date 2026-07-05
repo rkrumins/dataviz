@@ -40,6 +40,10 @@ class FakeGraph:
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
+        # Connectivity probe the non-destructive rebuild issues BEFORE the full-seed drop
+        # (a trivial read that never touches the graph); a reachable instance answers it.
+        if cypher == "RETURN 1":
+            return _Result([[1]])
         # projection verify (Part 1E) — mirrors _falkor_counts: exclude rollup-derived artifacts
         # (the :AGGREGATED layer and its _GVRollupMeta marker) the same way FalkorDB's WHERE does.
         if cypher == "MATCH (n) WHERE NOT '_GVRollupMeta' IN labels(n) RETURN count(n) AS c":
@@ -279,6 +283,190 @@ def test_versioning_projection_target_resolver_e2e():
     asyncio.run(_run_target_resolver())
 
 
+# ── Non-destructive rebuild: probe before the full-seed drop; abort on a drop failure ──────────
+#
+# A full seed DROPs the FalkorDB graph key and re-MERGEs it from Postgres. If the resolved client
+# is unreachable/misrouted, the drop must NOT run (it would wipe the read cache with no way to
+# re-seed it) and a drop that FAILS on an existing graph must NOT fall through to the MERGE
+# (which cannot repair a partial/failed wipe). These fakes make the probe / the drop fail on
+# demand and assert: nothing dropped, MERGE never runs, existing cache intact, watermark unmoved.
+
+class _ProbeFailGraph(FakeGraph):
+    """A reachable-check that fails: the connectivity probe (``RETURN 1``) raises, as an
+    unreachable/misrouted instance would. ``delete`` records whether it was ever called."""
+
+    def __init__(self):
+        super().__init__()
+        self.delete_called = False
+
+    async def query(self, cypher: str, params: dict = None):
+        if cypher == "RETURN 1":
+            raise ConnectionError("Connection refused")
+        return await super().query(cypher, params)
+
+    async def delete(self):
+        self.delete_called = True
+        await super().delete()
+
+
+class _DropFailGraph(FakeGraph):
+    """Reachable (the probe answers) but ``delete`` raises the injected error. ``apply_ran``
+    flips on the first MERGE/DELETE apply query, so a test can assert the MERGE never ran."""
+
+    def __init__(self, drop_exc: Exception):
+        super().__init__()
+        self._drop_exc = drop_exc
+        self.apply_ran = False
+
+    async def query(self, cypher: str, params: dict = None):
+        if cypher.startswith("UNWIND"):
+            self.apply_ran = True
+        return await super().query(cypher, params)
+
+    async def delete(self):
+        raise self._drop_exc
+
+
+async def _seed_pinned_graph(svc, name: str) -> str:
+    """Create + publish a two-node graph pinned to ``name`` (a real FalkorDB target), left at
+    watermark 0 so the next ``project_graph`` takes the full-seed (drop-then-reseed) path."""
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="alice", falkor_graph_name=name)
+    gid = G["graph_id"]
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
+        {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": _node("Beta")},
+    ], "seed")
+    return gid
+
+
+async def _projection_state(gid: str):
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        return ps.status, ps.last_error, ps.projected_commit_seq
+
+
+async def _run_probe_fails_no_drop() -> None:
+    """Unreachable target: ``project_graph`` RAISES before any drop — nothing dropped, the
+    existing cache survives untouched, the watermark does not advance, ``last_error`` is set."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    g = _ProbeFailGraph()
+    g.nodes["gv:OLD"] = {"urn": "gv:OLD", "entityId": "OLD", "_label": "Dataset", "displayName": "old"}
+    fake.graphs[name] = g
+    gid = await _seed_pinned_graph(svc, name)
+
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    raised = False
+    try:
+        await proj.project_graph(gid)
+    except ConnectionError:
+        raised = True
+    assert raised, "project_graph must RAISE when the connectivity probe fails"
+    assert not g.delete_called, "the graph key must NOT be dropped when the probe fails"
+    assert "OLD" in g.entity_ids(), "the existing read cache must be left intact"
+
+    status, last_error, projected = await _projection_state(gid)
+    assert status == "idle", status                  # outer handler reset the 'rebuilding' row
+    assert last_error, "last_error must record the surfaced failure"
+    assert projected == 0, projected                 # watermark did NOT advance
+    await db.dispose_engine()
+
+
+async def _run_drop_failure_aborts() -> None:
+    """A drop that FAILS on an existing graph (non-``empty key``) aborts: ``project_graph``
+    RAISES and the MERGE apply NEVER runs, so a failed wipe can't be papered over by a merge."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    g = _DropFailGraph(RuntimeError("WRONGTYPE Operation against a key holding the wrong kind of value"))
+    g.nodes["gv:OLD"] = {"urn": "gv:OLD", "entityId": "OLD", "_label": "Dataset", "displayName": "old"}
+    fake.graphs[name] = g
+    gid = await _seed_pinned_graph(svc, name)
+
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    raised = False
+    try:
+        await proj.project_graph(gid)
+    except RuntimeError:
+        raised = True
+    assert raised, "a non-'empty key' drop failure must RAISE (never proceed to MERGE)"
+    assert not g.apply_ran, "the MERGE apply must NOT run after a failed drop"
+    assert "OLD" in g.entity_ids(), "the existing read cache must be left intact"
+
+    status, last_error, projected = await _projection_state(gid)
+    assert status == "idle", status
+    assert last_error, "last_error must record the surfaced failure"
+    assert projected == 0, projected
+    await db.dispose_engine()
+
+
+async def _run_empty_key_proceeds() -> None:
+    """The benign fresh-graph case: ``delete`` raises "empty key" (no graph yet) → the seed
+    PROCEEDS and MERGEs committed main, exactly as before (a normal first projection)."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    g = _DropFailGraph(RuntimeError("Invalid graph operation on empty key"))
+    fake.graphs[name] = g
+    gid = await _seed_pinned_graph(svc, name)
+
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    r = await proj.project_graph(gid)
+    assert not r["noop"], r
+    assert g.apply_ran, "the fresh-graph seed must proceed to the MERGE apply"
+    assert g.entity_ids() == {"A", "B"}, g.entity_ids()
+    status, _, projected = await _projection_state(gid)
+    assert status == "idle" and projected == 2, (status, projected)
+    await db.dispose_engine()
+
+
+async def _run_healthy_full_seed() -> None:
+    """A healthy client full-seeds exactly as today: the probe answers, the drop clears, the
+    MERGE lands committed main. (The broad seed/incremental/reseed path is covered by _run.)"""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    fake = FakeFalkor()
+    name = "gvt_" + os.urandom(3).hex()
+    gid = await _seed_pinned_graph(svc, name)
+
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=2)
+    r = await proj.project_graph(gid)
+    assert not r["noop"] and r["projected"] == 2, r
+    assert fake.graphs[name].entity_ids() == {"A", "B"}
+    status, _, projected = await _projection_state(gid)
+    assert status == "idle" and projected == 2, (status, projected)
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_versioning_projection_probe_fails_no_drop_e2e():
+    asyncio.run(_run_probe_fails_no_drop())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_versioning_projection_drop_failure_aborts_e2e():
+    asyncio.run(_run_drop_failure_aborts())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_versioning_projection_empty_key_proceeds_e2e():
+    asyncio.run(_run_empty_key_proceeds())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_versioning_projection_healthy_full_seed_e2e():
+    asyncio.run(_run_healthy_full_seed())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
+    asyncio.run(_run_probe_fails_no_drop())
+    asyncio.run(_run_drop_failure_aborts())
+    asyncio.run(_run_empty_key_proceeds())
+    asyncio.run(_run_healthy_full_seed())
     print("versioning FalkorDB projection e2e: OK")
