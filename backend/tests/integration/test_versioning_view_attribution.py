@@ -89,14 +89,18 @@ async def _run() -> None:
     assert r["my_draft"]["originating_view_id"] == "view_B"
     assert await _branch_view(legacy) == "view_B"
 
-    # an attributed draft is never re-assigned ...
+    # branch-per-view: a DIFFERENT view (view_C) gets its OWN new draft — view_B's
+    # draft is never re-assigned (it stays attributed to view_B, invisible to view_C).
     r = await svc.resolve_graph(data_source_id=ds_id, actor="bob",
                                 originating_view_id="view_C")
-    assert r["my_draft"]["originating_view_id"] == "view_B"
-    # ... and a read resolve (no view id) never mutates
+    assert r["my_draft"]["branch_id"] != legacy
+    assert r["my_draft"]["originating_view_id"] == "view_C"
+    assert await _branch_view(legacy) == "view_B"
+    # ... and a read resolve (no view id) never mutates the attribution
     r = await svc.resolve_graph(data_source_id=ds_id, actor="bob",
                                 open_draft_if_absent=False)
-    assert r["my_draft"]["originating_view_id"] == "view_B"
+    assert r["my_draft"] is not None
+    assert await _branch_view(legacy) == "view_B"
 
     # ── A draft MR from an attributed draft is view-listable ──────────────
     await svc.stage_changes(graph_id=gid, branch_id=legacy, actor="bob", ops=[_n("C")])

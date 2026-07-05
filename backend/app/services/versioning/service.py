@@ -3037,19 +3037,28 @@ class GraphVersioningService:
                 return None
             graph_id, main_head, graph_kind = g.id, g.main_head_commit_seq, g.kind
             main_id = await self._main_branch_id(s, graph_id)
-            draft = (await s.execute(
-                select(BranchORM).where(
-                    BranchORM.graph_id == graph_id, BranchORM.owner == actor,
-                    BranchORM.kind == "draft", BranchORM.status == "open",
-                ).order_by(BranchORM.created_at.desc())
-            )).scalars().first()
-            # Claim-if-null: a draft opened before view tracking (or from a path that
-            # couldn't name its view) adopts the caller's view on the next editing
-            # resolve. Only POST /resolve passes a view id, so reads never mutate;
-            # an already-attributed draft is never re-assigned.
-            if (draft is not None and originating_view_id
-                    and draft.originating_view_id is None):
-                draft.originating_view_id = originating_view_id
+            draft_q = select(BranchORM).where(
+                BranchORM.graph_id == graph_id, BranchORM.owner == actor,
+                BranchORM.kind == "draft", BranchORM.status == "open",
+            ).order_by(BranchORM.created_at.desc())
+            if originating_view_id is None:
+                # Legacy/no-view caller: the owner's most-recent open draft (unchanged).
+                draft = (await s.execute(draft_q)).scalars().first()
+            else:
+                # Branch-per-view: a draft is isolated per (data source, owner, view).
+                # Prefer THIS view's own (most-recent) draft; else claim a not-yet-attributed
+                # (originating_view_id IS NULL) legacy draft for this view; else this view has
+                # no draft (only OTHER views' drafts exist) and one is opened below if requested.
+                drafts = (await s.execute(draft_q)).scalars().all()
+                draft = next(
+                    (d for d in drafts if d.originating_view_id == originating_view_id), None)
+                if draft is None:
+                    # Claim-if-null: a draft opened before view tracking (or from a path that
+                    # couldn't name its view) adopts the caller's view on this editing resolve;
+                    # an already-attributed draft is never re-assigned.
+                    draft = next((d for d in drafts if d.originating_view_id is None), None)
+                    if draft is not None:
+                        draft.originating_view_id = originating_view_id
             my_draft = self._draft_ref(draft) if draft is not None else None
         if my_draft is None and open_draft_if_absent:
             branch_id = await self.open_draft(
