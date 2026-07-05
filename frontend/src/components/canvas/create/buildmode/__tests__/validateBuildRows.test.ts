@@ -87,23 +87,43 @@ describe('validateBuildRows', () => {
     expect(a1.fixes.map((f) => f.field)).not.toContain('parent')
   })
 
-  it('(f) two sibling rows needing the same missing ancestor chain share ONE synthesized chain', () => {
+  it('(f) three root leaf-typed rows needing the same missing ancestor chain each get their OWN synthesized chain (no cross-root sharing)', () => {
     const rows: BuildRow[] = [
       makeRow({ id: 'ds1', name: 'Orders', typeId: 'dataset', parentId: null }),
       makeRow({ id: 'ds2', name: 'Customers', typeId: 'dataset', parentId: null }),
+      makeRow({ id: 'ds3', name: 'Products', typeId: 'dataset', parentId: null }),
     ]
     const result = validateBuildRows(rows, ctx)
     const ds1 = byId(result, 'ds1')
     const ds2 = byId(result, 'ds2')
+    const ds3 = byId(result, 'ds3')
 
     expect(ds1.parentId).not.toBeNull()
-    expect(ds1.parentId).toBe(ds2.parentId)
+    expect(ds2.parentId).not.toBeNull()
+    expect(ds3.parentId).not.toBeNull()
+    // each root dataset gets its own container — none shared across roots
+    expect(new Set([ds1.parentId, ds2.parentId, ds3.parentId]).size).toBe(3)
 
-    // exactly one synthesized domain/dataPlatform/container chain (3 new
-    // rows) is shared by both datasets, not two full chains (6).
-    const synthesized = result.filter((r) => r.id !== 'ds1' && r.id !== 'ds2')
-    expect(synthesized).toHaveLength(3)
-    expect(synthesized.map((r) => r.typeId).sort()).toEqual(['container', 'dataPlatform', 'domain'])
+    // three FULL, independent domain/dataPlatform/container chains (9 new
+    // rows total), not one chain (3) shared across all three roots.
+    const synthesized = result.filter((r) => r.id !== 'ds1' && r.id !== 'ds2' && r.id !== 'ds3')
+    expect(synthesized).toHaveLength(9)
+    expect(synthesized.map((r) => r.typeId).sort()).toEqual(
+      ['container', 'container', 'container', 'dataPlatform', 'dataPlatform', 'dataPlatform', 'domain', 'domain', 'domain'],
+    )
+
+    const domainIdsOf = (ds: BuildRow) => {
+      const container = byId(result, ds.parentId!)
+      const platform = byId(result, container.parentId!)
+      const domain = byId(result, platform.parentId!)
+      expect(container.typeId).toBe('container')
+      expect(platform.typeId).toBe('dataPlatform')
+      expect(domain.typeId).toBe('domain')
+      expect(domain.parentId).toBeNull()
+      return domain.id
+    }
+    const domainIds = [ds1, ds2, ds3].map(domainIdsOf)
+    expect(new Set(domainIds).size).toBe(3)
   })
 
   it('(c) inserts a missing parent level (dataset pasted at root gets the domain/dataPlatform/container chain)', () => {
@@ -139,6 +159,30 @@ describe('validateBuildRows', () => {
     expect(at1.issues).toHaveLength(1)
     expect(at1.issues[0].message).toContain('Attribute')
     expect(at1.issues[0].message).toContain('Container')
+  })
+
+  it('(g) returns rows in OUTLINE order, not depth order — a multi-level, multi-item tree stays contiguous per subtree', () => {
+    // Two root groups ("layers"), each with two attribute children
+    // ("objects"); one child (ga1) itself gains a child (gga1), so pass 1
+    // auto-promotes ga1 from attribute -> group to hold it (like test (b)).
+    // Given in outline order already — the bug is that validateBuildRows
+    // used to return rows sorted by DEPTH instead of preserving this order.
+    const rows: BuildRow[] = [
+      makeRow({ id: 'g1', name: 'Group1', typeId: 'group', parentId: null }),
+      makeRow({ id: 'ga1', name: 'GA1', typeId: 'attribute', parentId: 'g1' }),
+      makeRow({ id: 'gga1', name: 'GGA1', typeId: 'attribute', parentId: 'ga1' }),
+      makeRow({ id: 'ga2', name: 'GA2', typeId: 'attribute', parentId: 'g1' }),
+      makeRow({ id: 'g2', name: 'Group2', typeId: 'group', parentId: null }),
+      makeRow({ id: 'gb1', name: 'GB1', typeId: 'attribute', parentId: 'g2' }),
+      makeRow({ id: 'gb2', name: 'GB2', typeId: 'attribute', parentId: 'g2' }),
+    ]
+    const result = validateBuildRows(rows, ctx)
+
+    // ga1 got promoted to 'group' (bottom-up pass 1) so it can hold gga1 —
+    // confirms the fixture is exercising the intended multi-level shape.
+    expect(byId(result, 'ga1').typeId).toBe('group')
+
+    expect(result.map((r) => r.id)).toEqual(['g1', 'ga1', 'gga1', 'ga2', 'g2', 'gb1', 'gb2'])
   })
 
   it('(e) summarize() counts valid/fixed/errors', () => {

@@ -138,11 +138,15 @@ function tryAutoPromoteParent(
  * Finds the ontology containment chain that would place `row`'s type under an
  * allowed ancestor, synthesizes the missing intermediate BuildRow(s), and
  * relinks `row` under the deepest one. A chain level already synthesized
- * under the same anchor for an earlier row (tracked in `insertedKeys`, keyed
- * by `anchorId::type`) is reused instead of duplicated — sibling rows needing
- * the same missing ancestors end up sharing one chain. Returns the ids of the
- * newly-CREATED rows only (root-to-nearest order; empty if the whole chain
- * was reused), or `null` if no chain bridges the gap.
+ * under the same REAL anchor for an earlier row (tracked in `insertedKeys`,
+ * keyed by `anchorId::type`) is reused instead of duplicated — sibling rows
+ * that share an existing parent and need the same missing ancestors end up
+ * sharing one chain. Root-anchored insertions (no real existing parent —
+ * `row` is itself top-level) are keyed per-originating-row instead, so
+ * distinct top-level rows never merge into one synthesized hierarchy even
+ * when they need an identical chain. Returns the ids of the newly-CREATED
+ * rows only (root-to-nearest order; empty if the whole chain was reused), or
+ * `null` if no chain bridges the gap.
  */
 function tryInsertMissingParent(
   row: BuildRow,
@@ -178,7 +182,12 @@ function tryInsertMissingParent(
   const newIds: string[] = []
   let anchorId = best.anchorId
   for (const t of best.missing) {
-    const key = `${anchorId ?? '(root)'}::${t.toLowerCase()}`
+    // Root-anchored (anchorId null, i.e. `row` is itself top-level): scope
+    // the key to THIS row so distinct top-level rows never share a
+    // synthesized chain, even when the missing chain is identical (see
+    // docstring above). Real-anchor keys are unaffected — those legitimately
+    // dedup across siblings of the same existing parent.
+    const key = anchorId != null ? `${anchorId}::${t.toLowerCase()}` : `root:${row.id}::${t.toLowerCase()}`
     const reused = insertedKeys.get(key)
     if (reused) {
       anchorId = reused
@@ -198,6 +207,63 @@ function tryInsertMissingParent(
     note: `Placed under an auto-inserted ${displayName(best.missing[best.missing.length - 1], ctx.entityTypes)}.`,
   })
   return newIds
+}
+
+/**
+ * Re-orders `rows` (whose parentId edges are already final) into OUTLINE
+ * order: a DFS over the parent/child tree where each node is immediately
+ * followed by its own full subtree, recursively — the contiguous "row then
+ * its whole subtree" invariant buildRow.ts's lastSubtreeIndex maintains,
+ * which the outline/grid adapters assume when they indent by row.depth.
+ *
+ * Roots, and each node's children, are ordered by the position their
+ * EARLIEST original-input descendant held in `originalIds`. Synthesized
+ * ancestors (from tryInsertMissingParent) have no original position of their
+ * own, so they inherit the position of the real row that caused them to be
+ * created and — since a node is emitted before its children are visited —
+ * land immediately before the rest of their subtree.
+ */
+function toOutlineOrder(rows: BuildRow[], originalIds: string[]): BuildRow[] {
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  const childrenOfParent = new Map<string | null, BuildRow[]>()
+  for (const r of rows) {
+    const key = r.parentId != null && byId.has(r.parentId) ? r.parentId : null
+    const list = childrenOfParent.get(key)
+    if (list) list.push(r)
+    else childrenOfParent.set(key, [r])
+  }
+  const originalIndex = new Map(originalIds.map((id, i) => [id, i]))
+
+  const anchorCache = new Map<string, number>()
+  const visiting = new Set<string>()
+  function anchorIndex(id: string): number {
+    if (anchorCache.has(id)) return anchorCache.get(id)!
+    if (visiting.has(id)) return Infinity // cycle guard
+    visiting.add(id)
+    let best = originalIndex.get(id) ?? Infinity
+    for (const child of childrenOfParent.get(id) ?? []) {
+      best = Math.min(best, anchorIndex(child.id))
+    }
+    visiting.delete(id)
+    anchorCache.set(id, best)
+    return best
+  }
+  const byAnchor = (a: BuildRow, b: BuildRow) => anchorIndex(a.id) - anchorIndex(b.id)
+
+  const result: BuildRow[] = []
+  const visited = new Set<string>()
+  function visit(row: BuildRow): void {
+    if (visited.has(row.id)) return
+    visited.add(row.id)
+    result.push(row)
+    for (const child of [...(childrenOfParent.get(row.id) ?? [])].sort(byAnchor)) visit(child)
+  }
+  for (const root of [...(childrenOfParent.get(null) ?? [])].sort(byAnchor)) visit(root)
+
+  // Defensive: never silently drop a row (e.g. a dangling parentId ref not
+  // caught above) — fail open by appending anything unvisited.
+  for (const r of rows) if (!visited.has(r.id)) result.push(r)
+  return result
 }
 
 /**
@@ -266,9 +332,10 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
   }
 
   // Pass 2: placement. With every row's type now final, insert missing
-  // ancestors for any row still in an invalid position; sibling rows needing
-  // the same missing chain share one synthesized chain (see insertedKeys in
-  // tryInsertMissingParent) instead of each synthesizing their own.
+  // ancestors for any row still in an invalid position; sibling rows that
+  // share a REAL existing parent and need the same missing chain share one
+  // synthesized chain (see insertedKeys in tryInsertMissingParent) instead of
+  // each synthesizing their own — distinct top-level rows never share.
   const insertedKeys = new Map<string, string>()
   const output: BuildRow[] = []
   for (const id of order) {
@@ -304,5 +371,10 @@ function validateBuildRowsUnsafe(rows: BuildRow[], ctx: BuildOntologyCtx): Build
     ...r,
     status: (r.issues.length > 0 ? 'error' : r.fixes.length > 0 ? 'fixed' : 'valid') as BuildRow['status'],
   }))
-  return reindexDepths(finalized)
+  // `output`/`finalized` are still in Pass 2's internal depth-first-by-LEVEL
+  // processing order (needed so every row's real parent is resolved before
+  // it's placed) — NOT outline order. Re-derive outline order (each row
+  // immediately followed by its own subtree) from the now-final parentId
+  // tree before returning; see toOutlineOrder for why.
+  return reindexDepths(toOutlineOrder(finalized, rows.map((r) => r.id)))
 }
