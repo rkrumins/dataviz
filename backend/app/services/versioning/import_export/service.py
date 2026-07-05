@@ -192,18 +192,21 @@ class ImportExportService:
         export_format: str = "ndjson",
         as_of_seq: Optional[int] = None,
         scope_view_id: Optional[str] = None,
+        branch_id: Optional[str] = None,
         provider_id: Optional[str] = None,
         extra_props: Optional[List[str]] = None,
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, str]:
         """Create an export job; mints the ``export.<fmt>`` artifact key. Returns
         ``{job_id, result_uri}``. A whole-data-source export is a re-importable backup.
-        ``extra_props`` = property names to emit as (empty) columns so the user can add them."""
+        ``branch_id`` exports that working branch's composed state (main + committed + draft),
+        defaulting to published main. ``extra_props`` = property names to emit as empty columns."""
         async with db.graphver_session() as s:
             job = JobORM(
                 job_type="export", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, provider_id=provider_id,
-                scope_view_id=scope_view_id, import_format=export_format, as_of_seq=as_of_seq,
+                scope_view_id=scope_view_id, branch_id=branch_id,
+                import_format=export_format, as_of_seq=as_of_seq,
                 field_scope=extra_props or None, idempotency_key=idempotency_key, status="pending",
             )
             s.add(job)

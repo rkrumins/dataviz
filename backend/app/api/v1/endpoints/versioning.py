@@ -2091,6 +2091,7 @@ async def create_export(
     format: str = Query("ndjson"),
     as_of_seq: Optional[int] = Query(None, alias="asOfSeq"),
     view_id: Optional[str] = Query(None, alias="viewId"),
+    branch_id: Optional[str] = Query(None, alias="branchId", description="Export this working branch's composed state (main + committed + draft); default = published main"),
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -2109,7 +2110,8 @@ async def create_export(
         created = await ie.create_export_job(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
             actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
-            provider_id=meta.get("provider_id"), extra_props=extra_props, idempotency_key=idempotency_key)
+            branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=extra_props,
+            idempotency_key=idempotency_key)
     background.add_task(ie.run_export_safe, created["job_id"])
     return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": "running"}
 

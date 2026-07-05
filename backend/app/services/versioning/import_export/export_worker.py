@@ -174,13 +174,16 @@ class ExportWorker:
             job.status = "running"
             job.started_at = _now()
             graph_id, fmt = job.graph_id, job.import_format or "ndjson"
-            as_of_seq, result_uri = job.as_of_seq, job.result_uri
-            main_id = (await s.execute(
-                select(BranchORM.id).where(
-                    BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
+            as_of_seq, result_uri, branch_id = job.as_of_seq, job.result_uri, job.branch_id
+            if branch_id is None:                        # default: published main
+                branch_id = (await s.execute(
+                    select(BranchORM.id).where(
+                        BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
 
+        # A branch_id (a working draft) composes main + committed + draft ops — so a user can export
+        # their in-progress branch, edit in Excel, and re-import onto the same branch.
         state = await self._svc.materialize_state(
-            graph_id=graph_id, branch_id=main_id, as_of_seq=as_of_seq)
+            graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq)
         nodes, edges = state["nodes"], state["edges"]
         if self._scope:                                   # view-scoped export (Phase 4)
             nodes, edges = filter_to_scope(nodes, edges, self._scope)

@@ -879,8 +879,20 @@ export function ContextViewCanvas({
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
+  // An import commits to the draft server-side; we refresh only when the user LEAVES the import
+  // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
+  const importedRef = useRef(false)
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
+  // Refresh the canvas + versioning surfaces after an import — but only on dialog exit, and only if
+  // an import happened (re-hydrating while the dialog is open unmounts its preview).
+  const refreshAfterImport = useCallback(() => {
+    if (!importedRef.current) return
+    importedRef.current = false
+    queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+    invalidateAggregatedEdges()
+    useBranchStore.getState().bumpMainEpoch()
+  }, [queryClient])
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
 
@@ -2315,19 +2327,17 @@ export function ContextViewCanvas({
             graphId={graphId}
             branchId={useBranchStore.getState().currentBranchId ?? undefined}
             viewId={activeView?.id}
-            onClose={() => setShowImportDialog(false)}
+            onClose={() => { setShowImportDialog(false); refreshAfterImport() }}
             onReviewChanges={() => {
               setShowImportDialog(false)
               useVersioningPanelStore.getState().openPanel('changes')
+              refreshAfterImport()
             }}
             onImported={() => {
-              // The import committed changes to the draft SERVER-SIDE (no optimistic canvas), so
-              // refresh everything at once: the versioning surfaces (Changes tab + count chips),
-              // the lineage rollups, and re-hydrate the canvas (bumping the epoch folds into
-              // providerVersion, which re-reads the current branch with the imported changes).
-              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-              invalidateAggregatedEdges()
-              useBranchStore.getState().bumpMainEpoch()
+              // The import committed to the draft server-side. DON'T refresh the canvas now — that
+              // would re-hydrate behind the open dialog and unmount its preview. Just remember an
+              // import happened; refreshAfterImport() runs when the user closes / reviews.
+              importedRef.current = true
             }}
           />
         )}
@@ -2336,6 +2346,8 @@ export function ContextViewCanvas({
             wsId={scopeWsId}
             graphId={graphId}
             viewId={activeView?.id}
+            branchId={useBranchStore.getState().isDraftMode()
+              ? (useBranchStore.getState().currentBranchId ?? undefined) : undefined}
             onClose={() => setShowExportDialog(false)}
           />
         )}

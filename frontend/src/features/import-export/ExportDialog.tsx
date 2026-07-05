@@ -17,6 +17,7 @@ export interface ExportDialogProps {
   wsId: string
   graphId: string
   viewId?: string
+  branchId?: string   // present when the user is on a working draft branch → offer to include it
   onClose: () => void
 }
 
@@ -30,9 +31,10 @@ const FORMATS: { id: ImportFormat; label: string; hint: string }[] = [
   { id: 'json', label: 'JSON', hint: 'A single JSON array · for tools & scripts' },
 ]
 
-export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogProps) {
+export function ExportDialog({ wsId, graphId, viewId, branchId, onClose }: ExportDialogProps) {
   const [format, setFormat] = useState<ImportFormat>('csv')
   const [scope, setScope] = useState<'view' | 'all'>(viewId ? 'view' : 'all')
+  const [source, setSource] = useState<'branch' | 'published'>(branchId ? 'branch' : 'published')
   const [newProps, setNewProps] = useState('')
   const [phase, setPhase] = useState<Phase>('choose')
   const [error, setError] = useState<string | null>(null)
@@ -42,7 +44,10 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
     setError(null)
     try {
       const props = newProps.split(',').map((s) => s.trim()).filter(Boolean)
-      await exportAndDownload(wsId, graphId, { format, viewId: scope === 'view' ? viewId : undefined, props })
+      await exportAndDownload(wsId, graphId, {
+        format, viewId: scope === 'view' ? viewId : undefined,
+        branchId: branchId && source === 'branch' ? branchId : undefined, props,
+      })
       setPhase('done')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The export could not be completed.')
@@ -76,7 +81,8 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
         <div className="flex-1 overflow-y-auto">
           {phase === 'choose' && (
             <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope}
-              hasView={!!viewId} newProps={newProps} setNewProps={setNewProps} />
+              hasView={!!viewId} source={source} setSource={setSource} hasBranch={!!branchId}
+              newProps={newProps} setNewProps={setNewProps} />
           )}
           {phase === 'running' && (
             <div className="px-8 py-16 flex flex-col items-center gap-4">
@@ -146,9 +152,10 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
 }
 
 // ── choose (two columns: guide | scope + format) ─────────────────────────────
-function ChooseStep({ format, setFormat, scope, setScope, hasView, newProps, setNewProps }: {
+function ChooseStep({ format, setFormat, scope, setScope, hasView, source, setSource, hasBranch, newProps, setNewProps }: {
   format: ImportFormat; setFormat: (f: ImportFormat) => void
   scope: 'view' | 'all'; setScope: (s: 'view' | 'all') => void; hasView: boolean
+  source: 'branch' | 'published'; setSource: (s: 'branch' | 'published') => void; hasBranch: boolean
   newProps: string; setNewProps: (s: string) => void
 }) {
   return (
@@ -171,8 +178,19 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView, newProps, set
         </div>
       </div>
 
-      {/* Right — scope + format */}
+      {/* Right — source + scope + format */}
       <div className="px-8 py-6 space-y-5">
+        {hasBranch && (
+          <div>
+            <label className="block text-xs font-medium text-ink-secondary mb-2">Which version</label>
+            <div className="grid grid-cols-2 gap-2">
+              <ScopeCard active={source === 'branch'} onClick={() => setSource('branch')}
+                title="My working branch" desc="Includes your draft changes" />
+              <ScopeCard active={source === 'published'} onClick={() => setSource('published')}
+                title="Published" desc="The committed main graph" />
+            </div>
+          </div>
+        )}
         {hasView && (
           <div>
             <label className="block text-xs font-medium text-ink-secondary mb-2">What to export</label>
