@@ -736,8 +736,11 @@ class ProviderManager:
         creds = credentials or {}
 
         if ptype == "falkordb":
-            from backend.app.providers.falkordb_provider import FalkorDBProvider
-            host, port = apply_local_dev_falkordb_override(host, port)
+            from backend.app.providers.falkordb_provider import (
+                FalkorDBProvider,
+                resolve_falkordb_target,
+            )
+            host, port = resolve_falkordb_target(host, port)
             # P1.6 — credentials previously dropped here, causing NOAUTH
             # errors to be mis-classified as network failures and tripping
             # the breaker for what is actually a configuration problem.

@@ -81,19 +81,12 @@ def make_registry_graph_factory(session_factory=None) -> Callable[[str, Optional
                         "routing its graphs to the DEFAULT FalkorDB instance", provider_id)
                 else:
                     creds = await provider_repo.get_credentials(session, provider_id)
-                    # Same host rewrites the read path applies — projector and reads must
-                    # resolve a provider to the SAME instance. BOTH directions matter:
-                    # LOCAL_DEV_FALKORDB_OVERRIDE (Docker hostname → env host for
-                    # host-run processes) and _normalize_falkordb_host (a stored
-                    # ``localhost`` → FALKORDB_DOCKER_LOCALHOST_REWRITE for in-container
-                    # processes; the reader gets this inside FalkorDBProvider.__init__).
-                    # Missing the second was why a localhost-registered provider READ
-                    # fine but every projection/rebuild died with "connection refused".
-                    from backend.app.providers.falkordb_provider import _normalize_falkordb_host
-                    from backend.app.providers.manager import apply_local_dev_falkordb_override
-                    host, port = apply_local_dev_falkordb_override(
-                        row.host, int(row.port or 6379))
-                    host = _normalize_falkordb_host(host)
+                    # Same resolution the read path applies — projector and reads must
+                    # resolve a provider to the SAME instance. Missing this parity was
+                    # why a localhost-registered provider READ fine but every
+                    # projection/rebuild died with "connection refused".
+                    from backend.app.providers.falkordb_provider import resolve_falkordb_target
+                    host, port = resolve_falkordb_target(row.host, int(row.port or 6379))
                     conn = (host, port, creds.get("username"), creds.get("password"))
         except Exception:
             logger.exception(
@@ -149,11 +142,8 @@ async def list_graph_keys(provider_id: Optional[str] = None,
                     if row is not None and row.is_active and row.provider_type == "falkordb" \
                             and row.host:
                         creds = await provider_repo.get_credentials(session, provider_id)
-                        from backend.app.providers.falkordb_provider import _normalize_falkordb_host
-                        from backend.app.providers.manager import apply_local_dev_falkordb_override
-                        host, port = apply_local_dev_falkordb_override(
-                            row.host, int(row.port or 6379))
-                        host = _normalize_falkordb_host(host)   # read-path parity (docker rewrite)
+                        from backend.app.providers.falkordb_provider import resolve_falkordb_target
+                        host, port = resolve_falkordb_target(row.host, int(row.port or 6379))
                         username, password = creds.get("username"), creds.get("password")
             except Exception:
                 logger.exception("provider lookup for %r failed — listing DEFAULT instance",

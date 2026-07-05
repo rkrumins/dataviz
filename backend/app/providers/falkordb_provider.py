@@ -189,6 +189,24 @@ def _normalize_falkordb_host(host: Optional[str]) -> str:
     return h
 
 
+def resolve_falkordb_target(host: Optional[str], port: Optional[int]) -> Tuple[str, int]:
+    """Single host/port resolution path for a FalkorDB provider.
+
+    Composes ``apply_local_dev_falkordb_override`` (Docker hostname → host,
+    opt-in for host-run dev processes) then ``_normalize_falkordb_host``
+    (env Docker→host rewrite / IPv4 pin), in that exact order — the same
+    composition every call site previously assembled inline (provider
+    creation, projection registry resolve, registry key-list). Consolidating
+    here is what guarantees a given ``(host, port)`` resolves to the SAME
+    target in every process, so the read instance and the projection
+    instance can no longer drift apart.
+    """
+    from .manager import apply_local_dev_falkordb_override
+    host, port = apply_local_dev_falkordb_override(host, port)
+    host = _normalize_falkordb_host(host)
+    return host, port
+
+
 def _redact_redis_url(url: str) -> str:
     """Strip embedded credentials from a Redis URL for safe logging.
 
