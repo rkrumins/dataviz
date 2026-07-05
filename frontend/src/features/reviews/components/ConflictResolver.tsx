@@ -23,7 +23,8 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
-  AlertTriangle, Box, Columns3, Database, Folder, GitBranch, Loader2, Search, Trash2, Undo2, X,
+  AlertTriangle, ArrowRight, Box, CheckCircle2, Columns3, Database, Folder, GitBranch, GitMerge,
+  Layers, Loader2, Search, Trash2, Undo2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ResolutionMap } from '@/services/versioningApiService'
@@ -147,7 +148,7 @@ export function ConflictResolver({
   const rowVirtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 150,
+    estimateSize: () => 220,
     overscan: 6,
     getItemKey: (i) => filtered[i][0],
   })
@@ -174,28 +175,40 @@ export function ConflictResolver({
         onClick={onCancel}
       >
         <motion.div
-          className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
+          className="w-full max-w-[1180px] max-h-[90vh] flex flex-col rounded-2xl bg-canvas border border-glass-border shadow-2xl overflow-hidden"
           initial={{ scale: 0.96, y: 8 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 8 }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-glass-border/60">
-            <div className="flex items-start gap-2.5">
-              <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/10 shrink-0">
-                <AlertTriangle className="w-4 h-4 text-amber-500" />
+          {/* Header */}
+          <div className="flex items-start justify-between gap-3 px-6 py-5 border-b border-glass-border/60">
+            <div className="flex items-start gap-3">
+              <span className="flex items-center justify-center w-11 h-11 rounded-xl bg-gradient-to-br from-amber-500/20 to-amber-500/[0.04] ring-1 ring-amber-500/20 shrink-0">
+                <GitMerge className="w-5 h-5 text-amber-500" />
               </span>
               <div>
-                <h3 className="text-sm font-semibold text-ink">
-                  Resolve {normalized.length} {normalized.length === 1 ? 'conflict' : 'conflicts'}
-                  {byEntity.size > 1 && <span className="text-ink-muted font-normal"> across {byEntity.size} entities</span>}
-                </h3>
-                <p className="text-[11px] text-ink-muted mt-0.5">
-                  Main changed under your work. For each, choose <span className="text-accent-lineage font-medium">your version</span> or the <span className="text-violet-500 font-medium">incoming</span> one, then merge.
+                <h3 className="text-[15px] font-semibold text-ink">Review changes from main</h3>
+                <p className="text-[12px] text-ink-muted mt-1 leading-relaxed">
+                  <span className="font-medium text-ink">{normalized.length}</span>{' '}
+                  {normalized.length === 1 ? 'change needs' : 'changes need'} your decision
+                  {byEntity.size > 1 && <> across <span className="font-medium text-ink">{byEntity.size}</span> entities</>}.
+                  {' '}For each, keep <span className="text-accent-lineage font-medium">your version</span> or take the{' '}
+                  <span className="text-violet-500 font-medium">incoming</span> one, then merge.
                 </p>
               </div>
             </div>
             <button onClick={onCancel} className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               <X className="w-4 h-4" />
             </button>
+          </div>
+
+          {/* Union reassurance — the "everything else is safe" signal */}
+          <div className="flex items-start gap-2 px-6 py-2.5 bg-emerald-500/[0.06] border-b border-emerald-500/15 text-[11.5px] leading-relaxed text-ink-muted">
+            <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-px" />
+            <span>
+              <span className="font-medium text-emerald-600 dark:text-emerald-400">Everything else merges automatically.</span>{' '}
+              Only genuine clashes appear below — your other edits and main's non-conflicting changes
+              (properties added, updated, and removed) are all preserved.
+            </span>
           </div>
 
           {/* Toolbar: bulk + search */}
@@ -293,19 +306,30 @@ function EntityCard({
   const { type, name } = entityMeta(eid, list, seed)
   const Icon = iconForType(type)
   const dm = list.find(isDeleteModify)
+  const core = list.filter((c) => c.path[0] !== 'properties')
+  const props = list.filter((c) => c.path[0] === 'properties')
+  const renderConflict = (c: Conflict) => (
+    <FieldConflict key={ckey(c)} c={c} side={picks[ckey(c)] ?? 'ours'}
+      onPick={(s) => setPicks((p) => ({ ...p, [ckey(c)]: s }))} />
+  )
 
   return (
-    <div className={cn('rounded-xl border bg-canvas-elevated/40 p-3',
+    <div className={cn('rounded-xl border bg-canvas-elevated/40 p-4',
       deleted ? 'border-rose-500/30' : dm ? 'border-amber-500/30' : 'border-glass-border')}>
-      <div className="flex items-center justify-between gap-2 mb-2.5">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="flex items-center justify-center w-6 h-6 rounded-md bg-canvas-overlay shrink-0">
-            <Icon className="w-3.5 h-3.5 text-ink-muted" />
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-canvas-overlay shrink-0">
+            <Icon className="w-4 h-4 text-ink-muted" />
           </span>
           <div className="min-w-0">
-            <p className="text-xs font-semibold text-ink truncate" title={eid}>{name}</p>
+            <p className="text-[13px] font-semibold text-ink truncate" title={eid}>{name}</p>
             <p className="text-[10px] text-ink-muted/70 capitalize">{type}</p>
           </div>
+          {!dm && !deleted && (
+            <span className="ml-1 shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+              {list.length} to decide
+            </span>
+          )}
         </div>
         {!dm && (
           <button
@@ -326,10 +350,15 @@ function EntityCard({
           onPick={(s) => setPicks((p) => ({ ...p, [ckey(dm)]: s }))} />
       ) : (
         <div className="space-y-3">
-          {list.map((c) => (
-            <FieldConflict key={ckey(c)} c={c} side={picks[ckey(c)] ?? 'ours'}
-              onPick={(s) => setPicks((p) => ({ ...p, [ckey(c)]: s }))} />
-          ))}
+          {core.length > 0 && <div className="grid sm:grid-cols-2 gap-3">{core.map(renderConflict)}</div>}
+          {props.length > 0 && (
+            <div className="rounded-lg border border-glass-border/70 bg-canvas/40 p-3">
+              <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-semibold text-ink-muted/70 mb-2.5">
+                <Layers className="w-3 h-3" /> Properties · {props.length}
+              </p>
+              <div className="grid sm:grid-cols-2 gap-3">{props.map(renderConflict)}</div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -383,24 +412,33 @@ function DeleteModifyChoice({ dm, side, onPick }: { dm: Conflict; side: Side; on
 function FieldConflict({ c, side, onPick }: { c: Conflict; side: Side; onPick: (s: Side) => void }) {
   const youChanged = JSON.stringify(c.ours) !== JSON.stringify(c.base)
   const mainChanged = JSON.stringify(c.theirs) !== JSON.stringify(c.base)
+  const both = youChanged && mainChanged
   return (
-    <div>
-      <p className="text-[10px] uppercase tracking-wider text-ink-muted/70 mb-1 font-medium">{humanizeField(c.path)}</p>
-      <div className="flex items-center gap-1.5 mb-1.5 text-[11px]">
-        <span className="text-ink-muted/60 shrink-0">was</span>
+    <div className="rounded-lg border border-glass-border/60 bg-canvas/40 p-2.5">
+      {/* Field + who-changed context (the "why") */}
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <p className="text-[11px] font-semibold text-ink truncate" title={humanizeField(c.path)}>{humanizeField(c.path)}</p>
+        <span className="shrink-0 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+          {both ? 'both changed' : youChanged ? 'you changed' : 'main changed'}
+        </span>
+      </div>
+      {/* Original value */}
+      <div className="flex items-center gap-1.5 mb-2 text-[11px]">
+        <span className="text-ink-muted/60 shrink-0">Original</span>
+        <ArrowRight className="w-3 h-3 text-ink-muted/40 shrink-0" />
         <span className="min-w-0"><ValueText value={c.base} /></span>
         <button
           onClick={() => onPick('base')}
           title="Keep the original value"
-          className={cn('ml-auto shrink-0 p-1 rounded transition-colors',
-            side === 'base' ? 'text-ink bg-canvas-overlay' : 'text-ink-muted/50 hover:text-ink-muted')}
+          className={cn('ml-auto shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] transition-colors',
+            side === 'base' ? 'text-ink bg-canvas-overlay font-medium' : 'text-ink-muted/50 hover:text-ink-muted')}
         >
-          <Undo2 className="w-3 h-3" />
+          <Undo2 className="w-3 h-3" /> {side === 'base' ? 'kept' : 'revert'}
         </button>
       </div>
+      {/* The two choices */}
       <div className="grid grid-cols-2 gap-1.5">
         {(['ours', 'theirs'] as const).map((s) => {
-          const changed = s === 'ours' ? youChanged : mainChanged
           const sel = side === s
           return (
             <button
@@ -408,10 +446,10 @@ function FieldConflict({ c, side, onPick }: { c: Conflict; side: Side; onPick: (
               className={cn('rounded-lg border px-2.5 py-1.5 text-left transition-colors',
                 sel ? SIDE_STYLE[s].sel : 'border-glass-border bg-canvas hover:border-glass-border/80')}
             >
-              <span className={cn('flex items-center justify-between text-[10px] font-semibold mb-0.5',
+              <span className={cn('flex items-center gap-1 text-[10px] font-semibold mb-0.5',
                 sel ? SIDE_STYLE[s].text : 'text-ink-muted')}>
+                {sel && <CheckCircle2 className="w-3 h-3" />}
                 {SIDE_LABEL[s]}
-                {changed && <span className="text-[9px] font-normal text-ink-muted/60">changed</span>}
               </span>
               <span className="block text-[11px]"><ValueText value={c[s]} /></span>
             </button>

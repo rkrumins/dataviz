@@ -275,6 +275,7 @@ export interface PullRequest {
   sourceBranchId: string
   sourceBranchOwner?: string | null   // owner of the source draft (only on the single-PR read)
   sourceBranchName?: string | null
+  originatingViewId?: string | null   // the view the source draft belongs to — for "back to view" nav
   targetGraphId: string
   targetBranch: string
   baseCommitSeq?: number | null

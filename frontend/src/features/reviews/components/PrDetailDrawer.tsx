@@ -8,10 +8,11 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
-  GitPullRequestArrow, Pencil, Check, ArrowDownToLine, AlertTriangle, GitCommitHorizontal,
+  GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -47,6 +48,7 @@ function Section({ icon: Icon, title, right, children }: {
 }
 
 export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: string; onClose: () => void }) {
+  const navigate = useNavigate()
   const { showToast } = useToast()
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const user = useAuthStore((s) => s.user)
@@ -267,10 +269,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
               <Section icon={GitBranch} title="Overview">
                 <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-3 space-y-2 text-sm">
-                  <div className="flex items-center gap-2 text-ink">
-                    <span className="font-mono text-[12px]">{isDraftMr(pr) ? 'draft' : (pr.sourceBranchId?.slice(0, 12) ?? 'fork')}</span>
-                    <span className="text-ink-muted">→</span>
-                    <span className="font-mono text-[12px]">{pr.targetBranch}</span>
+                  <div className="flex items-center gap-2 text-ink flex-wrap">
+                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage font-medium text-[12px]">
+                      <GitBranch className="w-3.5 h-3.5" />
+                      {pr.sourceBranchName || (isDraftMr(pr) ? 'this draft' : (pr.sourceBranchId?.slice(0, 12) ?? 'fork'))}
+                    </span>
+                    <span className="text-ink-muted text-[13px]">→</span>
+                    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-ink/[0.06] text-ink font-medium text-[12px]">
+                      <GitBranch className="w-3.5 h-3.5" /> {pr.targetBranch}
+                    </span>
                   </div>
                   <p className="text-[12px] text-ink-muted flex items-center gap-1.5">
                     <User className="w-3.5 h-3.5" /> {ownerName(pr.actor, pr.userNames)}
@@ -292,17 +299,29 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                       ))}
                     </p>
                   )}
+                  {pr.originatingViewId && (
+                    <button
+                      onClick={() => { onClose(); navigate(`/views/${pr.originatingViewId}?branch=${pr.sourceBranchId}`) }}
+                      className="mt-1 inline-flex items-center gap-1.5 text-[12px] font-medium text-accent-lineage hover:underline"
+                      title="Go to the canvas for this draft's view"
+                    >
+                      <ArrowUpRight className="w-3.5 h-3.5" /> Open this draft in its view
+                    </button>
+                  )}
                 </div>
               </Section>
 
               {isDraftPr && (
-                <Section icon={GitCommitHorizontal} title={`Commits${commits.length ? ` (${commits.length})` : ''}`}>
+                <Section icon={GitCommitHorizontal}
+                  title={`Changes${commits.length ? ` (${commits.length})` : ''}`}
+                  right={commits.length > 0 && <span className="text-[10px] text-ink-muted/70 normal-case font-normal">each is one recorded edit</span>}
+                >
                   {commitsQ.isLoading ? (
                     <div className="flex items-center gap-2 text-[12px] text-ink-muted py-2">
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading commits…
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading changes…
                     </div>
                   ) : commits.length === 0 ? (
-                    <p className="text-[12px] text-ink-muted py-1">No commits on this draft yet.</p>
+                    <p className="text-[12px] text-ink-muted py-1">No changes on this draft yet.</p>
                   ) : (
                     <ol className="relative ml-1.5 border-l border-glass-border space-y-3.5 pl-4">
                       {commits.map((c, i) => {

@@ -38,7 +38,7 @@ describe('ConflictResolver', () => {
     document.addEventListener('mousedown', outside)
     try {
       render(<ConflictResolver conflicts={conflicts} seeds={seeds} onCancel={onCancel} onResolve={vi.fn()} />)
-      fireEvent.mouseDown(screen.getByText(/Resolve 2 conflicts/i))
+      fireEvent.mouseDown(screen.getByText(/Review changes from main/i))
       expect(outside).not.toHaveBeenCalled() // the fix — mousedown is stopped at the modal root
       expect(onCancel).not.toHaveBeenCalled()
     } finally {
@@ -87,7 +87,7 @@ describe('ConflictResolver', () => {
       entity_id: `urn:e${i}`, path: ['displayName'], base: `b${i}`, ours: `o${i}`, theirs: `t${i}`,
     }))
     render(<ConflictResolver conflicts={many} seeds={{}} onCancel={vi.fn()} onResolve={vi.fn()} />)
-    expect(screen.getByText(/Resolve 500 conflicts/i)).toBeInTheDocument()
+    expect(screen.getByText(/Review changes from main/i)).toBeInTheDocument()
     expect(screen.queryAllByText('Delete instead').length).toBeLessThan(500)
   })
 })

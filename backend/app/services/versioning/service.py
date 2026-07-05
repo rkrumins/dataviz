@@ -3139,6 +3139,7 @@ class GraphVersioningService:
             if src is not None:
                 meta["source_branch_owner"] = src.owner
                 meta["source_branch_name"] = src.name
+                meta["originating_view_id"] = src.originating_view_id   # for "back to the view" nav
             return meta
 
     @staticmethod

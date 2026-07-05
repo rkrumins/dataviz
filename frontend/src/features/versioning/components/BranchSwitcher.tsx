@@ -7,15 +7,15 @@
  * Shared across all three canvases via the toolbars. Renders nothing when the data source has
  * no versioned graph (the common case until a graph is created).
  */
-import { useEffect, useRef, useState } from 'react'
-import { GitBranch, Check, Plus, ChevronDown, Loader2, Globe, Settings2, ArrowRight } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { GitBranch, GitPullRequest, Check, Plus, ChevronDown, Loader2, Globe, Settings2, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useActiveView } from '@/store/schema'
-import { useBranches, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useMergeRequests, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
 import type { Branch } from '@/services/versioningApiService'
 import { BRANCH_VOCAB, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
@@ -55,6 +55,15 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // than falling back to graph-wide for a tick.
   const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
+
+  // Which drafts already have an OPEN review (PR)? Badge them in the list so it's clear at a glance.
+  const mrsQ = useMergeRequests(workspaceId, graphId)
+  const openPrBranchIds = useMemo(
+    () => new Set((mrsQ.data ?? [])
+      .filter((p) => p.status !== 'merged' && p.status !== 'closed')
+      .map((p) => p.sourceBranchId)),
+    [mrsQ.data],
+  )
 
   const currentBranchId = useBranchStore((s) => s.currentBranchId)
   // The view the branch store has RESOLVED (setResolved's scope). The deep-link only syncs
@@ -174,6 +183,14 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                   subtitle={draftSubtitle(b)}
                   active={b.branchId === currentBranchId}
                   statusPill={status}
+                  prBadge={openPrBranchIds.has(b.branchId) ? (
+                    <span
+                      className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-500 text-[9px] font-medium"
+                      title="A review (PR) is already open for this draft"
+                    >
+                      <GitPullRequest className="w-2.5 h-2.5" /> PR
+                    </span>
+                  ) : undefined}
                   pullSlot={canManage ? (
                     <PullLatestButton
                       variant="row" wsId={workspaceId} graphId={graphId ?? ''}
@@ -282,6 +299,7 @@ function BranchRow({
   subtitle,
   active,
   statusPill,
+  prBadge,
   pullSlot,
   settingsSlot,
   onClick,
@@ -291,6 +309,7 @@ function BranchRow({
   subtitle: string
   active: boolean
   statusPill?: DraftStatus
+  prBadge?: React.ReactNode
   pullSlot?: React.ReactNode
   settingsSlot?: React.ReactNode
   onClick: () => void
@@ -300,7 +319,10 @@ function BranchRow({
       <button onClick={onClick} className="flex-1 min-w-0 flex items-center gap-2.5 px-3 py-2 text-left">
         <span className="shrink-0">{icon}</span>
         <span className="flex-1 min-w-0">
-          <span className="block text-sm text-ink truncate">{title}</span>
+          <span className="flex items-center gap-1.5 min-w-0">
+            <span className="text-sm text-ink truncate">{title}</span>
+            {prBadge}
+          </span>
           <span className="block text-[11px] text-ink-muted truncate">{subtitle}</span>
         </span>
         {statusPill && <DraftStatusPill status={statusPill} className="shrink-0" />}

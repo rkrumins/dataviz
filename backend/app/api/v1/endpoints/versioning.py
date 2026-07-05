@@ -830,6 +830,7 @@ class PrResponse(_ApiModel):
     # who owns the draft (only populated by GET /…/{pr_id}, not the list endpoints).
     source_branch_owner: Optional[str] = Field(default=None, alias="sourceBranchOwner")
     source_branch_name: Optional[str] = Field(default=None, alias="sourceBranchName")
+    originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
     target_graph_id: str = Field(alias="targetGraphId")
     target_branch: str = Field(alias="targetBranch")
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
