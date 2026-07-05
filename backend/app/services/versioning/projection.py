@@ -490,7 +490,63 @@ class FalkorProjector:
                 su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
                 tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
                 edge_upserts.append((eid, su, tu, p))
+
+        await self._merkle_augment_upserts(
+            s, graph, main_id, from_seq, to_seq, last, urn_of, node_upserts, edge_upserts)
         return node_upserts, edge_upserts, node_deletes, edge_deletes
+
+    async def _merkle_augment_upserts(
+        self, s, graph, main_id, from_seq, to_seq, last, urn_of, node_upserts, edge_upserts,
+    ) -> None:
+        """Union the raw commit-row delta with the AUTHORITATIVE Merkle diff.
+
+        The row scan above can rarely MISS an entity a merge changed (content drift the count-based
+        verify/heal can't see — same node count, changed properties). The Merkle diff between the
+        projected seq and the target is authoritative: the tree's hash changes on ANY content change,
+        and the walk prunes equal subtrees so it costs O(diff), not O(graph). We add any entity it
+        flags that the row scan didn't already cover — UNION ONLY, so this never drops what the scan
+        found and is strictly safer than the prior behaviour. Best-effort: a diff failure never fails
+        the pass (the scan result still applies)."""
+        covered = {eid for (_k, eid) in last}
+        try:
+            mdiff = await self._svc._merkle.diff(s, graph.id, main_id, from_seq, to_seq)
+        except Exception:                                # pragma: no cover - best-effort safety net
+            logger.debug("merkle-diff augmentation skipped for %s", graph.id, exc_info=True)
+            return
+        # Upserts the scan missed (present at target: hash_to is not None). Deletes it missed are
+        # handled by the tombstone sweep in _verify_and_heal.
+        extra = {eid: hn for eid, (_hf, hn) in mdiff.items() if hn is not None and eid not in covered}
+        if not extra:
+            return
+        recovered = 0
+        for batch in _batches(list(extra.items()), 10000):
+            eids = [e for e, _ in batch]
+            hashes = list({h for _, h in batch})
+            for model in (NodeVersionORM, EdgeVersionORM):
+                rows = (await s.execute(
+                    select(model.entity_id, model.content_hash, model.payload).where(
+                        model.graph_id == graph.id, model.branch_id == main_id,
+                        model.entity_id.in_(eids), model.content_hash.in_(hashes))
+                )).all()
+                by = {(e, h): p for e, h, p in rows}
+                for eid, hn in batch:
+                    p = by.get((eid, hn))
+                    if p is None:
+                        continue
+                    if _is_edge_payload(p):
+                        src, tgt = _edge_endpoints(p)
+                        su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
+                        tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
+                        edge_upserts.append((eid, su, tu, p))
+                    else:
+                        urn = _node_urn(eid, p)
+                        urn_of[eid] = urn
+                        node_upserts.append((eid, urn, p))
+                    recovered += 1
+        if recovered:
+            logger.warning("merkle-diff recovered %d entity upsert(s) the incremental scan MISSED "
+                           "for %s (from_seq=%d to_seq=%d) — content drift repaired", recovered,
+                           graph.id, from_seq, to_seq)
 
     # Bounded-recount cap for containment moves: above this many affected entities/edges the
     # move can't be maintained incrementally — the on_rollups_stale hook queues a rebuild.
