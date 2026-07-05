@@ -73,6 +73,50 @@ describe('branchStore — per-view scoping', () => {
     expect(useBranchStore.getState().currentBranchId).toBeNull()
   })
 
+  it('resuming a view adopts its own open draft from the resolve (myDraft), not Published', () => {
+    const { setResolved } = useBranchStore.getState()
+    // Enter v1 whose backend-resolved draft is br_v1 → the store must RESUME it (edit mode),
+    // not silently drop it and open Published. This is the branch-per-view resume contract.
+    setResolved(
+      { workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1' },
+      resolveResponse({ myDraft: { branchId: 'br_v1', originatingViewId: 'v1' } }),
+    )
+    expect(useBranchStore.getState().currentBranchId).toBe('br_v1')
+    expect(useBranchStore.getState().originatingViewId).toBe('v1')
+  })
+
+  it('switching to a draft-less view opens Published; returning to the view resumes its draft', () => {
+    const { setResolved } = useBranchStore.getState()
+    const scope = (viewId: string) => ({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId })
+    const v1Draft = resolveResponse({ myDraft: { branchId: 'br_v1', originatingViewId: 'v1' } })
+
+    setResolved(scope('v1'), v1Draft)
+    expect(useBranchStore.getState().currentBranchId).toBe('br_v1')
+
+    // v2 has no draft of its own → Published (read) mode.
+    setResolved(scope('v2'), resolveResponse())
+    expect(useBranchStore.getState().currentBranchId).toBeNull()
+
+    // Back to v1 → its unpublished draft is restored (this is what "not done" was: it was lost).
+    setResolved(scope('v1'), v1Draft)
+    expect(useBranchStore.getState().currentBranchId).toBe('br_v1')
+  })
+
+  it('a same-scope refetch does NOT override the user\'s explicit switch to Published', () => {
+    const { setResolved, switchToMain } = useBranchStore.getState()
+    const v1Draft = resolveResponse({ myDraft: { branchId: 'br_v1', originatingViewId: 'v1' } })
+    setResolved({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1' }, v1Draft)
+    expect(useBranchStore.getState().currentBranchId).toBe('br_v1')
+
+    switchToMain() // user deliberately views Published while their draft stays open server-side
+    expect(useBranchStore.getState().currentBranchId).toBeNull()
+
+    // A background resolve refetch of the SAME view still reports the open draft — it must NOT
+    // yank the user back into the draft (adoption happens only on a scope CHANGE).
+    setResolved({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1' }, v1Draft)
+    expect(useBranchStore.getState().currentBranchId).toBeNull()
+  })
+
   it('useEffectiveBranchId returns the per-view branch only for its own view', () => {
     const { setResolved, switchToDraft } = useBranchStore.getState()
     setResolved({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1' }, resolveResponse())

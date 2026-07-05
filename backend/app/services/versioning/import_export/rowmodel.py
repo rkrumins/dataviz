@@ -67,7 +67,19 @@ def _assemble_properties(raw: Dict[str, Any]) -> Dict[str, Any]:
 def normalize(raw: Dict[str, Any], kind: str) -> Dict[str, Any]:
     """Flat file record -> normalized row (``kind`` is 'node' or 'edge')."""
     out: Dict[str, Any] = {"kind": kind}
-    out["op"] = "delete" if str(raw.get("_op") or "").strip().lower() == "delete" else "upsert"
+    # ``_op`` accepts only blank/'upsert' or 'delete'. An unexpected value almost always means the
+    # user's columns are shifted (e.g. a property value that fell into the _op slot) — flag it as
+    # invalid rather than silently swallowing it as an upsert (which would drop their edit).
+    _op = str(raw.get("_op") or "").strip().lower()
+    if _op in ("", "upsert"):
+        out["op"] = "upsert"
+    elif _op == "delete":
+        out["op"] = "delete"
+    else:
+        out["op"] = "invalid"
+        out["op_error"] = (
+            f"unexpected _op value {str(raw.get('_op')).strip()!r} — the _op column only accepts "
+            "blank or 'delete'; a property value here usually means your columns are shifted")
     # Identity is always carried (empty string for a brand-new row) so the resolver can tell
     # "no id supplied → create" from "id supplied → match".
     out["entity_id"] = str(raw.get("entity_id") or "").strip()

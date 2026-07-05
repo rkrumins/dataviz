@@ -13,8 +13,9 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
-  createImport, detectFormat, getImport, pollJob, templateDownloadUrl, triggerBrowserDownload,
-  type ImportFormat, type ImportSummary, type Job, type ReconcileMode,
+  createImport, detectFormat, getImport, getImportPreview, pollJob, templateDownloadUrl,
+  triggerBrowserDownload,
+  type ImportFormat, type ImportPreviewRow, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
 
 export interface ImportDialogProps {
@@ -60,6 +61,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [resultBranch, setResultBranch] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
+  const [invalidRows, setInvalidRows] = useState<ImportPreviewRow[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleFile = useCallback((f: File | null) => {
@@ -81,6 +83,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     if (!file) return
     setPhase('running')
     setError(null)
+    setInvalidRows([])
     try {
       const created = await createImport(wsId, graphId, file, { format, reconcileMode, branchId, viewId })
       setResultBranch(created.branchId)
@@ -92,6 +95,13 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
         setJob(done)
         setPhase('done')
         onImported?.()
+        // Pull a sample of the resolved rows so we can call out anything that couldn't be applied
+        // (e.g. shifted columns landing a value in _op) — the review's "what went wrong" surface.
+        if (((done.summary as ImportSummary)?.invalid ?? 0) > 0) {
+          getImportPreview(wsId, graphId, created.jobId)
+            .then((p) => setInvalidRows(p.sample.filter((r) => r.status === 'invalid')))
+            .catch(() => {})
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The import could not be completed.')
@@ -135,7 +145,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
             />
           )}
           {phase === 'running' && <RunningStep job={job} fileName={file?.name} />}
-          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} />}
+          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} invalidRows={invalidRows} />}
           {phase === 'failed' && <FailedStep error={error} />}
         </div>
 
@@ -380,30 +390,35 @@ function RunningStep({ job, fileName }: { job: Job | null; fileName?: string }) 
 }
 
 // ── done ─────────────────────────────────────────────────────────────────────
-function DoneStep({ summary }: { summary: ImportSummary | null }) {
+function DoneStep({ summary, invalidRows }: { summary: ImportSummary | null; invalidRows: ImportPreviewRow[] }) {
   const s = summary
-  const nothing = s && s.new === 0 && s.updated === 0 && s.deleted === 0
+  const changes = s ? s.new + s.updated + s.deleted : 0
+  const nothing = s != null && changes === 0
   return (
     <div className="px-8 py-8 max-w-2xl mx-auto">
       <div className="flex items-start gap-4">
-        <div className="w-11 h-11 rounded-xl bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500 flex items-center justify-center flex-shrink-0">
+        <div className={cn('w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0',
+          nothing ? 'bg-slate-100 dark:bg-slate-800 text-ink-muted' : 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500')}>
           <CheckCircle2 className="w-6 h-6" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-lg font-bold text-ink">Ready to review</h3>
+          <h3 className="text-lg font-bold text-ink">
+            {nothing ? 'No changes to apply' : `${changes} change${changes === 1 ? '' : 's'} ready to review`}
+          </h3>
           <p className="text-sm text-ink-muted mt-1">
             {nothing
-              ? 'No changes — your data already matches the file.'
-              : 'Your changes are staged on a draft and are now visible in the canvas and the Changes tab. Review them, then publish or open a pull request.'}
+              ? 'Your data already matches the file — nothing was staged.'
+              : 'Staged on your draft and already visible in the canvas and the Changes tab. Review, then publish or open a pull request.'}
           </p>
         </div>
       </div>
+
       {s && (
         <div className="mt-6 grid grid-cols-4 gap-3">
           <Stat n={s.new} label="New" icon={<Plus className="w-4 h-4" />} tone="emerald" />
           <Stat n={s.updated} label="Updated" icon={<Pencil className="w-4 h-4" />} tone="blue" />
           <Stat n={s.deleted} label="Deleted" icon={<Trash2 className="w-4 h-4" />} tone="rose" />
-          <Stat n={s.invalid} label="Skipped" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
+          <Stat n={s.invalid} label="Needs fixing" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
         </div>
       )}
       {s && (s.unchanged ?? 0) > 0 && (
@@ -411,10 +426,39 @@ function DoneStep({ summary }: { summary: ImportSummary | null }) {
           {s.unchanged} row{s.unchanged === 1 ? ' was' : 's were'} already up to date — only real changes are staged.
         </p>
       )}
+
+      {/* What couldn't be applied — with the exact reason, so a shifted column or bad value is
+          obvious and fixable rather than silently missing from the result. */}
       {s && s.invalid > 0 && (
-        <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">
-          {s.invalid} row{s.invalid === 1 ? '' : 's'} were skipped (invalid) and left out of the draft.
-        </p>
+        <div className="mt-5 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50/50 dark:bg-amber-950/20 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200/60 dark:border-amber-800/40">
+            <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+            <span className="text-xs font-semibold text-amber-700 dark:text-amber-400">
+              {s.invalid} row{s.invalid === 1 ? '' : 's'} couldn't be applied
+            </span>
+          </div>
+          {invalidRows.length > 0 ? (
+            <ul className="divide-y divide-amber-200/40 dark:divide-amber-800/30">
+              {invalidRows.slice(0, 6).map((r) => (
+                <li key={r.rowIndex} className="flex items-start gap-2.5 px-4 py-2">
+                  <span className="text-[10px] font-mono font-semibold text-amber-600 dark:text-amber-500 mt-0.5 flex-shrink-0">
+                    Row {r.rowIndex + 1}
+                  </span>
+                  <span className="text-[11px] text-ink-secondary leading-relaxed">
+                    {r.reasons?.[0] || 'invalid row'}
+                  </span>
+                </li>
+              ))}
+              {invalidRows.length > 6 && (
+                <li className="px-4 py-2 text-[11px] text-ink-muted">+ {invalidRows.length - 6} more</li>
+              )}
+            </ul>
+          ) : (
+            <p className="px-4 py-2.5 text-[11px] text-ink-muted">
+              These rows were left out of the draft. Fix them in the file and import again.
+            </p>
+          )}
+        </div>
       )}
     </div>
   )

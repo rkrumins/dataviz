@@ -35,6 +35,11 @@ def _run() -> None:
     # ---- _op=delete -> op delete ----
     assert normalize({"entity_id": "e", "_op": "delete"}, "node")["op"] == "delete"
 
+    # ---- unexpected _op -> flagged INVALID (not silently swallowed): the CSV-column-shift bug
+    #      where a property value ("yeehaw") fell into the _op slot must surface, not vanish. ----
+    bad = normalize({"entity_id": "e", "displayName": "1bef", "_op": "yeehaw"}, "node")
+    assert bad["op"] == "invalid" and "yeehaw" in bad["op_error"]
+
     # ---- empty cells are DROPPED (a blank never blanks a field; PATCH semantics) ----
     n2 = normalize({"entity_id": "e", "urn": "u", "displayName": "", "prop.x": ""}, "node")
     assert "displayName" not in n2 and n2["properties"] == {}

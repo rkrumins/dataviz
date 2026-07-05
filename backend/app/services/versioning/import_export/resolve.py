@@ -114,6 +114,9 @@ def resolve_rows(
 
     # ---- pass 1: nodes ----
     for row in node_rows:
+        if row.get("op") == "invalid":
+            resolutions.append(_resolution(row, "invalid", None, reasons=[row.get("op_error") or "invalid row"]))
+            continue
         matched_eid = _match_node(row, urn_to_eid, qname_to_eid, node_eids)
         if row.get("op") == "delete":
             if matched_eid:
@@ -144,6 +147,9 @@ def resolve_rows(
 
     # ---- pass 2: edges ----
     for row in edge_rows:
+        if row.get("op") == "invalid":
+            resolutions.append(_resolution(row, "invalid", None, reasons=[row.get("op_error") or "invalid row"]))
+            continue
         seid = _resolve_endpoint(row, "source", node_eids, qname_to_eid, urn_to_eid)
         teid = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid)
         if not (row.get("edgeType") and seid and teid):
