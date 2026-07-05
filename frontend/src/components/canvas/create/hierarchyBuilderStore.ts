@@ -32,6 +32,20 @@ interface HierarchyBuilderState {
   initialTemplate: string[] | null
   /** Which panel is open: the current rail, or the new Build surface. */
   surface: 'rail' | 'build'
+  /**
+   * Bumped on every `open()`/`openBuild()` — the session batch boundary.
+   * `useHierarchyOutline` keys its scope-reset effect on this so a re-open
+   * (per-layer "+", "Start another set", …) always starts a fresh batch even
+   * though the panel/hook stay mounted across it (stable key).
+   */
+  batchId: number
+  /** Temp urns staged during the CURRENT batch — cleared on every `open()`. */
+  batchUrns: string[]
+  /**
+   * Entities staged since the drawer was last opened, across all batches —
+   * reset on `close()`. Drives the "N added this session" footer line.
+   */
+  sessionAddedCount: number
   open: (opts?: {
     parentUrn?: string
     layerId?: string
@@ -48,6 +62,8 @@ interface HierarchyBuilderState {
     template?: string[]
   }) => void
   close: () => void
+  /** Registers a freshly staged temp urn into the current batch + session tally. */
+  registerBatchUrn: (urn: string) => void
 }
 
 export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get) => ({
@@ -58,10 +74,13 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
   initialMode: 'outline',
   initialTemplate: null,
   surface: 'rail',
+  batchId: 0,
+  batchUrns: [],
+  sessionAddedCount: 0,
 
   open: (opts) => {
     void ensureDraftOpen()
-    set({
+    set((s) => ({
       isOpen: true,
       parentUrn: opts?.parentUrn ?? null,
       layerId: opts?.layerId ?? null,
@@ -69,7 +88,9 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
       initialMode: opts?.mode ?? 'outline',
       initialTemplate: opts?.template ?? null,
       surface: opts?.surface ?? 'rail',
-    })
+      batchId: s.batchId + 1,
+      batchUrns: [],
+    }))
   },
 
   openBuild: (opts) => get().open({ ...opts, surface: 'build' }),
@@ -83,5 +104,9 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
       initialMode: 'outline',
       initialTemplate: null,
       surface: 'rail',
+      sessionAddedCount: 0,
     }),
+
+  registerBatchUrn: (urn) =>
+    set((s) => ({ batchUrns: [...s.batchUrns, urn], sessionAddedCount: s.sessionAddedCount + 1 })),
 }))

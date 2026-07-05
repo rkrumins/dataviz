@@ -94,6 +94,7 @@ function seedNode(urn: string, type: string, label: string) {
 const resetStores = () => {
   useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set() } as never)
   useStagedChangesStore.setState({ changes: [], redoStack: [], _scopeKey: null, _byScope: {} })
+  useHierarchyBuilderStore.setState({ batchId: 0, batchUrns: [], sessionAddedCount: 0 })
   seedSchema()
 }
 
@@ -404,12 +405,66 @@ describe('useHierarchyOutline', () => {
     expect(afterOf(findByTempUrn(tempUrn!)).displayName).toBe('Sales EMEA')
     expect(canvasNode(tempUrn!)?.data.label).toBe('Sales EMEA')
   })
+
+  it('14. tree scopes to the CURRENT batch: a fresh open() clears the ADDING list without un-staging the previous set; the next set staged shows only itself', () => {
+    seedNode('urn:real:domain1', 'domain', 'Sales Domain')
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', layerId: null, initialTypeId: null }),
+    )
+
+    // Stage set A.
+    act(() => result.current.setName('Analytics A'))
+    let aUrn: string | null = null
+    act(() => { aUrn = result.current.commitSibling() })
+    expect(result.current.tree.map((r) => r.tempUrn)).toEqual([aUrn])
+
+    // A fresh open() (e.g. "Start another set") bumps the batch — WITHOUT un-staging set A.
+    act(() => { useHierarchyBuilderStore.getState().open({ parentUrn: 'urn:real:domain1' }) })
+
+    expect(result.current.tree).toEqual([])
+    expect(findByTempUrn(aUrn!)).toBeTruthy()
+    expect(canvasNode(aUrn!)).toBeTruthy()
+
+    // Stage set B — tree shows ONLY B, set A stays staged but out of view.
+    act(() => result.current.setName('Analytics B'))
+    let bUrn: string | null = null
+    act(() => { bUrn = result.current.commitSibling() })
+    expect(result.current.tree.map((r) => r.tempUrn)).toEqual([bUrn])
+    expect(result.current.tree.some((r) => r.tempUrn === aUrn)).toBe(false)
+    expect(findByTempUrn(aUrn!)).toBeTruthy()
+  })
+
+  it('15. a fresh open() to a NEW scope resets active.parentUrn to it — a previously nested-into parent does not leak into the next batch', () => {
+    seedNode('urn:real:domain1', 'domain', 'Sales Domain')
+    useHierarchyBuilderStore.getState().open({ parentUrn: 'urn:real:domain1' })
+
+    const { result } = renderHook(() => {
+      const scopeParentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
+      return useHierarchyOutline({ scopeParentUrn, layerId: null, initialTypeId: null })
+    })
+
+    expect(result.current.active.parentUrn).toBe('urn:real:domain1')
+
+    // Nest into a freshly staged child — active.parentUrn pins to it.
+    act(() => result.current.setName('Platform'))
+    let platformUrn: string | null = null
+    act(() => { platformUrn = result.current.commitAndNest() })
+    expect(result.current.active.parentUrn).toBe(platformUrn)
+
+    // A fresh open() to a DIFFERENT scope (per-layer "+", or "Start another set") —
+    // the pinned nested parent must NOT survive into the new batch.
+    act(() => { useHierarchyBuilderStore.getState().open() })
+
+    expect(result.current.active.parentUrn).toBeNull()
+    expect(result.current.active.parentUrn).not.toBe(platformUrn)
+  })
 })
 
 describe('useHierarchyBuilderStore', () => {
   beforeEach(() => {
     useHierarchyBuilderStore.setState({
       isOpen: false, parentUrn: null, layerId: null, initialTypeId: null, initialMode: 'outline', initialTemplate: null,
+      batchId: 0, batchUrns: [], sessionAddedCount: 0,
     })
     vi.mocked(ensureDraftOpen).mockClear()
   })
@@ -461,5 +516,41 @@ describe('useHierarchyBuilderStore', () => {
     useHierarchyBuilderStore.getState().open()
     unsub()
     expect(order).toEqual(['ensureDraftOpen', 'isOpen'])
+  })
+
+  it('open() bumps batchId and clears batchUrns; a second open() bumps it again and clears anything registered since', () => {
+    expect(useHierarchyBuilderStore.getState().batchId).toBe(0)
+
+    useHierarchyBuilderStore.getState().open()
+    const afterFirst = useHierarchyBuilderStore.getState().batchId
+    expect(afterFirst).toBeGreaterThan(0)
+    expect(useHierarchyBuilderStore.getState().batchUrns).toEqual([])
+
+    useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:1')
+    expect(useHierarchyBuilderStore.getState().batchUrns).toEqual(['urn:temp:1'])
+
+    useHierarchyBuilderStore.getState().open()
+    expect(useHierarchyBuilderStore.getState().batchId).toBeGreaterThan(afterFirst)
+    expect(useHierarchyBuilderStore.getState().batchUrns).toEqual([])
+  })
+
+  it('registerBatchUrn appends to batchUrns and bumps sessionAddedCount', () => {
+    useHierarchyBuilderStore.getState().open()
+    useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:1')
+    useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:2')
+
+    const s = useHierarchyBuilderStore.getState()
+    expect(s.batchUrns).toEqual(['urn:temp:1', 'urn:temp:2'])
+    expect(s.sessionAddedCount).toBe(2)
+  })
+
+  it('close() resets sessionAddedCount; open() alone (a "start another set" reopen) does not, since it tracks the WHOLE session', () => {
+    useHierarchyBuilderStore.getState().open()
+    useHierarchyBuilderStore.getState().registerBatchUrn('urn:temp:1')
+    useHierarchyBuilderStore.getState().open() // a "start another set" reopen
+    expect(useHierarchyBuilderStore.getState().sessionAddedCount).toBe(1)
+
+    useHierarchyBuilderStore.getState().close()
+    expect(useHierarchyBuilderStore.getState().sessionAddedCount).toBe(0)
   })
 })

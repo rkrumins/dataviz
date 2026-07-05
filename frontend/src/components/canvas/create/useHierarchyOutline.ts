@@ -33,6 +33,7 @@ import {
   type AllowedEdgeOption,
 } from '@/services/ontologyPreflightService'
 import { useStageEntityCreation } from './useStageEntityCreation'
+import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import type { ParsedOutlineRow } from './outlineParser'
 import type { EntityTypeSchema } from '@/types/schema'
 
@@ -84,6 +85,15 @@ export function useHierarchyOutline(opts: {
   const allStaged = useStagedChanges()
   const { stageEntity, updateStagedEntity } = useStageEntityCreation()
 
+  // --- Session batch boundary: `batchId` bumps on every open()/openBuild()
+  // even when this hook stays mounted across it (the panel has a stable
+  // key) — `batchUrns` is which staged temp urns belong to the CURRENT
+  // batch, cleared on each open(). Nothing un-stages: earlier batches stay
+  // in `allStaged` (and on the canvas), they just drop out of `tree` below.
+  const batchId = useHierarchyBuilderStore((s) => s.batchId)
+  const batchUrns = useHierarchyBuilderStore((s) => s.batchUrns)
+  const registerBatchUrn = useHierarchyBuilderStore((s) => s.registerBatchUrn)
+
   const [active, setActive] = useState<ActiveRow>(() => ({
     name: '',
     typeId: null,
@@ -109,8 +119,9 @@ export function useHierarchyOutline(opts: {
       parentUrn?: string
       hasDetails: boolean
     }
+    const batchSet = new Set(batchUrns)
     const nodes: Node[] = allStaged
-      .filter((c) => c.type === 'create_entity')
+      .filter((c) => c.type === 'create_entity' && batchSet.has(c.targetUrn ?? c.targetId))
       .map((c) => {
         const a = (c.after ?? {}) as {
           displayName?: string
@@ -148,7 +159,7 @@ export function useHierarchyOutline(opts: {
     }
     for (const r of roots) walk(r, 0)
     return out
-  }, [allStaged])
+  }, [allStaged, batchUrns])
 
   /** Entity type id of `parentUrn` — a staged row (looked up in `tree`) or a real canvas node. */
   const parentTypeOf = useCallback(
@@ -252,6 +263,21 @@ export function useHierarchyOutline(opts: {
     }
   }, [active.parentUrn, tree, canvasNodes, scopeParentUrn])
 
+  // --- Batch boundary scope reset (rule 8): a fresh open()/openBuild() bumps
+  // `batchId` even when this hook stays mounted across it (stable panel key)
+  // — re-scope `active` to the CURRENT scopeParentUrn so a parent nested into
+  // during the PREVIOUS batch doesn't leak into the new one. Mirrors
+  // `retarget()`. On mount this is a no-op — the initial useState already
+  // seeds parentUrn from scopeParentUrn.
+  useEffect(() => {
+    setIndentBlockedReason(null)
+    setActive((prev) => (prev.parentUrn === scopeParentUrn ? prev : { ...prev, parentUrn: scopeParentUrn }))
+    lastCommittedTempUrn.current = null
+    // Intentionally keyed on batchId only: scopeParentUrn is read fresh from
+    // the store at the moment batchId bumps (same open() call sets both).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchId])
+
   // Typing clears a stale indent-blocked message: indent() only fires on an
   // EMPTY name, so once the user types, the failed Tab is history — leaving the
   // reason set would wrongly gate a perfectly valid sibling commit via canCommit.
@@ -287,12 +313,13 @@ export function useHierarchyOutline(opts: {
       tags,
       properties,
     })
+    registerBatchUrn(tempUrn)
     lastUsedTypeAtDepth.current.set(depthForParent(active.parentUrn), active.typeId)
     lastCommittedTempUrn.current = tempUrn
     onEntityStaged?.(tempUrn, active.parentUrn ?? undefined)
     setActive((prev) => ({ ...prev, name: '', details: { description: '', tags: '', fieldValues: {} } }))
     return tempUrn
-  }, [canCommit, active, layerId, stageEntity, depthForParent, onEntityStaged])
+  }, [canCommit, active, layerId, stageEntity, depthForParent, onEntityStaged, registerBatchUrn])
 
   const commitAndNest = useCallback((): string | null => {
     const tempUrn = commitSibling()
@@ -412,12 +439,13 @@ export function useHierarchyOutline(opts: {
         typeByTempUrn.set(tempUrn, row.typeId)
         parentAt[row.depth + 1] = tempUrn
         count++
+        registerBatchUrn(tempUrn)
         onEntityStaged?.(tempUrn, parentUrn ?? undefined)
       }
 
       return count
     },
-    [stageEntity, parentTypeOf, relationshipTypes, containmentEdgeTypes, layerId, onEntityStaged],
+    [stageEntity, parentTypeOf, relationshipTypes, containmentEdgeTypes, layerId, onEntityStaged, registerBatchUrn],
   )
 
   return {

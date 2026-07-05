@@ -106,6 +106,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const initialTypeId = useHierarchyBuilderStore((s) => s.initialTypeId)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const initialTemplate = useHierarchyBuilderStore((s) => s.initialTemplate)
+  const sessionAddedCount = useHierarchyBuilderStore((s) => s.sessionAddedCount)
 
   const {
     tree, active, allowedTypes, edgeOptions, blockedReason, canCommit,
@@ -321,6 +322,16 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     })
   }, [scopeParentUrn, layerId])
 
+  // "Start another set" — a fresh open() at the SAME original scope. Bumps
+  // batchId (clears the ADDING list + re-scopes `active`) WITHOUT un-staging
+  // anything already on the canvas — earlier batches stay in the draft.
+  const startAnotherSet = useCallback(() => {
+    useHierarchyBuilderStore.getState().open({
+      parentUrn: scopeParentUrn ?? undefined,
+      layerId: layerId ?? undefined,
+    })
+  }, [scopeParentUrn, layerId])
+
   // ── Keyboard model (unchanged from v1). Tab routing is load-bearing:
   //    non-blank name → commitAndNest(); blank name → indent(). ──
   const onNameKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -480,9 +491,11 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
           ) : (
             <>
               <div className="flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar">
-                {/* ADDING (N) — the live outline of what's being staged. Click a
-                    row to add the next entity under it. */}
-                {tree.length > 0 && (
+                {/* ADDING (N) — the live outline of the CURRENT batch. Click a
+                    row to add the next entity under it. Earlier batches this
+                    session stay staged on the canvas but drop out of this
+                    list once "Start another set" draws a new boundary. */}
+                {tree.length > 0 ? (
                   <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-2">
                     <div className="flex items-center justify-between px-1 pb-1.5">
                       <span className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Adding ({tree.length})</span>
@@ -513,7 +526,12 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                       </AnimatePresence>
                     </div>
                   </div>
-                )}
+                ) : sessionAddedCount > 0 ? (
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-[11px] text-ink-muted">
+                    <LucideIcons.CheckCircle2 className="w-3.5 h-3.5 text-accent-lineage/70 flex-shrink-0" />
+                    <span>{sessionAddedCount} added this session — on the canvas</span>
+                  </div>
+                ) : null}
 
                 {/* Templates — a scaffold to start from, only on an empty outline. */}
                 {chains.length > 0 && (
@@ -727,10 +745,19 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                   {tree.length > 0 && <span className="text-[10px] text-ink-muted">{tree.length} staged · Save when you&rsquo;re done</span>}
                   <button
                     type="button"
+                    onClick={startAnotherSet}
+                    title="Keep everything staged and start a new set"
+                    className="px-4 py-2 rounded-lg text-sm font-semibold bg-accent-lineage text-white hover:bg-accent-lineage/90 shadow-sm shadow-accent-lineage/30 transition-colors flex items-center gap-1.5"
+                  >
+                    <LucideIcons.RefreshCw className="w-3.5 h-3.5" />
+                    Start another set
+                  </button>
+                  <button
+                    type="button"
                     onClick={onClose}
                     className="px-4 py-2 rounded-lg text-sm font-medium bg-black/5 dark:bg-white/10 text-ink hover:bg-black/10 dark:hover:bg-white/20 transition-colors"
                   >
-                    Done
+                    Close
                   </button>
                 </div>
               </div>
