@@ -29,6 +29,8 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   onOpenStagedChanges?: () => void
   /** Opens the bulk-import dialog (import a file onto the current draft). */
   onImport?: () => void
+  /** Exports the graph to a downloadable file (also a re-importable backup). */
+  onExport?: () => void
   onExitEdit: () => void
 }
 
@@ -40,6 +42,7 @@ export function EditorActions({
   pendingChangeCount = 0,
   onOpenStagedChanges,
   onImport,
+  onExport,
   onExitEdit,
   ...tools
 }: EditorActionsProps) {
@@ -95,6 +98,18 @@ export function EditorActions({
         >
           <LucideIcons.Upload className="w-3.5 h-3.5" strokeWidth={2.4} />
           <span>Import</span>
+        </button>
+      )}
+
+      {/* Export — download the graph as a file (a re-importable backup). */}
+      {onExport && (
+        <button
+          onClick={onExport}
+          title="Export the graph to a file (also a re-importable backup)"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11.5px] font-semibold tracking-tight text-ink/85 border border-black/[0.10] dark:border-white/[0.08] bg-black/[0.03] dark:bg-white/[0.03] hover:bg-black/[0.06] hover:text-ink dark:hover:bg-white/[0.06] transition-all"
+        >
+          <LucideIcons.Download className="w-3.5 h-3.5" strokeWidth={2.4} />
+          <span>Export</span>
         </button>
       )}
 

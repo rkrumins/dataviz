@@ -28,17 +28,45 @@ class FormatAdapter(Protocol):
     ) -> AsyncIterator[bytes]: ...
 
 
+def decode_bytes(raw: bytes) -> str:
+    """Robustly decode bytes to text — UNIVERSAL across OSes/apps. Real-world files aren't always
+    clean UTF-8: Excel/Windows export CSVs as **Windows-1252/Latin-1** and add a **UTF-8 BOM** to
+    "CSV UTF-8"; both used to crash the import with a cryptic ``'utf-8' codec can't decode byte``.
+    Strip a leading BOM, try UTF-8, then fall back to cp1252 (a superset of Latin-1 that decodes
+    every byte, so it never raises)."""
+    if raw.startswith(b"\xef\xbb\xbf"):   # UTF-8 BOM (Excel "CSV UTF-8")
+        raw = raw[3:]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")   # Excel/Windows files; never raises
+
+
+def _decode_line(raw: bytes, *, first: bool) -> str:
+    """Decode one line (BOM only meaningful on the first) and tolerate CRLF endings."""
+    text = decode_bytes(raw) if first else _decode_no_bom(raw)
+    return text.rstrip("\r")   # CRLF -> strip the trailing \r left after splitting on \n
+
+
+def _decode_no_bom(raw: bytes) -> str:
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 async def _lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
     """Yield complete decoded lines from a byte-chunk stream (reassembling across boundaries)."""
     buf = b""
+    seen = False
     async for chunk in chunks:
         buf += chunk
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            yield line.decode("utf-8")
-    tail = buf.decode("utf-8").strip()
-    if tail:
-        yield tail
+            yield _decode_line(line, first=not seen)
+            seen = True
+    if buf.strip():
+        yield _decode_line(buf, first=not seen)
 
 
 class NdjsonAdapter:
@@ -89,8 +117,36 @@ class DelimitedAdapter:
         return buf.getvalue().encode("utf-8")
 
 
+class JsonAdapter:
+    """A single JSON array of records: ``[{...}, ...]``. Not line-streamable, so the whole file is
+    buffered — fine for human-scale exports; ndjson/csv are the streaming formats for millions."""
+
+    fmt = "json"
+
+    async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+        buf = b""
+        async for chunk in chunks:
+            buf += chunk
+        text = decode_bytes(buf).strip()
+        if not text:
+            return
+        data = json.loads(text)
+        if isinstance(data, dict):                       # {"records": [...]} or a single object
+            data = data.get("records") or data.get("rows") or [data]
+        for rec in data:
+            if isinstance(rec, dict):
+                yield rec
+
+    async def write(
+        self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str] = ()
+    ) -> AsyncIterator[bytes]:
+        rows = [rec async for rec in records]
+        yield json.dumps(rows).encode("utf-8")
+
+
 _ADAPTERS = {
     "ndjson": lambda: NdjsonAdapter(),
+    "json": lambda: JsonAdapter(),
     "csv": lambda: DelimitedAdapter("csv", ","),
     "tsv": lambda: DelimitedAdapter("tsv", "\t"),
 }

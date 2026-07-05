@@ -21,9 +21,12 @@ from sqlalchemy import select
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
-from ..models import ImportRowORM, JobORM
+from ..models import BranchORM, ImportRowORM, JobORM
 from ..service import GraphVersioningService
-from .export_worker import ExportWorker
+from .export_worker import (
+    ExportWorker, column_order, example_template_records, records_from_state,
+)
+from .formats import get_adapter
 from .import_worker import ImportWorker
 
 logger = logging.getLogger(__name__)
@@ -188,9 +191,33 @@ class ImportExportService:
     async def open_result(self, job_id: str):
         """Return ``(job, byte-stream)`` for downloading a completed export, else ``None``."""
         job = await self.get_job(job_id)
-        if job is None or not job.get("result_uri"):
+        if job is None or not job.get("resultUri"):
             return None
         return job, self._store.open_stream(job["resultUri"])
+
+    async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
+        """A small, prepopulated starter template so users learn the format instantly: the column
+        schema + up to ``limit`` real rows from the graph (edit-in-place), or worked example rows
+        when the graph is empty. Synchronous (tiny) — returned inline for a direct download."""
+        async with db.graphver_session() as s:
+            main_id = (await s.execute(
+                select(BranchORM.id).where(
+                    BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
+        state = await self._svc.materialize_state(graph_id=graph_id, branch_id=main_id)
+        nodes = dict(list(state["nodes"].items())[:limit])
+        edges = dict(list(state["edges"].items())[:limit])
+        records = records_from_state(nodes, edges) or example_template_records()
+        columns = column_order(records)
+        adapter = get_adapter(export_format)
+
+        async def _iter():
+            for rec in records:
+                yield rec
+
+        chunks: List[bytes] = []
+        async for b in adapter.write(_iter(), columns=columns):
+            chunks.append(b)
+        return b"".join(chunks)
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Job as a camelCase dict (frontend wire shape)."""

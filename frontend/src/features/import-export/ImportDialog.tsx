@@ -8,14 +8,19 @@
  */
 import { useCallback, useRef, useState } from 'react'
 import {
-  AlertTriangle, ArrowRight, CheckCircle2, FileUp, Loader2, Plus, Pencil,
-  RefreshCw, ShieldAlert, Sparkles, Trash2, UploadCloud, X,
+  AlertTriangle, ArrowRight, CheckCircle2, Download, FileUp, Loader2,
+  Plus, Pencil, RefreshCw, ShieldAlert, Sparkles, Trash2, UploadCloud, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
-  createImport, getImport, inferFormat, pollJob,
-  type ImportSummary, type Job, type ReconcileMode,
+  createImport, detectFormat, getImport, pollJob, templateDownloadUrl, triggerBrowserDownload,
+  type ImportFormat, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
+
+const FORMATS: { id: ImportFormat; label: string }[] = [
+  { id: 'csv', label: 'CSV' }, { id: 'tsv', label: 'TSV' },
+  { id: 'ndjson', label: 'NDJSON' }, { id: 'json', label: 'JSON' },
+]
 
 export interface ImportDialogProps {
   wsId: string
@@ -36,8 +41,21 @@ function prettyBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`
 }
 
+const UNSUPPORTED: Record<string, string> = {
+  xlsx: 'Excel workbook', xlsm: 'Excel workbook', xls: 'Excel workbook',
+  numbers: 'Numbers file', parquet: 'Parquet file', zip: 'Zip archive',
+}
+
+/** A friendly reason a file can't be imported yet (binary spreadsheets), else null. */
+function unsupportedReason(name: string): string | null {
+  const ext = name.toLowerCase().split('.').pop() || ''
+  return UNSUPPORTED[ext] ? `${UNSUPPORTED[ext]}s aren't supported yet` : null
+}
+
 export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onReviewChanges }: ImportDialogProps) {
   const [file, setFile] = useState<File | null>(null)
+  const [format, setFormat] = useState<ImportFormat>('csv')
+  const [autoDetected, setAutoDetected] = useState(false)
   const [reconcileMode, setReconcileMode] = useState<ReconcileMode>('upsert')
   const [phase, setPhase] = useState<Phase>('choose')
   const [job, setJob] = useState<Job | null>(null)
@@ -46,12 +64,20 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Detect the format from CONTENT (never the extension — a download may have none), but let the
+  // user override it below. This is what makes "export → re-import the same file" always work.
+  const handleFile = useCallback((f: File | null) => {
+    setFile(f)
+    setAutoDetected(false)
+    if (f) detectFormat(f).then((fmt) => { setFormat(fmt); setAutoDetected(true) }).catch(() => {})
+  }, [])
+
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setDragging(false)
     const f = e.dataTransfer.files?.[0]
-    if (f) setFile(f)
-  }, [])
+    if (f) handleFile(f)
+  }, [handleFile])
 
   async function start() {
     if (!file) return
@@ -59,7 +85,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     setError(null)
     try {
       const created = await createImport(wsId, graphId, file, {
-        format: inferFormat(file.name), reconcileMode, branchId, viewId,
+        format, reconcileMode, branchId, viewId,
       })
       setResultBranch(created.branchId)
       const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob })
@@ -104,9 +130,11 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
 
         {phase === 'choose' && (
           <ChooseStep
-            file={file} setFile={setFile} dragging={dragging} setDragging={setDragging}
+            file={file} setFile={handleFile} dragging={dragging} setDragging={setDragging}
             onDrop={onDrop} inputRef={inputRef} reconcileMode={reconcileMode} setReconcileMode={setReconcileMode}
+            format={format} setFormat={(f) => { setFormat(f); setAutoDetected(false) }} autoDetected={autoDetected}
             onClose={onClose} onStart={start}
+            onDownloadTemplate={() => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, 'csv'), 'import-template.csv')}
           />
         )}
         {phase === 'running' && <RunningStep job={job} fileName={file?.name} />}
@@ -136,18 +164,44 @@ function ChooseStep(props: {
   inputRef: React.RefObject<HTMLInputElement | null>
   reconcileMode: ReconcileMode
   setReconcileMode: (m: ReconcileMode) => void
+  format: ImportFormat
+  setFormat: (f: ImportFormat) => void
+  autoDetected: boolean
   onClose: () => void
   onStart: () => void
+  onDownloadTemplate: () => void
 }) {
-  const { file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode } = props
+  const {
+    file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode,
+    format, setFormat, autoDetected,
+  } = props
+  const warning = file ? unsupportedReason(file.name) : null
   return (
     <>
       <div className="px-6 py-5 space-y-4">
+        {/* No accept filter — a downloaded export may have no extension and must stay selectable. */}
         <input
           ref={inputRef} type="file" className="hidden"
-          accept=".ndjson,.csv,.tsv,.json"
           onChange={(e) => e.target.files?.[0] && setFile(e.target.files[0])}
         />
+
+        {/* How it works — a 3-step guide + a prepopulated starter template so anyone can start. */}
+        <div className="rounded-xl border border-glass-border bg-gradient-to-br from-indigo-50/50 to-transparent dark:from-indigo-950/20 p-3.5">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary">
+            <GuideStep n={1} label="Download template" />
+            <ArrowRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
+            <GuideStep n={2} label="Fill it in" />
+            <ArrowRight className="w-3 h-3 text-ink-muted/40 flex-shrink-0" />
+            <GuideStep n={3} label="Upload & review" />
+          </div>
+          <button
+            onClick={props.onDownloadTemplate}
+            className="mt-3 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-indigo-200/80 dark:border-indigo-800/50 bg-white/70 dark:bg-white/[0.04] text-indigo-600 dark:text-indigo-400 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" /> Download a starter template
+            <span className="text-[10px] font-normal text-ink-muted">· prefilled with your data</span>
+          </button>
+        </div>
         {!file ? (
           <button
             onClick={() => inputRef.current?.click()}
@@ -173,19 +227,49 @@ function ChooseStep(props: {
             </div>
           </button>
         ) : (
-          <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-4 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-1 duration-200">
-            <div className="w-10 h-10 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 flex items-center justify-center flex-shrink-0">
-              <FileUp className="w-5 h-5 text-indigo-500" />
+          <div className="space-y-3 animate-in fade-in slide-in-from-bottom-1 duration-200">
+            <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-4 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-indigo-50 dark:bg-indigo-950/30 flex items-center justify-center flex-shrink-0">
+                <FileUp className="w-5 h-5 text-indigo-500" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-ink truncate">{file.name}</p>
+                <p className="text-[11px] text-ink-muted mt-0.5">{prettyBytes(file.size)}</p>
+              </div>
+              <button onClick={() => setFile(null)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold text-ink truncate">{file.name}</p>
-              <p className="text-[11px] text-ink-muted mt-0.5">
-                {prettyBytes(file.size)} · {inferFormat(file.name).toUpperCase()}
-              </p>
-            </div>
-            <button onClick={() => setFile(null)} className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink-muted transition-colors">
-              <X className="w-4 h-4" />
-            </button>
+
+            {warning ? (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-800/50 bg-amber-50/60 dark:bg-amber-950/20 px-3 py-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
+                <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                  {warning}. Please open it and 'Save As' CSV, then import that file.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-medium text-ink-secondary">File format</label>
+                  {autoDetected && <span className="text-[10px] text-ink-muted">Auto-detected · change if needed</span>}
+                </div>
+                <div className="flex items-center gap-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] p-1">
+                  {FORMATS.map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => setFormat(f.id)}
+                      className={cn('flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors',
+                        format === f.id
+                          ? 'bg-white dark:bg-white/10 text-ink shadow-sm'
+                          : 'text-ink-muted hover:text-ink')}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -219,13 +303,24 @@ function ChooseStep(props: {
           Cancel
         </button>
         <button
-          onClick={props.onStart} disabled={!file}
+          onClick={props.onStart} disabled={!file || !!warning}
           className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-indigo-500/20"
         >
           <UploadCloud className="w-4 h-4" /> Import
         </button>
       </div>
     </>
+  )
+}
+
+function GuideStep({ n, label }: { n: number; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5 min-w-0">
+      <span className="w-4 h-4 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 text-[9px] font-bold flex items-center justify-center flex-shrink-0">
+        {n}
+      </span>
+      <span className="truncate">{label}</span>
+    </span>
   )
 }
 

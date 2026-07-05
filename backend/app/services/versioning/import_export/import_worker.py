@@ -78,7 +78,23 @@ class ImportWorker:
             branch = await s.get(BranchORM, branch_id)
             return (branch.owner if branch else None) or "system"
 
+    async def _reject_binary(self, source_uri: str) -> None:
+        """Fail fast with a clear message on a binary (non-text) file — uploading an Excel
+        workbook (.xlsx/.xls) instead of CSV is a common mistake that would otherwise parse into
+        meaningless rows. Raised in the normal flow (not inside a generator) so the message
+        surfaces on the job."""
+        async for chunk in self._store.open_stream(source_uri):
+            if chunk[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
+                raise ValueError(
+                    "This looks like an Excel workbook (.xlsx). Please open it and 'Save As' "
+                    "CSV (UTF-8), then import that file — spreadsheet workbooks aren't supported yet.")
+            if chunk[:4] == b"\xd0\xcf\x11\xe0":
+                raise ValueError(
+                    "This looks like a legacy Excel file (.xls). Please save it as CSV and import that.")
+            return  # only the first chunk is needed to sniff the file type
+
     async def _parse(self, job_id: str, source_uri: str, fmt: str) -> int:
+        await self._reject_binary(source_uri)
         adapter = get_adapter(fmt)
         batch: List[ImportRowORM] = []
         idx = 0

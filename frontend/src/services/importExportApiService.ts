@@ -154,6 +154,53 @@ export function downloadExportUrl(wsId: string, graphId: string, jobId: string):
   return `${base(wsId)}/graphs/${graphId}/exports/${jobId}/download`
 }
 
+/** URL for a prepopulated starter template (columns + a few real/example rows). */
+export function templateDownloadUrl(wsId: string, graphId: string, format: ImportFormat = 'csv'): string {
+  return `${base(wsId)}/graphs/${graphId}/imports/template?format=${format}`
+}
+
+/** Trigger a browser download with an explicit filename (so the extension is always correct —
+ *  the browser otherwise falls back to the URL segment, which has no extension). */
+export function triggerBrowserDownload(url: string, filename: string): void {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+/** Detect a file's format from its CONTENT (universal — never relies on the extension, which may
+ *  be missing after a download). Reads the first line and classifies json-lines vs csv vs tsv. */
+export async function detectFormat(file: File): Promise<ImportFormat> {
+  try {
+    const head = (await file.slice(0, 8192).text()).replace(/^﻿/, '')
+    const firstLine = (head.split(/\r?\n/).find((l) => l.trim().length > 0) || '').trim()
+    if (firstLine.startsWith('{') || firstLine.startsWith('[')) {
+      try { JSON.parse(firstLine); return 'ndjson' } catch { /* not json-lines */ }
+    }
+    if (firstLine.includes('\t') && !firstLine.includes(',')) return 'tsv'
+    if (firstLine.includes(',')) return 'csv'
+  } catch { /* fall through to extension */ }
+  return inferFormat(file.name)
+}
+
+/** Export the graph and download it (with a correct .{format} filename) when ready. */
+export async function exportAndDownload(
+  wsId: string,
+  graphId: string,
+  opts: { format?: ImportFormat; viewId?: string; onStatus?: (s: JobStatus) => void } = {},
+): Promise<void> {
+  const format = opts.format ?? 'csv'
+  const created = await createExport(wsId, graphId, { format, viewId: opts.viewId })
+  const done = await pollJob(() => getExport(wsId, graphId, created.jobId), {
+    onTick: (j) => opts.onStatus?.(j.status),
+  })
+  if (done.status !== 'completed') throw new Error(done.errorMessage || 'Export failed')
+  triggerBrowserDownload(downloadExportUrl(wsId, graphId, created.jobId), `graph-export.${format}`)
+}
+
 /** Poll a job until it reaches a terminal state (or the signal aborts). */
 export async function pollJob(
   fetcher: () => Promise<Job>,

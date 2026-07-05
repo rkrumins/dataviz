@@ -1959,6 +1959,30 @@ async def list_imports(
     return await ie.list_jobs(graph_id=graph_id, job_type="ingest")
 
 
+# NOTE: declared before `/imports/{job_id}` so the literal path wins over the path param.
+@router.get("/graphs/{graph_id}/imports/template")
+async def import_template(
+    ws_id: str, graph_id: str,
+    format: str = Query("csv"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """A prepopulated starter template (columns + a few real/example rows) so a user learns the
+    import format instantly. Small + synchronous — returned as a direct file download."""
+    from fastapi.responses import Response
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    try:
+        get_adapter(format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    with _domain_errors():
+        data = await ie.build_template(graph_id=graph_id, export_format=format)
+    media = "text/csv" if format in ("csv", "tsv") else "application/x-ndjson"
+    return Response(content=data, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="import-template.{format}"'})
+
+
 @router.get("/graphs/{graph_id}/imports/{job_id}")
 async def get_import(
     ws_id: str, graph_id: str, job_id: str,

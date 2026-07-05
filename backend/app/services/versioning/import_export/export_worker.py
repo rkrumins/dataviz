@@ -32,6 +32,47 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[Dict[str, Any]]:
+    """Denormalize a materialized ``{nodes, edges}`` state into template-shaped export records."""
+    eid_to_qname = {eid: p.get("qualifiedName") for eid, p in nodes.items()}
+    node_records = [
+        {"kind": "node", **denormalize_node(eid, content_hash(p), p)} for eid, p in nodes.items()
+    ]
+    edge_records = [
+        {"kind": "edge", **denormalize_edge(
+            eid, content_hash(p), p,
+            source_qname=eid_to_qname.get(p.get("sourceEntityId")),
+            target_qname=eid_to_qname.get(p.get("targetEntityId")))}
+        for eid, p in edges.items()
+    ]
+    return node_records + edge_records
+
+
+def column_order(records: List[Dict[str, Any]]) -> List[str]:
+    """Deterministic column order: kind + core (node then edge) + sorted prop.* + properties_json
+    + _op — the union present across ``records`` (for csv/tsv/xlsx; ndjson ignores)."""
+    base = ["kind"] + _NODE_COL_ORDER + [c for c in _EDGE_COL_ORDER if c not in _NODE_COL_ORDER]
+    props = sorted({k for r in records for k in r if k.startswith("prop.")})
+    tail = [c for c in ("properties_json", "_op") if any(c in r for r in records)]
+    cols = [c for c in base if any(c in r for r in records)]
+    return cols + props + tail
+
+
+def example_template_records() -> List[Dict[str, Any]]:
+    """Worked example rows for an empty graph's starter template (edit or delete them)."""
+    return [
+        {"kind": "node", "entity_id": "", "urn": "", "entityType": "Table",
+         "displayName": "Example table", "qualifiedName": "analytics.example_table",
+         "description": "An example row — edit or delete me", "prop.owner": "data-team", "_op": ""},
+        {"kind": "node", "entity_id": "", "urn": "", "entityType": "Column",
+         "displayName": "id", "qualifiedName": "analytics.example_table.id",
+         "prop.dataType": "bigint", "_op": ""},
+        {"kind": "edge", "entity_id": "", "edgeType": "CONTAINS",
+         "sourceQualifiedName": "analytics.example_table",
+         "targetQualifiedName": "analytics.example_table.id", "_op": ""},
+    ]
+
+
 class ExportWorker:
     def __init__(self, versioning, store) -> None:
         self._svc = versioning
@@ -51,21 +92,8 @@ class ExportWorker:
         state = await self._svc.materialize_state(
             graph_id=graph_id, branch_id=main_id, as_of_seq=as_of_seq)
         nodes, edges = state["nodes"], state["edges"]
-        eid_to_qname = {eid: p.get("qualifiedName") for eid, p in nodes.items()}
-
-        node_records = [
-            {"kind": "node", **denormalize_node(eid, content_hash(p), p)}
-            for eid, p in nodes.items()
-        ]
-        edge_records = [
-            {"kind": "edge", **denormalize_edge(
-                eid, content_hash(p), p,
-                source_qname=eid_to_qname.get(p.get("sourceEntityId")),
-                target_qname=eid_to_qname.get(p.get("targetEntityId")))}
-            for eid, p in edges.items()
-        ]
-        records = node_records + edge_records
-        columns = self._columns(records)
+        records = records_from_state(nodes, edges)
+        columns = column_order(records)
 
         adapter = get_adapter(fmt)
 
@@ -75,7 +103,7 @@ class ExportWorker:
 
         stat = await self._store.put_stream(result_uri, adapter.write(_iter(), columns=columns))
 
-        summary = {"nodes": len(node_records), "edges": len(edge_records), "bytes": stat.size}
+        summary = {"nodes": len(nodes), "edges": len(edges), "bytes": stat.size}
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             row.status = "completed"
@@ -83,14 +111,3 @@ class ExportWorker:
             row.updated_at = _now()
             row.summary = summary
         return summary
-
-    @staticmethod
-    def _columns(records: List[Dict[str, Any]]) -> List[str]:
-        """Deterministic column order: kind + core (node then edge) + sorted prop.* +
-        properties_json + _op — the union across all records (for csv/tsv/xlsx; ndjson ignores)."""
-        base = ["kind"] + _NODE_COL_ORDER + [c for c in _EDGE_COL_ORDER if c not in _NODE_COL_ORDER]
-        seen = set(base)
-        props = sorted({k for r in records for k in r if k.startswith("prop.")})
-        tail = [c for c in ("properties_json", "_op") if any(c in r for r in records)]
-        cols = [c for c in base if any(c in r for r in records)]
-        return cols + props + tail
