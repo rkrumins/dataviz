@@ -38,6 +38,10 @@ import { BuildGrid } from './BuildGrid'
 
 export interface BuildPanelProps {
   onClose: () => void
+  /** Target layer id (Context View only) — stamped durably into every staged
+   *  row's create_entity (see `stageBuildRows`). Omitted on non-layered
+   *  canvases (Graph/Hierarchy). */
+  layerId?: string
   /** Fired per staged row so the canvas can assign layers / expand parents. */
   onRowStaged?: (rowId: string, urn: string) => void
 }
@@ -62,7 +66,7 @@ function TypeChip({ type }: { type?: EntityTypeSchema }) {
   )
 }
 
-export function BuildPanel({ onClose, onRowStaged }: BuildPanelProps) {
+export function BuildPanel({ onClose, layerId, onRowStaged }: BuildPanelProps) {
   const parentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const [activeTab, setActiveTab] = useState<BuildTab>(initialMode === 'paste' || initialMode === 'grid' ? initialMode : 'outline')
@@ -109,7 +113,7 @@ export function BuildPanel({ onClose, onRowStaged }: BuildPanelProps) {
     if (!canApply) return
     setApplying(true)
     try {
-      await stageBuildRows(stageable, { rootParentUrn: parentUrn, onRowStaged })
+      await stageBuildRows(stageable, { rootParentUrn: parentUrn, layerId, onRowStaged })
       reset()
       onClose()
     } finally {

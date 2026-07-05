@@ -2121,6 +2121,17 @@ export function ContextViewCanvas({
     clearSelection()
   }, [clearSelection])
 
+  // Build Mode's target layer for this session — same 3-tier resolution as
+  // the rail's onEntityStaged: the creation layer → else the root parent's
+  // layer → else the first layer. Fixed for the whole batch (Build's
+  // parentUrn/layerId don't change mid-Apply, unlike the rail's per-row live
+  // retarget). Passed to BuildPanel both to stamp a DURABLE layerAssignment
+  // at stage time (mirrors the rail's create-time properties.layerAssignment)
+  // and for the optimistic session assignEntityToLayer below.
+  const buildLayerId = builderLayerId
+    ?? (builderParentUrn ? nodeLayerMap.get(builderParentUrn) : undefined)
+    ?? sortedLayers[0]?.id
+
   return (
     <div
       data-trace-active={trace.isTracing ? 'true' : 'false'}
@@ -2568,16 +2579,13 @@ export function ContextViewCanvas({
           <BuildPanel
             key="build-panel"
             onClose={() => useHierarchyBuilderStore.getState().close()}
+            layerId={buildLayerId}
             onRowStaged={(_rowId, urn) => {
-              // Same 3-tier layer resolution as onEntityStaged above, evaluated
-              // once per batch from the session's fixed scope (Build's
-              // parentUrn/layerId don't change mid-Apply, unlike the rail's
-              // per-row live retarget) — the creation layer → else the root
-              // parent's layer → else the first layer.
-              const layer = builderLayerId
-                ?? (builderParentUrn ? nodeLayerMap.get(builderParentUrn) : undefined)
-                ?? sortedLayers[0]?.id
-              if (layer) assignEntityToLayer(urn, layer)
+              // Durable layerAssignment is already stamped into the
+              // create_entity at stage time (via the `layerId` prop above).
+              // This is just the optimistic session assignment for immediate
+              // display before save/reload.
+              if (buildLayerId) assignEntityToLayer(urn, buildLayerId)
             }}
           />
         )}

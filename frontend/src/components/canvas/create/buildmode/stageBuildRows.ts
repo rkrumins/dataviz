@@ -42,6 +42,11 @@ export interface PlanBuildStagingOptions {
    *  `parentType` is `''` for a batch-root row (no BuildRow parent) — the
    *  caller resolves `rootParentUrn`'s real type itself, if it needs one. */
   containmentEdgeTypeFor: (parentType: string, childType: string) => string
+  /** Target layer id (Context View only) — stamped into every row's
+   *  `properties.layerAssignment` so it persists through `createNode`,
+   *  mirroring `useHierarchyOutline`'s rail create path. Omitted for
+   *  non-layered canvases (Graph/Hierarchy). */
+  layerId?: string
 }
 
 /**
@@ -83,7 +88,10 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
     const containmentEdgeId = parentUrn ? `contains-${parentUrn}-${tempUrn}` : null
 
     const tags = row.tags ?? []
-    const properties = row.properties ?? {}
+    // Durable layer stamp (rail parity — useHierarchyOutline.stageRows):
+    // goes into the create_entity's properties bag, which createNode passes
+    // through to context_engine.create_node's `layerAssignment=` kwarg.
+    const properties = { ...(row.properties ?? {}), ...(opts.layerId ? { layerAssignment: opts.layerId } : {}) }
 
     nodes.push({
       id: tempUrn,
@@ -177,6 +185,9 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
 export interface StageBuildRowsOptions {
   /** Real canvas urn the batch's root rows attach under, or null for a top-level create. */
   rootParentUrn: string | null
+  /** Target layer id (Context View only) — stamped durably into every
+   *  staged row; see `PlanBuildStagingOptions.layerId`. */
+  layerId?: string
   /** Fired per staged row (in no particular order) so the caller can assign layers. */
   onRowStaged?: (rowId: string, urn: string) => void
 }
@@ -206,7 +217,11 @@ export function useStageBuildRows(): {
         return (contains ?? allowed[0])?.edgeType ?? containmentEdgeTypes[0] ?? 'CONTAINS'
       }
 
-      const plan = planBuildStaging(rows, { rootParentUrn: opts.rootParentUrn, containmentEdgeTypeFor })
+      const plan = planBuildStaging(rows, {
+        rootParentUrn: opts.rootParentUrn,
+        containmentEdgeTypeFor,
+        layerId: opts.layerId,
+      })
 
       useCanvasStore.getState().addNodes(plan.nodes)
       useCanvasStore.getState().addEdges(plan.edges)
