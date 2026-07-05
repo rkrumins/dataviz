@@ -1699,10 +1699,13 @@ class ContextEngine:
 
         if request.parent_urn and parent_entity_type:
 
-            # Derive containment edge type from ontology (fallback to CONTAINS)
-            containment_type = "CONTAINS"
-            if resolved and resolved.containment_edge_types:
-                containment_type = resolved.containment_edge_types[0]
+            # Ontology-authoritative: default to the ontology's first containment relationship, or
+            # None when the ontology declares none — never a fabricated 'CONTAINS'. A client-chosen
+            # type (validated below) overrides this.
+            containment_type = (
+                resolved.containment_edge_types[0]
+                if (resolved and resolved.containment_edge_types) else None
+            )
 
             # Honour a client-chosen containment relationship, validated against the
             # resolved ontology: it must be a real containment type, and (when the
@@ -1741,14 +1744,17 @@ class ContextEngine:
                         )
                 containment_type = canonical
 
-            containment_edge = GraphEdge(
-                id=f"contains-{request.parent_urn}-{urn}",
-                sourceUrn=request.parent_urn,
-                targetUrn=urn,
-                edgeType=containment_type,
-                confidence=1.0,
-                properties={}
-            )
+            # No ontology containment relationship (and no client choice) ⇒ create the node at the
+            # root instead of under a synthesized edge the ontology never declared.
+            if containment_type:
+                containment_edge = GraphEdge(
+                    id=f"contains-{request.parent_urn}-{urn}",
+                    sourceUrn=request.parent_urn,
+                    targetUrn=urn,
+                    edgeType=containment_type,
+                    confidence=1.0,
+                    properties={}
+                )
         
         # Create the node
         new_node = GraphNode(

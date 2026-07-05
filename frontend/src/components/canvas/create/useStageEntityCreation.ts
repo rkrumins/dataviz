@@ -66,11 +66,11 @@ export function useStageEntityCreation() {
       const parentLabel = (parentNode?.data?.label as string) || undefined
 
       const tempUrn = `urn:staged:${input.entityType}:${generateId('new')}`
-      const containmentEdgeId = parentUrn ? `contains-${parentUrn}-${tempUrn}` : null
-      // Prefer the caller's ontology-chosen relationship; fall back to the first
-      // resolved containment type (then the literal CONTAINS) for callers that
-      // don't pick one.
-      const containmentEdgeType = input.containmentEdgeType || containmentEdgeTypes[0] || 'CONTAINS'
+      // Ontology-authoritative containment relationship: the caller's ontology-chosen type, else the
+      // graph's first containment type. `undefined` when the ontology declares none — then NO
+      // containment edge is staged and the child is created at the root (never a fabricated 'CONTAINS').
+      const containmentEdgeType = input.containmentEdgeType || containmentEdgeTypes[0]
+      const containmentEdgeId = parentUrn && containmentEdgeType ? `contains-${parentUrn}-${tempUrn}` : null
 
       addNodes([{
         id: tempUrn,
@@ -86,7 +86,7 @@ export function useStageEntityCreation() {
         },
       }])
 
-      if (containmentEdgeId && parentUrn) {
+      if (containmentEdgeId && parentUrn && containmentEdgeType) {
         addEdges([{
           id: containmentEdgeId,
           source: parentUrn,
@@ -103,8 +103,9 @@ export function useStageEntityCreation() {
       // `apply` (which reads from this same object) observes edits made after staging.
       const afterState = {
         entityType: input.entityType, displayName: input.displayName, parentUrn, tags, properties,
-        // Recorded so the staged-changes review can show how the child is related to its parent.
-        ...(parentUrn ? { containmentEdgeType, parentLabel } : {}),
+        // Recorded so the staged-changes review can show how the child is related to its parent —
+        // only when the ontology actually declares a containment relationship.
+        ...(parentUrn && containmentEdgeType ? { containmentEdgeType, parentLabel } : {}),
       }
 
       stageChange({

@@ -38,10 +38,11 @@ export interface PlanBuildStagingOptions {
   /** Real canvas urn the whole batch attaches under (its batch-root rows'
    *  parent), or null for a top-level create. */
   rootParentUrn: string | null
-  /** Resolves the containment edge type for a parent/child type pair.
-   *  `parentType` is `''` for a batch-root row (no BuildRow parent) — the
-   *  caller resolves `rootParentUrn`'s real type itself, if it needs one. */
-  containmentEdgeTypeFor: (parentType: string, childType: string) => string
+  /** Resolves the containment edge type for a parent/child type pair from the ontology.
+   *  `parentType` is `''` for a batch-root row (no BuildRow parent) — the caller resolves
+   *  `rootParentUrn`'s real type itself, if it needs one. Returns `undefined` when the ontology
+   *  declares no containment relationship for the pairing (⇒ the child is created at the root). */
+  containmentEdgeTypeFor: (parentType: string, childType: string) => string | undefined
   /** Resolves the target layer id for a SINGLE row (Context View only) —
    *  auto-by-type via `resolveRowLayer`, so each entity lands in the column
    *  configured for ITS type. Its result is stamped into that row's
@@ -216,13 +217,18 @@ export function useStageBuildRows(): {
           )?.data?.type as string) ?? '')
         : ''
 
-      const containmentEdgeTypeFor = (parentType: string, childType: string): string => {
+      // Ontology-authoritative: the containment relationship for a parent→child pairing is whatever
+      // the ONTOLOGY allows (deriveContainmentEdges walks relationship endpoint constraints), taking
+      // the first allowed in ontology order — no bias toward any specific edge name, no fabricated
+      // default. Falls back to the graph's first containment type when the pairing isn't explicitly
+      // constrained; returns `undefined` when the ontology defines no containment at all (⇒ the child
+      // is created at the root rather than under a synthesized edge the ontology never declared).
+      const containmentEdgeTypeFor = (parentType: string, childType: string): string | undefined => {
         const pt = parentType || rootParentType
         const allowed = deriveContainmentEdges(pt, childType, relationshipTypes, containmentEdgeTypes).filter(
           (e) => e.allowed,
         )
-        const contains = allowed.find((e) => e.edgeType.toUpperCase() === 'CONTAINS')
-        return (contains ?? allowed[0])?.edgeType ?? containmentEdgeTypes[0] ?? 'CONTAINS'
+        return allowed[0]?.edgeType ?? containmentEdgeTypes[0]
       }
 
       const plan = planBuildStaging(rows, {
