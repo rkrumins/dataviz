@@ -15,18 +15,36 @@
  * Keyboard model on a (non-synthetic) row's name input, matching the rail's
  * `HierarchyBuilderPanel`/`useHierarchyOutline` vocabulary but written fresh
  * against `buildRowsStore` (that hook's API is out of scope to touch):
- *   Enter      → addSibling(id), then focus the new row
+ *   Enter      → addSibling(id), then focus the new row — UNLESS the row is
+ *                EMPTY and not already at the top level, in which case Enter
+ *                outdents it one level instead (doc-editor idiom); repeated
+ *                Enter on an empty row climbs to the top, then a further
+ *                Enter there starts a fresh top-level row (Task 3).
  *   Tab        → addChild(id), then focus the new row
  *   Shift+Tab  → reparent to the grandparent (outdent), via updateRow
  *   Escape     → blur (stop editing this row)
+ *
+ * Each row's type label is also a picker (Task 4) — options are the
+ * ontology-legal children of the row's PARENT type (`builderAllowedChildTypeIds`,
+ * the same gate `useHierarchyOutline.ts` uses), or the legal top-level types
+ * for a depth-0 row; picking one writes `updateRow(id, { typeId })`.
  */
 import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import {
+  useViewEntityTypes,
+  useViewRootEntityTypes,
+  useViewEntityTypeHierarchyMap,
+  useViewRelationshipTypes,
+  useViewContainmentEdgeTypes,
+} from '@/hooks/useViewSchema'
+import { builderAllowedChildTypeIds } from '@/services/ontologyPreflightService'
 import type { EntityTypeSchema } from '@/types/schema'
 import type { BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
 import { grandparentIdOf } from './buildOutlineOutdent'
+import { TypePickerPopover } from './TypePickerPopover'
 
 export interface BuildOutlineProps {
   /** Validated rows (BuildPanel's `validateBuildRows(rows, ctx)`) — live type inference + status. */
@@ -59,7 +77,14 @@ export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
   const updateRow = useBuildRowsStore((s) => s.updateRow)
   const removeRow = useBuildRowsStore((s) => s.removeRow)
 
+  const entityTypes = useViewEntityTypes()
+  const rootEntityTypes = useViewRootEntityTypes()
+  const hierarchyMap = useViewEntityTypeHierarchyMap()
+  const relationshipTypes = useViewRelationshipTypes()
+  const containmentEdgeTypes = useViewContainmentEdgeTypes()
+
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [typePickerRowId, setTypePickerRowId] = useState<string | null>(null)
   const inputRefs = useRef(new Map<string, HTMLInputElement>())
   // Snapshot of row ids taken right before a store mutation that adds a row
   // (addSibling/addChild generate the new id internally via crypto.randomUUID,
@@ -81,11 +106,37 @@ export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
   const armFocusNext = () => { pendingFocusIds.current = new Set(rawRows.map((r) => r.id)) }
   const rawIds = new Set(rawRows.map((r) => r.id))
 
+  /** `row`'s parent's typeId — looked up in the validated `rows` (so an
+   *  auto-inserted synthetic ancestor's type counts too), or `null` at the
+   *  top level. */
+  const parentTypeOf = (row: BuildRow): string | null => {
+    if (row.parentId == null) return null
+    return rows.find((r) => r.id === row.parentId)?.typeId ?? null
+  }
+
+  /** Task 4: the ontology-legal types for `row`'s slot — the legal children
+   *  of its parent's type (or the legal top-level types at depth 0). */
+  const legalTypesForRow = (row: BuildRow): EntityTypeSchema[] => {
+    const ids = builderAllowedChildTypeIds(
+      parentTypeOf(row), entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes,
+    )
+    return entityTypes.filter((t) => ids.has(t.id))
+  }
+
   const onNameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, row: BuildRow) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      armFocusNext()
-      addSibling(row.id)
+      if (row.name.trim() === '' && row.depth > 0) {
+        // Empty row, not yet at the top level: outdent one level (doc-editor
+        // idiom) instead of adding a same-depth sibling. Repeated Enter climbs
+        // to depth 0; a further Enter there falls through below and starts a
+        // new top-level row.
+        const grandparentId = grandparentIdOf(rawRows, row.id)
+        if (grandparentId !== undefined) updateRow(row.id, { parentId: grandparentId })
+      } else {
+        armFocusNext()
+        addSibling(row.id)
+      }
     } else if (e.key === 'Tab' && !e.shiftKey) {
       e.preventDefault()
       armFocusNext()
@@ -163,9 +214,30 @@ export function BuildOutline({ rows, typeById }: BuildOutlineProps) {
               />
             )}
 
-            <span className="flex-shrink-0 text-[10px] text-ink-muted/70 truncate max-w-[140px]">
-              {type?.name ?? row.typeId ?? 'unknown type'}
-            </span>
+            {isSynthetic ? (
+              <span className="flex-shrink-0 text-[10px] text-ink-muted/70 truncate max-w-[140px]">
+                {type?.name ?? row.typeId ?? 'unknown type'}
+              </span>
+            ) : (
+              <div className="relative flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setTypePickerRowId((cur) => (cur === row.id ? null : row.id))}
+                  aria-label={`Type for ${row.name || 'row'}`}
+                  className="text-[10px] text-ink-muted/70 hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 rounded px-1 -mx-1 truncate max-w-[140px] transition-colors"
+                >
+                  {type?.name ?? row.typeId ?? 'unknown type'}
+                </button>
+                {typePickerRowId === row.id && (
+                  <TypePickerPopover
+                    entityTypes={legalTypesForRow(row)}
+                    selectedId={row.typeId}
+                    onPick={(id) => { updateRow(row.id, { typeId: id }); setTypePickerRowId(null) }}
+                    onClose={() => setTypePickerRowId(null)}
+                  />
+                )}
+              </div>
+            )}
 
             {badge && <DynamicIcon name={badge.icon} className={cn('w-3.5 h-3.5 flex-shrink-0', badge.cls)} />}
 

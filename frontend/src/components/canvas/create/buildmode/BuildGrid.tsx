@@ -42,6 +42,7 @@ import type { BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
 import { buildTypeLayerMap } from './resolveRowLayer'
 import { computeRangeIds, computeDownIds, descendantIds } from './buildGridSelection'
+import { TypePickerPopover } from './TypePickerPopover'
 
 export interface BuildGridProps {
   /** Validated rows (BuildPanel's `validateBuildRows(rows, ctx)`) — live type inference + status. */
@@ -78,59 +79,6 @@ function useOutsideDismiss(ref: React.RefObject<HTMLElement | null>, onDismiss: 
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [ref, onDismiss])
-}
-
-function TypePickerPopover({
-  entityTypes, selectedId, onPick, onClose,
-}: {
-  entityTypes: EntityTypeSchema[]
-  selectedId: string | null
-  onPick: (id: string) => void
-  onClose: () => void
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [q, setQ] = useState('')
-  useOutsideDismiss(ref, onClose)
-
-  const filtered = useMemo(() => {
-    if (!q.trim()) return entityTypes
-    const s = q.toLowerCase()
-    return entityTypes.filter((t) => t.name.toLowerCase().includes(s) || t.id.toLowerCase().includes(s))
-  }, [entityTypes, q])
-
-  return (
-    <div
-      ref={ref}
-      className="absolute left-0 top-full mt-1 z-30 w-56 bg-canvas-elevated/98 backdrop-blur-xl border border-glass-border rounded-xl shadow-lg overflow-hidden"
-    >
-      <div className="p-1.5 border-b border-glass-border">
-        <input
-          autoFocus
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search types…"
-          className="w-full px-2 py-1 text-xs bg-transparent focus:outline-none text-ink placeholder:text-ink-muted/50"
-        />
-      </div>
-      <div className="max-h-48 overflow-y-auto custom-scrollbar p-1 space-y-0.5">
-        {filtered.length === 0 && <div className="text-center py-3 text-[11px] text-ink-muted">No matching types.</div>}
-        {filtered.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onPick(t.id)}
-            className={cn(
-              'w-full flex items-center gap-2 px-2 py-1 rounded-lg text-left transition-colors',
-              t.id === selectedId ? 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30' : 'hover:bg-black/5 dark:hover:bg-white/5',
-            )}
-          >
-            <TypeChip type={t} />
-            <span className="flex-1 min-w-0 text-xs text-ink truncate">{t.name}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 function ParentPickerPopover({
