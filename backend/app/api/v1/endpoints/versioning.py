@@ -1170,13 +1170,18 @@ async def list_branches(
     ws_id: str, graph_id: str,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    view_id: Optional[str] = Query(None, alias="viewId"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    branches = await svc.list_branches(graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    """Branches on the graph — graph-wide (every view) by default; ``viewId`` narrows to
+    that view's own branches (the Data-Source rollup stays the default, unfiltered)."""
+    branches = await svc.list_branches(
+        graph_id=graph_id, limit=limit, offset=offset, viewer=viewer,
+        originating_view_id=view_id)
     await _attach_user_names(session, branches)
     return branches
 
@@ -1185,14 +1190,16 @@ async def list_branches(
 async def resolve_graph_get(
     ws_id: str,
     data_source_id: str = Query(..., alias="dataSourceId"),
+    view_id: Optional[str] = Query(None, alias="viewId"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Resolve (workspace, dataSource) → versioned graph + the caller's open draft, if
-    any. Read-only: never opens a draft. 404 when no versioned graph backs the source."""
+    any, scoped to ``viewId`` when given (branch-per-view). Read-only: never opens a
+    draft. 404 when no versioned graph backs the source."""
     res = await svc.resolve_graph(
         data_source_id=data_source_id, actor=user.id, workspace_id=ws_id,
-        open_draft_if_absent=False,
+        open_draft_if_absent=False, originating_view_id=view_id,
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
@@ -2128,13 +2135,18 @@ async def list_pull_requests(
     ws_id: str, graph_id: str,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    view_id: Optional[str] = Query(None, alias="viewId"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    prs = await svc.list_pulls(target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer)
+    """PRs targeting the graph — graph-wide (every view) by default; ``viewId`` narrows to
+    PRs raised from that view's drafts (the Data-Source rollup stays the default, unfiltered)."""
+    prs = await svc.list_pulls(
+        target_graph_id=graph_id, limit=limit, offset=offset, viewer=viewer,
+        originating_view_id=view_id)
     await _attach_user_names(session, prs)
     return prs
 

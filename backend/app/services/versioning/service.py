@@ -3054,10 +3054,14 @@ class GraphVersioningService:
                     (d for d in drafts if d.originating_view_id == originating_view_id), None)
                 if draft is None:
                     # Claim-if-null: a draft opened before view tracking (or from a path that
-                    # couldn't name its view) adopts the caller's view on this editing resolve;
-                    # an already-attributed draft is never re-assigned.
+                    # couldn't name its view) adopts the caller's view — but ONLY on a
+                    # write-intent resolve (open_draft_if_absent); a plain read must not
+                    # write-on-read (two concurrent reads from different views could
+                    # otherwise race to claim the same null draft). A read still SEES the
+                    # null draft (the view shows it) without mutating it; an already-
+                    # attributed draft is never re-assigned.
                     draft = next((d for d in drafts if d.originating_view_id is None), None)
-                    if draft is not None:
+                    if draft is not None and open_draft_if_absent:
                         draft.originating_view_id = originating_view_id
             my_draft = self._draft_ref(draft) if draft is not None else None
         if my_draft is None and open_draft_if_absent:
@@ -3073,15 +3077,20 @@ class GraphVersioningService:
 
     async def list_branches(
         self, *, graph_id: str, limit: int = 100, offset: int = 0,
-        viewer: Optional[Viewer] = None,
+        viewer: Optional[Viewer] = None, originating_view_id: Optional[str] = None,
     ) -> List[dict]:
-        """Branches of a graph (``main`` + drafts/forks), oldest first. With a ``viewer`` who isn't a
-        manager, only ``main`` + the caller's own or shared drafts are returned — others' private
-        drafts aren't browsable (so the switcher won't list them)."""
+        """Branches of a graph (``main`` + drafts/forks), oldest first — graph-keyed by
+        DEFAULT (every view's branches, the Data-Source rollup). Optional
+        ``originating_view_id`` narrows to that view's own branches (``main`` carries no
+        view, so it drops out of a view-scoped slice). With a ``viewer`` who isn't a
+        manager, only ``main`` + the caller's own or shared drafts are returned — others'
+        private drafts aren't browsable (so the switcher won't list them)."""
         async with self._session() as s:
+            stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
+            if originating_view_id is not None:
+                stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
             rows = (await s.execute(
-                select(BranchORM).where(BranchORM.graph_id == graph_id)
-                .order_by(BranchORM.created_at).limit(limit).offset(offset)
+                stmt.order_by(BranchORM.created_at).limit(limit).offset(offset)
             )).scalars().all()
             if viewer is not None and not viewer.can_manage:
                 member_ids = set((await s.execute(
