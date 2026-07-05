@@ -216,7 +216,7 @@ function ChooseStep(props: {
         </div>
         <ol className="space-y-3">
           <Step n={1} title="Download a starter template" body="Prefilled with your current data so you learn the columns instantly." />
-          <Step n={2} title="Edit it anywhere" body="Excel, Google Sheets, or any editor. Add rows to create, edit cells to update." />
+          <Step n={2} title="Edit it anywhere" body="Excel, Sheets, or any editor. Each property is its own column — edit a cell to change it, add a prop.<name> column for a new one." />
           <Step n={3} title="Upload it here" body="Excel, CSV, TSV, NDJSON or JSON — the format is detected automatically." />
           <Step n={4} title="Review every change" body="See exactly what's new, updated or deleted on a draft before it's live." />
           <Step n={5} title="Publish or open a PR" body="Nothing touches the published model until you approve it." />
@@ -230,7 +230,7 @@ function ChooseStep(props: {
         <div className="flex items-start gap-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] px-3 py-2.5">
           <Lock className="w-3.5 h-3.5 text-ink-muted mt-0.5 flex-shrink-0" />
           <p className="text-[11px] text-ink-muted leading-relaxed">
-            The greyed <span className="font-medium text-ink-secondary">entity_id</span> / <span className="font-medium text-ink-secondary">urn</span> columns are the identity — leave them as-is so edits match the right item. Set <span className="font-mono text-ink-secondary">_op=delete</span> on a row to remove it.
+            Include only the <span className="font-medium text-ink-secondary">rows and columns you're changing</span> — everything else is left untouched, so you can update one property across 50 rows of 10,000. Keep the greyed <span className="font-medium text-ink-secondary">entity_id</span> / <span className="font-medium text-ink-secondary">urn</span> as-is (they match the row); <span className="font-mono text-ink-secondary">_op=delete</span> removes an entity, <span className="font-mono text-ink-secondary">\N</span> in a cell clears a property.
           </p>
         </div>
       </div>

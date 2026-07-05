@@ -33,6 +33,7 @@ const FORMATS: { id: ImportFormat; label: string; hint: string }[] = [
 export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogProps) {
   const [format, setFormat] = useState<ImportFormat>('csv')
   const [scope, setScope] = useState<'view' | 'all'>(viewId ? 'view' : 'all')
+  const [newProps, setNewProps] = useState('')
   const [phase, setPhase] = useState<Phase>('choose')
   const [error, setError] = useState<string | null>(null)
 
@@ -40,7 +41,8 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
     setPhase('running')
     setError(null)
     try {
-      await exportAndDownload(wsId, graphId, { format, viewId: scope === 'view' ? viewId : undefined })
+      const props = newProps.split(',').map((s) => s.trim()).filter(Boolean)
+      await exportAndDownload(wsId, graphId, { format, viewId: scope === 'view' ? viewId : undefined, props })
       setPhase('done')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The export could not be completed.')
@@ -73,7 +75,8 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
         {/* Body */}
         <div className="flex-1 overflow-y-auto">
           {phase === 'choose' && (
-            <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope} hasView={!!viewId} />
+            <ChooseStep format={format} setFormat={setFormat} scope={scope} setScope={setScope}
+              hasView={!!viewId} newProps={newProps} setNewProps={setNewProps} />
           )}
           {phase === 'running' && (
             <div className="px-8 py-16 flex flex-col items-center gap-4">
@@ -143,9 +146,10 @@ export function ExportDialog({ wsId, graphId, viewId, onClose }: ExportDialogPro
 }
 
 // ── choose (two columns: guide | scope + format) ─────────────────────────────
-function ChooseStep({ format, setFormat, scope, setScope, hasView }: {
+function ChooseStep({ format, setFormat, scope, setScope, hasView, newProps, setNewProps }: {
   format: ImportFormat; setFormat: (f: ImportFormat) => void
   scope: 'view' | 'all'; setScope: (s: 'view' | 'all') => void; hasView: boolean
+  newProps: string; setNewProps: (s: string) => void
 }) {
   return (
     <div className="grid md:grid-cols-2">
@@ -198,6 +202,20 @@ function ChooseStep({ format, setFormat, scope, setScope, hasView }: {
               </button>
             ))}
           </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-ink-secondary mb-1.5">Add new property columns <span className="text-ink-muted font-normal">(optional)</span></label>
+          <input
+            value={newProps}
+            onChange={(e) => setNewProps(e.target.value)}
+            placeholder="e.g. Owner, Logical Data Type, PII"
+            className="w-full px-3 py-2 rounded-xl border border-glass-border bg-transparent text-sm text-ink placeholder:text-ink-muted focus:outline-none focus:border-indigo-500 transition-colors"
+          />
+          <p className="text-[11px] text-ink-muted mt-1.5">
+            Each becomes an empty <span className="font-mono">prop.&lt;name&gt;</span> column to fill in — the easy way to add a
+            property. Existing properties are already included as columns.
+          </p>
         </div>
       </div>
     </div>

@@ -48,19 +48,31 @@ def records_from_state(nodes: Dict[str, dict], edges: Dict[str, dict]) -> List[D
     return node_records + edge_records
 
 
-def column_order(records: List[Dict[str, Any]]) -> List[str]:
-    """Deterministic, EDIT-READY column order (csv/tsv/xlsx; ndjson ignores). Always includes the
-    full editable node schema + a ``properties_json`` surface + ``_op``, even when those cells are
-    empty, so a user can add a description/tag/layer or a NEW property without hand-adding a column
-    (the fragile step that shifts values into the wrong column). Edge columns appear only when the
-    export actually has edges. Existing ``prop.<name>`` columns are included so they edit in place."""
+def column_order(records: List[Dict[str, Any]], schema_props: Optional[Dict[str, List[str]]] = None) -> List[str]:
+    """Deterministic, EDIT-READY column order (csv/tsv/xlsx; ndjson ignores).
+
+    Property management is TABULAR — **every property is its own ``prop.<name>`` column**, like a
+    spreadsheet/Airtable grid, so 10–50 properties are 10–50 columns you edit in place (never a
+    bulky JSON blob). The property columns are the union of: what entities actually have + what the
+    ontology defines for the types present (``schema_props`` = ``{"node": [...], "edge": [...]}``),
+    so a defined-but-empty property is still a column to fill. ``properties_json`` is demoted to a
+    pure OVERFLOW column for genuinely nested/complex values — emitted only when a record needs it.
+    The full editable node core (description/tags/layer/…) is always present; edge columns only when
+    the export has edges."""
     has_edge = any(r.get("kind") == "edge" for r in records)
+    schema_props = schema_props or {}
     cols: List[str] = ["kind"] + list(_NODE_COL_ORDER)
     if has_edge:
         cols += [c for c in _EDGE_COL_ORDER if c not in cols]
-    cols += sorted({k for r in records for k in r if k.startswith("prop.")})
-    cols += ["properties_json", "_op"]              # property escape hatch + op — ALWAYS present
-    seen, out = set(), []                            # dedup, preserve order
+    prop_cols = {k for r in records for k in r if k.startswith("prop.")}
+    prop_cols |= {f"prop.{n}" for n in (schema_props.get("node") or [])}
+    if has_edge:
+        prop_cols |= {f"prop.{n}" for n in (schema_props.get("edge") or [])}
+    cols += sorted(prop_cols)
+    if any("properties_json" in r for r in records):    # overflow only — nested values, when present
+        cols.append("properties_json")
+    cols.append("_op")
+    seen, out = set(), []                                # dedup, preserve order
     for c in cols:
         if c not in seen:
             seen.add(c)
@@ -148,10 +160,13 @@ def filter_to_scope(nodes: Dict[str, dict], edges: Dict[str, dict], scope: Dict[
 
 
 class ExportWorker:
-    def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, versioning, store, scope: Optional[Dict[str, Any]] = None,
+                 extra_props: Optional[List[str]] = None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope
+        # Property names the user wants as (initially empty) columns to fill — "add a new property".
+        self._extra_props = [p for p in (extra_props or []) if str(p).strip()]
 
     async def run(self, job_id: str) -> Dict[str, int]:
         async with db.graphver_session() as s:
@@ -170,7 +185,10 @@ class ExportWorker:
         if self._scope:                                   # view-scoped export (Phase 4)
             nodes, edges = filter_to_scope(nodes, edges, self._scope)
         records = records_from_state(nodes, edges)
-        columns = column_order(records)
+        # Every property is its own column: existing ones (unioned in column_order) + any the user
+        # asked to add, so a brand-new property is an empty column ready to fill.
+        schema_props = {"node": self._extra_props, "edge": self._extra_props} if self._extra_props else None
+        columns = column_order(records, schema_props)
 
         adapter = get_adapter(fmt)
 

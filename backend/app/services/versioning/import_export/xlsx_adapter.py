@@ -142,13 +142,16 @@ def _write_instructions(ws) -> None:
     lines = [
         ("How to edit this workbook", 14),
         ("", 0),
-        ("• The Nodes and Edges sheets hold your data — one entity per row.", 0),
+        ("• The Nodes and Edges sheets hold your data — one entity per row, and EACH PROPERTY IS ITS"
+         " OWN COLUMN (prop.<name>). Edit a cell to change a value.", 0),
         ("• Greyed columns (entity_id, urn, baseVersion, source/target_entity_id) are the identity"
          " — leave them exactly as-is so your edits match the right item.", 0),
-        ("• Edit any other cell to update it. Add a new row with entity_id/urn left blank to create.", 0),
-        ("• Add a NEW property by adding a column named 'prop.<name>' (e.g. prop.owner) and filling"
-         " values — only the rows you fill are changed.", 0),
-        ("• Set the _op column to 'delete' to remove a row; leave it blank to add or update.", 0),
+        ("• You only need the ROWS and COLUMNS you're changing. Deleting rows or columns from this"
+         " file changes nothing — untouched entities and fields are left exactly as they are.", 0),
+        ("• Add a NEW property = add a column named 'prop.<name>' (e.g. prop.owner) and fill only the"
+         " rows it applies to. Add a new entity = a new row with entity_id/urn left blank.", 0),
+        ("• DELETE a property value with the token \\N in its cell (or delete the whole row's entity"
+         " by setting _op to 'delete').", 0),
         ("• Save as .xlsx and import — you'll review every change before anything is published.", 0),
     ]
     for text, size in lines:

@@ -135,12 +135,13 @@ export function listImports(wsId: string, graphId: string): Promise<Job[]> {
 export function createExport(
   wsId: string,
   graphId: string,
-  opts: { format?: ImportFormat; asOfSeq?: number; viewId?: string; idempotencyKey?: string } = {},
+  opts: { format?: ImportFormat; asOfSeq?: number; viewId?: string; props?: string[]; idempotencyKey?: string } = {},
 ): Promise<CreateExportResult> {
   const params = new URLSearchParams()
   params.set('format', opts.format ?? 'ndjson')
   if (opts.asOfSeq != null) params.set('asOfSeq', String(opts.asOfSeq))
   if (opts.viewId) params.set('viewId', opts.viewId)
+  if (opts.props?.length) params.set('props', opts.props.join(','))
   if (opts.idempotencyKey) params.set('idempotencyKey', opts.idempotencyKey)
   return authFetch<CreateExportResult>(
     `${base(wsId)}/graphs/${graphId}/exports?${params.toString()}`,
@@ -198,10 +199,10 @@ export async function detectFormat(file: File): Promise<ImportFormat> {
 export async function exportAndDownload(
   wsId: string,
   graphId: string,
-  opts: { format?: ImportFormat; viewId?: string; onStatus?: (s: JobStatus) => void } = {},
+  opts: { format?: ImportFormat; viewId?: string; props?: string[]; onStatus?: (s: JobStatus) => void } = {},
 ): Promise<void> {
   const format = opts.format ?? 'csv'
-  const created = await createExport(wsId, graphId, { format, viewId: opts.viewId })
+  const created = await createExport(wsId, graphId, { format, viewId: opts.viewId, props: opts.props })
   const done = await pollJob(() => getExport(wsId, graphId, created.jobId), {
     onTick: (j) => opts.onStatus?.(j.status),
   })
