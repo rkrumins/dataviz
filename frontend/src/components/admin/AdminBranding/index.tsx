@@ -30,6 +30,13 @@ const BUILTIN_MARKS = [
         logoUrl: '/brand-graph-mark.svg',
         faviconUrl: '/brand-graph-icon.svg',
     },
+    {
+        id: 'nexus-pyramid',
+        name: 'Layered pyramid',
+        blurb: 'The classic stacked-pyramid mark.',
+        logoUrl: '/nexus-icon.svg',
+        faviconUrl: '/nexus-icon.svg',
+    },
 ] as const
 import {
     fetchAdminBranding, updateBranding, uploadBrandingImage, resetBranding,
