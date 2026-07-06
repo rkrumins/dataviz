@@ -289,14 +289,22 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
 
-        // A genuinely NEW view (new initKey) resets the retry budget and shows
-        // the fresh 'loading' state. A RETRY of the same view (same initKey,
-        // re-armed via retryEpoch) keeps the failed status/overlay up so it
-        // can't flash the empty state between attempts.
+        // A genuinely NEW view (new initKey) resets the retry budget.
         const isFreshView = lastInitKeyRef.current !== initKey
         if (isFreshView) {
             lastInitKeyRef.current = initKey
             retryCountRef.current = 0
+        }
+        // Any ACTIVE load — a fresh view OR a re-fetch of the same view (deps
+        // churned) — must show 'loading', NOT 'ready'. Otherwise the canvas is
+        // cleared (setGraph([],[]) below) while status is still 'ready' from the
+        // previous success, and the empty-state gate (status==='ready' &&
+        // nodes===0) flashes "Start building" in the reload gap. A RETRY of a
+        // FAILED load is the one exception: keep the warming/unavailable overlay
+        // (retryCountRef>0 marks it) so it doesn't blink either. So the empty
+        // state is reachable ONLY from a SETTLED successful load (markReady).
+        const isRetry = retryCountRef.current > 0
+        if (!isRetry) {
             setHydrationStatus('loading')
             setHydrationError(null)
         }
