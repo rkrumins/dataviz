@@ -20,6 +20,7 @@ import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCr
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
+import { getCircuitBreaker } from '@/services/circuitBreaker'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -183,7 +184,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const enableHydration = options?.hydrate ?? false
 
     const provider = useGraphProvider()
-    const { providerVersion } = useGraphProviderContext()
+    const { providerVersion, workspaceId: providerWsId, dataSourceId: providerDsId } = useGraphProviderContext()
+
+    // Force the client-side circuit breaker closed so a re-attempt actually
+    // probes the provider. Without this, an OPEN breaker (it opens for ~15s
+    // after failures, longer with a Retry-After) makes every retry throw
+    // "circuit open" WITHOUT a network call — which is exactly why clicking
+    // "Retry now" did nothing until a full page refresh (which builds a fresh
+    // provider + breaker). Same singleton the provider uses.
+    const forceReprobe = useCallback(() => {
+        getCircuitBreaker(providerWsId ?? undefined, providerDsId ?? undefined).reset()
+    }, [providerWsId, providerDsId])
     const containmentEdgeTypes = useViewContainmentEdgeTypes()
     const lineageEdgeTypes = useViewLineageEdgeTypes()
     const rootEntityTypes = useViewRootEntityTypes()
@@ -638,10 +649,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // background tab is brought back to the foreground). Re-arms a fresh round
     // of auto-retries. Kept stable so the overlay button identity doesn't churn.
     const retryHydration = useCallback(() => {
+        forceReprobe()                     // close the breaker so this actually hits the network
         retryCountRef.current = 0
         initializedKeyRef.current = null
         setRetryEpoch(e => e + 1)
-    }, [])
+    }, [forceReprobe])
 
     // Auto-retry while the provider is warming/unavailable — but SCALE-SAFELY:
     //  • a configurable, deliberately-unhurried interval (POLLING_INTERVALS.
@@ -667,12 +679,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const attempt = retryCountRef.current + 1
         const delay = withJitter(POLLING_INTERVALS.providerRetry)
         const t = setTimeout(() => {
+            forceReprobe()                     // close the breaker so the retry actually probes
             retryCountRef.current = attempt
             initializedKeyRef.current = null   // re-arm the hydration effect
             setRetryEpoch(e => e + 1)          // re-run; status/overlay stay until success
         }, delay)
         return () => clearTimeout(t)
-    }, [enableHydration, hydrationStatus, retryEpoch])
+    }, [enableHydration, hydrationStatus, retryEpoch, forceReprobe])
 
     // Resume retrying the moment a hidden tab returns to the foreground (the
     // auto-retry above pauses while hidden), so a user coming back to a warming
