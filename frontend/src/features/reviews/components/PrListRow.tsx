@@ -158,8 +158,8 @@ export function PrListRow({
           <button
             onClick={(e) => { e.stopPropagation(); setConfirming(true) }}
             title="Dismiss — reject these changes without merging (nothing is applied to main)"
-            className="p-1.5 rounded-lg text-ink-muted/50 hover:bg-rose-500/10 hover:text-rose-500 transition-all shrink-0"
-          ><XCircle className="w-4 h-4" /></button>
+            className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium text-ink-muted/60 border border-transparent hover:bg-rose-500/10 hover:text-rose-500 hover:border-rose-500/20 transition-all"
+          ><XCircle className="w-3.5 h-3.5" /> Dismiss</button>
         )
       )}
 

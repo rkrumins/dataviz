@@ -300,16 +300,17 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                       ))}
                     </p>
                   )}
-                  {pr.originatingViewId && (
-                    <button
-                      onClick={() => { onClose(); navigate(`/views/${pr.originatingViewId}?branch=${pr.sourceBranchId}`) }}
-                      className="mt-1 inline-flex items-center gap-1.5 text-[12px] font-medium text-accent-lineage hover:underline"
-                      title="Go to the canvas for this draft's view"
-                    >
-                      <ArrowUpRight className="w-3.5 h-3.5" /> Open this draft in its view
-                    </button>
-                  )}
                 </div>
+                {/* Prominent, easy-to-find entry to browse the branch's actual changes on the canvas. */}
+                {pr.originatingViewId && (
+                  <button
+                    onClick={() => { onClose(); navigate(`/views/${pr.originatingViewId}?branch=${pr.sourceBranchId}`) }}
+                    className="mt-2.5 w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-[13px] font-semibold text-accent-lineage border border-accent-lineage/30 bg-accent-lineage/[0.06] hover:bg-accent-lineage/[0.12] hover:border-accent-lineage/50 transition-colors"
+                    title="Open this branch in the canvas to browse and review its changes in context"
+                  >
+                    <ArrowUpRight className="w-4 h-4" /> Browse this branch’s changes
+                  </button>
+                )}
               </Section>
 
               {isDraftPr && (
