@@ -88,12 +88,14 @@ import { LayerColumn } from './LayerColumn'
 import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
+import * as assignmentOps from './assignmentMutations'
+import { normalizeReferenceLayout, deriveEntityScope, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
-import { getView, updateView } from '@/services/viewApiService'
+import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -113,6 +115,34 @@ export interface ContextViewCanvasProps {
   className?: string
   layers?: ViewLayerConfig[]
   showLineageFlow?: boolean
+}
+
+/**
+ * Containment descendants of `rootId` (via `parentMap`) that carry their OWN explicit assignment entry.
+ * Assigning a parent clears these so they inherit the parent's new layer (the hard-inherit rule).
+ */
+function explicitDescendants(
+  rootId: string,
+  parentMap: Map<string, string>,
+  assignments: NormalizedReferenceLayout['assignments'],
+): string[] {
+  const childMap = new Map<string, string[]>()
+  parentMap.forEach((parent, child) => {
+    const list = childMap.get(parent) ?? []
+    list.push(child)
+    childMap.set(parent, list)
+  })
+  const out: string[] = []
+  const queue = [...(childMap.get(rootId) ?? [])]
+  const seen = new Set<string>()
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    if (seen.has(id)) continue
+    seen.add(id)
+    if (assignments[id]) out.push(id)
+    queue.push(...(childMap.get(id) ?? []))
+  }
+  return out
 }
 
 export function ContextViewCanvas({
@@ -456,6 +486,7 @@ export function ContextViewCanvas({
   const effectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
   const computeAssignments = useReferenceModelStore(s => s.computeAssignments)
   const assignmentStatus = useReferenceModelStore(s => s.assignmentStatus)
+  const resetAssignmentStatus = useReferenceModelStore(s => s.resetAssignmentStatus)
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
   const syncStatus = useReferenceModelStore(s => s.syncStatus)
@@ -517,17 +548,65 @@ export function ContextViewCanvas({
       : { ...interactions.keyboardHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
   })
 
-  // Blueprint autosync is ambient: display-rule / layer edits dirty the reference model, but there
-  // is no Save button. Debounce-persist for managers so their changes survive a reload. saveToBackend
-  // flips syncStatus off 'dirty' (→ saving/synced/error), so this can't loop. Viewers can't save, so
-  // their edits stay session-local — firing here would only spam errors at people without permission.
-  useEffect(() => {
-    if (syncStatus !== 'dirty' || !canManage || !scopeWsId) return
-    // saveToBackend re-throws on failure; that's already surfaced via syncStatus='error' + the
-    // header's retry affordance, so swallow the rejection here to avoid unhandled-rejection noise.
-    const t = setTimeout(() => { saveToBackend(scopeWsId).catch(() => {}) }, 1500)
-    return () => clearTimeout(t)
-  }, [syncStatus, canManage, scopeWsId, saveToBackend])
+  // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
+  // Every layer/assignment gesture writes ONE store: the active view's `referenceLayout`.
+  // persistReferenceLayout updates the schema-store view SYNCHRONOUSLY (immediate canvas re-render —
+  // useLayerAssignment reads the canonical `assignments`) and arms a debounced durable
+  // PUT /views/{id}/layout. Reads go through the LIVE view (getActiveView) + normalizeReferenceLayout so
+  // rapid successive writes (e.g. a build batch's per-row assigns) accumulate instead of clobbering, and
+  // every saved config is canonical-clean (entityAssignments stripped, exact-urn rules converted).
+  // This REPLACES the prior syncStatus→saveToBackend blueprint-autosync effect (the reference-model
+  // store no longer persists layers/assignments — Task 5 demotes it to a render cache).
+  const layoutSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingLayoutSave = useRef<
+    { viewId: string; referenceLayout: NormalizedReferenceLayout; entityScope: 'all' | 'curated' } | null
+  >(null)
+
+  const doLayoutSave = useCallback(async () => {
+    if (layoutSaveTimer.current) { clearTimeout(layoutSaveTimer.current); layoutSaveTimer.current = null }
+    const pending = pendingLayoutSave.current
+    if (!pending) return
+    pendingLayoutSave.current = null
+    try {
+      await updateViewLayout(pending.viewId, {
+        referenceLayout: pending.referenceLayout,
+        entityScope: pending.entityScope,
+      })
+    } catch (err) {
+      // Swallow to avoid unhandled-rejection noise; the next edit re-arms the save.
+      console.error('[ContextViewCanvas] layout save failed', err)
+    }
+  }, [])
+
+  /** Flush any pending debounced layout save NOW (no-op if none pending). Used by the Save button. */
+  const flushLayoutSave = useCallback(async () => { await doLayoutSave() }, [doLayoutSave])
+
+  // Clear the pending debounce on unmount (matches the prior blueprint-autosync effect's cleanup).
+  useEffect(() => () => { if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current) }, [])
+
+  /** The active view's CURRENT canonical layout, read LIVE so successive writes accumulate. Falls back
+   *  to the default columns when the view has none, matching the prior `currentLayers()` behaviour. */
+  const currentLayout = useCallback((): NormalizedReferenceLayout => {
+    const view = useSchemaStore.getState().getActiveView()
+    const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
+    return { layers: norm.layers.length > 0 ? norm.layers : defaultReferenceModelLayers, assignments: norm.assignments }
+  }, [])
+
+  const persistReferenceLayout = useCallback((next: NormalizedReferenceLayout) => {
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    // Canonical-clean: only layers + assignments (currentLayout already stripped legacy shapes).
+    const referenceLayout = { layers: next.layers, assignments: next.assignments }
+    useSchemaStore.getState().updateView(view.id, {
+      layout: { ...(view.layout ?? {}), referenceLayout },
+    })
+    // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
+    // prior blueprint-autosync gate).
+    if (!canManage) return
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope: deriveEntityScope(view.content, next) }
+    if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
+    layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
+  }, [canManage, doLayoutSave])
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -557,8 +636,10 @@ export function ContextViewCanvas({
 
   // Reset the assignment guard when the active view changes so recomputation
   // always happens for the new view (even if layer IDs happen to match).
+  const assignmentRetriesRef = useRef(0)
   useEffect(() => {
     assignmentComputedRef.current = null
+    assignmentRetriesRef.current = 0
   }, [activeView?.id])
 
   useEffect(() => {
@@ -575,6 +656,27 @@ export function ContextViewCanvas({
 
     computeAssignments(provider)
   }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
+
+  // Bounded recovery: the 'error' state is otherwise terminal (the compute
+  // effect above only fires from 'idle', and the fingerprint ref stays
+  // latched), so a transient failure — a backend blip, a request that timed
+  // out and then recovered — left the canvas unable to place entities until
+  // a full view switch. Retry with backoff a few times, then stop: a
+  // genuinely-down backend must not be hammered forever. On success the
+  // counter resets so a later, unrelated failure gets its own budget.
+  useEffect(() => {
+    if (assignmentStatus === 'success') { assignmentRetriesRef.current = 0; return }
+    if (assignmentStatus !== 'error') return
+    if (assignmentRetriesRef.current >= 3) return
+    const attempt = assignmentRetriesRef.current + 1
+    const delay = Math.min(1000 * 2 ** attempt, 8000) // 2s, 4s, 8s
+    const t = setTimeout(() => {
+      assignmentRetriesRef.current = attempt
+      assignmentComputedRef.current = null   // clear the fingerprint latch
+      resetAssignmentStatus()                // 'error' -> 'idle' re-arms the compute effect
+    }, delay)
+    return () => clearTimeout(t)
+  }, [assignmentStatus, resetAssignmentStatus])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -1297,101 +1399,86 @@ export function ContextViewCanvas({
     interactions.closeContextMenu()
   }, [activeView, displayMap, interactions])
 
-  // User-created layers: append a ViewLayerConfig to the view's layout so the new column renders
-  // immediately (the canvas reads activeView.layout.referenceLayout.layers). Persistence is automatic
-  // — the view→referenceModel sync mirrors it and the debounced saveToBackend commits it, so writing
-  // the VIEW config (never the store directly, which the sync would revert) is all we do. Nodes created
-  // in the new column pick up its id via hierarchyBuilderStore → the durable `layerAssignment`, which
-  // is honoured on reload precisely because the layer id now exists in the view (the validLayerIds gate).
-  // Write a new layers array to the view's layout. Local updateView → the canvas re-renders (it reads
-  // this array); the view→referenceModel sync + debounced saveToBackend then persist it. All four
-  // layer ops (add/rename/delete/reorder) funnel through here; the pure list math lives in layerOps.
-  const persistLayers = useCallback((nextLayers: ViewLayerConfig[]) => {
-    if (!activeView?.id) return
-    useSchemaStore.getState().updateView(activeView.id, {
-      layout: {
-        ...(activeView.layout ?? {}),
-        referenceLayout: {
-          ...(activeView.layout?.referenceLayout ?? {}),
-          layers: nextLayers,
-        },
-      },
-    })
-  }, [activeView])
-
-  const currentLayers = useCallback(
-    () => activeView?.layout?.referenceLayout?.layers ?? defaultReferenceModelLayers,
-    [activeView],
-  )
-
-  // Stage a view-layout change so it (a) shows in Review & Save as a "View layout" entry, (b) is
-  // undoable via the shared Undo/Redo (undo runs `discard` → persistLayers(before)), while staying
-  // DECOUPLED from the data source — `layer_config` has no apply hook, so it never becomes a graph op
-  // (stagedChangesToOps ignores it). persistLayers already ran, so the column is live; discard reverts.
+  // Stage a view-layout change so it (a) shows in Review & Save under "View layout", (b) is undoable via
+  // the shared Undo/Redo (undo runs `discard` → persistReferenceLayout(before)), while staying DECOUPLED
+  // from the data source — `layer_config` has no apply hook, so it never becomes a graph op
+  // (stagedChangesToOps ignores it). persistReferenceLayout already ran, so the column is live; discard
+  // reverts the whole layout (layers + assignments, e.g. deleteLayer's remap).
   const stageLayerChange = useCallback((
     targetId: string,
-    before: ViewLayerConfig[],
-    after: ViewLayerConfig[],
+    before: NormalizedReferenceLayout,
+    after: NormalizedReferenceLayout,
     action: 'add' | 'rename' | 'delete' | 'reorder',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
       type: 'layer_config',
       targetId,
-      before: { layers: before },
-      after: { layers: after, action },
+      before: { layers: before.layers },
+      after: { layers: after.layers, action },
       summary,
-      discard: () => persistLayers(before),
-      reapply: () => persistLayers(after),
+      discard: () => persistReferenceLayout(before),
+      reapply: () => persistReferenceLayout(after),
     })
-  }, [persistLayers])
+  }, [persistReferenceLayout])
 
   const addLayer = useCallback((name: string) => {
-    const prev = currentLayers()
+    const before = currentLayout()
     const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
     const id = `layer-${Date.now()}`
-    const next = layerOps.appendLayer(prev, {
+    const layers = layerOps.appendLayer(before.layers, {
       id,
       name,
       description: '',
       icon: 'Layers',
-      color: palette[prev.length % palette.length],
+      color: palette[before.layers.length % palette.length],
       entityTypes: [],
-      order: prev.length,
+      order: before.layers.length,
     })
-    persistLayers(next)
-    stageLayerChange(`layer:${id}`, prev, next, 'add', `Added layer “${name}”`)
-  }, [currentLayers, persistLayers, stageLayerChange])
+    const after = { layers, assignments: before.assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   const renameLayer = useCallback((id: string, name: string) => {
     const trimmed = name.trim()
-    const prev = currentLayers()
-    const old = prev.find((l) => l.id === id)
+    const before = currentLayout()
+    const old = before.layers.find((l) => l.id === id)
     if (!trimmed || !old || old.name === trimmed) return
-    const next = layerOps.renameLayer(prev, id, trimmed)
-    persistLayers(next)
-    stageLayerChange(`layer:${id}`, prev, next, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
-  }, [currentLayers, persistLayers, stageLayerChange])
+    const after = { layers: layerOps.renameLayer(before.layers, id, trimmed), assignments: before.assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   const deleteLayer = useCallback((id: string) => {
-    const prev = currentLayers()
-    const target = prev.find((l) => l.id === id)
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === id)
     if (!target) return
-    const next = layerOps.removeLayer(prev, id)
-    persistLayers(next)
-    stageLayerChange(`layer:${id}`, prev, next, 'delete', `Deleted layer “${target.name}”`)
-  }, [currentLayers, persistLayers, stageLayerChange])
+    const layers = layerOps.removeLayer(before.layers, id)
+    const fallbackId = layers[0]?.id
+    // Remap the deleted layer's assignments to the first remaining layer so their entities don't vanish
+    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them.
+    const assignments: NormalizedReferenceLayout['assignments'] = {}
+    for (const [urn, entry] of Object.entries(before.assignments)) {
+      if (entry.layerId !== id) assignments[urn] = entry
+      else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
+    }
+    const after = { layers, assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'delete', `Deleted layer “${target.name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
-  // Reorder a layer column (drag). Entities keep their layerAssignment, so they render wherever the
-  // layer now sits — nodes and their edges move with it for free.
+  // Reorder a layer column (drag). Assignments key off layer id, so nodes and their edges move with the
+  // column for free.
   const reorderLayer = useCallback((draggedId: string, targetId: string) => {
-    const prev = currentLayers()
-    const dragged = prev.find((l) => l.id === draggedId)
-    const next = layerOps.reorderLayer(prev, draggedId, targetId)
-    if (!dragged || next === prev) return
-    persistLayers(next)
-    stageLayerChange(`layer:${draggedId}`, prev, next, 'reorder', `Reordered layer “${dragged.name}”`)
-  }, [currentLayers, persistLayers, stageLayerChange])
+    const before = currentLayout()
+    const dragged = before.layers.find((l) => l.id === draggedId)
+    const layers = layerOps.reorderLayer(before.layers, draggedId, targetId)
+    if (!dragged || layers === before.layers) return
+    const after = { layers, assignments: before.assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${draggedId}`, before, after, 'reorder', `Reordered layer “${dragged.name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {

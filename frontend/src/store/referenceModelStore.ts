@@ -129,6 +129,11 @@ interface ReferenceModelState {
     /** Mark assignment computation as error */
     setAssignmentError: (error: string) => void
 
+    /** Return assignment status to 'idle' so the canvas's compute effect
+     *  re-fires — used for bounded recovery after a transient failure
+     *  (the 'error' state is otherwise terminal until a view switch). */
+    resetAssignmentStatus: () => void
+
     /** Trigger backend assignment computation */
     computeAssignments: (provider: GraphDataProvider) => Promise<void>
 
@@ -518,6 +523,10 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 
             setAssignmentError: (error) => {
                 set({ assignmentStatus: 'error', lastError: error })
+            },
+
+            resetAssignmentStatus: () => {
+                set({ assignmentStatus: 'idle', lastError: null })
             },
 
             computeAssignments: async (provider) => {
