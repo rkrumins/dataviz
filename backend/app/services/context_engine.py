@@ -295,6 +295,11 @@ class ContextEngine:
         self._resolved_ontology_cache = None
         self._resolved_ontology_cache_ts = 0.0
 
+    async def get_resolved_ontology(self):
+        """Public access to the resolved ontology (containment + root types) for
+        callers outside the engine (top-level cache serve/compute paths)."""
+        return await self._resolve_ontology()
+
     async def _resolve_ontology(self):
         """
         Single ontology resolution entry point with TTL caching.
@@ -494,6 +499,8 @@ class ContextEngine:
         limit: int = 100,
         cursor: Optional[str] = None,
         include_child_count: bool = True,
+        query_timeout: Optional[float] = None,
+        known_total_count: Optional[int] = None,
     ) -> TopLevelNodesResult:
         """Return instances with no incoming containment edge, scoped to the
         active workspace/data-source ontology.
@@ -512,14 +519,37 @@ class ContextEngine:
         if resolved and getattr(resolved, "root_entity_types", None):
             root_types = list(resolved.root_entity_types)
 
-        return await self.provider.get_top_level_or_orphan_nodes(
-            root_entity_types=root_types,
-            entity_types=entity_types,
-            search_query=search_query,
-            limit=limit,
-            cursor=cursor,
-            include_child_count=include_child_count,
-        )
+        # query_timeout / known_total_count are newer keyword-only params some
+        # providers (DraftOverlayProvider, VersionedBranchProvider) don't yet
+        # accept — only pass the ones actually given, and retry once without
+        # them on TypeError. Mirrors the fallback in insights_service/collector.py.
+        extra: Dict[str, Any] = {}
+        if query_timeout is not None:
+            extra["query_timeout"] = query_timeout
+        if known_total_count is not None:
+            extra["known_total_count"] = known_total_count
+
+        try:
+            return await self.provider.get_top_level_or_orphan_nodes(
+                root_entity_types=root_types,
+                entity_types=entity_types,
+                search_query=search_query,
+                limit=limit,
+                cursor=cursor,
+                include_child_count=include_child_count,
+                **extra,
+            )
+        except TypeError:
+            if not extra:
+                raise
+            return await self.provider.get_top_level_or_orphan_nodes(
+                root_entity_types=root_types,
+                entity_types=entity_types,
+                search_query=search_query,
+                limit=limit,
+                cursor=cursor,
+                include_child_count=include_child_count,
+            )
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()

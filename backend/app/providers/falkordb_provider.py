@@ -2269,6 +2269,8 @@ class FalkorDBProvider(GraphDataProvider):
         limit: int = 100,
         cursor: Optional[str] = None,
         include_child_count: bool = True,
+        query_timeout: Optional[float] = None,
+        known_total_count: Optional[int] = None,
     ) -> TopLevelNodesResult:
         """Return structurally top-level nodes (no incoming containment edge).
 
@@ -2279,8 +2281,16 @@ class FalkorDBProvider(GraphDataProvider):
         Pagination is cursor-based on displayName for stability under writes:
         callers pass cursor=None for the first page and the returned
         next_cursor for subsequent pages.
+
+        query_timeout overrides the default per-query timeout for both the
+        page and count queries. known_total_count, when given, skips the
+        count query entirely and uses the value directly (e.g. a caller
+        serving from a materialized cache that already knows the total).
         """
         await self._ensure_connected()
+
+        from ..config.resilience import FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+        t = query_timeout if query_timeout is not None else FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
 
         # Raises ProviderConfigurationError if no types resolvable — surfaced
         # as HTTP 400 by the endpoint. An empty set is a valid state meaning
@@ -2363,7 +2373,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         try:
-            page_result = await self._ro_query(page_cypher, params=params)
+            page_result = await self._ro_query(page_cypher, params=params, timeout=t)
         except Exception as e:
             if not _is_missing_graph_error(e):
                 logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
@@ -2396,35 +2406,40 @@ class FalkorDBProvider(GraphDataProvider):
         has_more = len(nodes) >= int(limit)
         next_cursor = nodes[-1].display_name if (has_more and nodes) else None
 
-        # ── Total count query (no cursor filter) ──────────────────────────
-        # We run this separately so the page result reflects the cursor, but
-        # the total accurately shows how many top-level entities exist.
-        count_params: Dict[str, Any] = {}
-        if "search" in params:
-            count_params["search"] = params["search"]
-
-        if use_label_union:
-            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
-            count_branches = [
-                f"MATCH (n:{label}){where_clause} RETURN n"
-                for label in safe_types
-            ]
-            count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+        if known_total_count is not None:
+            # Caller already knows the total (e.g. serving from a materialized
+            # cache) — skip the full-scan count query entirely.
+            total_count = int(known_total_count)
         else:
-            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
-            count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
+            # ── Total count query (no cursor filter) ──────────────────────────
+            # We run this separately so the page result reflects the cursor, but
+            # the total accurately shows how many top-level entities exist.
+            count_params: Dict[str, Any] = {}
+            if "search" in params:
+                count_params["search"] = params["search"]
 
-        total_count = 0
-        try:
-            count_result = await self._ro_query(count_cypher, params=count_params)
-            if count_result and count_result.result_set:
-                first = count_result.result_set[0]
-                total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
-        except Exception as e:
-            if not _is_missing_graph_error(e):
-                logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
-                raise  # connection refused / transient = surface it (breaker -> 503)
-            total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
+            if use_label_union:
+                where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+                count_branches = [
+                    f"MATCH (n:{label}){where_clause} RETURN n"
+                    for label in safe_types
+                ]
+                count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+            else:
+                where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+                count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
+
+            total_count = 0
+            try:
+                count_result = await self._ro_query(count_cypher, params=count_params, timeout=t)
+                if count_result and count_result.result_set:
+                    first = count_result.result_set[0]
+                    total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+            except Exception as e:
+                if not _is_missing_graph_error(e):
+                    logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
+                    raise  # connection refused / transient = surface it (breaker -> 503)
+                total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
 
         return TopLevelNodesResult(
             nodes=nodes,
