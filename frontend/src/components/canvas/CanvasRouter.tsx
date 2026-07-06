@@ -25,6 +25,8 @@ import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { BranchBehindBanner } from '@/features/versioning/components/BranchBehindBanner'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
+import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
+import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
 import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
@@ -99,10 +101,19 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // canvas itself rehydrates from the branch-scoped provider via ViewExecutionContext.)
   const scopeWs = useBranchStore((s) => s.workspaceId)
   const scopeDs = useBranchStore((s) => s.dataSourceId)
+  const stagedScopeKey = `${scopeWs ?? ''}::${scopeDs ?? ''}::${currentBranchId ?? 'main'}`
   useEffect(() => {
-    const key = `${scopeWs ?? ''}::${scopeDs ?? ''}::${currentBranchId ?? 'main'}`
-    useStagedChangesStore.getState().setScope(key)
-  }, [scopeWs, scopeDs, currentBranchId])
+    useStagedChangesStore.getState().setScope(stagedScopeKey)
+  }, [stagedScopeKey])
+
+  // Persist unsaved staged work to localStorage under the same scope key so a
+  // refresh restores it (with a banner) instead of losing it. Only meaningful
+  // in a draft (staged edits require an open branch); on 'main' the snapshot
+  // stays empty. See features/canvas-drafts/.
+  const { restoredCount, dismissRestored, discardAllStaged } = useStagedDraftPersistence(
+    currentBranchId ? stagedScopeKey : null,
+    currentBranchId,
+  )
 
   // A brand-new blank model opens ready to build: auto-open (or resume) the
   // caller's draft once per graph per session. No-op for every other graph kind.
@@ -144,6 +155,12 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           className="mx-4 mt-2"
         />
       )}
+      <RestoredDraftBanner
+        count={restoredCount}
+        onDiscard={discardAllStaged}
+        onDismiss={dismissRestored}
+        className="mx-4 mt-2"
+      />
       <div className="relative flex-1 min-h-0">
         <AnimatePresence>
           <motion.div
