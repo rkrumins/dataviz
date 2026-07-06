@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.app.services.versioning.ontology import EntityRule, EdgeRule, OntologyRules
-from backend.scripts.repair_edge_type_casing import plan_edge_repairs
+from backend.scripts.repair_edge_type_casing import is_governed, plan_edge_repairs
 
 RULES = OntologyRules(
     entity_types={
@@ -69,6 +69,19 @@ def test_infer_containment_skips_invalid_pair():
         {"m": {"sourceEntityId": "O1", "targetEntityId": "L1"}}, NODES, RULES,
         infer_containment=True)
     assert ops == [] and missing[0]["inferred"] is None
+
+
+def test_is_governed_provenance_gate_blank_manual_only():
+    # Governed provenance: user-authored kinds (the assigned-ontology requirement is enforced
+    # separately by the caller's _resolve_rules, so is_governed passes a manual graph whose
+    # ontology is assigned at the workspace level, i.e. without a graph-level base_ontology_id).
+    assert is_governed({"kind": "blank"}) == (True, "")
+    assert is_governed({"kind": "manual", "base_ontology_id": None}) == (True, "")
+    # Third-party / synced kinds are NEVER repaired (reason mentions third-party).
+    ok, reason = is_governed({"kind": "authoritative"})
+    assert ok is False and "third-party" in reason
+    ok, reason = is_governed({"kind": "hybrid"})
+    assert ok is False and "third-party" in reason
 
 
 def test_infer_disabled_when_multiple_containment_types():

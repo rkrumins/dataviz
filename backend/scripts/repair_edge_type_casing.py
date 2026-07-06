@@ -28,8 +28,16 @@ endpoints) for a human to fix via the UI/import. The one exception, behind
 ``--infer-containment`` (default off): if the ontology declares EXACTLY ONE containment type
 AND both endpoints' entity types form a declared containment pair, the repair may set it.
 
+Scope — GOVERNED graphs only: this touches only graphs whose content originates with the USER and
+whose writes ontology enforcement governs — kind ``blank`` (self-authored) or ``manual``
+(manual-provider), AND with an explicit ontology assigned (``base_ontology_id``). It NEVER touches
+synced/ingested content from a third-party source system (kind ``authoritative``/``hybrid``): a
+third-party vocabulary is not ours to mutate — its ``Knows``/``KNOWS``/``knows`` may be legitimately
+distinct. Anything excluded (including a graph whose provenance is uncertain) is listed in the
+dry-run output as ``skip: <reason>``.
+
 Usage:
-  # Dry-run every graph that has a resolvable ontology (read-only; prints per-graph counts):
+  # Dry-run every GOVERNED graph (read-only; prints per-graph counts + skip reasons):
   python backend/scripts/repair_edge_type_casing.py
 
   # Dry-run a single graph / data source:
@@ -147,15 +155,39 @@ async def _resolve_rules(workspace_id, data_source_id) -> Optional[OntologyRules
     return rules
 
 
-async def _list_graph_ids(kinds: Optional[List[str]]) -> List[Tuple[str, str, str, str]]:
-    """``(graph_id, data_source_id, workspace_id, kind)`` for every graph (optionally filtered
-    to ``kinds``)."""
+# Kinds whose CONTENT ORIGINATES WITH THE USER, so ontology enforcement governs their writes:
+# a self-authored blank lineage model, or a manual-provider data source. 'authoritative' and
+# 'hybrid' carry content synced/ingested from a third-party source system — a third-party
+# vocabulary is not ours to mutate (its `Knows`/`KNOWS`/`knows` may be legitimately distinct), so
+# those are NEVER repaired.
+GOVERNED_KINDS = frozenset({"blank", "manual"})
+
+
+def is_governed(meta: dict) -> Tuple[bool, str]:
+    """``(governed, skip_reason)`` — whether this graph's PROVENANCE lets us repair it.
+
+    Governed = kind in {blank, manual}: content originates with the user, so ontology enforcement
+    governs its writes. Third-party kinds (``authoritative``/``hybrid``) carry synced/ingested
+    content and are NEVER touched. The second half of the rule — an explicit ontology must be
+    ASSIGNED — is enforced by the caller via ``_resolve_rules`` (which resolves the data source's
+    assigned ontology, graph-level ``base_ontology_id`` OR a workspace assignment; ``None`` when
+    none is assigned). Kept importable + unit-testable (no I/O)."""
+    kind = meta.get("kind")
+    if kind not in GOVERNED_KINDS:
+        return False, (f"kind={kind!r}: content originates from a third-party/synced source — "
+                       f"third-party vocabulary is not ours to mutate")
+    return True, ""
+
+
+async def _list_graph_ids(kinds: Optional[List[str]]) -> List[dict]:
+    """Graph metadata dicts for every graph (optionally pre-filtered to ``kinds``)."""
     async with gv_db.graphver_session() as s:
         q = select(GraphORM.id, GraphORM.data_source_id, GraphORM.workspace_id, GraphORM.kind)
         if kinds:
             q = q.where(GraphORM.kind.in_(kinds))
         rows = (await s.execute(q)).all()
-    return [(r[0], r[1], r[2], r[3]) for r in rows]
+    return [{"graph_id": r[0], "data_source_id": r[1], "workspace_id": r[2], "kind": r[3]}
+            for r in rows]
 
 
 async def _reproject(svc: GraphVersioningService, gid: str) -> None:
@@ -191,9 +223,13 @@ async def _process_graph(
     gid = meta["graph_id"]
     ds = meta.get("data_source_id")
     print(f"\n=== graph {gid}  (data_source={ds}, kind={meta.get('kind')}) ===")
+    governed, reason = is_governed(meta)
+    if not governed:
+        print(f"    skip: {reason}")
+        return {"skipped": 1}
     rules = await _resolve_rules(meta.get("workspace_id"), ds)
     if rules is None:
-        print("    skip: no resolvable ontology / no declared types")
+        print("    skip: no explicit ontology assigned to the data source (nothing governs casing)")
         return {"skipped": 1}
 
     main_id = await svc.main_branch_id(gid)
@@ -242,8 +278,9 @@ async def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--graph-id", help="repair a single graph")
     p.add_argument("--data-source-id", help="repair the graph backing this data source")
-    p.add_argument("--kinds", default="blank,manual,hybrid,authoritative",
-                   help="comma-separated graph kinds to sweep (default: all)")
+    p.add_argument("--kinds", default="blank,manual",
+                   help="comma-separated graph kinds to sweep (default: blank,manual — the "
+                        "user-governed kinds; other kinds are excluded as third-party/synced)")
     p.add_argument("--apply", action="store_true",
                    help="append a repair commit per affected graph (default: dry-run)")
     p.add_argument("--infer-containment", action="store_true",
@@ -268,9 +305,7 @@ async def main() -> None:
         metas = [m]
     else:
         kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
-        ids = await _list_graph_ids(kinds)
-        metas = [{"graph_id": g, "data_source_id": ds, "workspace_id": ws, "kind": kind}
-                 for (g, ds, ws, kind) in ids]
+        metas = await _list_graph_ids(kinds)
 
     print(f"mode: {'APPLY' if args.apply else 'DRY-RUN'}   graphs: {len(metas)}   "
           f"infer-containment: {args.infer_containment}")

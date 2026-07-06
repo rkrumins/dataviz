@@ -264,9 +264,10 @@ def test_check_coverage_partial():
 def test_case_insensitive_type_id_collisions():
     # No collision when ids are distinct case-insensitively.
     assert case_insensitive_type_id_collisions(["System", "Dataset"], ["HAS", "FLOWS_TO"]) == []
-    # Entity ids differing only by case → one message.
+    # Entity ids differing only by case → one message, WITH an explicit remedy.
     ent = case_insensitive_type_id_collisions(["Dataset", "dataset"], [])
     assert len(ent) == 1 and "Entity" in ent[0] and "case" in ent[0].lower()
+    assert "rename" in ent[0] and "alias" in ent[0]
     # Edge ids (incl. containment/lineage lists folded into edge_ids by the caller) collide.
     edge = case_insensitive_type_id_collisions([], ["HAS", "has"])
     assert len(edge) == 1 and "Relationship" in edge[0]

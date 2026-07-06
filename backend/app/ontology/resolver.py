@@ -313,8 +313,9 @@ def case_insensitive_type_id_collisions(
             first = seen.get(key)
             if first is not None and first != n:
                 out.append(
-                    f"{kind} types '{first}' and '{n}' differ only by case; "
-                    f"type ids must be unique case-insensitively."
+                    f"{kind} types '{first}' and '{n}' differ only by case; type ids must be "
+                    f"unique case-insensitively — rename one of them, or if the vocabulary is "
+                    f"genuinely case-distinct, keep one id here and alias the other at mapping time."
                 )
             else:
                 seen.setdefault(key, str(n))
