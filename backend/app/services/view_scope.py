@@ -63,6 +63,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM
+from backend.app.services.layout_config import parse_reference_layout
 from backend.common.models.search import SearchScope
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,6 @@ class EffectiveViewScope:
 # Reserved keys live alongside user properties in the view's stored JSON.
 # These are the field names we read.
 _CONFIG_KEY_CONTENT = "content"
-_CONFIG_KEY_LAYOUT = "referenceLayout"
 _CONFIG_KEY_ROOT_URNS = "rootUrns"
 _CONFIG_KEY_VISIBLE_ENTITY_TYPES = "visibleEntityTypes"
 _CONFIG_KEY_ROOT_ENTITY_TYPES = "rootEntityTypes"
@@ -171,18 +171,18 @@ def _collect_reference_roots(
 ) -> Tuple[List[str], FrozenSet[str], FrozenSet[str]]:
     """Reference / context-view layout root extraction.
 
+    Reads the canonical view-config shape via ``parse_reference_layout``,
+    which up-converts legacy per-layer ``entityAssignments`` (and the
+    top-level ``referenceLayout`` spelling this module's rows use) into a
+    flattened ``assignments`` map. Root URNs are the assignment keys that
+    carry a ``layerId`` (a real placement, not a UI-only entry).
+
     Returns ``(root_urns, entity_type_allow_list, layer_allow_list)``.
     """
-    root_urns: List[str] = []
     entity_types: List[str] = []
     layer_ids: List[str] = []
-    layout = config.get(_CONFIG_KEY_LAYOUT) or {}
-    if not isinstance(layout, dict):
-        return [], frozenset(), frozenset()
-    layers = layout.get("layers") or []
-    if not isinstance(layers, list):
-        return [], frozenset(), frozenset()
-    for layer in layers:
+    layout = parse_reference_layout(config)
+    for layer in layout.layers:
         if not isinstance(layer, dict):
             continue
         layer_id = layer.get("id")
@@ -191,12 +191,10 @@ def _collect_reference_roots(
         for ent_type in layer.get("entityTypes") or []:
             if isinstance(ent_type, str) and ent_type:
                 entity_types.append(ent_type)
-        for assignment in layer.get("entityAssignments") or []:
-            if not isinstance(assignment, dict):
-                continue
-            urn = assignment.get("urn")
-            if isinstance(urn, str) and urn:
-                root_urns.append(urn)
+    root_urns = [
+        urn for urn, assignment in layout.assignments.items()
+        if isinstance(assignment, dict) and assignment.get("layerId")
+    ]
     return root_urns, frozenset(entity_types), frozenset(layer_ids)
 
 

@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,18 @@ async def get_data_source_stats(session: AsyncSession, ds_id: str) -> Optional[D
         select(DataSourceStatsORM).where(DataSourceStatsORM.data_source_id == ds_id)
     )
     return result.scalar_one_or_none()
+
+async def list_data_source_stats(
+    session: AsyncSession, ds_ids: Sequence[str]
+) -> List[DataSourceStatsORM]:
+    """Bulk read backing /datasources/cached-stats — one SELECT for a
+    whole dashboard instead of one query per data source."""
+    if not ds_ids:
+        return []
+    result = await session.execute(
+        select(DataSourceStatsORM).where(DataSourceStatsORM.data_source_id.in_(ds_ids))
+    )
+    return list(result.scalars().all())
 
 async def upsert_data_source_stats(
     session: AsyncSession,

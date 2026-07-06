@@ -108,7 +108,7 @@ def _keep_from_assignments(nodes, edges, assigned_urns: set, inherit_urns: set, 
     """The view's entities: each explicitly layer-assigned URN, plus (when the assignment inherits
     children — the default for a Context View placing a subtree into a layer) all its containment
     descendants. This is the AUTHORITATIVE 'what the view contains', taken straight from the view's
-    ``instance_assignments`` rather than a heuristic."""
+    canonical reference-layout ``assignments`` map rather than a heuristic."""
     urn_to_eid = {p.get("urn"): eid for eid, p in nodes.items() if p.get("urn")}
     children = _containment_children(edges, cont)
     keep, seen = set(), set()
@@ -144,9 +144,9 @@ def _keep_from_filters(nodes, scope: Dict[str, Any]) -> set:
 def filter_to_scope(nodes: Dict[str, dict], edges: Dict[str, dict], scope: Dict[str, Any]):
     """Restrict a materialized ``{nodes, edges}`` to a view's entity set (plan Phase 4).
 
-    Primary source: the view's explicit layer assignments (``context_model.instance_assignments``) —
-    the assigned URNs plus their containment descendants. Fallback: entity-type/layer allow-lists.
-    Edges are kept only when BOTH endpoints are in-scope."""
+    Primary source: the view's explicit layer assignments (the view config's canonical
+    reference-layout ``assignments`` map) — the assigned URNs plus their containment descendants.
+    Fallback: entity-type/layer allow-lists. Edges are kept only when BOTH endpoints are in-scope."""
     cont = {str(t).upper() for t in (scope.get("containment_types") or [])}
     assigned = set(scope.get("assigned_urns") or [])
     if assigned:

@@ -286,3 +286,149 @@ class TestResolveAssignmentNodeLayer:
         node = self._node("urn:x", "Layer", layer_assignment="warehouse")
         result = self.engine._resolve_assignment(node, None, None, index, layers, self.lsm)
         assert result.layer_id == "warehouse"
+
+
+# ---------------------------------------------------------------------------
+# _build_rule_index / _resolve_assignment — canonical view-config assignments
+# map (request.assignments), inheritsChildren=False, and entityScope='curated'
+# ---------------------------------------------------------------------------
+
+
+class TestRequestAssignmentsAndEntityScope:
+    def setup_method(self):
+        self.engine = AssignmentEngine()
+
+    def test_explicit_map_beats_rules(self):
+        """A request-level `assignments` entry outranks generic rule matching."""
+        type_rule = LayerAssignmentRuleConfig(id="r1", priority=10, entityTypes=["Table"])
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0, rules=[type_rule]),
+            ViewLayerConfig(id="curated", name="Curated", color="#222", order=1),
+        ]
+        request_assignments = {
+            "urn:x": EntityAssignmentConfig(
+                entityId="urn:x", layerId="curated", priority=100,
+                assignedBy="user", assignedAt="2026-01-01",
+            ),
+        }
+        index = self.engine._build_rule_index(layers, request_assignments)
+        lsm = {l.id: i for i, l in enumerate(layers)}
+        node = GraphNode(urn="urn:x", entityType="Table", displayName="urn:x")
+        result = self.engine._resolve_assignment(node, None, None, index, layers, lsm)
+        assert result.layer_id == "curated"
+        assert result.is_inherited is False
+
+    def test_legacy_entity_assignments_still_honored_union(self):
+        """Legacy per-layer entity_assignments remain indexed even when a
+        request-level assignments map is also present (union, not replace)."""
+        legacy = EntityAssignmentConfig(
+            entityId="urn:legacy", layerId="source", priority=100,
+            assignedBy="test", assignedAt="2026-01-01",
+        )
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0,
+                            entityAssignments=[legacy]),
+            ViewLayerConfig(id="curated", name="Curated", color="#222", order=1),
+        ]
+        request_assignments = {
+            "urn:x": EntityAssignmentConfig(
+                entityId="urn:x", layerId="curated", priority=100,
+                assignedBy="user", assignedAt="2026-01-01",
+            ),
+        }
+        index = self.engine._build_rule_index(layers, request_assignments)
+        assert index["instances"]["urn:legacy"][0] == "source"
+        assert index["instances"]["urn:x"][0] == "curated"
+
+    def test_request_map_wins_on_collision_with_legacy(self):
+        legacy = EntityAssignmentConfig(
+            entityId="urn:x", layerId="source", priority=100,
+            assignedBy="legacy", assignedAt="2026-01-01",
+        )
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0,
+                            entityAssignments=[legacy]),
+            ViewLayerConfig(id="curated", name="Curated", color="#222", order=1),
+        ]
+        request_assignments = {
+            "urn:x": EntityAssignmentConfig(
+                entityId="urn:x", layerId="curated", priority=100,
+                assignedBy="user", assignedAt="2026-01-01",
+            ),
+        }
+        index = self.engine._build_rule_index(layers, request_assignments)
+        assert index["instances"]["urn:x"][0] == "curated"
+
+    def test_inherits_children_false_falls_through(self):
+        """A parent's explicit assignment with inheritsChildren=False does NOT
+        cascade to its children — they fall through to tiers 3-5 (here, the
+        layers[0] default) instead of inheriting the parent's layer."""
+        layers = [
+            ViewLayerConfig(id="other", name="Other", color="#222", order=0),
+            ViewLayerConfig(id="source", name="Source", color="#111", order=1),
+        ]
+        request_assignments = {
+            "urn:parent": EntityAssignmentConfig(
+                entityId="urn:parent", layerId="source", inheritsChildren=False,
+                priority=100, assignedBy="user", assignedAt="2026-01-01",
+            ),
+        }
+        index = self.engine._build_rule_index(layers, request_assignments)
+        lsm = {l.id: i for i, l in enumerate(layers)}
+        parent_assignment = EntityAssignment(
+            entityId="urn:parent", layerId="source", isInherited=False, confidence=1.0,
+        )
+        child = GraphNode(urn="urn:child", entityType="Object", displayName="urn:child")
+        result = self.engine._resolve_assignment(
+            child, "urn:parent", parent_assignment, index, layers, lsm,
+        )
+        assert result.layer_id == "other"  # layers[0] default, NOT inherited "source"
+        assert result.is_inherited is False
+
+    def test_node_hint_ignored_in_curated_scope(self):
+        """The node's own persisted layerAssignment hint is only honoured in
+        open scope; curated scope skips this tier entirely."""
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0),
+            ViewLayerConfig(id="transform", name="Transform", color="#222", order=1),
+        ]
+        index = self.engine._build_rule_index(layers)
+        lsm = {l.id: i for i, l in enumerate(layers)}
+        node = GraphNode(
+            urn="urn:x", entityType="Layer", displayName="urn:x",
+            layerAssignment="transform",
+        )
+        result = self.engine._resolve_assignment(
+            node, None, None, index, layers, lsm, entity_scope="curated",
+        )
+        assert result is None
+
+    def test_curated_unassigned_dropped(self):
+        """Curated scope = explicit assignment + containment inheritance only.
+        An entity that fails tiers 1-2 gets no assignment, even when a generic
+        rule would otherwise have matched it."""
+        type_rule = LayerAssignmentRuleConfig(id="r1", priority=10, entityTypes=["Table"])
+        layers = [
+            ViewLayerConfig(id="source", name="Source", color="#111", order=0, rules=[type_rule]),
+        ]
+        index = self.engine._build_rule_index(layers)
+        lsm = {l.id: i for i, l in enumerate(layers)}
+        node = GraphNode(urn="urn:unassigned", entityType="Table", displayName="urn:unassigned")
+        result = self.engine._resolve_assignment(
+            node, None, None, index, layers, lsm, entity_scope="curated",
+        )
+        assert result is None
+
+    @pytest.mark.parametrize("scope", [None, "all"])
+    def test_open_scope_default_layer(self, scope):
+        """Existing default behaviour (layers[0] fallback) is unchanged for
+        open scope ('all' or the None/absent default)."""
+        layers = [ViewLayerConfig(id="source", name="Source", color="#111", order=0)]
+        index = self.engine._build_rule_index(layers)
+        lsm = {l.id: i for i, l in enumerate(layers)}
+        node = GraphNode(urn="urn:plain", entityType="Table", displayName="urn:plain")
+        result = self.engine._resolve_assignment(
+            node, None, None, index, layers, lsm, entity_scope=scope,
+        )
+        assert result.layer_id == "source"
+        assert result.confidence == 0.5

@@ -9,8 +9,8 @@ caller's effective permissions so non-admins only see workspaces they
 have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
-from typing import List
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, Response
+from typing import List, Optional
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -510,6 +510,90 @@ async def set_projection_mode(
 # ================================================================== #
 # Cached Stats (DB-only — zero provider dependency)                    #
 # ================================================================== #
+
+@router.get("/datasources/cached-stats")
+async def get_cached_stats_bulk(
+    workspace_id: Optional[str] = Query(None),
+    _user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Bulk cached graph statistics for every data source the caller can
+    see, optionally scoped to one workspace via ``?workspace_id=``.
+
+    Collapses the dashboard/admin N×M per-datasource ``/cached-stats``
+    fan-out into one request backed by two SQL queries. Entries carry
+    only what those surfaces consume (counts + type-count maps); the
+    per-datasource endpoint remains the source for the full composite
+    (schemaStats / ontologyMetadata / graphSchema).
+
+    Visibility mirrors ``list_workspaces``: system admins see every
+    workspace, everyone else only those their bindings reach. Cold,
+    expired, and stale cache rows enqueue a background refresh — the
+    same self-healing the per-datasource endpoint does — and cold or
+    expired entries report ``status=computing`` with zero counts so
+    callers can skip them.
+    """
+    import json
+
+    from backend.app.db.repositories.stats_repo import list_data_source_stats
+    from backend.app.services.stats_cache import age_seconds, classify_tier, parse_iso
+
+    workspaces = await workspace_repo.list_workspaces(session)
+    if rbac_flag("RBAC_ENFORCE_WORKSPACES") and not has_permission(claims, "system:admin"):
+        workspaces = [w for w in workspaces if claims.ws_perms.get(w.id)]
+    if workspace_id is not None:
+        workspaces = [w for w in workspaces if w.id == workspace_id]
+
+    ds_rows = await data_source_repo.list_data_sources_for_workspaces(
+        session, [w.id for w in workspaces]
+    )
+    cache_by_ds = {
+        c.data_source_id: c
+        for c in await list_data_source_stats(session, [d.id for d in ds_rows])
+    }
+
+    def _counts(raw) -> dict:
+        if not raw or raw == "{}":
+            return {}
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+
+    data: dict = {}
+    for ds in ds_rows:
+        key = f"{ds.workspace_id}/{ds.id}"
+        cache = cache_by_ds.get(ds.id)
+        tier = None
+        if cache is not None:
+            tier = classify_tier(age_seconds(parse_iso(cache.updated_at)))
+        if cache is None or tier == "expired":
+            await enqueue_stats_job_safe(ds.id, ds.workspace_id)
+            data[key] = {
+                "status": "computing",
+                "nodeCount": 0,
+                "edgeCount": 0,
+                "entityTypeCounts": {},
+            }
+            continue
+        if tier == "stale":
+            await enqueue_stats_job_safe(ds.id, ds.workspace_id)
+        data[key] = {
+            "status": tier,
+            "nodeCount": cache.node_count or 0,
+            "edgeCount": cache.edge_count or 0,
+            "entityTypeCounts": _counts(cache.entity_type_counts),
+            "updatedAt": cache.updated_at,
+        }
+
+    return JSONResponse(
+        content={
+            "data": data,
+            "meta": {"status": "fresh", "source": "postgres", "count": len(data)},
+        }
+    )
+
 
 @router.get("/{workspace_id}/datasources/{ds_id}/cached-stats")
 async def get_cached_stats(

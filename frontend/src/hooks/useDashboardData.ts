@@ -117,42 +117,36 @@ export function useDashboardData() {
         enabled: !!workspaces?.length,
         staleTime: 30_000,
         queryFn: async () => {
-            const results: Record<string, DataSourceStats> = {}
-            let totalEntities = 0
-
-            const fetchPromises = workspaces.flatMap(ws =>
-                (ws.dataSources || []).map(ds => {
-                    // Use cached-stats endpoint (DB-only) — no provider dependency.
-                    // The endpoint returns the canonical {data, meta} envelope;
-                    // ``fetchEnveloped`` unwraps and returns ``null`` on cold
-                    // cache (``meta.status === "computing"``) so we render zero
-                    // counts only when the row is genuinely missing — same UX
-                    // as before, but no longer broken by the envelope wrapper.
-                    //
-                    // Per-call 8s timeout caps a single slow datasource so it
-                    // can't gate the whole dashboard. ``Promise.allSettled``
-                    // means one timeout drops one entry; the rest still render.
-                    const url = `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`
-                    return withTimeout(
-                        fetchEnveloped<{
-                            nodeCount?: number
-                            edgeCount?: number
-                            entityTypeCounts?: Record<string, number>
-                        }>(url, { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } }),
-                        TIMEOUTS.ADMIN_LIST_MS,
-                        `dashboard.cached-stats.${ds.id}`,
-                    ).then(data => {
-                        if (!data) return
-                        const nodeCount = data.nodeCount ?? 0
-                        const edgeCount = data.edgeCount ?? 0
-                        const entityTypes = Object.keys(data.entityTypeCounts ?? {})
-                        results[`${ws.id}/${ds.id}`] = { nodeCount, edgeCount, entityTypes }
-                        totalEntities += nodeCount
-                    })
-                })
+            // One bulk request (DB-only, two SQL queries server-side)
+            // replaces the former workspaces×datasources fan-out over the
+            // per-ds /cached-stats endpoint. Entries are keyed
+            // "<wsId>/<dsId>" — the same shape consumers already read.
+            // status==='computing' rows are cold-cache placeholders (the
+            // backend has already enqueued their refresh); skipping them
+            // matches the old null-on-computing behavior.
+            const data = await withTimeout(
+                fetchEnveloped<Record<string, {
+                    status?: string
+                    nodeCount?: number
+                    edgeCount?: number
+                    entityTypeCounts?: Record<string, number>
+                }>>('/api/v1/admin/workspaces/datasources/cached-stats'),
+                TIMEOUTS.ADMIN_LIST_MS,
+                'dashboard.cached-stats.bulk',
             )
 
-            await Promise.allSettled(fetchPromises)
+            const results: Record<string, DataSourceStats> = {}
+            let totalEntities = 0
+            for (const [key, entry] of Object.entries(data ?? {})) {
+                if (entry.status === 'computing') continue
+                const nodeCount = entry.nodeCount ?? 0
+                results[key] = {
+                    nodeCount,
+                    edgeCount: entry.edgeCount ?? 0,
+                    entityTypes: Object.keys(entry.entityTypeCounts ?? {}),
+                }
+                totalEntities += nodeCount
+            }
             return { results, totalEntities }
         },
     })
