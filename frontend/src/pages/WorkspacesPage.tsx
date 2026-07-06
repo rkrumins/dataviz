@@ -259,29 +259,32 @@ export function WorkspacesPage() {
                 setViewCountByWs(byWs)
             }).catch(() => {})
 
+            // One bulk request replaces the former per-(workspace, datasource)
+            // cached-stats fan-out (44 datasources × loadData re-runs was
+            // hundreds of requests). Entries are keyed "<wsId>/<dsId>";
+            // status==='computing' rows are cold-cache placeholders (refresh
+            // already enqueued server-side) — skipped, same as the old
+            // null-on-computing behavior.
+            const bulk = await fetchEnveloped<Record<string, {
+                status?: string
+                nodeCount?: number
+                edgeCount?: number
+                entityTypeCounts?: Record<string, number>
+            }>>('/api/v1/admin/workspaces/datasources/cached-stats').catch(() => null)
+            const agg: Record<string, { nodes: number; edges: number; types: Set<string> }> = {}
+            for (const [key, entry] of Object.entries(bulk ?? {})) {
+                if (entry.status === 'computing') continue
+                const wsId = key.slice(0, key.indexOf('/'))
+                const a = (agg[wsId] ??= { nodes: 0, edges: 0, types: new Set<string>() })
+                a.nodes += entry.nodeCount ?? 0
+                a.edges += entry.edgeCount ?? 0
+                for (const t of Object.keys(entry.entityTypeCounts ?? {})) a.types.add(t)
+            }
             const statsMap: Record<string, { nodes: number; edges: number; types: number }> = {}
-            const statsPromises = wsList.map(async (ws) => {
-                let totalNodes = 0, totalEdges = 0, allTypes = new Set<string>()
-                const dsPromises = (ws.dataSources || []).map(async (ds) => {
-                    // Cache-only read via canonical {data, meta} envelope.
-                    // ``fetchEnveloped`` returns null on cache-miss / circuit-open.
-                    const data = await fetchEnveloped<{
-                        nodeCount?: number
-                        edgeCount?: number
-                        entityTypeCounts?: Record<string, number>
-                    }>(
-                        `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`,
-                        { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } },
-                    )
-                    if (!data) return
-                    totalNodes += (data.nodeCount ?? 0)
-                    totalEdges += (data.edgeCount ?? 0)
-                    Object.keys(data.entityTypeCounts ?? {}).forEach(t => allTypes.add(t))
-                })
-                await Promise.all(dsPromises)
-                statsMap[ws.id] = { nodes: totalNodes, edges: totalEdges, types: allTypes.size }
-            })
-            await Promise.all(statsPromises)
+            for (const ws of wsList) {
+                const a = agg[ws.id]
+                statsMap[ws.id] = { nodes: a?.nodes ?? 0, edges: a?.edges ?? 0, types: a?.types.size ?? 0 }
+            }
             setDsStats(statsMap)
         } catch (err) { console.error('Failed to load workspaces', err) }
         finally { setIsLoading(false) }
