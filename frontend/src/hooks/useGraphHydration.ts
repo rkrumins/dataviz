@@ -249,6 +249,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
 
+        // Mark this view as (re)loading synchronously, before the async fetch.
+        // Otherwise a stale 'complete' from the previous view lingers through
+        // the switch, and anything gated on "hydration finished" (the ghost
+        // shimmer, the staged-draft restore) would fire against the
+        // about-to-be-cleared canvas.
+        setHydrationPhase('roots')
+
         const { setGraph } = useCanvasStore.getState()
 
         // Clear canvas and error state atomically
