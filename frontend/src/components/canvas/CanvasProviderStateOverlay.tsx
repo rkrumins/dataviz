@@ -19,38 +19,58 @@ import React from 'react'
 import { RefreshCw, WifiOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
+const ACCENT = 'var(--nx-accent-lineage, #6366f1)'
+
 const STYLE = `
 @keyframes canvas-state-in {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
-@keyframes canvas-ring-spin { to { transform: rotate(360deg); } }
+/* Graph-constellation loader — edges "draw in", nodes pulse, on a stagger, so
+   the mark reads as a small graph assembling itself. transform/opacity/
+   stroke-dashoffset only → runs on the compositor, stays smooth under load. */
+@keyframes canvas-graph-draw {
+  0%   { stroke-dashoffset: 44; opacity: 0.15; }
+  45%  { stroke-dashoffset: 0;  opacity: 0.85; }
+  75%  { stroke-dashoffset: 0;  opacity: 0.85; }
+  100% { stroke-dashoffset: 44; opacity: 0.15; }
+}
+@keyframes canvas-graph-pulse {
+  0%, 100% { transform: scale(0.7);  opacity: 0.5; }
+  50%      { transform: scale(1.15); opacity: 1; }
+}
+@keyframes canvas-graph-halo {
+  0%, 100% { transform: scale(0.6); opacity: 0.3; }
+  50%      { transform: scale(1.3); opacity: 0.7; }
+}
+.cv-edge { stroke: ${ACCENT}; stroke-width: 1.6; stroke-linecap: round; fill: none;
+  stroke-dasharray: 44; stroke-dashoffset: 44; animation: canvas-graph-draw 2.4s ease-in-out infinite; }
+.cv-node { fill: ${ACCENT}; transform-box: fill-box; transform-origin: center;
+  animation: canvas-graph-pulse 2.4s ease-in-out infinite; }
+.cv-halo { fill: rgba(99,102,241,0.16); transform-box: fill-box; transform-origin: center;
+  animation: canvas-graph-halo 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .cv-edge, .cv-node, .cv-halo { animation: none; opacity: 0.85; stroke-dashoffset: 0; }
+}
 `
 
-/** Ring loader: a conic-gradient arc masked into a ring, spinning on transform
- *  only (GPU) so it stays smooth even while the main thread is busy hydrating.
- *  A static track sits behind it; a soft core pulses. */
+/** Thematic loader: a small node-graph that assembles itself (edges draw in,
+ *  nodes pulse) — on-brand for "loading your graph", and animated purely on
+ *  transform/opacity/stroke-dashoffset so it never janks. */
 function WarmingLoader() {
   return (
-    <div className="relative h-16 w-16" style={{ willChange: 'transform' }}>
-      <div className="absolute inset-0 rounded-full border-[3px] border-accent-lineage/15" />
-      <div
-        className="absolute inset-0 rounded-full"
-        style={{
-          background:
-            'conic-gradient(from 0deg, transparent 0deg, rgba(var(--accent-lineage-rgb, 99 102 241) / 0.12) 90deg, var(--accent-lineage, #6366f1) 320deg)',
-          WebkitMask:
-            'radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px))',
-          mask: 'radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px))',
-          animation: 'canvas-ring-spin 0.9s linear infinite',
-          willChange: 'transform',
-        }}
-      />
-      <div className="absolute inset-[10px] rounded-full bg-accent-lineage/10 animate-pulse" />
-      <div className="absolute inset-0 flex items-center justify-center">
-        <div className="h-2 w-2 rounded-full bg-accent-lineage" />
-      </div>
-    </div>
+    <svg className="h-[68px] w-[68px]" viewBox="0 0 72 72" aria-hidden="true" style={{ willChange: 'transform' }}>
+      <line className="cv-edge" x1="36" y1="20" x2="20" y2="40" style={{ animationDelay: '0s' }} />
+      <line className="cv-edge" x1="36" y1="20" x2="52" y2="40" style={{ animationDelay: '.3s' }} />
+      <line className="cv-edge" x1="20" y1="40" x2="36" y2="56" style={{ animationDelay: '.6s' }} />
+      <line className="cv-edge" x1="52" y1="40" x2="36" y2="56" style={{ animationDelay: '.9s' }} />
+      <line className="cv-edge" x1="20" y1="40" x2="52" y2="40" style={{ animationDelay: '1.2s' }} />
+      <circle className="cv-halo" cx="36" cy="20" r="9" />
+      <circle className="cv-node" cx="36" cy="20" r="4.2" style={{ animationDelay: '0s' }} />
+      <circle className="cv-node" cx="20" cy="40" r="4.2" style={{ animationDelay: '.3s' }} />
+      <circle className="cv-node" cx="52" cy="40" r="4.2" style={{ animationDelay: '.6s' }} />
+      <circle className="cv-node" cx="36" cy="56" r="4.2" style={{ animationDelay: '.9s' }} />
+    </svg>
   )
 }
 
