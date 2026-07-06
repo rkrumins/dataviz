@@ -185,7 +185,11 @@ def _get_sample_urn(engine: ContextEngine) -> str:
 # ── POST /trace ───────────────────────────────────────────────────────
 
 async def test_trace_returns_lineage_result(graph_client):
-    """POST /trace returns a LineageResult-shaped response."""
+    """POST /trace is removed — returns 410 Gone with a migration pointer.
+
+    The v1 lineage trace was deprecated in favour of POST /trace/v2 (see
+    graph.py ``get_lineage_trace_deprecated``). Actual trace behaviour is
+    covered by the v2 suites (test_trace_v2_falkordb / _invalidation)."""
     client, engine = graph_client
     urn = _get_sample_urn(engine)
 
@@ -197,17 +201,14 @@ async def test_trace_returns_lineage_result(graph_client):
             "depth": 1,
         },
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    # LineageResult has nodes and edges lists
-    assert "nodes" in body
-    assert "edges" in body
-    assert isinstance(body["nodes"], list)
-    assert isinstance(body["edges"], list)
+    assert resp.status_code == 410
+    assert resp.json()["error"]["code"] == "v1_trace_deprecated"
+    assert resp.headers["Deprecation"] == "true"
+    assert "Sunset" in resp.headers
 
 
 async def test_trace_upstream_only(graph_client):
-    """POST /trace with direction=upstream."""
+    """POST /trace with direction=upstream — 410 Gone (deprecated)."""
     client, engine = graph_client
     urn = _get_sample_urn(engine)
 
@@ -215,11 +216,11 @@ async def test_trace_upstream_only(graph_client):
         "/api/v1/test-ws/graph/trace",
         json={"urn": urn, "direction": "upstream", "depth": 2},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 410
 
 
 async def test_trace_downstream_only(graph_client):
-    """POST /trace with direction=downstream."""
+    """POST /trace with direction=downstream — 410 Gone (deprecated)."""
     client, engine = graph_client
     urn = _get_sample_urn(engine)
 
@@ -227,7 +228,7 @@ async def test_trace_downstream_only(graph_client):
         "/api/v1/test-ws/graph/trace",
         json={"urn": urn, "direction": "downstream", "depth": 2},
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 410
 
 
 # ── GET /nodes/{urn} ──────────────────────────────────────────────────
@@ -288,8 +289,14 @@ async def test_search_provider_unavailable_returns_structured_503(test_client: A
 
     app.dependency_overrides[get_context_engine] = _override
     try:
+        # Real workspace ids are ``ws_<hex>`` (models.py), and main.py's
+        # ``_provider_error_handler`` only classifies a raw connectivity
+        # error as PROVIDER_UNAVAILABLE on provider-bound paths (the
+        # ``/api/v1/ws_`` prefix). A ``ws_``-scoped id exercises that
+        # production path; a non-``ws_`` id would fall through to the
+        # generic DB_UNAVAILABLE branch.
         resp = await test_client.post(
-            "/api/v1/test-ws/graph/search",
+            "/api/v1/ws_test/graph/search",
             json={"query": "demo", "limit": 5},
         )
     finally:
@@ -307,24 +314,39 @@ async def test_search_provider_unavailable_returns_structured_503(test_client: A
 
 # ── GET /introspection ────────────────────────────────────────────────
 
-async def test_introspection_returns_schema_stats(graph_client, monkeypatch):
-    """GET /introspection returns GraphSchemaStats-shaped response."""
+async def test_introspection_returns_schema_stats(graph_client, db_session):
+    """GET /introspection serves cached schema stats in a {data, meta} envelope.
+
+    The endpoint was reworked into a cache-only reader (never calls the
+    provider): it resolves a data source, reads
+    ``data_source_stats.schema_stats``, and always returns HTTP 200 with
+    ``meta.status`` carrying the cache tier. Seed a fresh cache row and
+    assert the schema stats surface under ``data``."""
+    import json
+    from datetime import datetime, timezone
+    from backend.app.db.models import DataSourceStatsORM
+
     client, _ = graph_client
 
-    async def _provider_for_workspace(_workspace_id, _session, _data_source_id=None):
-        return _StubProvider()
+    schema = {
+        "entityTypeStats": [{"entityType": "dataset", "count": 3}],
+        "edgeTypeStats": [{"edgeType": "TRANSFORMS", "count": 1}],
+    }
+    db_session.add(DataSourceStatsORM(
+        data_source_id="ds_introspect",
+        schema_stats=json.dumps(schema),
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    ))
+    await db_session.commit()
 
-    monkeypatch.setattr(
-        "backend.app.api.v1.endpoints.graph.provider_registry.get_provider_for_workspace",
-        _provider_for_workspace,
+    resp = await client.get(
+        "/api/v1/test-ws/graph/introspection?dataSourceId=ds_introspect"
     )
-
-    resp = await client.get("/api/v1/test-ws/graph/introspection")
     assert resp.status_code == 200
     body = resp.json()
-    # GraphSchemaStats has entityTypeStats and edgeTypeStats
-    assert "entityTypeStats" in body
-    assert "edgeTypeStats" in body
+    assert body["meta"]["status"] in ("fresh", "stale")
+    assert body["data"]["entityTypeStats"] == schema["entityTypeStats"]
+    assert body["data"]["edgeTypeStats"] == schema["edgeTypeStats"]
 
 
 # ── GET /nodes (list) ─────────────────────────────────────────────────

@@ -15,7 +15,7 @@ import sqlalchemy as sa
 
 from backend.app.services.versioning import config as gv_config
 
-revision: str = "20260704_1200_projection_progress"
+revision: str = "20260704_1200_projection_prog"
 down_revision: Union[str, None] = "20260703_1200_graph_kind_blank"
 branch_labels = None
 depends_on = None

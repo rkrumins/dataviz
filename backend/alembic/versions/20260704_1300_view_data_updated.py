@@ -19,7 +19,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision: str = "20260704_1300_view_data_updated"
-down_revision: Union[str, None] = "20260704_1200_projection_progress"
+down_revision: Union[str, None] = "20260704_1200_projection_prog"
 branch_labels = None
 depends_on = None
 
