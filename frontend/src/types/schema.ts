@@ -211,6 +211,10 @@ export interface ViewContentConfig {
 
   // Root entity types (entry points for navigation)
   rootEntityTypes: string[];
+
+  // Membership scope — decoupled from placement. Absent on legacy views
+  // (derived by deriveEntityScope from whether any layer assignments exist).
+  entityScope?: 'all' | 'curated';
 }
 
 export interface ViewLayoutConfig {
@@ -233,6 +237,10 @@ export interface ViewLayoutConfig {
   // Reference Model specific (horizontal layer columns)
   referenceLayout?: {
     layers: ViewLayerConfig[];
+    // Canonical flattened physical-root-urn -> layer assignment map. Legacy
+    // views have no top-level `assignments` and are up-converted on read via
+    // normalizeReferenceLayout() (frontend/src/utils/referenceLayout.ts).
+    assignments?: Record<string, LayerAssignmentEntry>;
   };
 
   // LOD (Level of Detail) configuration
@@ -240,6 +248,22 @@ export interface ViewLayoutConfig {
 
   // Projection/Aggregation configuration
   projection?: ViewProjectionConfig;
+}
+
+/**
+ * One entry in a `referenceLayout.assignments` map: a physical root urn's
+ * placement into a layer (and optionally a logical node within it). This is
+ * the canonical, flattened replacement for per-layer `entityAssignments[]`
+ * and exact-urn `rules[]` — see normalizeReferenceLayout() in
+ * frontend/src/utils/referenceLayout.ts.
+ */
+export interface LayerAssignmentEntry {
+  layerId: string
+  logicalNodeId?: string
+  /** default true — descendants resolve via containment at read time */
+  inheritsChildren: boolean
+  assignedBy?: 'user' | 'rule' | 'import'
+  assignedAt?: string
 }
 
 /**
@@ -262,7 +286,12 @@ export interface ViewLayerConfig {
   // Advanced assignment rules (overrides entityTypes)
   rules?: LayerAssignmentRuleConfig[];
 
-  // Instance-level assignments (highest priority - direct entity mapping)
+  /**
+   * Instance-level assignments (highest priority - direct entity mapping)
+   * @deprecated Legacy input only. Canonical storage is the flattened
+   * `referenceLayout.assignments` map (LayerAssignmentEntry); this field is
+   * up-converted by normalizeReferenceLayout() and no longer written.
+   */
   entityAssignments?: EntityAssignmentConfig[];
 
   // Scope configuration - which edge types define containment hierarchy

@@ -797,6 +797,35 @@ class ViewUpdateRequest(BaseModel):
         populate_by_name = True
 
 
+class ViewLayoutUpdateRequest(BaseModel):
+    """Body for ``PUT /views/{id}/layout`` — a layout-only update (layer
+    definitions + the flattened urn->assignment map), decoupled from the
+    rest of the view's config (name/description/content/filters/...). See
+    ``backend.app.services.layout_config.parse_reference_layout`` for the
+    canonical shape ``reference_layout`` must match.
+    """
+    reference_layout: Dict[str, Any] = Field(alias="referenceLayout")
+    entity_scope: Optional[str] = Field(None, alias="entityScope")
+    display_rules: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRules")
+
+    class Config:
+        populate_by_name = True
+
+    @model_validator(mode="after")
+    def _validate_reference_layout_shape(self) -> "ViewLayoutUpdateRequest":
+        if not isinstance(self.reference_layout.get("layers"), list):
+            raise ValueError("referenceLayout.layers must be a list")
+        if not isinstance(self.reference_layout.get("assignments"), dict):
+            raise ValueError("referenceLayout.assignments must be a dict")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_entity_scope(self) -> "ViewLayoutUpdateRequest":
+        if self.entity_scope is not None and self.entity_scope not in ("all", "curated"):
+            raise ValueError("entityScope must be 'all' or 'curated'")
+        return self
+
+
 class ViewResponse(BaseModel):
     id: str
     name: str

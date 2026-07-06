@@ -23,6 +23,7 @@ from ..models import (
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
+    ViewLayoutUpdateRequest,
     ViewResponse,
     ViewListResponse,
     ViewFacetValue,
@@ -480,6 +481,68 @@ async def update_view(
     if user_id is not None:
         row.updated_by = user_id
 
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()
+    return await _to_enriched_response(session, row)
+
+
+async def update_view_layout(
+    session: AsyncSession,
+    view_id: str,
+    req: ViewLayoutUpdateRequest,
+    *,
+    user_id: Optional[str] = None,
+) -> Optional[ViewResponse]:
+    """Persist a view's layer layout in isolation.
+
+    Only touches ``config["layout"]["referenceLayout"]`` (and, when
+    supplied, ``config["content"]["entityScope"]`` and
+    ``referenceLayout["displayRules"]``) — every other config key
+    (name/description/content/filters/...) is left untouched.
+
+    Raises ``ValueError`` if an assignment names a ``layerId`` that isn't
+    one of the submitted layers' ids (the endpoint maps this to a 422).
+    """
+    result = await session.execute(
+        select(ViewORM).where(ViewORM.id == view_id).with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        return None
+
+    config = json.loads(row.config or "{}")
+    if not isinstance(config, dict):
+        config = {}
+    layout = config.get("layout")
+    if not isinstance(layout, dict):
+        layout = {}
+    layout["referenceLayout"] = req.reference_layout
+    config["layout"] = layout
+
+    if req.entity_scope is not None:
+        content = config.get("content")
+        if not isinstance(content, dict):
+            content = {}
+        content["entityScope"] = req.entity_scope
+        config["content"] = content
+
+    if req.display_rules is not None:
+        layout["referenceLayout"]["displayRules"] = req.display_rules
+
+    layer_ids = {
+        layer.get("id") for layer in req.reference_layout.get("layers", [])
+        if isinstance(layer, dict)
+    }
+    for urn, assignment in req.reference_layout.get("assignments", {}).items():
+        layer_id = assignment.get("layerId") if isinstance(assignment, dict) else None
+        if layer_id not in layer_ids:
+            raise ValueError(
+                f"assignment for '{urn}' names unknown layerId '{layer_id}'"
+            )
+
+    row.config = json.dumps(config)
+    if user_id is not None:
+        row.updated_by = user_id
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row)

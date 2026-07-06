@@ -41,6 +41,7 @@ from backend.auth_service.interface import User
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
+    ViewLayoutUpdateRequest,
     ViewResponse,
     ViewListResponse,
     ViewFacetsResponse,
@@ -446,6 +447,44 @@ async def update_view(
     view = await view_repo.update_view(
         session, view_id, req, ontology_digest=digest, user_id=_user_id(user),
     )
+    if not view:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+    return view
+
+
+@router.put("/{view_id}/layout", response_model=ViewResponse)
+async def update_view_layout(
+    view_id: str = Path(...),
+    req: ViewLayoutUpdateRequest = Body(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Update a view's layer layout (layers + assignments) in isolation.
+
+    Layout-only: does not touch name/description/content (other than
+    entityScope)/filters/or any other config key — see
+    ``view_repo.update_view_layout`` for the merge + validation logic.
+    """
+    existing = await view_repo.get_view(session, view_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        view_orm = await _load_view_orm(session, view_id)
+        ctx = await _viewer_context(session, user, claims)
+        if not await view_access.can_edit_view(session, ctx, view_orm):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing permission: workspace:view:edit",
+            )
+
+    try:
+        view = await view_repo.update_view_layout(
+            session, view_id, req, user_id=_user_id(user),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
     return view

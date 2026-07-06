@@ -6,7 +6,7 @@
  *
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
-import type { ViewConfiguration } from '@/types/schema'
+import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
 import { authFetch } from './apiClient'
 
 // ============================================
@@ -343,6 +343,25 @@ export async function updateView(viewId: string, data: ViewUpdateRequest): Promi
     return apiFetch<View>(`/api/v1/views/${viewId}`, {
         method: 'PUT',
         body: JSON.stringify(data),
+    })
+}
+
+/**
+ * Update a view's layer layout (layers + assignments) in isolation — does
+ * not touch name/content (other than entityScope)/filters/any other
+ * config key. See backend `view_repo.update_view_layout`.
+ */
+export async function updateViewLayout(
+    viewId: string,
+    body: {
+        referenceLayout: { layers: ViewLayerConfig[]; assignments: Record<string, LayerAssignmentEntry> }
+        entityScope?: 'all' | 'curated'
+        displayRules?: unknown[]
+    },
+): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/layout`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
     })
 }
 
