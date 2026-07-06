@@ -228,6 +228,11 @@ export function ContextViewHeader({
     onSetTraceDepth,
     onTogglePropertyManager,
     propertyManagerOpen,
+    // Import / Export live in the shared cluster so the combined dropdown shows in BOTH modes; the
+    // Import item self-disables when not editing (isDraft).
+    onImport,
+    onExport,
+    isDraft,
   }
 
   const subline = [
@@ -306,8 +311,6 @@ export function ContextViewHeader({
                 onRedo={onRedo}
                 pendingChangeCount={pendingChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
-                onImport={onImport}
-                onExport={onExport}
                 onExitEdit={onExitEdit}
               />
             </motion.div>

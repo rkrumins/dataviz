@@ -85,6 +85,7 @@ import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
+import { StartEditingDialog } from './StartEditingDialog'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -884,6 +885,7 @@ export function ContextViewCanvas({
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showExportDialog, setShowExportDialog] = useState(false)
+  const [showStartEditing, setShowStartEditing] = useState(false)
   // An import commits to the draft server-side; we refresh only when the user LEAVES the import
   // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
   const importedRef = useRef(false)
@@ -1463,10 +1465,11 @@ export function ContextViewCanvas({
   // View/Edit mode transitions (header Edit / Done). Entering edit =
   // opening/resuming a draft; the versioning bar tints amber and the header
   // morphs — that IS the success feedback, so no toast on the happy path.
-  const handleEnterEdit = useCallback(async () => {
-    const id = await ensureDraftOpen()
-    if (!id) showToast('error', 'Could not open a draft — check that version control is enabled.')
-  }, [showToast])
+  // Entering Edit no longer silently resumes/creates a draft. The user explicitly continues an
+  // existing draft OR names a new branch in StartEditingDialog (which then switchToDrafts). The
+  // shared `ensureDraftOpen` stays the path for the OTHER authoring entry points (create-link,
+  // hierarchy builder, blank-model auto-draft) so this deliberate choice is only for the Edit button.
+  const handleEnterEdit = useCallback(() => setShowStartEditing(true), [])
 
   // Done: switching branches reloads the canvas, which would silently drop
   // staged edits — so route the user through the review panel instead.
@@ -2371,6 +2374,15 @@ export function ContextViewCanvas({
             branchId={useBranchStore.getState().isDraftMode()
               ? (useBranchStore.getState().currentBranchId ?? undefined) : undefined}
             onClose={() => setShowExportDialog(false)}
+          />
+        )}
+        {/* Start editing — the deliberate branch chooser that replaces the silent draft resume/create. */}
+        {showStartEditing && graphId && scopeWsId && (
+          <StartEditingDialog
+            wsId={scopeWsId}
+            graphId={graphId}
+            viewId={activeView?.id ?? null}
+            onClose={() => setShowStartEditing(false)}
           />
         )}
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint

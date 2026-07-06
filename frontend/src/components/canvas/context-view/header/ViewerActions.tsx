@@ -24,6 +24,7 @@ import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
 import { DisplayMenu } from './DisplayMenu'
+import { ImportExportMenu } from './ImportExportMenu'
 
 export interface ComprehensionToolsProps {
   // Lineage flow
@@ -63,6 +64,13 @@ export interface ComprehensionToolsProps {
   // Property Manager — optional so canvases that don't wire it omit the button.
   onTogglePropertyManager?: () => void
   propertyManagerOpen?: boolean
+
+  // Import / Export — one combined dropdown, shown in BOTH modes (Export is always reachable). The
+  // Import item disables with an explainer when not editing (`isDraft` false), since import writes to
+  // the working draft.
+  onImport?: () => void
+  onExport?: () => void
+  isDraft: boolean
 }
 
 export function ComprehensionTools({
@@ -91,6 +99,9 @@ export function ComprehensionTools({
   onSetTraceDepth,
   onTogglePropertyManager,
   propertyManagerOpen = false,
+  onImport,
+  onExport,
+  isDraft,
 }: ComprehensionToolsProps) {
   const { showToast } = useToast()
 
@@ -227,6 +238,10 @@ export function ComprehensionTools({
           onToggle={onTogglePropertyManager}
         />
       )}
+
+      {/* Import / Export — one dropdown, both modes. Import is disabled with an explainer outside
+          Edit mode; Export is always available (published state is a valid, re-importable backup). */}
+      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} />
     </>
   )
 }
