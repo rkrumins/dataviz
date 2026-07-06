@@ -12,6 +12,7 @@ import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../../../dia
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { assignEntities, unassignEntities } from '@/components/canvas/context-view/assignmentMutations'
 import type { AssignmentStepProps } from './AssignmentStep'
 
 export function AssignmentStepLegacy({ formData, updateFormData }: AssignmentStepProps) {
@@ -47,15 +48,13 @@ export function AssignmentStepLegacy({ formData, updateFormData }: AssignmentSte
         return map
     }, [canvasEdges, containmentEdgeTypes, storeParentMap, browserParentMap])
 
-    // Layer assignment lookup: wizard formData.layers > store effectiveAssignments
+    // Layer assignment lookup: wizard formData.assignments (canonical) > store effectiveAssignments
     const layerAssignmentMap = useMemo(() => {
         const map = new Map<string, string>()
         storeEffectiveAssignments.forEach((a, entityId) => map.set(entityId, a.layerId))
-        ;(formData.layers ?? []).forEach(layer => {
-            layer.entityAssignments?.forEach(a => map.set(a.entityId, layer.id))
-        })
+        Object.entries(formData.assignments ?? {}).forEach(([urn, entry]) => map.set(urn, entry.layerId))
         return map
-    }, [storeEffectiveAssignments, formData.layers])
+    }, [storeEffectiveAssignments, formData.assignments])
 
     // Build reverse child map from parentMap for DOWN checks
     const childMap = useMemo(() => {
@@ -108,26 +107,18 @@ export function AssignmentStepLegacy({ formData, updateFormData }: AssignmentSte
         info: ChildReassignInfo; commit: () => void
     } | null>(null)
 
-    /** Commit entity + descendants to a layer (local formData only) */
+    /** Commit entity + descendants to a layer (local formData only). Writes to
+     *  formData.assignments (canonical) via assignmentMutations — mirrors the
+     *  canvas's write path. Descendants are cleared (not re-stamped) so they
+     *  fall back to containment inheritance from the newly-assigned parent. */
     const commitAssignment = useCallback((entityIds: string[], descendantsToMove: string[], layerId: string) => {
         if (!formData.layers) return
-        const allMovedIds = new Set([...entityIds, ...descendantsToMove])
-        const updatedLayers = formData.layers.map(layer => {
-            const filtered = (layer.entityAssignments || []).filter(a => !allMovedIds.has(a.entityId))
-            if (layer.id === layerId) {
-                return {
-                    ...layer,
-                    entityAssignments: [
-                        ...filtered,
-                        ...entityIds.map(id => ({ entityId: id, layerId: layer.id, inheritsChildren: true, priority: 1000, assignedBy: 'user' as const, assignedAt: new Date().toISOString() })),
-                        ...descendantsToMove.map(dId => ({ entityId: dId, layerId: layer.id, inheritsChildren: true, priority: 999, assignedBy: 'rule' as const, assignedAt: new Date().toISOString() })),
-                    ],
-                }
-            }
-            return { ...layer, entityAssignments: filtered }
-        })
-        updateFormData({ layers: updatedLayers })
-    }, [formData.layers, updateFormData])
+        const layout = { layers: formData.layers, assignments: formData.assignments }
+        const next = layerId
+            ? assignEntities(layout, entityIds, layerId, { clearDescendants: descendantsToMove })
+            : unassignEntities(layout, entityIds)
+        updateFormData({ layers: next.layers, assignments: next.assignments })
+    }, [formData.layers, formData.assignments, updateFormData])
 
     /** Show confirmation dialog if descendants need moving, otherwise commit immediately */
     const confirmOrCommit = useCallback((entityIds: string[], descendantsToMove: string[], layerId: string) => {
@@ -205,6 +196,7 @@ export function AssignmentStepLegacy({ formData, updateFormData }: AssignmentSte
                 <div className="w-2/5 min-w-[380px] flex flex-col">
                     <WizardAssignmentTree
                         layers={formData.layers || []}
+                        assignments={formData.assignments}
                         onAssignmentChange={handleAssignmentChange}
                         onBulkAssign={handleBulkAssignment}
                         onParentMapChange={setBrowserParentMap}

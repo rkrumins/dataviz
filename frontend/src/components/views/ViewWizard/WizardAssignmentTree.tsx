@@ -28,12 +28,10 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
-    useReferenceModelStore,
-    useInstanceAssignments,
     useAssignmentConflicts,
     useEffectiveAssignments
 } from '@/store/referenceModelStore'
-import type { ViewLayerConfig, AssignmentConflict } from '@/types/schema'
+import type { ViewLayerConfig, LayerAssignmentEntry, AssignmentConflict } from '@/types/schema'
 import { useContainmentEdgeTypes, useEntityTypes, useSchemaIsLoading } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
@@ -64,6 +62,8 @@ export interface EntityTreeNode {
 interface WizardAssignmentTreeProps {
     /** Layers to assign to */
     layers: ViewLayerConfig[]
+    /** Canonical flattened urn -> layer assignment map (the wizard's live buffer). */
+    assignments?: Record<string, LayerAssignmentEntry>
     /** Active drop target from the Layer Studio (shows strip indicator) */
     activeTarget?: ActiveTarget | null
     /** Callback when assignment changes */
@@ -337,6 +337,7 @@ function TreeRow({
 
 export function WizardAssignmentTree({
     layers,
+    assignments,
     onAssignmentChange,
     onBulkAssign,
     onParentMapChange,
@@ -374,30 +375,26 @@ export function WizardAssignmentTree({
         onParentMapChange?.(browser.parentMap)
     }, [browser.parentMap, onParentMapChange])
 
-    // Store hooks (assignment-related — unchanged)
-    const instanceAssignments = useInstanceAssignments()
+    // Store hooks (assignment-related — read-only; the tree never writes to the
+    // store, it communicates assignment changes ONLY via onAssignmentChange/onBulkAssign).
     const effectiveAssignments = useEffectiveAssignments()
     const conflicts = useAssignmentConflicts()
 
+    // The wizard's canonical assignments buffer (formData.assignments), keyed
+    // by urn — same shape/precedence the canvas resolves from.
     const manualAssignmentMap = useMemo(() => {
         const map = new Map<string, string>()
-        layers.forEach(l => {
-            l.entityAssignments?.forEach(a => {
-                map.set(a.entityId, l.id)
-            })
+        Object.entries(assignments ?? {}).forEach(([urn, entry]) => {
+            map.set(urn, entry.layerId)
         })
         return map
-    }, [layers])
-    const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
-    const removeEntityAssignment = useReferenceModelStore(s => s.removeEntityAssignment)
+    }, [assignments])
 
     // Local UI state
     const [searchQuery, setSearchQuery] = useState('')
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
-    const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
-    const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
@@ -641,40 +638,12 @@ export function WizardAssignmentTree({
         }
     }, [])
 
-    const showAssignmentWarning = useCallback((message: string) => {
-        setAssignmentWarning(message)
-        if (warningTimerRef.current) clearTimeout(warningTimerRef.current)
-        warningTimerRef.current = setTimeout(() => setAssignmentWarning(null), 5000)
-    }, [])
-
+    // Communicates ONLY via onAssignmentChange/onBulkAssign — no direct store
+    // writes. The owner (LayerStudio / AssignmentStepLegacy) does its own
+    // containment-conflict check and warning UI before committing.
     const handleAssign = useCallback((entityId: string, layerId: string) => {
-        if (!layerId) {
-            // "Remove" action logic
-            const instanceAssignment = instanceAssignments.get(entityId)
-            const isExplicitlyExcluded = instanceAssignment?.layerId === '__UNASSIGNED__'
-
-            if (isExplicitlyExcluded) {
-                // Was excluded -> Revert to Default (Inheritance)
-                removeEntityAssignment(entityId)
-            } else {
-                const nodeInTree = flattenedNodes.find(n => n.id === entityId)
-
-                if (nodeInTree && 'isInherited' in nodeInTree && nodeInTree.isInherited) {
-                    assignEntityToLayer(entityId, '__UNASSIGNED__', { inheritsChildren: true })
-                } else {
-                    removeEntityAssignment(entityId)
-                }
-            }
-            onAssignmentChange?.(entityId, null)
-        } else {
-            const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
-            if (!result.success && result.conflict?.type === 'containment_locked') {
-                showAssignmentWarning(result.conflict.message)
-                return // Don't propagate blocked assignment
-            }
-            onAssignmentChange?.(entityId, layerId)
-        }
-    }, [assignEntityToLayer, removeEntityAssignment, onAssignmentChange, instanceAssignments, flattenedNodes, showAssignmentWarning])
+        onAssignmentChange?.(entityId, layerId || null)
+    }, [onAssignmentChange])
 
     const handleBulkAssign = useCallback((layerId: string) => {
         const ids = Array.from(selectedIds)
@@ -682,33 +651,14 @@ export function WizardAssignmentTree({
 
         if (onBulkAssign) {
             onBulkAssign(layerId, ids)
-            // Clear selection after bulk action
-            setSelectedIds(new Set())
-            return
-        }
-
-        // Fallback to one-by-one if onBulkAssign not provided
-        let blockedCount = 0
-        ids.forEach(entityId => {
-            if (!layerId) {
-                removeEntityAssignment(entityId)
-                onAssignmentChange?.(entityId, null)
-            } else {
-                const result = assignEntityToLayer(entityId, layerId, { inheritsChildren: true })
-                if (!result.success && result.conflict?.type === 'containment_locked') {
-                    blockedCount++
-                    return
-                }
-                onAssignmentChange?.(entityId, layerId)
-            }
-        })
-        if (blockedCount > 0) {
-            showAssignmentWarning(`${blockedCount} assignment(s) blocked: children inherit their parent's layer.`)
+        } else {
+            // Fallback: forward one-by-one via onAssignmentChange (no direct store writes).
+            ids.forEach(entityId => onAssignmentChange?.(entityId, layerId || null))
         }
 
         // Clear selection after bulk action
         setSelectedIds(new Set())
-    }, [selectedIds, onBulkAssign, onAssignmentChange, removeEntityAssignment, assignEntityToLayer, showAssignmentWarning])
+    }, [selectedIds, onBulkAssign, onAssignmentChange])
 
     const handleSelectAllChildren = useCallback(() => {
         if (selectedIds.size !== 1) return
@@ -824,15 +774,6 @@ export function WizardAssignmentTree({
                         </div>
                     )}
                 </div>
-
-                {/* Containment inheritance warning */}
-                {assignmentWarning && (
-                    <div className="flex items-center gap-2 px-3 py-2 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl text-xs text-red-700 dark:text-red-400">
-                        <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                        <span className="flex-1"><span className="font-medium">Assignment blocked.</span> {assignmentWarning}</span>
-                        <button onClick={() => setAssignmentWarning(null)} className="text-red-400 hover:text-red-600">&times;</button>
-                    </div>
-                )}
 
                 {/* Search */}
                 <div className="relative">

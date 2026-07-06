@@ -326,6 +326,9 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
 
     // One apply path for every template origin: normalize layers (mint ids/orders,
     // default colors) and record the choice so the picker can be revisited.
+    // Resets assignments to {} — a template's layers get fresh ids, so any prior
+    // assignments (keyed to the OLD layer ids) would otherwise dangle. Never
+    // copies assignments a template might carry; only layer STRUCTURE is copied.
     const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate) => {
         const layers: ViewLayerConfig[] = template.layers.map((l, i) => ({
             ...l,
@@ -336,7 +339,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             id: l.id ?? generateId(),
             order: i,
         }))
-        updateFormData({ layers, layoutTemplateId: template.id })
+        updateFormData({ layers, assignments: {}, layoutTemplateId: template.id })
         setGalleryOpen(false)
     }, [updateFormData])
     // ────────────────────────────────────────────────────────────────────────

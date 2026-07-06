@@ -45,7 +45,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { viewService } from '@/services/viewService'
-import { viewToViewConfig } from '@/services/viewApiService'
+import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
 import { provisionBlankGraph, type BlankGraphResult } from '@/services/versioningApiService'
 import type { ProviderResponse } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
@@ -53,7 +53,8 @@ import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
 import { useWizardScope } from '@/hooks/useWizardScope'
-import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
 import { useBlankScopeOptions } from './useBlankScopeOptions'
 import { useBlankSchemaHydration } from './useBlankSchemaHydration'
 import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
@@ -112,6 +113,10 @@ export interface WizardFormData {
     dataSourceId?: string
     layoutType: 'graph' | 'hierarchy' | 'reference'
     layers: ViewLayerConfig[]
+    /** Canonical flattened physical-root-urn -> layer assignment map — the same
+     *  shape the canvas writes via persistReferenceLayout. Never embedded back
+     *  into `layers[].entityAssignments` (legacy, deprecated). */
+    assignments: Record<string, LayerAssignmentEntry>
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
     advancedFilters: ActiveFilter[]
@@ -753,7 +758,7 @@ function ViewWizardBody({
     const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
-    const { clearAssignments, setLayers } = useReferenceModelStore()
+    const { clearAssignments } = useReferenceModelStore()
     const isBlank = scopeMode === 'blank'
 
     // Blank provisioning result — held so a failed createView retry reuses the
@@ -780,14 +785,17 @@ function ViewWizardBody({
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [previousSteps, setPreviousSteps] = useState<WizardStep[]>([])
-    const [linkedContextModelId, setLinkedContextModelId] = useState<string | null>(null)
     const [driftDismissed, setDriftDismissed] = useState(false)
 
     const [formData, setFormData] = useState<WizardFormData>(makeCreateFormData)
 
-    // Hydrate form from view in edit mode.
+    // Hydrate form from view in edit mode. normalizeReferenceLayout up-converts
+    // legacy per-layer entityAssignments/rules into the flattened assignments
+    // map, so canvas-created layer placements (canonical or legacy) become
+    // visible in the wizard here.
     useEffect(() => {
         if (mode === 'edit' && editingView) {
+            const { layers, assignments } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
@@ -796,7 +804,8 @@ function ViewWizardBody({
                 tags: (editingView as any).tags ?? [],
                 dataSourceId: editingView.dataSourceId ?? undefined,
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
-                layers: editingView.layout.referenceLayout?.layers ?? [],
+                layers,
+                assignments,
                 visibleEntityTypes: editingView.content.visibleEntityTypes,
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
                 advancedFilters: (editingView.filters.fieldFilters || []).map(f => ({
@@ -809,7 +818,7 @@ function ViewWizardBody({
                             : `${f.field}=${f.value}`,
                     value: f.value,
                 })),
-                scopeEdges: editingView.layout.referenceLayout?.layers?.[0]?.scopeEdges,
+                scopeEdges: layers[0]?.scopeEdges,
                 isValid: true,
             })
         }
@@ -944,6 +953,9 @@ function ViewWizardBody({
         setProvisionError(null)
         try {
             const layersWithScope = formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges }))
+            // Canonical-clean: strips any stray legacy entityAssignments and merges
+            // them into the flattened map so nothing is silently lost.
+            const normalizedLayout = normalizeReferenceLayout({ layers: layersWithScope, assignments: formData.assignments })
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
             if (mode === 'create') {
@@ -983,20 +995,26 @@ function ViewWizardBody({
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: layersWithScope,
+                    layers: normalizedLayout.layers,
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     workspaceId: resolvedWorkspaceId,
                     dataSourceId,
-                    contextModelId: linkedContextModelId ?? undefined,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
                 })
                 if (result.success && result.data) {
-                    const savedLayers = result.data.layout?.referenceLayout?.layers
-                    if (savedLayers?.length) setLayers(savedLayers)
-                    onComplete?.(result.data)
+                    // The layout endpoint is the single writer of referenceLayout — write
+                    // the full layers+assignments (a new view has no prior layout to race).
+                    const entityScope = deriveEntityScope(undefined, normalizedLayout)
+                    const layoutResult = await updateViewLayout(result.data.id, {
+                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                        entityScope,
+                    })
+                    const savedView = viewToViewConfig(layoutResult)
+                    useSchemaStore.getState().addOrUpdateView(savedView)
+                    onComplete?.(savedView)
                     onClose()
                     navigate(`/views/${result.data.id}`)
                 }
@@ -1006,24 +1024,32 @@ function ViewWizardBody({
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: layersWithScope,
+                    layers: normalizedLayout.layers,
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
-                })
+                }, fullViewQuery.data?.config)
                 if (result.success && result.data) {
-                    const savedLayers = result.data.layout?.referenceLayout?.layers
-                    if (savedLayers?.length) setLayers(savedLayers)
-                    onComplete?.(result.data)
+                    // Preserve an explicit editingView.content.entityScope; otherwise derive
+                    // from the submitted assignments — a deliberate wizard save is allowed to
+                    // set scope explicitly, unlike implicit canvas gestures.
+                    const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
+                    const layoutResult = await updateViewLayout(viewId, {
+                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                        entityScope,
+                    })
+                    const savedView = viewToViewConfig(layoutResult)
+                    useSchemaStore.getState().addOrUpdateView(savedView)
+                    onComplete?.(savedView)
                     onClose()
                 }
             }
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, setLayers, buildFieldFilters, linkedContextModelId])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         setFormData(prev => ({ ...prev, ...updates }))
@@ -1093,8 +1119,6 @@ function ViewWizardBody({
                 <AssignmentStep
                     formData={formData}
                     updateFormData={updateFormData}
-                    linkedContextModelId={linkedContextModelId}
-                    onDraftSaved={setLinkedContextModelId}
                 />
             )}
             {currentStep === 'entities' && (
@@ -1160,6 +1184,7 @@ function getInitialFormData(schema: ReturnType<typeof useSchemaStore.getState>['
         tags: [],
         layoutType: 'reference',
         layers: [],
+        assignments: {},
         visibleEntityTypes: schema?.entityTypes.map(e => e.id) ?? [],
         visibleRelationshipTypes: schema?.relationshipTypes.map(r => r.id) ?? [],
         advancedFilters: [],
