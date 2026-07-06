@@ -140,6 +140,47 @@ def test_resolve_ontology_assigned_overrides_system_default():
     assert resolved.resolution_sources.get("domain") == "assigned"
 
 
+def test_resolve_ontology_honors_persisted_containment_list_without_flag():
+    # Regression (FalkorDB wizard flat-tree bug): a custom ontology recorded its
+    # `containment_edge_types` list but the matching rel def did NOT carry
+    # is_containment=True (default False). Re-deriving containment ONLY from the
+    # per-rel flag drops the persisted list → empty containment → the structural
+    # top-level query treats every node as parentless (flat 27-orphan tree),
+    # while the cached-schema/canvas path (which reads the persisted list) nests.
+    # resolve_ontology must UNION the persisted list so both agree.
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={"layer": {"name": "Layer"}, "object": {"name": "Object"}},
+        # rel def present but is_containment left at its False default — the trigger
+        relationship_type_definitions={"CONTAINS": {"name": "Contains"}},
+        containment_edge_types=["CONTAINS"],   # persisted list IS populated
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    assert "CONTAINS" in resolved.containment_edge_types
+
+
+def test_resolve_ontology_honors_persisted_lineage_list_without_flag():
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={},
+        relationship_type_definitions={"FLOWS_TO": {"name": "Flows To"}},
+        lineage_edge_types=["FLOWS_TO"],
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    assert "FLOWS_TO" in resolved.lineage_edge_types
+
+
+def test_resolve_ontology_containment_from_flag_still_works():
+    # The per-rel flag path must remain intact (union is additive, not a swap).
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={},
+        relationship_type_definitions={"OWNS": {"name": "Owns", "isContainment": True}},
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    assert "OWNS" in resolved.containment_edge_types
+
+
 # ---------------------------------------------------------------------------
 # validate_ontology — SHACL-lite checks
 # ---------------------------------------------------------------------------

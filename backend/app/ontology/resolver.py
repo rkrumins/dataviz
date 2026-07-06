@@ -255,11 +255,32 @@ def resolve_ontology(
 
     flat = derive_flat_lists(entity_defs, rel_defs)
 
+    # Honor the ontology's PERSISTED containment/lineage lists, not ONLY the
+    # per-relationship `is_containment`/`is_lineage` flags. The stored top-level
+    # lists are authoritative — they are exactly what the ontologies API and the
+    # cached-schema (hence the frontend/canvas) surface. Re-deriving containment
+    # solely from per-rel flags silently drops the persisted list whenever the
+    # flag wasn't round-tripped onto the matching rel def (e.g. a custom/blank
+    # ontology that recorded `containment_edge_types` but left the rel def's
+    # `is_containment` at its False default). That empties the structural
+    # top-level query and flattens the wizard tree — while the canvas, which
+    # reads the persisted list, still nests. Union so BOTH sources are honored
+    # (additive: can only add declared containment types, never remove derived).
+    containment = list(flat.containment_edge_types)
+    lineage = list(flat.lineage_edge_types)
+    if assigned:
+        for t in (assigned.containment_edge_types or []):
+            if t not in containment:
+                containment.append(t)
+        for t in (assigned.lineage_edge_types or []):
+            if t not in lineage:
+                lineage.append(t)
+
     return ResolvedOntology(
         entity_type_definitions=entity_defs,
         relationship_type_definitions=rel_defs,
-        containment_edge_types=flat.containment_edge_types,
-        lineage_edge_types=flat.lineage_edge_types,
+        containment_edge_types=containment,
+        lineage_edge_types=lineage,
         edge_type_metadata=flat.edge_type_metadata,
         entity_type_hierarchy=flat.entity_type_hierarchy,
         root_entity_types=flat.root_entity_types,

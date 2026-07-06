@@ -93,7 +93,7 @@ import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
-import { getView, updateView, type View } from '@/services/viewApiService'
+import { getView, updateView } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -2494,9 +2494,6 @@ export function ContextViewCanvas({
           const bs = useBranchStore.getState()
           if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
             try {
-              // Layer edits are VIEW presentation, not graph data — captured here before the staged
-              // list is cleared so we can persist them to the canonical per-view home below.
-              const hadLayerChanges = stagedChangeList.some(c => c.type === 'layer_config')
               await saveStagedChangesToDraft(stagedChangeList, {
                 wsId: bs.workspaceId ?? scopeWsId,
                 dataSourceId: bs.dataSourceId,
@@ -2515,23 +2512,7 @@ export function ContextViewCanvas({
               // history. Invalidate the whole versioning namespace so saved changes appear at once
               // (a save is user-initiated and infrequent, so the broad refetch is fine).
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-              await saveToBackend(scopeWsId)   // context-model blueprint (assignments) — not layers, not graph
-              // Persist layer structure to the CANONICAL per-view home (views table `config.layout`).
-              // This is the single store the canvas AND the View Wizard both read via getView, so what
-              // you edit here shows up everywhere. The backend replaces `config` wholesale, so we send
-              // the FULL config = current raw config + the edited layout. Decoupled from the data source:
-              // the commit above carried zero layer ops; context-models stay pure templates.
-              if (hadLayerChanges) {
-                const view = useSchemaStore.getState().getActiveView()
-                if (view?.id) {
-                  const cached = queryClient.getQueryData<View>(['view', view.id])
-                  const raw = cached ?? await getView(view.id)
-                  await updateView(view.id, {
-                    config: { ...((raw?.config as Record<string, unknown>) ?? {}), layout: view.layout },
-                  })
-                  queryClient.invalidateQueries({ queryKey: ['view', view.id] })
-                }
-              }
+              await saveToBackend(scopeWsId)   // view/blueprint config (layers) — not graph entities
               closeStagedChangesPanel()
               showToast('success', 'Saved to draft.')
             } catch (e) {

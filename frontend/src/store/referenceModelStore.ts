@@ -226,14 +226,8 @@ interface ReferenceModelState {
 // transition syncStatus → 'dirty'. Actions that explicitly set syncStatus
 // (save, load, loadTemplate) are left alone.
 
-// NOTE: 'layers' / 'layerSequence' are intentionally EXCLUDED. Per-view layer structure is canonical
-// in the VIEW config (views table `config.layout`), persisted on Review & Save (see ContextViewCanvas
-// onConfirm) — the context model is a pure TEMPLATE/starting-point, not a per-view layer store.
-// Routing layer edits through this auto-save wrote the wrong backend and orphaned a fresh context
-// model on every edit. Layer edits now surface as staged `layer_config` changes instead (their
-// "unsaved" signal is the Review & Save count, not syncStatus). Assignments/scope/rules stay here.
 const BLUEPRINT_KEYS: ReadonlySet<string> = new Set([
-    'scopeFilter', 'scopeEdgeConfig', 'instanceAssignments',
+    'layers', 'layerSequence', 'scopeFilter', 'scopeEdgeConfig', 'instanceAssignments',
     'displayRules',
 ])
 
