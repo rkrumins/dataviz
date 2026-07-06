@@ -23,6 +23,12 @@ const READY_STATUSES = new Set(['mergeable', 'approved'])
 const PAGE = 20
 type Scope = 'open' | 'mine' | 'all'
 
+// Human labels for the status filter (mirrors PrStatusBadge's lifecycle states).
+const STATUS_LABELS: Record<string, string> = {
+  open: 'Open', mergeable: 'Ready to merge', approved: 'Approved',
+  conflicts: 'Conflicts', merged: 'Merged', closed: 'Dismissed / closed',
+}
+
 // ── Compact filter dropdown (button + popover) ───────────────────────────────
 function FilterSelect({
   label, value, options, onChange,
@@ -128,6 +134,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
   const [scope, setScope] = useState<Scope>('open')
   const [authorFilter, setAuthorFilter] = useState<string | null>(null)
   const [sourceFilter, setSourceFilter] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [visible, setVisible] = useState(PAGE)
   const [openPrId, setOpenPrId] = useState<string | null>(initialPrId ?? null)
@@ -154,11 +161,17 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
     for (const { sourceLabel } of all) if (sourceLabel) seen.add(sourceLabel)
     return [...seen].sort().map((s) => ({ id: s, label: s }))
   }, [all])
+  const statusOptions = useMemo(() => {
+    const present = new Set(all.map(({ pr }) => pr.status))
+    return [...present].filter((s) => STATUS_LABELS[s]).sort().map((s) => ({ id: s, label: STATUS_LABELS[s] }))
+  }, [all])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return all.filter(({ pr, sourceLabel }) => {
-      if (scope === 'open' && !OPEN_STATUSES.has(pr.status)) return false
+      // An explicit status pick wins over the coarse "Open" scope (so they don't contradict).
+      if (statusFilter) { if (pr.status !== statusFilter) return false }
+      else if (scope === 'open' && !OPEN_STATUSES.has(pr.status)) return false
       if (scope === 'mine' && !raisedByMe(pr)) return false
       if (authorFilter && pr.actor !== authorFilter) return false
       if (sourceFilter && sourceLabel !== sourceFilter) return false
@@ -168,10 +181,10 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
       }
       return true
     })
-  }, [all, scope, authorFilter, sourceFilter, search, raisedByMe])
+  }, [all, scope, statusFilter, authorFilter, sourceFilter, search, raisedByMe])
 
   // Reset the visible window whenever the active filter set changes.
-  useEffect(() => { setVisible(PAGE) }, [scope, authorFilter, sourceFilter, search])
+  useEffect(() => { setVisible(PAGE) }, [scope, statusFilter, authorFilter, sourceFilter, search])
 
   const stats = useMemo(() => ({
     open: all.filter(({ pr }) => OPEN_STATUSES.has(pr.status)).length,
@@ -181,7 +194,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
   }), [all, raisedByMe])
 
   const loading = Object.keys(feeds).length < dataSources.length
-  const hasFilters = !!(authorFilter || sourceFilter || search.trim())
+  const hasFilters = !!(statusFilter || authorFilter || sourceFilter || search.trim())
   const shown = filtered.slice(0, visible)
 
   const SCOPES: Array<{ key: Scope; label: string }> = [
@@ -232,10 +245,11 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
           )}
         </div>
 
+        {statusOptions.length > 1 && <FilterSelect label="Status" value={statusFilter} options={statusOptions} onChange={setStatusFilter} />}
         {authorOptions.length > 1 && <FilterSelect label="Author" value={authorFilter} options={authorOptions} onChange={setAuthorFilter} />}
         {sourceOptions.length > 1 && <FilterSelect label="Source" value={sourceFilter} options={sourceOptions} onChange={setSourceFilter} />}
         {hasFilters && (
-          <button onClick={() => { setAuthorFilter(null); setSourceFilter(null); setSearch('') }} className="text-[12px] text-ink-muted hover:text-ink underline underline-offset-2">Clear</button>
+          <button onClick={() => { setStatusFilter(null); setAuthorFilter(null); setSourceFilter(null); setSearch('') }} className="text-[12px] text-ink-muted hover:text-ink underline underline-offset-2">Clear</button>
         )}
         <span className="ml-auto text-[12px] text-ink-muted tabular-nums">{filtered.length} request{filtered.length === 1 ? '' : 's'}</span>
       </div>

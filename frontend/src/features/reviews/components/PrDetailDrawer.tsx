@@ -105,6 +105,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const [resolverError, setResolverError] = useState<string | null>(null)
   const [needsPull, setNeedsPull] = useState(false)
   const [resolveMode, setResolveMode] = useState<'merge' | 'pull'>('merge')
+  const [dismissing, setDismissing] = useState(false)
 
   const terminal = pr?.status === 'merged' || pr?.status === 'closed'
   const isAuthor = !!user && pr?.actor === user.id
@@ -386,7 +387,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         )}
 
         {/* Action bar */}
-        {pr && !terminal && canManage && (
+        {pr && !terminal && canManage && !dismissing && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
             {showApprove && (
               <button
@@ -395,6 +396,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                   onError: (e) => showToast('error', (e as Error).message),
                 })}
                 disabled={busy}
+                title="Sign off on these changes so they can be merged"
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-emerald-600 border border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10 disabled:opacity-60"
               >
                 <CheckCircle2 className="w-4 h-4" /> Approve
@@ -404,6 +406,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               <button
                 onClick={() => runPull()}
                 disabled={busy}
+                title="This draft is behind main — pull the latest changes before it can merge"
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-sm disabled:opacity-60"
               >
                 {pullLatest.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
@@ -413,6 +416,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               <button
                 onClick={() => runMerge()}
                 disabled={busy}
+                title="Apply these changes to main"
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
                 {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
@@ -420,15 +424,47 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               </button>
             )}
             <button
-              onClick={() => closePr.mutate({ prId, graphId: pr.graphId }, {
-                onSuccess: () => { showToast('success', 'Closed.'); onClose() },
-                onError: (e) => showToast('error', (e as Error).message),
-              })}
+              onClick={() => setDismissing(true)}
               disabled={busy}
+              title="Reject these changes without merging — nothing is applied to main"
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-medium text-ink-muted border border-glass-border hover:text-rose-500 hover:border-rose-500/30 disabled:opacity-60"
             >
-              <XCircle className="w-4 h-4" /> Close
+              <XCircle className="w-4 h-4" /> Dismiss
             </button>
+          </div>
+        )}
+
+        {/* Dismiss confirmation — plain-language, so it's clear this rejects the changes. */}
+        {pr && !terminal && canManage && dismissing && (
+          <div className="px-5 py-4 border-t border-rose-500/25 bg-rose-500/[0.04]">
+            <div className="flex items-start gap-2.5 mb-3">
+              <XCircle className="w-5 h-5 text-rose-500 mt-0.5 shrink-0" />
+              <div>
+                <p className="text-[13px] font-semibold text-ink">Dismiss this merge request?</p>
+                <p className="text-[12px] text-ink-muted mt-1 leading-relaxed">
+                  The proposed changes are <span className="font-medium text-rose-500">rejected</span> and <span className="font-medium text-ink">nothing is applied to <span className="font-mono">main</span></span>. The draft itself is kept, so its author can open a new request or discard it later — but this review closes.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => closePr.mutate({ prId, graphId: pr.graphId }, {
+                  onSuccess: () => { showToast('success', 'Request dismissed — no changes applied.'); onClose() },
+                  onError: (e) => { showToast('error', (e as Error).message); setDismissing(false) },
+                })}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-rose-500 hover:bg-rose-600 shadow-sm disabled:opacity-60"
+              >
+                {closePr.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />} Dismiss request
+              </button>
+              <button
+                onClick={() => setDismissing(false)}
+                disabled={busy}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted border border-glass-border hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] disabled:opacity-60"
+              >
+                Keep reviewing
+              </button>
+            </div>
           </div>
         )}
 

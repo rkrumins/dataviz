@@ -4,11 +4,12 @@
  * (added/modified/removed via usePrDiffSummary), reviewer avatar stack + approval, staleness,
  * data source, and relative time. Click opens the detail drawer.
  */
-import { ChevronRight, GitMerge, AlertTriangle, Plus, Minus, PencilLine } from 'lucide-react'
+import { useState } from 'react'
+import { ChevronRight, GitMerge, AlertTriangle, Plus, Minus, PencilLine, XCircle, Check, X, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { PullRequest } from '@/services/versioningApiService'
-import { usePrDiffSummary } from '@/features/versioning/hooks/useVersioning'
+import { usePrDiffSummary, useCloseMergeRequest } from '@/features/versioning/hooks/useVersioning'
 import { ownerName } from '@/features/versioning/model/branchVocab'
 import { OwnerAvatar } from '@/features/versioning/components/BranchStatusBits'
 import { PrStatusBadge, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
@@ -78,12 +79,19 @@ export function PrListRow({
   const branchName = pr.sourceBranchName?.trim() || (isDraftMr(pr) ? 'draft' : pr.sourceBranchId?.slice(0, 8)) || 'fork'
   const author = ownerName(pr.actor, pr.userNames)
   const behind = pr.behind && (pr.behindBy ?? 0) > 0
+  const closePr = useCloseMergeRequest(wsId)
+  const [confirming, setConfirming] = useState(false)
+  const canDismiss = COUNTED_STATUSES.has(pr.status) // only an active PR can be dismissed
 
   return (
-    <button
+    // A clickable <div> (not <button>) so the inline Dismiss controls can be real nested buttons.
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
       className={cn(
-        'group w-full flex items-center gap-3.5 rounded-2xl border border-glass-border bg-canvas-elevated/50 px-4 py-3 text-left',
+        'group w-full flex items-center gap-3.5 rounded-2xl border border-glass-border bg-canvas-elevated/50 px-4 py-3 text-left cursor-pointer',
         'hover:border-accent-lineage/40 hover:bg-canvas-elevated/80 hover:shadow-sm transition-all duration-150',
       )}
     >
@@ -128,7 +136,34 @@ export function PrListRow({
       </div>
 
       <ReviewerStack pr={pr} />
+
+      {/* Dismiss — reject the PR (close without merging; no changes are taken). Inline confirm. */}
+      {canDismiss && (
+        confirming ? (
+          <span className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+            <span className="text-[11px] text-ink-muted mr-0.5 hidden sm:inline">Dismiss?</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); closePr.mutate({ prId: pr.prId, graphId: pr.graphId }, { onSuccess: () => setConfirming(false) }) }}
+              disabled={closePr.isPending}
+              title="Reject these changes — closes the request without merging"
+              className="p-1.5 rounded-lg bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 transition-colors disabled:opacity-60"
+            >{closePr.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" strokeWidth={2.6} />}</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setConfirming(false) }}
+              title="Cancel"
+              className="p-1.5 rounded-lg text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            ><X className="w-3.5 h-3.5" /></button>
+          </span>
+        ) : (
+          <button
+            onClick={(e) => { e.stopPropagation(); setConfirming(true) }}
+            title="Dismiss — reject these changes without merging (nothing is applied to main)"
+            className="p-1.5 rounded-lg text-ink-muted/50 hover:bg-rose-500/10 hover:text-rose-500 transition-all shrink-0"
+          ><XCircle className="w-4 h-4" /></button>
+        )
+      )}
+
       <ChevronRight className="w-4 h-4 text-ink-muted/40 group-hover:text-accent-lineage transition-colors shrink-0" />
-    </button>
+    </div>
   )
 }
