@@ -28,6 +28,7 @@ import { useAnyWorkspacePermission, usePermission } from '@/store/auth'
 import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntologies'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
   entityDefToSchema,
   entitySchemaToBackend,
@@ -195,6 +196,7 @@ export function OntologySchemaPage() {
   // ── React Query data ───────────────────────────────────────────────
   const { data: ontologies = [], isLoading: isLoadingOntologies } = useOntologies()
   const { data: selectedOntology } = useOntology(ontologyId)
+  useDocumentTitle(selectedOntology?.name ? `${selectedOntology.name} · Schema` : 'Schema')
   const mutations = useOntologyMutations()
   // Invalidate the cached graph schema whenever a data-source-to-ontology
   // assignment changes. useOntologyMutations already does this for ontology

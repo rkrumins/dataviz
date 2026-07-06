@@ -13,6 +13,7 @@ import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function ForgotPasswordPage() {
     const brand = useBrand()
@@ -26,6 +27,8 @@ export function ForgotPasswordPage() {
     useEffect(() => {
         if (isAuthenticated) navigate('/', { replace: true })
     }, [isAuthenticated, navigate])
+
+    useDocumentTitle('Forgot password')
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()

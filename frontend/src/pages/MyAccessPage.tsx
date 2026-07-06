@@ -35,9 +35,11 @@ import {
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { useToast } from '@/components/ui/toast'
 import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 
 export function MyAccessPage() {
+    useDocumentTitle('My Access')
     const [access, setAccess] = useState<UserAccessResponse | null>(null)
     const [permissions, setPermissions] = useState<PermissionResponse[] | null>(null)
     const [requests, setRequests] = useState<AccessRequestResponse[] | null>(null)

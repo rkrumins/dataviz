@@ -19,6 +19,7 @@
  */
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 const MOCK_URL = '/api/v1/auth/custom/mock'
 const LOGIN_URL = '/api/v1/auth/custom/login'
@@ -53,6 +54,8 @@ export function DevLogin() {
     const raw = params.get('next') ?? '/dashboard'
     return raw.startsWith('/') ? raw : '/dashboard'
   }, [params])
+
+  useDocumentTitle('Dev sign in')
 
   const [externalId, setExternalId] = useState('S-1-5-21-1001')
   const [email, setEmail] = useState('alice@corp.example')

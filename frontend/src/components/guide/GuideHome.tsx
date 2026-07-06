@@ -28,6 +28,7 @@ import {
 import { guideMarkdownComponents } from './guideMarkdown'
 import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 const fade = {
   hidden: { opacity: 0, y: 16 },
@@ -43,6 +44,8 @@ export function GuideHome() {
   const interp = (t: string) => interpolateBrand(t, brand)
   const [query, setQuery] = useState('')
   const q = query.trim().toLowerCase()
+
+  useDocumentTitle('User Guide')
 
   const results = useMemo(
     () =>

@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
 import { useNavPermission } from '@/store/auth'
 import { useAdminSectionSpec } from '@/store/navCatalogue'
 import { useBrand } from '@/store/branding'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // Administration sidebar is split into two sections — "System" for
 // platform-wide configuration and "Identity & Access" for the people
@@ -57,6 +58,12 @@ export function AdminPage() {
     const location = useLocation()
     const brand = useBrand()
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
+
+    // Tab title for every admin sub-page, derived from the same label map that
+    // drives the sidebar so the two never drift: "{Section} · Admin · {Brand}".
+    const activeSub = location.pathname.replace(/^\/admin\/?/, '').split('/')[0]
+    const activeLabel = adminGroups.flatMap(g => g.items).find(i => i.path === activeSub)?.label
+    useDocumentTitle(activeLabel ? `${activeLabel} · Admin` : 'Admin')
 
     // Permission gate per admin sub-item, driven by the centralised nav
     // catalogue served from the backend (seeded by bundled defaults).

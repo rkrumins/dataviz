@@ -2,8 +2,10 @@ import { Outlet, Link } from 'react-router-dom'
 import { BookOpen, ArrowLeft, Sun, Moon } from 'lucide-react'
 import { DocsSidebar } from '@/components/docs/DocsSidebar'
 import { usePreferencesStore } from '@/store/preferences'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function DocsPage() {
+  useDocumentTitle('Docs')
   const { setTheme } = usePreferencesStore()
   const isDark = document.documentElement.classList.contains('dark')
 

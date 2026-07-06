@@ -2,8 +2,10 @@
  * 404 page for unmatched routes.
  */
 import { Link } from 'react-router-dom'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function NotFoundPage() {
+  useDocumentTitle('Page not found')
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-canvas">
       <div className="flex flex-col items-center gap-4 max-w-md text-center">

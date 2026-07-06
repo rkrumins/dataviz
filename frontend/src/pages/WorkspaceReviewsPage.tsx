@@ -7,11 +7,14 @@ import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { GitPullRequestArrow, ArrowLeft } from 'lucide-react'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { WorkspaceReviewsInbox } from '@/features/reviews/components/WorkspaceReviewsInbox'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function WorkspaceReviewsPage() {
   const { wsId } = useParams<{ wsId: string }>()
   const [searchParams] = useSearchParams()
   const workspaceName = useWorkspacesStore((s) => s.workspaces.find((w) => w.id === wsId)?.name)
+
+  useDocumentTitle(workspaceName ? `Reviews · ${workspaceName}` : 'Reviews')
 
   if (!wsId) return null
 

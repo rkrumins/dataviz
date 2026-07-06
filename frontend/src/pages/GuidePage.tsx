@@ -2,8 +2,10 @@ import { Outlet, Link } from 'react-router-dom'
 import { Sparkles, ArrowLeft, Sun, Moon, BookOpen } from 'lucide-react'
 import { GuideSidebar } from '@/components/guide/GuideSidebar'
 import { usePreferencesStore } from '@/store/preferences'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function GuidePage() {
+  useDocumentTitle('User Guide')
   const { setTheme } = usePreferencesStore()
   const isDark = document.documentElement.classList.contains('dark')
 

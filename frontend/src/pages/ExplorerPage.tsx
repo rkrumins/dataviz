@@ -46,6 +46,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useToast } from '@/components/ui/toast'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ function parseSearchParams(params: URLSearchParams) {
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export function ExplorerPage() {
+  useDocumentTitle('Explorer')
   const [searchParams, setSearchParams] = useSearchParams()
   const parsed = parseSearchParams(searchParams)
   const currentUser = useAuthStore(s => s.user)

@@ -11,6 +11,7 @@ import {
 } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function WorkspaceViewsManager() {
   const { workspaceId } = useParams<{ workspaceId: string }>()
@@ -22,6 +23,8 @@ export function WorkspaceViewsManager() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
   const workspace = workspaces.find(ws => ws.id === workspaceId)
+
+  useDocumentTitle(workspace ? `${workspace.name} · Views` : 'Views')
 
   // Set workspace as active
   useEffect(() => {

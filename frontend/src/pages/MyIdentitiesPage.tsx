@@ -18,6 +18,7 @@ import {
     type SsoProviderSummary,
     type UserIdentity,
 } from '@/services/authService'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 interface ErrorState {
     detail: string
@@ -46,6 +47,8 @@ export function MyIdentitiesPage() {
     useEffect(() => {
         void refresh()
     }, [refresh])
+
+    useDocumentTitle('My Identities')
 
     if (data === null && error === null) {
         return (
