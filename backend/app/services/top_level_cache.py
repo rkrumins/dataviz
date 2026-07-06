@@ -74,7 +74,12 @@ def build_top_level_payload(result: TopLevelNodesResult, *, stats: dict, digest:
     ``truncated`` forced True — a single warning is logged."""
     fingerprint = {field: stats.get(field) for field in _FINGERPRINT_FIELDS}
     truncated = bool(result.has_more or len(result.nodes) < result.total_count)
-    nodes = [n.model_dump(by_alias=True, mode="json") for n in result.nodes]
+    # try_serve_top_level keyset-slices this window assuming displayName-ASC;
+    # enforce that invariant where the payload is built rather than trusting the
+    # provider's ordering (defense-in-depth against the FalkorDB aggregating
+    # ORDER-BY quirk). Same key the serve path compares the cursor on.
+    ordered = sorted(result.nodes, key=lambda n: n.display_name or "")
+    nodes = [n.model_dump(by_alias=True, mode="json") for n in ordered]
 
     payload: Dict[str, Any] = {
         "v": 1,

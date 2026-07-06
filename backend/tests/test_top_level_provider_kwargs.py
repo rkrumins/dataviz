@@ -69,6 +69,54 @@ async def test_query_timeout_override_propagates_to_both_queries(monkeypatch):
     assert calls[1][2] == 99
 
 
+# ── Provider-level: ordering defense against the FalkorDB aggregating
+#    ORDER-BY quirk (page rows arrive scrambled) ───────────────────────
+
+def _scrambled_ro_query(rows, total):
+    """Page query returns ``rows`` verbatim (deliberately NOT sorted, as
+    FalkorDB does across an aggregating RETURN); the count query returns
+    ``total``. Distinguished by ``count(n)`` which only the count query uses."""
+    async def _ro_query(cypher, params=None, **kw):
+        if "count(n)" in cypher:
+            return _Result([[total]])
+        return _Result(rows)
+    return _ro_query
+
+
+@pytest.mark.asyncio
+async def test_scrambled_page_rows_sorted_and_cursor_is_page_max(monkeypatch):
+    p = _make_provider()
+    p._resolved_containment_types = {"HAS"}  # aggregating include_child_count branch
+    calls = []
+    scrambled = [
+        [{"urn": "urn:3", "entityType": "layer", "displayName": "Web Analytics"}, 5],
+        [{"urn": "urn:1", "entityType": "layer", "displayName": "Alpha"}, 1],
+        [{"urn": "urn:4", "entityType": "layer", "displayName": "Mango"}, 3],
+        [{"urn": "urn:2", "entityType": "layer", "displayName": "Beta"}, 2],
+    ]
+
+    async def _ro_query(cypher, params=None, **kw):
+        calls.append(cypher)
+        return await _scrambled_ro_query(scrambled, 4)(cypher, params, **kw)
+
+    monkeypatch.setattr(p, "_ro_query", _ro_query)
+    result = await p.get_top_level_or_orphan_nodes(
+        root_entity_types=["layer"], limit=4, include_child_count=True,
+    )
+
+    names = [n.display_name for n in result.nodes]
+    assert names == ["Alpha", "Beta", "Mango", "Web Analytics"]
+    # next_cursor is the page maximum → keyset pagination never skips/overlaps.
+    assert result.next_cursor == "Web Analytics"
+    assert result.next_cursor == max(names)
+    # childCount survives the reorder (attached per-node, order-independent).
+    by_name = {n.display_name: n.child_count for n in result.nodes}
+    assert by_name["Alpha"] == 1 and by_name["Web Analytics"] == 5
+    # The Cypher fix: aggregation is re-projected through a WITH before ORDER BY.
+    page_cypher = next(c for c in calls if "OPTIONAL MATCH" in c)
+    assert "WITH n, count(child) as childCount ORDER BY toString(n.displayName)" in page_cypher
+
+
 # ── Provider-level: known_total_count skips the count query ────────
 
 @pytest.mark.asyncio

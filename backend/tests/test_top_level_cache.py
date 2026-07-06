@@ -201,6 +201,46 @@ def test_build_payload_truncated_false_when_complete():
     assert json.loads(serialized)["truncated"] is False
 
 
+def test_build_payload_sorts_unsorted_nodes():
+    # Provider may hand back scrambled rows (FalkorDB aggregating ORDER-BY
+    # quirk); the payload must still serialize displayName-ASC because the
+    # serve path keyset-slices assuming that order.
+    nodes = [
+        GraphNode(urn="urn:3", entityType="Table", displayName="Gamma"),
+        GraphNode(urn="urn:1", entityType="Table", displayName="Alpha"),
+        GraphNode(urn="urn:2", entityType="Table", displayName="Beta"),
+    ]
+    stats = {"nodeCount": 3, "edgeCount": 0, "entityTypeCounts": {}, "edgeTypeCounts": {}}
+    serialized = top_level_cache.build_top_level_payload(_result(nodes, 3, False), stats=stats, digest="d1")
+    payload = json.loads(serialized)
+    assert [n["displayName"] for n in payload["nodes"]] == ["Alpha", "Beta", "Gamma"]
+
+
+@pytest.mark.asyncio
+async def test_build_payload_round_trip_paginates_without_overlap(monkeypatch):
+    # Scrambled provider window → build sorts → serve walks every node once.
+    names_scrambled = ["Gamma", "Alpha", "Epsilon", "Beta", "Delta"]
+    nodes = [GraphNode(urn=f"urn:{n}", entityType="Table", displayName=n) for n in names_scrambled]
+    stats = {"nodeCount": 200_000, "edgeCount": 0, "entityTypeCounts": {}, "edgeTypeCounts": {}}
+    serialized = top_level_cache.build_top_level_payload(_result(nodes, 5, False), stats=stats, digest=DIGEST)
+    row = _FakeStatsRow(top_level_nodes=serialized, top_level_updated_at=_fresh_ts())
+    _patch(monkeypatch, row=row)
+
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):  # loop guard
+        result, _ = await top_level_cache.try_serve_top_level(
+            session=object(), engine=_engine(), ds_id="ds1", ws_id="ws1", limit=2, cursor=cursor,
+        )
+        seen.extend(n.display_name for n in result.nodes)
+        if not result.has_more:
+            break
+        cursor = result.next_cursor
+
+    assert seen == ["Alpha", "Beta", "Delta", "Epsilon", "Gamma"]
+    assert len(seen) == len(set(seen))  # no page overlap
+
+
 def test_build_payload_byte_cap_truncates_and_logs_warning(monkeypatch, caplog):
     monkeypatch.setattr(top_level_cache, "_MAX_PAYLOAD_BYTES", 200)
     nodes = [

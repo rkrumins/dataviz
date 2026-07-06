@@ -2363,7 +2363,14 @@ class FalkorDBProvider(GraphDataProvider):
                 _build_match(page_filters)
                 + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
-                + " RETURN n, count(child) as childCount"
+                # Re-project through a non-aggregating WITH before ORDER BY:
+                # FalkorDB discards an ORDER BY that sits directly on an
+                # aggregating RETURN (and also a trailing RETURN ... ORDER BY),
+                # so the pre-aggregation window order is lost. Materializing the
+                # count into a WITH first, then ordering that WITH, restores the
+                # displayName-ASC output the keyset cursor depends on.
+                + " WITH n, count(child) as childCount ORDER BY toString(n.displayName) ASC"
+                + " RETURN n, childCount"
             )
         else:
             page_cypher = (
@@ -2402,6 +2409,13 @@ class FalkorDBProvider(GraphDataProvider):
                 else:
                     orphan_count += 1
                 nodes.append(node)
+
+        # Defense-in-depth: guarantee displayName-ASC output even if the engine
+        # reorders across the aggregating RETURN, so next_cursor is always the
+        # page maximum and keyset pagination never overlaps/skips. Uses the same
+        # key the cursor compares on. Classification/childCount are already
+        # attached above and are order-independent.
+        nodes.sort(key=lambda node: node.display_name or "")
 
         has_more = len(nodes) >= int(limit)
         next_cursor = nodes[-1].display_name if (has_more and nodes) else None
