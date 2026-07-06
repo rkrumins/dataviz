@@ -51,18 +51,26 @@ describe('stagedChangesToOps', () => {
     ])
   })
 
-  it('carries an explicit urn + the FULL node snapshot into the create payload (restore — no data loss)', () => {
+  it('carries an explicit urn + the ENTIRE node snapshot into the create payload (restore — no data loss)', () => {
     const ops = stagedChangesToOps([
       sc({ type: 'create_entity', targetUrn: 'urn:synodic:manual:table:abc', after: {
         entityType: 'Table', displayName: 'X', urn: 'urn:synodic:manual:table:abc',
         qualifiedName: 'schema.X', sourceSystem: 'manual', layerAssignment: 'warehouse', description: 'd',
+        childCount: 3, lastSyncedAt: '2026-07-05T20:46:13', tags: [], properties: {},
+        // client-only containment hints must NOT reach the node payload
+        parentUrn: 'urn:staged:p', containmentEdgeType: 'CONTAINS', parentLabel: 'P',
       } }),
     ])
-    // urn → resurrect; qualifiedName/sourceSystem/layerAssignment/description preserved (were being lost)
-    expect(ops[0]).toEqual({ op: 'create', kind: 'node', ref: 'urn:synodic:manual:table:abc', payload: {
+    const nodeOp = ops.find((o) => o.kind === 'node')!
+    // urn → resurrect; the WHOLE snapshot preserved (childCount + lastSyncedAt included now)…
+    expect(nodeOp.payload).toEqual({
       entityType: 'Table', displayName: 'X', urn: 'urn:synodic:manual:table:abc',
       qualifiedName: 'schema.X', sourceSystem: 'manual', layerAssignment: 'warehouse', description: 'd',
-    } })
+      childCount: 3, lastSyncedAt: '2026-07-05T20:46:13', tags: [], properties: {},
+    })
+    // …and the containment hints stayed out of the node payload (they drive the edge instead).
+    expect(nodeOp.payload).not.toHaveProperty('parentUrn')
+    expect(nodeOp.payload).not.toHaveProperty('containmentEdgeType')
   })
 
   it('maps a nested create_entity to a node create op + a containment edge op (parent by ref — backend resolves)', () => {

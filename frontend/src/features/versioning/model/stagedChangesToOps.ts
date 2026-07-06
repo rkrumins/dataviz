@@ -124,17 +124,16 @@ export function stagedChangesToOps(
         // urn OR an existing real urn); the backend resolves it in the same batch.
         const after = asObj(c.after)
         const ref = c.targetUrn ?? c.targetId
-        const payload: Record<string, unknown> = { entityType: after.entityType, displayName: after.displayName }
-        // Carry every user-authored node field that's present. A fresh create only sets the basics; a
-        // Restore replays the deleted entity's FULL snapshot, so this is what preserves qualifiedName,
-        // sourceSystem, layerAssignment, description, etc. (server-managed childCount/lastSyncedAt are
-        // intentionally NOT sent — the backend recomputes them).
-        for (const f of ['qualifiedName', 'description', 'sourceSystem', 'layerAssignment', 'businessLabel', 'technicalLabel', 'tags', 'properties'] as const) {
-          if (after[f] !== undefined) payload[f] = after[f]
+        // The node payload is EVERY field on `after` except the client-only containment hints (parent
+        // linkage is expressed via the containment edge below, never stored on the node). No per-field
+        // allow-list to drift: a fresh create carries just the basics it set; a Restore replays the
+        // deleted entity's ENTIRE snapshot, so nothing is dropped. An explicit `urn` ⇒ resurrect that
+        // entity (create-over-tombstone) instead of minting a new one.
+        const CONTAINMENT_HINT_FIELDS = new Set(['parentUrn', 'containmentEdgeType', 'parentLabel'])
+        const payload: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(after)) {
+          if (v !== undefined && !CONTAINMENT_HINT_FIELDS.has(k)) payload[k] = v
         }
-        // An explicit urn means "resurrect THIS entity" (Restore of a committed deletion) — the backend
-        // uses it as the entity_id and creates over the tombstone, rather than minting a fresh urn.
-        if (typeof after.urn === 'string' && after.urn) payload.urn = after.urn
         ops.push({ op: 'create', kind: 'node', ref, payload })
         // Containment edge to the parent. The edge TYPE is whatever the ONTOLOGY resolved at staging
         // (carried on `after.containmentEdgeType` — see `containmentEdgeTypeFor` / `useContainmentEdgeTypes`),
