@@ -118,6 +118,60 @@ class TestParseReferenceLayout:
             "layerId": "l1", "logicalNodeId": "ln1", "inheritsChildren": True, "assignedBy": "rule",
         }
 
+    def test_converts_exact_urn_rule_on_nested_child_logical_node(self):
+        config = {
+            "layout": {"referenceLayout": {"layers": [{
+                "id": "l1", "name": "L", "entityTypes": [], "order": 0,
+                "logicalNodes": [{
+                    "id": "ln1", "name": "LN", "type": "container",
+                    "children": [{
+                        "id": "ln1a", "name": "Child", "type": "container",
+                        "children": [{
+                            "id": "ln1a-i", "name": "Grandchild", "type": "group",
+                            "rules": [{"id": "r1", "urnPattern": "urn:nested:1"}],
+                        }],
+                    }],
+                }],
+            }]}}
+        }
+        result = parse_reference_layout(config)
+        assert result.assignments["urn:nested:1"] == {
+            "layerId": "l1", "logicalNodeId": "ln1a-i", "inheritsChildren": True, "assignedBy": "rule",
+        }
+
+    def test_glob_rule_on_nested_child_logical_node_not_converted(self):
+        config = {
+            "layout": {"referenceLayout": {"layers": [{
+                "id": "l1", "name": "L", "entityTypes": [], "order": 0,
+                "logicalNodes": [{
+                    "id": "ln1", "name": "LN", "type": "container",
+                    "children": [{
+                        "id": "ln1a", "name": "Child", "type": "container",
+                        "rules": [{"id": "r1", "urnPattern": "urn:nested:*"}],
+                    }],
+                }],
+            }]}}
+        }
+        result = parse_reference_layout(config)
+        assert result.assignments == {}
+
+    def test_collision_parent_rule_beats_nested_child_rule(self):
+        config = {
+            "layout": {"referenceLayout": {"layers": [{
+                "id": "l1", "name": "L", "entityTypes": [], "order": 0,
+                "logicalNodes": [{
+                    "id": "ln-parent", "name": "Parent", "type": "container",
+                    "rules": [{"id": "r1", "urnPattern": "urn:shared"}],
+                    "children": [{
+                        "id": "ln-child", "name": "Child", "type": "container",
+                        "rules": [{"id": "r2", "urnPattern": "urn:shared"}],
+                    }],
+                }],
+            }]}}
+        }
+        result = parse_reference_layout(config)
+        assert result.assignments["urn:shared"]["logicalNodeId"] == "ln-parent"
+
     def test_glob_rules_not_converted(self):
         config = {
             "layout": {"referenceLayout": {"layers": [{

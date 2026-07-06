@@ -32,6 +32,34 @@ def _is_exact_urn_pattern(pattern: Any) -> bool:
     return isinstance(pattern, str) and bool(pattern) and "*" not in pattern and "?" not in pattern
 
 
+def _collect_logical_node_rule_assignments(
+    nodes: Any, layer_id: Any, assignments: dict[str, dict],
+) -> None:
+    """Depth-first, pre-order walk of a logicalNodes tree (arbitrary nesting
+    via `children`): converts each node's own exact-urn rules before
+    descending into its children, so a collision between a parent's rule
+    and a descendant's rule leaves the parent's entry in place
+    (first-claimed wins). Mirrors collectLogicalNodeRuleAssignments in
+    frontend/src/utils/referenceLayout.ts.
+    """
+    for node in (nodes if isinstance(nodes, list) else []):
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        for rule in node.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            pattern = rule.get("urnPattern")
+            if _is_exact_urn_pattern(pattern) and pattern not in assignments:
+                assignments[pattern] = {
+                    "layerId": layer_id,
+                    "logicalNodeId": node_id,
+                    "inheritsChildren": True,
+                    "assignedBy": "rule",
+                }
+        _collect_logical_node_rule_assignments(node.get("children"), layer_id, assignments)
+
+
 def _resolve_raw_layout(config: Optional[dict]) -> dict:
     """Find the stored referenceLayout dict inside a full view config."""
     if not isinstance(config, dict):
@@ -52,9 +80,11 @@ def _normalize(raw_layout: dict) -> ReferenceLayout:
     1. existing top-level `assignments` entries
     2. per-layer `entityAssignments[]` (keyed by urn, falling back to
        entityId; priority dropped)
-    3. exact-urn (non-glob) layer/logicalNode `rules[]`
+    3. exact-urn (non-glob) layer/logicalNode `rules[]` — logicalNodes are
+       walked depth-first, pre-order (a node's own rules before its
+       `children`, at any nesting depth), layers in list order.
 
-    Glob rules are left in place, untouched, on the returned layer.
+    Glob rules are left in place, untouched, wherever they sit.
     `entityAssignments` is stripped from returned layers — it is legacy
     input only, never canonical output.
     """
@@ -100,21 +130,7 @@ def _normalize(raw_layout: dict) -> ReferenceLayout:
                     "assignedBy": "rule",
                 }
 
-        for node in raw_layer.get("logicalNodes") or []:
-            if not isinstance(node, dict):
-                continue
-            node_id = node.get("id")
-            for rule in node.get("rules") or []:
-                if not isinstance(rule, dict):
-                    continue
-                pattern = rule.get("urnPattern")
-                if _is_exact_urn_pattern(pattern) and pattern not in assignments:
-                    assignments[pattern] = {
-                        "layerId": layer_id,
-                        "logicalNodeId": node_id,
-                        "inheritsChildren": True,
-                        "assignedBy": "rule",
-                    }
+        _collect_logical_node_rule_assignments(raw_layer.get("logicalNodes"), layer_id, assignments)
 
         layers.append(layer)
 

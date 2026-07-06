@@ -108,6 +108,63 @@ describe('normalizeReferenceLayout', () => {
         })
     })
 
+    it('converts an exact-urn rule on a nested child logicalNode (depth >= 2)', () => {
+        const raw = {
+            layers: [{
+                id: 'l1', name: 'L', entityTypes: [], order: 0,
+                logicalNodes: [{
+                    id: 'ln1', name: 'LN', type: 'container',
+                    children: [{
+                        id: 'ln1a', name: 'Child', type: 'container',
+                        children: [{
+                            id: 'ln1a-i', name: 'Grandchild', type: 'group',
+                            rules: [{ id: 'r1', urnPattern: 'urn:nested:1' }],
+                        }],
+                    }],
+                }],
+            }],
+        }
+        const result = normalizeReferenceLayout(raw)
+        expect(result.assignments['urn:nested:1']).toEqual({
+            layerId: 'l1', logicalNodeId: 'ln1a-i', inheritsChildren: true, assignedBy: 'rule',
+        })
+    })
+
+    it('does NOT convert a glob rule on a nested child logicalNode', () => {
+        const raw = {
+            layers: [{
+                id: 'l1', name: 'L', entityTypes: [], order: 0,
+                logicalNodes: [{
+                    id: 'ln1', name: 'LN', type: 'container',
+                    children: [{
+                        id: 'ln1a', name: 'Child', type: 'container',
+                        rules: [{ id: 'r1', urnPattern: 'urn:nested:*' }],
+                    }],
+                }],
+            }],
+        }
+        const result = normalizeReferenceLayout(raw)
+        expect(result.assignments).toEqual({})
+    })
+
+    it('collision between a parent rule and a nested child rule: parent (first-traversed) wins', () => {
+        const raw = {
+            layers: [{
+                id: 'l1', name: 'L', entityTypes: [], order: 0,
+                logicalNodes: [{
+                    id: 'ln-parent', name: 'Parent', type: 'container',
+                    rules: [{ id: 'r1', urnPattern: 'urn:shared' }],
+                    children: [{
+                        id: 'ln-child', name: 'Child', type: 'container',
+                        rules: [{ id: 'r2', urnPattern: 'urn:shared' }],
+                    }],
+                }],
+            }],
+        }
+        const result = normalizeReferenceLayout(raw)
+        expect(result.assignments['urn:shared'].logicalNodeId).toBe('ln-parent')
+    })
+
     it('does NOT convert glob rules (leaves them in place untouched)', () => {
         const raw = {
             layers: [{
@@ -179,5 +236,11 @@ describe('deriveEntityScope', () => {
 
     it('derives all when assignments are empty and no explicit scope is set', () => {
         expect(deriveEntityScope(undefined, emptyLayout)).toBe('all')
+    })
+
+    it('falls through to derivation when entityScope is a garbage value', () => {
+        const content = { entityScope: 'bogus' } as unknown as ViewContentConfig
+        expect(deriveEntityScope(content, curatedLayout)).toBe('curated')
+        expect(deriveEntityScope(content, emptyLayout)).toBe('all')
     })
 })
