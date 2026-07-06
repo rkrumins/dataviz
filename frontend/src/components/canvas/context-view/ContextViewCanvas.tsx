@@ -93,7 +93,7 @@ import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
-import { getView, updateView } from '@/services/viewApiService'
+import { getView, updateView, type View } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -1324,34 +1324,74 @@ export function ContextViewCanvas({
     [activeView],
   )
 
+  // Stage a view-layout change so it (a) shows in Review & Save as a "View layout" entry, (b) is
+  // undoable via the shared Undo/Redo (undo runs `discard` → persistLayers(before)), while staying
+  // DECOUPLED from the data source — `layer_config` has no apply hook, so it never becomes a graph op
+  // (stagedChangesToOps ignores it). persistLayers already ran, so the column is live; discard reverts.
+  const stageLayerChange = useCallback((
+    targetId: string,
+    before: ViewLayerConfig[],
+    after: ViewLayerConfig[],
+    action: 'add' | 'rename' | 'delete' | 'reorder',
+    summary: string,
+  ) => {
+    useStagedChangesStore.getState().stage({
+      type: 'layer_config',
+      targetId,
+      before: { layers: before },
+      after: { layers: after, action },
+      summary,
+      discard: () => persistLayers(before),
+      reapply: () => persistLayers(after),
+    })
+  }, [persistLayers])
+
   const addLayer = useCallback((name: string) => {
-    const layers = currentLayers()
+    const prev = currentLayers()
     const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
-    persistLayers(layerOps.appendLayer(layers, {
-      id: `layer-${Date.now()}`,
+    const id = `layer-${Date.now()}`
+    const next = layerOps.appendLayer(prev, {
+      id,
       name,
       description: '',
       icon: 'Layers',
-      color: palette[layers.length % palette.length],
+      color: palette[prev.length % palette.length],
       entityTypes: [],
-      order: layers.length,
-    }))
-  }, [currentLayers, persistLayers])
+      order: prev.length,
+    })
+    persistLayers(next)
+    stageLayerChange(`layer:${id}`, prev, next, 'add', `Added layer “${name}”`)
+  }, [currentLayers, persistLayers, stageLayerChange])
 
   const renameLayer = useCallback((id: string, name: string) => {
     const trimmed = name.trim()
-    if (trimmed) persistLayers(layerOps.renameLayer(currentLayers(), id, trimmed))
-  }, [currentLayers, persistLayers])
+    const prev = currentLayers()
+    const old = prev.find((l) => l.id === id)
+    if (!trimmed || !old || old.name === trimmed) return
+    const next = layerOps.renameLayer(prev, id, trimmed)
+    persistLayers(next)
+    stageLayerChange(`layer:${id}`, prev, next, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
+  }, [currentLayers, persistLayers, stageLayerChange])
 
   const deleteLayer = useCallback((id: string) => {
-    persistLayers(layerOps.removeLayer(currentLayers(), id))
-  }, [currentLayers, persistLayers])
+    const prev = currentLayers()
+    const target = prev.find((l) => l.id === id)
+    if (!target) return
+    const next = layerOps.removeLayer(prev, id)
+    persistLayers(next)
+    stageLayerChange(`layer:${id}`, prev, next, 'delete', `Deleted layer “${target.name}”`)
+  }, [currentLayers, persistLayers, stageLayerChange])
 
   // Reorder a layer column (drag). Entities keep their layerAssignment, so they render wherever the
   // layer now sits — nodes and their edges move with it for free.
   const reorderLayer = useCallback((draggedId: string, targetId: string) => {
-    persistLayers(layerOps.reorderLayer(currentLayers(), draggedId, targetId))
-  }, [currentLayers, persistLayers])
+    const prev = currentLayers()
+    const dragged = prev.find((l) => l.id === draggedId)
+    const next = layerOps.reorderLayer(prev, draggedId, targetId)
+    if (!dragged || next === prev) return
+    persistLayers(next)
+    stageLayerChange(`layer:${draggedId}`, prev, next, 'reorder', `Reordered layer “${dragged.name}”`)
+  }, [currentLayers, persistLayers, stageLayerChange])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -2454,6 +2494,9 @@ export function ContextViewCanvas({
           const bs = useBranchStore.getState()
           if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
             try {
+              // Layer edits are VIEW presentation, not graph data — captured here before the staged
+              // list is cleared so we can persist them to the canonical per-view home below.
+              const hadLayerChanges = stagedChangeList.some(c => c.type === 'layer_config')
               await saveStagedChangesToDraft(stagedChangeList, {
                 wsId: bs.workspaceId ?? scopeWsId,
                 dataSourceId: bs.dataSourceId,
@@ -2472,7 +2515,23 @@ export function ContextViewCanvas({
               // history. Invalidate the whole versioning namespace so saved changes appear at once
               // (a save is user-initiated and infrequent, so the broad refetch is fine).
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-              await saveToBackend(scopeWsId)   // view/blueprint config (layers) — not graph entities
+              await saveToBackend(scopeWsId)   // context-model blueprint (assignments) — not layers, not graph
+              // Persist layer structure to the CANONICAL per-view home (views table `config.layout`).
+              // This is the single store the canvas AND the View Wizard both read via getView, so what
+              // you edit here shows up everywhere. The backend replaces `config` wholesale, so we send
+              // the FULL config = current raw config + the edited layout. Decoupled from the data source:
+              // the commit above carried zero layer ops; context-models stay pure templates.
+              if (hadLayerChanges) {
+                const view = useSchemaStore.getState().getActiveView()
+                if (view?.id) {
+                  const cached = queryClient.getQueryData<View>(['view', view.id])
+                  const raw = cached ?? await getView(view.id)
+                  await updateView(view.id, {
+                    config: { ...((raw?.config as Record<string, unknown>) ?? {}), layout: view.layout },
+                  })
+                  queryClient.invalidateQueries({ queryKey: ['view', view.id] })
+                }
+              }
               closeStagedChangesPanel()
               showToast('success', 'Saved to draft.')
             } catch (e) {

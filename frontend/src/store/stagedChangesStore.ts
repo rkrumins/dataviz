@@ -36,6 +36,11 @@ export type StagedChangeType =
   | 'edit_edge'
   | 'delete_edge'
   | 'reverse_edge'
+  // View-layout change (add/rename/delete/reorder a layer). Decoupled from the data source: it has
+  // NO apply hook, so applyAll drops it (local-only) and saveStagedChangesToDraft/stagedChangesToOps
+  // never turn it into a /graph/changes op. It persists to the VIEW via saveToBackend, and is
+  // reverted by its own `discard`. `after` carries `{ layers, action }`.
+  | 'layer_config'
 
 /** A single user-staged change awaiting Save. */
 export interface StagedChange {
@@ -55,6 +60,9 @@ export interface StagedChange {
   apply?: (ctx: ApplyContext) => Promise<void>
   /** Per-change discard hook — restores `before` state in whatever store owns it. */
   discard?: () => void
+  /** Per-change re-apply hook — re-applies `after` state on REDO (the inverse of `discard`). Optional:
+   *  change types without one just re-add the record on redo (legacy behavior). */
+  reapply?: () => void
   timestamp: number
   /** Set on apply failure so retry can target only failing changes. */
   error?: string
@@ -135,6 +143,7 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   reverse_edge: 3,
   assign_layer: 3,
   move_to_layer: 3,
+  layer_config: 3,
   create_entity: 4,
   create_edge: 5,
 }
@@ -329,12 +338,14 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const { redoStack } = get()
     if (redoStack.length === 0) return false
     const change = redoStack[redoStack.length - 1]
-    // Re-staging requires the apply hook to be intact, which it is — but the
-    // change's "before" state may no longer match the canvas (the user might
-    // have edited around it). We push it back without re-running side effects;
-    // the user is responsible for re-applying any visual mutations through
-    // the same UI path. In practice this is safe for delete/rename which keep
-    // their state in `before` and use it on apply.
+    // If the change carries a `reapply` hook (e.g. layer_config re-applies its `after` layers), run it
+    // so redo restores the visual mutation, not just the panel row. Types without one are re-added
+    // record-only (legacy — the user re-applies via the UI); this stays backward-compatible.
+    try {
+      change.reapply?.()
+    } catch (err) {
+      console.error('[StagedChanges] redo reapply hook failed', err)
+    }
     set((s) => ({
       changes: [...s.changes, change],
       redoStack: s.redoStack.slice(0, -1),
@@ -416,6 +427,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       edit_edge: 0,
       delete_edge: 0,
       reverse_edge: 0,
+      layer_config: 0,
     }
     get().changes.forEach((c) => {
       counts[c.type]++
