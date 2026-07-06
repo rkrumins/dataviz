@@ -765,6 +765,10 @@ function ViewWizardBody({
     // same data source instead of provisioning a duplicate.
     const provisionRef = useRef<BlankGraphResult | null>(null)
     const [provisionError, setProvisionError] = useState<string | null>(null)
+    // The just-created view's id — held so that if createView succeeds but the
+    // follow-up updateViewLayout fails, a retry re-drives ONLY the layout write
+    // against this id instead of minting a second view.
+    const createdViewIdRef = useRef<string | null>(null)
 
     // Create-mode initial form: layers start empty for both existing and blank
     // scopes — blank models choose their starting layers via a template on Layout.
@@ -990,42 +994,57 @@ function ViewWizardBody({
                     // been deleted" overlay.
                     await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
                 }
-                const result = await viewService.createView({
-                    name: formData.name,
-                    description: formData.description,
-                    icon: formData.icon,
-                    layoutType: formData.layoutType,
-                    layers: normalizedLayout.layers,
-                    visibleEntityTypes: formData.visibleEntityTypes,
-                    visibleRelationshipTypes: formData.visibleRelationshipTypes,
-                    fieldFilters,
-                    workspaceId: resolvedWorkspaceId,
-                    dataSourceId,
-                    visibility: formData.visibility,
-                    tags: formData.tags.length > 0 ? formData.tags : undefined,
-                })
-                if (result.success && result.data) {
-                    // The layout endpoint is the single writer of referenceLayout — write
-                    // the full layers+assignments (a new view has no prior layout to race).
-                    const entityScope = deriveEntityScope(undefined, normalizedLayout)
-                    try {
-                        const layoutResult = await updateViewLayout(result.data.id, {
-                            referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
-                            entityScope,
-                        })
-                        const savedView = viewToViewConfig(layoutResult)
-                        useSchemaStore.getState().addOrUpdateView(savedView)
-                        onComplete?.(savedView)
-                        onClose()
-                        navigate(`/views/${result.data.id}`)
-                    } catch (err) {
-                        // The view itself was created; only its layout failed to save. Leave
-                        // the modal open (isSubmitting resets below) so the user can retry
-                        // rather than silently losing their layer/assignment edits.
-                        console.error('[ViewWizard] updateViewLayout failed after create', err)
-                    }
+                // Reuse a successful create's id on retry — it's the layout write that's
+                // being retried here, not the view itself, so a retry must never call
+                // createView again (that would mint a second, half-baked view).
+                let createdViewId = createdViewIdRef.current
+                if (!createdViewId) {
+                    const result = await viewService.createView({
+                        name: formData.name,
+                        description: formData.description,
+                        icon: formData.icon,
+                        layoutType: formData.layoutType,
+                        layers: normalizedLayout.layers,
+                        visibleEntityTypes: formData.visibleEntityTypes,
+                        visibleRelationshipTypes: formData.visibleRelationshipTypes,
+                        fieldFilters,
+                        workspaceId: resolvedWorkspaceId,
+                        dataSourceId,
+                        visibility: formData.visibility,
+                        tags: formData.tags.length > 0 ? formData.tags : undefined,
+                    })
+                    if (!result.success || !result.data) return
+                    createdViewId = result.data.id
+                    createdViewIdRef.current = createdViewId
+                }
+
+                // The layout endpoint is the single writer of referenceLayout — write
+                // the full layers+assignments (a new view has no prior layout to race).
+                const entityScope = deriveEntityScope(undefined, normalizedLayout)
+                try {
+                    const layoutResult = await updateViewLayout(createdViewId, {
+                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                        entityScope,
+                    })
+                    const savedView = viewToViewConfig(layoutResult)
+                    useSchemaStore.getState().addOrUpdateView(savedView)
+                    onComplete?.(savedView)
+                    onClose()
+                    navigate(`/views/${createdViewId}`)
+                } catch (err) {
+                    // The view itself was created; only its layout failed to save. Leave
+                    // the modal open (isSubmitting resets below) so the user can retry —
+                    // createdViewIdRef makes that retry skip straight back to here.
+                    console.error('[ViewWizard] updateViewLayout failed after create', err)
                 }
             } else if (viewId) {
+                // Ordering dependency: buildViewConfig's `content` block never carries
+                // entityScope, so this updateView call's config PUT (base's referenceLayout
+                // is preserved, but content is rebuilt) transiently wipes content.entityScope
+                // — the immediately-following updateViewLayout call is what restores it. If
+                // that layout write fails (caught below), the view is left with entityScope
+                // wiped until a successful retry. Task 5/6 make scope explicit everywhere,
+                // closing this window; for now it's a narrow gap between two awaited calls.
                 const result = await viewService.updateView(viewId, {
                     name: formData.name,
                     description: formData.description,

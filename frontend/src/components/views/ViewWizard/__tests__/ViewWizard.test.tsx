@@ -6,6 +6,7 @@
  * Every step component is stubbed — this test exercises ViewWizard's OWN wiring
  * (edit-mode hydrate + submit), not the step UIs (covered by their own tests).
  */
+import { useEffect, useRef } from 'react'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -13,6 +14,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import type { View } from '@/services/viewApiService'
 
 const getViewMock = vi.fn()
+const createViewMock = vi.fn()
 const updateViewMock = vi.fn()
 const updateViewLayoutMock = vi.fn()
 
@@ -21,6 +23,7 @@ vi.mock('@/services/viewApiService', async (importOriginal) => {
   return {
     ...actual,
     getView: (...args: unknown[]) => getViewMock(...args),
+    createView: (...args: unknown[]) => createViewMock(...args),
     updateView: (...args: unknown[]) => updateViewMock(...args),
     updateViewLayout: (...args: unknown[]) => updateViewLayoutMock(...args),
   }
@@ -46,8 +49,31 @@ vi.mock('@/store/workspaces', () => {
 })
 
 // Every step is a black box for this test — only ViewWizard's own hydrate/submit
-// wiring is under test.
-vi.mock('../steps/BasicsStep', () => ({ BasicsStep: () => <div data-testid="basics-step" /> }))
+// wiring is under test. BasicsStep seeds name/visibleEntityTypes ONLY if still
+// blank (create-mode's fresh formData) once the initial render settles — the
+// seed is deferred a tick because ViewWizardBody's own "reset on open" effect
+// (mode==='create' -> setFormData(makeCreateFormData())) also fires on mount
+// and would otherwise stomp a same-tick seed. Reads formData via a ref (kept
+// current every render) rather than the effect's closure, so a slower edit-mode
+// hydrate that resolves before this fires is never clobbered.
+vi.mock('../steps/BasicsStep', () => ({
+  BasicsStep: ({ formData, updateFormData }: {
+    formData: { name: string }
+    updateFormData: (updates: Record<string, unknown>) => void
+  }) => {
+    const formDataRef = useRef(formData)
+    formDataRef.current = formData
+    useEffect(() => {
+      const t = setTimeout(() => {
+        if (!formDataRef.current.name) {
+          updateFormData({ name: 'New View', visibleEntityTypes: ['domain'] })
+        }
+      }, 0)
+      return () => clearTimeout(t)
+    }, [])
+    return <div data-testid="basics-step" />
+  },
+}))
 vi.mock('../steps/LayoutStep', () => ({ LayoutStep: () => <div data-testid="layout-step" /> }))
 vi.mock('../steps/EntitiesStep', () => ({ EntitiesStep: () => <div data-testid="entities-step" /> }))
 vi.mock('../steps/PreviewStep', () => ({ PreviewStep: () => <div data-testid="preview-step" /> }))
@@ -106,9 +132,13 @@ function renderWizard(view: View) {
   )
 }
 
-/** Click "Next" through every stubbed step to reach Preview (the last step). */
+/** Click "Next" through every stubbed step to reach Preview (the last step).
+ *  Waits for the button to be enabled first — canProceed may lag a render
+ *  behind an async hydrate (edit mode) or a mount effect (create mode's
+ *  BasicsStep seed). */
 async function goToPreview() {
   for (const step of ['layout-step', 'assignment-step', 'entities-step', 'preview-step']) {
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled())
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     await screen.findByTestId(step)
   }
@@ -234,5 +264,55 @@ describe('ViewWizard — submit (edit path)', () => {
     expect(onComplete).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument()
+  })
+})
+
+describe('ViewWizard — submit (create path) retry', () => {
+  it('a retry after updateViewLayout fails re-drives ONLY the layout write, never createView again', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    updateViewLayoutMock.mockRejectedValueOnce(new Error('layout save failed'))
+    const onComplete = vi.fn()
+    const onClose = vi.fn()
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={onClose}
+            onComplete={onComplete}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    // Phase A: confirm scope (initialWorkspaceId/initialDataSourceId pre-fill the picker).
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+
+    // First submit: createView succeeds, updateViewLayout fails.
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+    await waitFor(() => expect(createViewMock).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+
+    // Retry: must NOT call createView again (would mint a second view); must
+    // re-drive updateViewLayout against the SAME id captured from the first call.
+    updateViewLayoutMock.mockResolvedValueOnce(makeView(baseConfig({ layers: [], assignments: {} })))
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(2))
+    expect(createViewMock).toHaveBeenCalledTimes(1)
+    const [firstCallId] = updateViewLayoutMock.mock.calls[0]
+    const [secondCallId] = updateViewLayoutMock.mock.calls[1]
+    expect(secondCallId).toBe(firstCallId)
+    await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
