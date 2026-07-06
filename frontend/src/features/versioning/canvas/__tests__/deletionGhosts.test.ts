@@ -24,14 +24,22 @@ describe('deletionGhosts — nodes', () => {
     expect(g.data.isPending).toBeUndefined()
   })
 
-  it('adds ghosts for removed entities not on the canvas; not for live/optimistic-delete ones', () => {
+  it('ghosts off-canvas deletions AND converts a just-saved optimistic-delete node to a ghost (no refresh)', () => {
     const cs = buildChangeSet([
       removedNode('urn:gone', { displayName: 'Gone', entityType: 'T' }),
       removedNode('urn:optimistic', { displayName: 'O', entityType: 'T' }),
     ])
+    // urn:optimistic is the node the canvas keeps after delete+save (isPending:'delete') — now committed.
     const optimistic = { ...liveNode('urn:optimistic'), data: { urn: 'urn:optimistic', isPending: 'delete' } }
     const { nodesToAdd, nodesToRemove } = reconcileGhosts(cs, [optimistic], [], false, CONTAINS)
-    expect(nodesToAdd.map((n) => n.id)).toEqual(['urn:gone'])
+    expect(nodesToAdd.map((n) => n.id).sort()).toEqual(['urn:gone', 'urn:optimistic'])  // both become ghosts
+    expect(nodesToRemove).toEqual(['urn:optimistic'])   // its optimistic node is swapped out for the ghost
+  })
+
+  it('leaves a STAGED (uncommitted) delete as its optimistic node — only COMMITTED deletions ghost', () => {
+    const staged = { ...liveNode('urn:staged'), data: { urn: 'urn:staged', isPending: 'delete' } }
+    const { nodesToAdd, nodesToRemove } = reconcileGhosts(buildChangeSet([]), [staged], [], false, CONTAINS)
+    expect(nodesToAdd).toEqual([])
     expect(nodesToRemove).toEqual([])
   })
 

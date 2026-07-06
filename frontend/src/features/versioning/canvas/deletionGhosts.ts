@@ -43,6 +43,11 @@ export function isGhostEdge(e: EdgeLike): boolean {
   return (e.data as { isGhost?: unknown } | undefined)?.isGhost === true
 }
 
+/** An optimistic delete marker — the node the canvas keeps after you delete/save, before a reload. */
+function isPendingDelete(n: NodeLike): boolean {
+  return (n.data as { isPending?: unknown } | undefined)?.isPending === 'delete'
+}
+
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
 
 /** Build a read-only ghost canvas node from a committed `removed` node change's `before` snapshot. */
@@ -118,17 +123,30 @@ export function reconcileGhosts(
 
   const liveUrns = new Set<string>()
   const existingGhostNodes = new Set<string>()
-  for (const n of currentNodes) (isGhostNode(n) ? existingGhostNodes : liveUrns).add(n.id)
+  const pendingDeletes = new Set<string>()   // optimistic isPending:'delete' nodes still on the canvas
+  for (const n of currentNodes) {
+    if (isGhostNode(n)) existingGhostNodes.add(n.id)
+    else if (isPendingDelete(n)) pendingDeletes.add(n.id)
+    else liveUrns.add(n.id)
+  }
   const existingGhostEdges = new Set(currentEdges.filter(isGhostEdge).map((e) => e.id))
 
+  // Synthesize a ghost for every committed deletion not already live or ghosted. An optimistic
+  // `isPending:'delete'` node is NOT counted as "live": once its deletion is committed it CONVERTS to
+  // a ghost (its optimistic node is removed + re-synthesized), so a just-saved deletion becomes a
+  // read-only ghost with Restore immediately — no page refresh — and looks identical before/after reload.
   const nodesToAdd = removedNodes
     .filter((c) => !liveUrns.has(c.entityId) && !existingGhostNodes.has(c.entityId))
     .map(synthesizeGhostNode)
-  const nodesToRemove = [...existingGhostNodes].filter((u) => !desiredNodes.has(u))
+  const addedIds = new Set(nodesToAdd.map((n) => n.id))
+  const nodesToRemove = [
+    ...[...existingGhostNodes].filter((u) => !desiredNodes.has(u)),   // stale ghosts (merged / restored)
+    ...[...pendingDeletes].filter((u) => desiredNodes.has(u)),        // committed optimistic-delete → swap for a ghost
+  ]
 
   // Everything that will be on the canvas after this pass — the valid endpoint set for ghost edges.
-  const present = new Set<string>([...liveUrns, ...existingGhostNodes, ...nodesToAdd.map((n) => n.id)])
-  for (const u of nodesToRemove) present.delete(u)
+  const present = new Set<string>([...liveUrns, ...existingGhostNodes, ...pendingDeletes, ...addedIds])
+  for (const u of nodesToRemove) if (!addedIds.has(u)) present.delete(u)
 
   const edgesToAdd = removedEdges
     .filter((c) => !existingGhostEdges.has(c.entityId))
