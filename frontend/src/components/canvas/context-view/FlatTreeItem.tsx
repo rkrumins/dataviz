@@ -205,7 +205,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // be re-assigned between layers. Children live inside their parent's
   // containment scope; moving a column without its table would break the
   // ontology. Attach native events via ref (avoids type conflict).
-  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical
+  // A row being deleted (committed ghost or staged delete) is read-only — it must not be dragged to
+  // another layer. Restore it first if you want to move it.
+  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical && !isPendingDelete
   useEffect(() => {
     const el = itemRef.current
     if (!el) return

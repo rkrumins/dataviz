@@ -11,6 +11,7 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 
@@ -150,8 +151,11 @@ export const GenericNode = memo(function GenericNode({
   const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
   // Add-child affordance is ontology-gated: shown only when this type can
   // contain others. Resolves normally for isPending:'create' ghost nodes.
-  const canAddChild = (entityType?.hierarchy?.canContain?.length ?? 0) > 0
-  const canTrace = entityType?.behavior.traceable ?? false
+  // A deletion ghost is READ-ONLY: no add-child / trace toolbar (a deleted entity must not be
+  // mutated in place); its toolbar is just Restore.
+  const canAddChild = !isGhost && (entityType?.hierarchy?.canContain?.length ?? 0) > 0
+  const canTrace = !isGhost && (entityType?.behavior.traceable ?? false)
+  const restoreGhost = useRestoreGhost()
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
   // the canonical identifier; fall back to the React Flow node id
@@ -213,6 +217,25 @@ export const GenericNode = memo(function GenericNode({
               }}
             />
           )}
+        </NodeToolbar>
+      )}
+
+      {/* Ghost (committed deletion) toolbar — read-only entity, so the only action is to bring it
+          back. Restore stages a resurrect (create over the tombstone by its original urn). */}
+      {isGhost && !!selected && (
+        <NodeToolbar
+          isVisible
+          position={Position.Top}
+          className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
+        >
+          <ToolbarButton
+            icon="RotateCcw"
+            label="Restore"
+            onClick={(e) => {
+              e.stopPropagation()
+              restoreGhost(searchUrn)
+            }}
+          />
         </NodeToolbar>
       )}
 

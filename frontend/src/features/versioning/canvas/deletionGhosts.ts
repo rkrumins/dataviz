@@ -138,3 +138,102 @@ export function reconcileGhosts(
 
   return { nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove }
 }
+
+/** The staged `create_entity` input that RESTORES (resurrects) a committed deletion: it carries the
+ *  entity's ORIGINAL urn (→ create-over-tombstone on Save) + its `before` fields, and re-nests it
+ *  under its parent — but only when that parent is still LIVE (a still-deleted parent can't hold a
+ *  restored child; restore the parent first). Returns null if the urn isn't a committed deletion.
+ *  Pure; the caller stages it + flips the ghost node live. */
+export interface RestoreChangeInput {
+  type: 'create_entity'
+  targetId: string
+  targetUrn: string
+  after: Record<string, unknown>
+  summary: string
+}
+export function buildRestoreChange(
+  urn: string,
+  changeSet: ChangeSet | null,
+  presentUrns: ReadonlySet<string>,
+  isContainmentEdgeType: (edgeType: string) => boolean,
+): RestoreChangeInput | null {
+  const changes = changeSet?.changes ?? []
+  const nodeChange = changes.find(
+    (c) => c.kind === 'node' && c.status === 'removed' && c.entityId === urn && c.before,
+  )
+  if (!nodeChange?.before) return null
+  const b = nodeChange.before as Record<string, unknown>
+
+  const edgeBefore = (c: GraphChange) => (c.before ?? {}) as Record<string, unknown>
+  const parentEdge = changes.find((c) => {
+    if (c.kind !== 'edge' || c.status !== 'removed' || !c.before) return false
+    const e = edgeBefore(c)
+    const tgt = str(e.targetEntityId) ?? str(e.target_entity_id) ?? str(e.target)
+    const et = str(e.edgeType) ?? str(e.edge_type) ?? ''
+    return tgt === urn && isContainmentEdgeType(et)
+  })
+  const pe = parentEdge ? edgeBefore(parentEdge) : undefined
+  const parentUrn = pe ? (str(pe.sourceEntityId) ?? str(pe.source_entity_id) ?? str(pe.source)) : undefined
+  const edgeType = pe ? (str(pe.edgeType) ?? str(pe.edge_type)) : undefined
+  const nest = !!(parentUrn && edgeType && presentUrns.has(parentUrn))
+
+  return {
+    type: 'create_entity',
+    targetId: urn,
+    targetUrn: urn,
+    after: {
+      // Replay the ENTIRE deleted snapshot so nothing is lost (qualifiedName, sourceSystem,
+      // layerAssignment, description, …). stagedChangesToOps carries every user-authored field; the
+      // server-managed ones (childCount/lastSyncedAt) are recomputed on write.
+      ...b,
+      urn,
+      ...(nest ? { parentUrn, containmentEdgeType: edgeType } : {}),
+    },
+    summary: `Restore ${str(b.entityType) ?? 'entity'}: '${str(b.displayName) ?? urn}'`,
+  }
+}
+
+/** Restore a deleted entity AND its deleted descendants (the cascade-deleted subtree), parent-first,
+ *  each re-nested under its parent (live, or a subtree member also being restored). Walks the removed
+ *  containment edges down from `rootUrn`. A leaf collapses to a single restore. */
+export function buildRestoreSubtree(
+  rootUrn: string,
+  changeSet: ChangeSet | null,
+  liveUrns: ReadonlySet<string>,
+  isContainmentEdgeType: (edgeType: string) => boolean,
+): RestoreChangeInput[] {
+  const changes = changeSet?.changes ?? []
+  const isRemovedNode = (u: string) =>
+    changes.some((c) => c.kind === 'node' && c.status === 'removed' && c.entityId === u && c.before)
+
+  // parent urn → deleted child urns, from removed CONTAINMENT edges only.
+  const childrenOf = new Map<string, string[]>()
+  for (const c of changes) {
+    if (c.kind !== 'edge' || c.status !== 'removed' || !c.before) continue
+    const e = c.before as Record<string, unknown>
+    const et = str(e.edgeType) ?? str(e.edge_type) ?? ''
+    if (!isContainmentEdgeType(et)) continue
+    const src = str(e.sourceEntityId) ?? str(e.source_entity_id) ?? str(e.source)
+    const tgt = str(e.targetEntityId) ?? str(e.target_entity_id) ?? str(e.target)
+    if (src && tgt) childrenOf.set(src, [...(childrenOf.get(src) ?? []), tgt])
+  }
+
+  // BFS from the root over removed nodes → parent-before-child order.
+  const order: string[] = []
+  const seen = new Set<string>()
+  const queue = [rootUrn]
+  while (queue.length) {
+    const u = queue.shift()!
+    if (seen.has(u) || !isRemovedNode(u)) continue
+    seen.add(u)
+    order.push(u)
+    for (const ch of childrenOf.get(u) ?? []) queue.push(ch)
+  }
+
+  // A subtree child's parent isn't "live" yet — it's being restored too. Treat the whole restore set
+  // as present so descendants re-nest under their (restored) parents.
+  const willBePresent = new Set<string>([...liveUrns, ...order])
+  return order
+    .map((u) => buildRestoreChange(u, changeSet, willBePresent, isContainmentEdgeType))
+    .filter((r): r is RestoreChangeInput => !!r)
+}

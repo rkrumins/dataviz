@@ -51,6 +51,20 @@ describe('stagedChangesToOps', () => {
     ])
   })
 
+  it('carries an explicit urn + the FULL node snapshot into the create payload (restore — no data loss)', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'create_entity', targetUrn: 'urn:synodic:manual:table:abc', after: {
+        entityType: 'Table', displayName: 'X', urn: 'urn:synodic:manual:table:abc',
+        qualifiedName: 'schema.X', sourceSystem: 'manual', layerAssignment: 'warehouse', description: 'd',
+      } }),
+    ])
+    // urn → resurrect; qualifiedName/sourceSystem/layerAssignment/description preserved (were being lost)
+    expect(ops[0]).toEqual({ op: 'create', kind: 'node', ref: 'urn:synodic:manual:table:abc', payload: {
+      entityType: 'Table', displayName: 'X', urn: 'urn:synodic:manual:table:abc',
+      qualifiedName: 'schema.X', sourceSystem: 'manual', layerAssignment: 'warehouse', description: 'd',
+    } })
+  })
+
   it('maps a nested create_entity to a node create op + a containment edge op (parent by ref — backend resolves)', () => {
     const ops = stagedChangesToOps([
       sc({ type: 'create_entity', targetUrn: 'urn:staged:child', after: { entityType: 'Column', displayName: 'C', parentUrn: 'urn:staged:parent', containmentEdgeType: 'CONTAINS' } }),

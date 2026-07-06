@@ -49,6 +49,7 @@ import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
 import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
@@ -128,6 +129,10 @@ export function EntityDrawer({
   )
 
   const isOpen = !!selectedNode
+
+  // Committed-deletion ghost: the drawer is READ-ONLY (no edit/trace) and offers Restore instead.
+  const isGhost = (selectedNode?.data as { isGhost?: boolean } | undefined)?.isGhost === true
+  const restoreGhost = useRestoreGhost()
 
   // Real "last updated" timestamp — the most recent COMMIT that touched this entity (source of
   // truth), not the stale `lastSyncedAt` (which is set at sync/creation and doesn't move on edits).
@@ -473,7 +478,28 @@ export function EntityDrawer({
             {displayLabel}
           </h2>
 
+          {/* Committed-deletion ghost → a Restore banner takes the place of the trace/edit actions. */}
+          {isGhost && (
+            <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30">
+              <div className="flex items-center gap-2 mb-1.5">
+                <LucideIcons.Trash2 className="w-4 h-4 text-rose-500" />
+                <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">Deleted in this draft</span>
+              </div>
+              <p className="text-xs text-ink-muted mb-3">
+                Removed on this branch — it disappears once the draft merges. Restore to bring it back
+                (nested under its parent when that parent still exists).
+              </p>
+              <button
+                onClick={() => restoreGhost(((selectedNode.data as Record<string, unknown>).urn as string) || selectedNode.id)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs font-medium transition-colors"
+              >
+                <LucideIcons.RotateCcw className="w-3.5 h-3.5" /> Restore
+              </button>
+            </div>
+          )}
+
           {/* Prominent Trace Actions - Industry-Standard One-Click Lineage */}
+          {!isGhost && (
           <div className="flex flex-col gap-3 mb-4">
             <div className="grid grid-cols-3 gap-2">
               <motion.button
@@ -516,6 +542,7 @@ export function EntityDrawer({
               </motion.button>
             </div>
           </div>
+          )}
 
           {/* Secondary Quick Actions */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -552,13 +579,15 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            <ModeTab
-              active={viewMode === 'edit'}
-              onClick={() => setViewMode('edit')}
-              icon={LucideIcons.Pencil}
-              label="Edit"
-              badge={hasChanges ? '•' : undefined}
-            />
+            {!isGhost && (
+              <ModeTab
+                active={viewMode === 'edit'}
+                onClick={() => setViewMode('edit')}
+                icon={LucideIcons.Pencil}
+                label="Edit"
+                badge={hasChanges ? '•' : undefined}
+              />
+            )}
             <ModeTab
               active={viewMode === 'json'}
               onClick={openJsonView}

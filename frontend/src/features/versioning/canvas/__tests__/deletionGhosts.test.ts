@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, isGhostNode, isGhostEdge } from '../deletionGhosts'
+import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, isGhostNode, isGhostEdge } from '../deletionGhosts'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
 
 const removedNode = (urn: string, before: Record<string, unknown>): GraphChange => ({
@@ -86,5 +86,51 @@ describe('deletionGhosts — edges (containment nesting)', () => {
     // stale ghost edge no longer in the removed set → removed
     const { edgesToRemove } = reconcileGhosts(buildChangeSet([]), [], [line], false, CONTAINS)
     expect(edgesToRemove).toEqual(['lin'])
+  })
+})
+
+describe('deletionGhosts — restore', () => {
+  const cs = () => buildChangeSet([
+    removedNode('urn:child', { displayName: 'C', entityType: 'Column', layerAssignment: 'L', tags: ['t'] }),
+    removedEdge('e', { sourceEntityId: 'urn:parent', targetEntityId: 'urn:child', edgeType: 'CONTAINS' }),
+  ])
+
+  it('resurrects by original urn and re-nests under a LIVE parent', () => {
+    const r = buildRestoreChange('urn:child', cs(), new Set(['urn:parent']), CONTAINS)!
+    expect(r.type).toBe('create_entity')
+    expect(r.targetUrn).toBe('urn:child')
+    expect(r.after.urn).toBe('urn:child')          // → create-over-tombstone resurrect
+    expect(r.after.entityType).toBe('Column')
+    expect(r.after.layerAssignment).toBe('L')      // full snapshot preserved — no data loss
+    expect(r.after.tags).toEqual(['t'])
+    expect(r.after.parentUrn).toBe('urn:parent')   // re-nests
+    expect(r.after.containmentEdgeType).toBe('CONTAINS')
+  })
+
+  it('restores at the root when the parent is still deleted (not live) — restore the parent first', () => {
+    const r = buildRestoreChange('urn:child', cs(), new Set(), CONTAINS)!  // parent NOT live
+    expect(r.after.urn).toBe('urn:child')
+    expect(r.after.parentUrn).toBeUndefined()
+    expect(r.after.containmentEdgeType).toBeUndefined()
+  })
+
+  it('returns null when the urn is not a committed deletion', () => {
+    expect(buildRestoreChange('urn:notdeleted', cs(), new Set(), CONTAINS)).toBeNull()
+  })
+
+  it('restores a whole deleted subtree parent-first, nesting descendants under their restored parents', () => {
+    const cs2 = buildChangeSet([
+      removedNode('urn:p', { displayName: 'P', entityType: 'Table' }),
+      removedNode('urn:c1', { displayName: 'C1', entityType: 'Column' }),
+      removedNode('urn:c2', { displayName: 'C2', entityType: 'Column' }),
+      removedEdge('e-root', { sourceEntityId: 'urn:live', targetEntityId: 'urn:p', edgeType: 'CONTAINS' }),
+      removedEdge('e1', { sourceEntityId: 'urn:p', targetEntityId: 'urn:c1', edgeType: 'CONTAINS' }),
+      removedEdge('e2', { sourceEntityId: 'urn:p', targetEntityId: 'urn:c2', edgeType: 'CONTAINS' }),
+    ])
+    const subtree = buildRestoreSubtree('urn:p', cs2, new Set(['urn:live']), CONTAINS)
+    expect(subtree.map((r) => r.targetUrn)).toEqual(['urn:p', 'urn:c1', 'urn:c2'])  // parent-first
+    expect(subtree[0].after.parentUrn).toBe('urn:live')  // root re-nests under its live parent
+    expect(subtree[1].after.parentUrn).toBe('urn:p')     // child re-nests under its (restored) parent
+    expect(subtree[2].after.parentUrn).toBe('urn:p')
   })
 })

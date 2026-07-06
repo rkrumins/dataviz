@@ -125,8 +125,16 @@ export function stagedChangesToOps(
         const after = asObj(c.after)
         const ref = c.targetUrn ?? c.targetId
         const payload: Record<string, unknown> = { entityType: after.entityType, displayName: after.displayName }
-        if (after.tags !== undefined) payload.tags = after.tags
-        if (after.properties !== undefined) payload.properties = after.properties
+        // Carry every user-authored node field that's present. A fresh create only sets the basics; a
+        // Restore replays the deleted entity's FULL snapshot, so this is what preserves qualifiedName,
+        // sourceSystem, layerAssignment, description, etc. (server-managed childCount/lastSyncedAt are
+        // intentionally NOT sent — the backend recomputes them).
+        for (const f of ['qualifiedName', 'description', 'sourceSystem', 'layerAssignment', 'businessLabel', 'technicalLabel', 'tags', 'properties'] as const) {
+          if (after[f] !== undefined) payload[f] = after[f]
+        }
+        // An explicit urn means "resurrect THIS entity" (Restore of a committed deletion) — the backend
+        // uses it as the entity_id and creates over the tombstone, rather than minting a fresh urn.
+        if (typeof after.urn === 'string' && after.urn) payload.urn = after.urn
         ops.push({ op: 'create', kind: 'node', ref, payload })
         // Containment edge to the parent. The edge TYPE is whatever the ONTOLOGY resolved at staging
         // (carried on `after.containmentEdgeType` — see `containmentEdgeTypeFor` / `useContainmentEdgeTypes`),
