@@ -8,6 +8,7 @@ _StubProvider, which ships with deterministic in-memory data.
 """
 import pytest
 from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock
 from httpx import AsyncClient
 from fastapi import HTTPException
 
@@ -20,6 +21,7 @@ from backend.common.models.graph import (
     NodeQuery,
     EdgeQuery,
     OntologyMetadata,
+    TopLevelNodesResult,
 )
 from backend.app.services.context_engine import ContextEngine
 
@@ -392,3 +394,180 @@ async def test_query_edges(graph_client):
     )
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+# ── GET /nodes/top-level (materialized-payload intercept) ─────────────
+#
+# `graph_client`'s mock engine has no workspace/data-source scope, so
+# `_cache_scope` returns None and the endpoint always takes its
+# scope-is-None early path (compute() runs directly, no GraphCache
+# involved). To exercise the intercept added inside compute() — which
+# depends on a real CacheScope (`scope.data_source_id`, `scope.branch_id`)
+# — these tests use a dedicated fixture whose engine carries an explicit
+# scope, and swap `get_graph_cache` for a passthrough stand-in so no
+# Redis is required (GraphCache's own Redis-backed behavior is already
+# covered by test_graph_cache.py).
+
+class _PassthroughGraphCache:
+    """Bypasses GraphCache/Redis so these tests exercise only the
+    endpoint's own intercept logic inside `compute()`."""
+
+    async def get_or_compute(self, *, scope, endpoint, params, compute, model_cls,
+                              ttl_seconds=None, on_stale=None):
+        return await compute()
+
+
+@pytest.fixture()
+async def top_level_client(test_client: AsyncClient, monkeypatch):
+    """Like `graph_client`, but the mock engine carries a workspace/data
+    source scope (so `_cache_scope` resolves to a real CacheScope) and
+    `get_graph_cache` is replaced with a passthrough."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    mock_engine = ContextEngine(provider=_StubProvider())
+    mock_engine._workspace_id = "ws1"
+    mock_engine._data_source_id = "ds1"
+
+    async def _override():
+        return mock_engine
+
+    app.dependency_overrides[graph_module.get_context_engine] = _override
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: _PassthroughGraphCache())
+
+    yield test_client, mock_engine
+    app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+
+def _stub_top_level_result(total: int = 1) -> TopLevelNodesResult:
+    return TopLevelNodesResult(
+        nodes=[GraphNode(urn="urn:li:dataset:x", displayName="X", entityType="dataset")],
+        totalCount=total, hasMore=False, nextCursor=None, rootTypeCount=1, orphanCount=0,
+    )
+
+
+async def test_top_level_materialized_serve(top_level_client, monkeypatch):
+    """Large main-branch default-browse request is served straight from
+    the materialized payload; the live engine method is never called and
+    the response carries exactly the live-shape keys."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    served = _stub_top_level_result(total=1)
+
+    async def _fake_try_serve(session, eng, *, ds_id, ws_id, limit, cursor):
+        assert ds_id == "ds1"
+        assert ws_id == "ws1"
+        return served, served.total_count
+
+    monkeypatch.setattr(graph_module, "try_serve_top_level", _fake_try_serve)
+    live_spy = AsyncMock(side_effect=AssertionError("live engine must not be called"))
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    resp = await client.get("/api/v1/test-ws/graph/nodes/top-level?limit=5")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {
+        "nodes", "totalCount", "hasMore", "nextCursor", "rootTypeCount", "orphanCount",
+    }
+    assert body["totalCount"] == 1
+    live_spy.assert_not_called()
+
+
+async def _assert_live_path(
+    top_level_client, monkeypatch, *, params: dict,
+    expect_serve_called: bool, expected_known_total,
+):
+    """Shared assertion for the live-fallback tests below: the serve
+    helper is (or isn't) invoked as expected, and whatever `known_total`
+    it hands back is forwarded verbatim to the live engine call."""
+    client, engine = top_level_client
+    from backend.app.api.v1.endpoints import graph as graph_module
+
+    serve_spy = AsyncMock(return_value=(None, expected_known_total))
+    monkeypatch.setattr(graph_module, "try_serve_top_level", serve_spy)
+
+    live_spy = AsyncMock(return_value=_stub_top_level_result(total=2))
+    monkeypatch.setattr(engine, "get_top_level_or_orphan_nodes", live_spy)
+
+    resp = await client.get("/api/v1/test-ws/graph/nodes/top-level", params=params)
+    assert resp.status_code == 200
+
+    if expect_serve_called:
+        serve_spy.assert_awaited_once()
+    else:
+        serve_spy.assert_not_called()
+
+    live_spy.assert_awaited_once()
+    assert live_spy.await_args.kwargs["known_total_count"] == expected_known_total
+
+
+async def test_top_level_live_path_search_query(top_level_client, monkeypatch):
+    """searchQuery set -> intercept guard fails before calling the serve
+    helper; live engine called with known_total_count=None."""
+    await _assert_live_path(
+        top_level_client, monkeypatch,
+        params={"searchQuery": "foo"},
+        expect_serve_called=False,
+        expected_known_total=None,
+    )
+
+
+async def test_top_level_live_path_entity_types(top_level_client, monkeypatch):
+    """entityTypes set -> intercept guard fails; live engine called with
+    known_total_count=None."""
+    await _assert_live_path(
+        top_level_client, monkeypatch,
+        params={"entityTypes": ["dataset"]},
+        expect_serve_called=False,
+        expected_known_total=None,
+    )
+
+
+async def test_top_level_live_path_include_child_count_false(top_level_client, monkeypatch):
+    """includeChildCount=false -> intercept guard fails; live engine
+    called with known_total_count=None."""
+    await _assert_live_path(
+        top_level_client, monkeypatch,
+        params={"includeChildCount": "false"},
+        expect_serve_called=False,
+        expected_known_total=None,
+    )
+
+
+async def test_top_level_live_path_branch_scope(top_level_client, monkeypatch):
+    """A non-empty branch scope -> intercept guard fails (draft reads
+    never serve off the main-branch materialization); live engine called
+    with known_total_count=None."""
+    _, engine = top_level_client
+    engine._branch_id = "br_123"
+    await _assert_live_path(
+        top_level_client, monkeypatch,
+        params={},
+        expect_serve_called=False,
+        expected_known_total=None,
+    )
+
+
+async def test_top_level_serve_declines_but_forwards_known_total(top_level_client, monkeypatch):
+    """Guard passes (default main-branch browse) but the serve helper
+    declines to serve a page (e.g. below the materialize threshold)
+    while still reporting a known total — the endpoint forwards it to
+    the live engine call."""
+    await _assert_live_path(
+        top_level_client, monkeypatch,
+        params={},
+        expect_serve_called=True,
+        expected_known_total=42,
+    )
+
+
+async def test_top_level_cold_start_no_payload(top_level_client, monkeypatch):
+    """Row exists but has never been materialized — the serve helper
+    returns (None, None); live engine called with known_total_count=None."""
+    await _assert_live_path(
+        top_level_client, monkeypatch,
+        params={},
+        expect_serve_called=True,
+        expected_known_total=None,
+    )

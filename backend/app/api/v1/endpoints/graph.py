@@ -43,6 +43,7 @@ from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
 from backend.app.auth.dependencies import get_optional_user
+from backend.app.services.top_level_cache import try_serve_top_level
 from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
     enqueue_stats_job_safe,
@@ -538,6 +539,7 @@ async def get_top_level_nodes(
     ),
     includeChildCount: bool = Query(True, description="Populate child_count on each node."),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Return instances that have no incoming containment edge.
 
@@ -564,16 +566,34 @@ async def get_top_level_nodes(
     """
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
+    scope = _cache_scope(engine)
+
     async def compute() -> TopLevelNodesResult:
+        known_total = None
+        if (
+            scope is not None
+            and not scope.branch_id            # main-branch physical reads only
+            and scope.data_source_id
+            and not searchQuery
+            and not entityTypes
+            and includeChildCount
+        ):
+            served, known_total = await try_serve_top_level(
+                session, engine,
+                ds_id=scope.data_source_id, ws_id=scope.workspace_id,
+                limit=limit, cursor=cursor,
+            )
+            if served is not None:
+                return served
         return await engine.get_top_level_or_orphan_nodes(
             entity_types=entityTypes,
             search_query=searchQuery,
             limit=limit,
             cursor=cursor,
             include_child_count=includeChildCount,
+            known_total_count=known_total,
         )
 
-    scope = _cache_scope(engine)
     if scope is None:
         try:
             return await compute()
