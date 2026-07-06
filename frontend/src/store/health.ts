@@ -7,6 +7,13 @@
  *
  * Anti-flapping: requires 2 consecutive failures before surfacing the banner.
  * Adaptive polling: 30s when healthy, 5s when unhealthy.
+ *
+ * Only /health probe failures (and navigator.onLine === false) count toward
+ * ``consecutiveFailures``. An app-request failure does NOT count directly —
+ * a slow-but-alive backend times out app requests while /health (zero-I/O,
+ * constant-time on the BE) still answers instantly. Instead it triggers one
+ * debounced verification probe: a real outage fails the probe fast
+ * (connection refused) and climbs the counter; mere slowness resets it.
  */
 import { create } from 'zustand'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
@@ -29,6 +36,10 @@ interface HealthState {
 
 const HEALTH_URL = '/api/v1/health'
 const FAILURE_THRESHOLD = 2
+
+/** Debounce guard: many app requests can fail in the same burst (one
+ *  refetch wave hitting a stalled backend) — verify with ONE probe. */
+let probePending = false
 
 function classifyError(err: unknown): { reason: HealthReason; detail: string } {
   if (!navigator.onLine) {
@@ -90,7 +101,10 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
     }
 
     try {
-      const res = await fetchWithTimeout(HEALTH_URL, { cache: 'no-store', timeoutMs: 3_000 })
+      // 10s (not the previous 3s): a real outage fails fast on
+      // connection-refused; only a slow-but-alive backend approaches
+      // the timeout, and that's exactly the false-alarm case.
+      const res = await fetchWithTimeout(HEALTH_URL, { cache: 'no-store', timeoutMs: 10_000 })
 
       if (!res.ok) {
         applyFailure(get, set, 'backend-down', `Backend returned HTTP ${res.status}.`)
@@ -133,7 +147,27 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
 
   reportFailure: (err: unknown) => {
     const classified = classifyError(err)
-    applyFailure(get, set, classified.reason, classified.detail)
+    // Browser says we're offline — surface immediately, no probe needed.
+    if (classified.reason === 'network-offline') {
+      applyFailure(get, set, classified.reason, classified.detail)
+      return
+    }
+    // App-request failure: verify against /health instead of counting
+    // it toward the banner threshold (see module docstring).
+    if (probePending) return
+    probePending = true
+    setTimeout(() => {
+      probePending = false
+      void (async () => {
+        await get().poll()
+        const s = get()
+        // First failed verification on a quiet page: confirm or deny
+        // quickly rather than waiting for the banner's next tick.
+        if (s.status !== 'unreachable' && s.consecutiveFailures === 1) {
+          setTimeout(() => void get().poll(), 2_000)
+        }
+      })()
+    }, 250)
   },
 
   clearRecovery: () => {

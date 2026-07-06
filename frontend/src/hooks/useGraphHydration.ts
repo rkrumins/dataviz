@@ -181,6 +181,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         () => (isDraft ? [...committedCreatedUrns(activeChangeSet)].sort().join('|') : ''),
         [isDraft, activeChangeSet],
     )
+    // Content-stable keys for the hydration effect deps: the schema store
+    // rebuilds these arrays on every reload (token refresh, permission poll
+    // tick), and an identity-churned-but-identical array re-triggers the
+    // effect — whose cleanup resets initializedKeyRef, re-running the full
+    // clear + chunked getNodes/getEdgesBetween burst. Keying on content
+    // means only a REAL type-set change re-hydrates. Accepted tradeoff: a
+    // schema edit that changes only hierarchy metadata (not the id set)
+    // won't re-hydrate — real ontology swaps change providerVersion or the
+    // id set. The effect body still reads the closure arrays; their content
+    // matches the key by construction.
+    const rootTypesKey = useMemo(() => [...rootEntityTypes].sort().join('|'), [rootEntityTypes])
+    const schemaTypesKey = useMemo(
+        () => schemaEntityTypes.map(et => et.id).sort().join('|'),
+        [schemaEntityTypes],
+    )
 
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
@@ -493,7 +508,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootEntityTypes, schemaEntityTypes, isSchemaReady, committedDeltaKey])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 

@@ -15,6 +15,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useAnyWorkspacePermission } from '@/store/auth'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 
 export function useDataSourceProviderMap() {
@@ -22,7 +23,16 @@ export function useDataSourceProviderMap() {
   const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
   const [providers, setProviders] = useState<ProviderResponse[]>([])
 
+  // Mirror the backend gates (catalog.py / providers.py both `requires(...,
+  // workspace_any=True)`) so users without access don't fire two
+  // guaranteed-403 round trips on every mount. Hooks are called
+  // unconditionally (hook rules); the fetch is what's gated.
+  const canReadCatalog = useAnyWorkspacePermission('workspace:catalog:read')
+  const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
+  const canRead = canReadCatalog && canReadProviders
+
   useEffect(() => {
+    if (!canRead) return
     let cancelled = false
     Promise.all([catalogService.list(), providerService.list()])
       .then(([cats, provs]) => {
@@ -37,7 +47,7 @@ export function useDataSourceProviderMap() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [canRead])
 
   const map = useMemo(() => {
     const catMap: Record<string, CatalogItemResponse> = {}

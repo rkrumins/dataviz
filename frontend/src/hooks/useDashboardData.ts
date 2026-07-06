@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useWorkspaces } from './useWorkspaces'
 import { useSchemaStore } from '@/store/schema'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
@@ -93,11 +94,29 @@ export function useDashboardData() {
         }
     }, [workspaces])
 
-    // Fetch per-datasource graph stats (node + edge counts)
-    useEffect(() => {
-        if (!workspaces?.length) return
-
-        const fetchAllStats = async () => {
+    // Fetch per-datasource graph stats (node + edge counts).
+    //
+    // React Query, NOT a per-instance effect: useDashboardData is mounted
+    // by several components at once (Dashboard, WorkspaceGrid, InsightCards,
+    // TemplateGrid, and one DataSourceCard / DataSourceGridCard PER card on
+    // admin pages). A per-instance fetch fires a duplicate
+    // workspaces×datasources fan-out for EVERY instance on mount — the
+    // "hundreds of cached-stats requests" storm. One query keyed on the
+    // ws/ds id-set means all instances share a single fan-out and cache;
+    // identity churn on the workspaces array is harmless (same key → no
+    // new requests).
+    const statsKey = useMemo(
+        () => (workspaces ?? [])
+            .map(ws => `${ws.id}:${(ws.dataSources ?? []).map(d => d.id).sort().join(',')}`)
+            .sort()
+            .join('|'),
+        [workspaces],
+    )
+    const dsStatsQuery = useQuery({
+        queryKey: ['dashboard-datasource-stats', statsKey],
+        enabled: !!workspaces?.length,
+        staleTime: 30_000,
+        queryFn: async () => {
             const results: Record<string, DataSourceStats> = {}
             let totalEntities = 0
 
@@ -134,12 +153,18 @@ export function useDashboardData() {
             )
 
             await Promise.allSettled(fetchPromises)
-            setDataSourceStats(results)
-            setStats(prev => ({ ...prev, totalEntities }))
-        }
+            return { results, totalEntities }
+        },
+    })
 
-        fetchAllStats()
-    }, [workspaces])
+    // Sync the shared query result into the hook's existing state shape so
+    // consumers keep their current API (dataSourceStats + stats.totalEntities).
+    const dsStatsData = dsStatsQuery.data
+    useEffect(() => {
+        if (!dsStatsData) return
+        setDataSourceStats(dsStatsData.results)
+        setStats(prev => ({ ...prev, totalEntities: dsStatsData.totalEntities }))
+    }, [dsStatsData])
 
     // Phase 17: Templates + Ontologies live behind system:admin gates.
     // Skip the fetch entirely for non-admins — the dashboard tiles and

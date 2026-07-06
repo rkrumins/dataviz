@@ -33,8 +33,8 @@
  *     switched to a long-running session and a mutation happened
  *     while they were away).
  */
-import { useAuthStore } from './auth'
-import { authService, type PermissionClaims } from '@/services/authService'
+import { useAuthStore, claimsSnapshot } from './auth'
+import { authService } from '@/services/authService'
 import { getQueryClient } from '@/main'
 import { POLLING_INTERVALS, withJitter } from '@/config/polling'
 import { notifyPermissionsChanged } from './permissionChangeBus'
@@ -48,20 +48,6 @@ let authReady = false
  *  external updates (e.g. from the silent refresh path) don't trip a
  *  false-positive invalidation. */
 let lastSnapshot: string = ''
-
-/** Canonical JSON for a claims object — sorts arrays + object keys so
- *  semantically-equal payloads compare equal regardless of key order
- *  or perm order. Used as the cheap change detector. */
-function snapshot(claims: PermissionClaims): string {
-    const wsKeys = Object.keys(claims.ws).sort()
-    return JSON.stringify({
-        global: [...claims.global].sort(),
-        ws: wsKeys.reduce<Record<string, string[]>>((acc, k) => {
-            acc[k] = [...claims.ws[k]].sort()
-            return acc
-        }, {}),
-    })
-}
 
 /** Mark every React Query cache as stale so mounted components refetch
  *  and unmounted ones refetch on next mount. We blanket-invalidate
@@ -78,7 +64,7 @@ function invalidateAllQueries(): void {
 async function pollOnce(): Promise<void> {
     try {
         const claims = await authService.myPermissions()
-        const next = snapshot(claims)
+        const next = claimsSnapshot(claims)
         if (next === lastSnapshot) return
         lastSnapshot = next
         useAuthStore.getState().setPermissions(claims)
@@ -110,12 +96,16 @@ function stopPolling(): void {
     }
 }
 
-/** Call once after auth resolves. Fires an immediate first poll to
- *  establish ``lastSnapshot``, then schedules the next tick. */
+/** Call once after auth resolves. Seeds ``lastSnapshot`` from the
+ *  already-hydrated store — otherwise the first poll compares against
+ *  ``''``, always "detects" a change, and blanket-invalidates every
+ *  query on boot. A real mutation between bootstrap and the first
+ *  poll still diffs against the seed and invalidates. */
 export function enablePermissionPolling(): void {
     authReady = true
     if (typeof document !== 'undefined' && document.hidden) return
     stopPolling()
+    lastSnapshot = claimsSnapshot(useAuthStore.getState().permissions)
     void (async () => {
         await pollOnce()
         scheduleNext()

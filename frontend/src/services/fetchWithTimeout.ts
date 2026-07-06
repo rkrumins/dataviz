@@ -107,17 +107,21 @@ async function tryRefresh(): Promise<boolean> {
         // Dynamic import avoids a circular dep through the auth
         // store.
         //
-        // After the store rehydrates, blanket-invalidate React Query
-        // so the sidebar's workspaces list, member tables, etc.
-        // repaint with fresh data instead of serving the cached
-        // response that pre-dates the permission mutation. The cost
-        // is one refetch wave per silent refresh — acceptable, and
-        // exactly the behaviour users expect after their access
-        // shifts mid-session.
+        // After the store rehydrates, compare claims before/after: a
+        // rotated JWT with IDENTICAL claims changes no data, so the
+        // blanket invalidation below is skipped and React Query's
+        // staleTime governs freshness. Only a real access shift
+        // (rare) pays the full refetch wave — exactly the behaviour
+        // users expect after their access shifts mid-session, without
+        // a 15-20 request burst on every routine ~5-min token
+        // rotation.
         void (async () => {
           try {
             const mod = await import('@/store/auth')
+            const before = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
             await mod.useAuthStore.getState().refreshPermissions()
+            const after = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
+            if (before === after) return
             try {
               const mainMod = await import('@/main')
               const qc = mainMod.getQueryClient()

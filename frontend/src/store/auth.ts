@@ -148,6 +148,21 @@ export function effectiveRoleFor(
     return null
 }
 
+/** Canonical JSON for a claims object — sorts arrays + object keys so
+ *  semantically-equal payloads compare equal regardless of key order
+ *  or perm order. Shared cheap change detector for the permission
+ *  poller and the silent-refresh path in ``fetchWithTimeout``. */
+export function claimsSnapshot(claims: PermissionClaims): string {
+    const wsKeys = Object.keys(claims.ws).sort()
+    return JSON.stringify({
+        global: [...claims.global].sort(),
+        ws: wsKeys.reduce<Record<string, string[]>>((acc, k) => {
+            acc[k] = [...claims.ws[k]].sort()
+            return acc
+        }, {}),
+    })
+}
+
 interface AuthState {
     status: AuthStatus
     /** Convenience derivation of ``status === 'authenticated'``. Kept in
