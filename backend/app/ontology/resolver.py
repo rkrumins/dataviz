@@ -293,6 +293,36 @@ def resolve_ontology(
 # ---------------------------------------------------------------------------
 
 
+def case_insensitive_type_id_collisions(
+    entity_ids: List[str], edge_ids: List[str]
+) -> List[str]:
+    """Type ids that collide only by case, one message per collision.
+
+    Case-insensitive normalization of authored data (``Has``/``HAS``/``has`` → the
+    declared casing) is only well-defined when a case-folded id maps to exactly one
+    declared id. Declaring both ``HAS`` and ``has`` would make that ambiguous, so the
+    save path rejects it. Entity ids and edge ids are separate namespaces (a payload's
+    ``entityType`` vs ``edgeType`` disambiguates), so they are checked independently."""
+    def _collisions(names: List[str], kind: str) -> List[str]:
+        seen: Dict[str, str] = {}
+        out: List[str] = []
+        for n in names:
+            if not n:
+                continue
+            key = str(n).lower()
+            first = seen.get(key)
+            if first is not None and first != n:
+                out.append(
+                    f"{kind} types '{first}' and '{n}' differ only by case; "
+                    f"type ids must be unique case-insensitively."
+                )
+            else:
+                seen.setdefault(key, str(n))
+        return out
+
+    return _collisions(entity_ids, "Entity") + _collisions(edge_ids, "Relationship")
+
+
 def validate_ontology(
     entity_defs: Dict[str, EntityTypeDefEntry],
     relationship_defs: Dict[str, RelationshipTypeDefEntry],

@@ -122,6 +122,28 @@ def _lc(values) -> Optional[set]:
     return s or None
 
 
+def _canonical_map(values) -> Dict[str, str]:
+    """``lowercased type name → declared casing`` (first declared wins), for restoring the
+    ontology's exact spelling on emitted ops. The import worker does not run ops through the
+    commit-boundary canonicalizer (it does not pass ``ontology_rules`` into ``apply_ops``), so
+    a case variant is normalized here instead — otherwise a lowercase ``has`` would project
+    case-sensitively as ``:has`` and miss the ``:HAS`` containment predicate."""
+    out: Dict[str, str] = {}
+    for v in (values or []):
+        s = str(v).strip()
+        if s:
+            out.setdefault(s.lower(), s)
+    return out
+
+
+def _canon(value, canon_map: Dict[str, str]):
+    """Declared casing for *value* if it matches a declared type case-insensitively; else
+    *value* unchanged (unknown/missing types are left for the per-row gate to judge)."""
+    if value is None or not canon_map:
+        return value
+    return canon_map.get(str(value).strip().lower(), value)
+
+
 def resolve_rows(
     rows: Sequence[Mapping[str, Any]],
     indexes: Mapping[str, Any],
@@ -142,6 +164,8 @@ def resolve_rows(
     current: Dict[str, dict] = dict(indexes.get("current") or {})   # eid -> current payload
     node_types = _lc(ontology.get("node_types")) if ontology else None   # lowercased valid sets | None
     edge_types = _lc(ontology.get("edge_types")) if ontology else None
+    node_type_canon = _canonical_map(ontology.get("node_types")) if ontology else {}
+    edge_type_canon = _canonical_map(ontology.get("edge_types")) if ontology else {}
 
     ops: List[dict] = []
     resolutions: List[dict] = []
@@ -167,7 +191,10 @@ def resolve_rows(
                 reasons=[f"'{row['entityType']}' is not a valid entity type in this ontology"]))
             continue
         if matched_eid:
-            changed = _changed_fields(_node_payload(row), current.get(matched_eid) or {})
+            np = _node_payload(row)
+            if "entityType" in np:                                # normalize casing before diffing
+                np["entityType"] = _canon(np["entityType"], node_type_canon)
+            changed = _changed_fields(np, current.get(matched_eid) or {})
             if not changed:                                       # a true no-op (e.g. an unchanged round-trip)
                 resolutions.append(_resolution(row, "unchanged", matched_eid))
                 continue
@@ -183,8 +210,10 @@ def resolve_rows(
             urn_to_eid[row["urn"]] = eid
         if row.get("qualifiedName"):
             qname_to_eid[row["qualifiedName"]] = eid
-        ops.append({"op": "create", "entity_kind": "node", "entity_id": eid,
-                    "payload": _no_deletes(_node_payload(row))})
+        p = _no_deletes(_node_payload(row))
+        if "entityType" in p:
+            p["entityType"] = _canon(p["entityType"], node_type_canon)
+        ops.append({"op": "create", "entity_kind": "node", "entity_id": eid, "payload": p})
         resolutions.append(_resolution(row, "create", eid))
 
     # ---- pass 2: edges ----
@@ -202,7 +231,8 @@ def resolve_rows(
             reason = "edge missing edgeType" if not row.get("edgeType") else "edge endpoint not found"
             resolutions.append(_resolution(row, "invalid", None, reasons=[reason]))
             continue
-        key = (seid, teid, row["edgeType"])
+        etype = _canon(row["edgeType"], edge_type_canon)   # declared casing for key + payload
+        key = (seid, teid, etype)
         matched_eid = edge_to_eid.get(key)
         if row.get("op") == "delete":
             if matched_eid:
@@ -212,7 +242,9 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete edge not found"]))
             continue
         if matched_eid:
-            changed = _changed_fields(_edge_payload(row, seid, teid), current.get(matched_eid) or {})
+            ep = _edge_payload(row, seid, teid)
+            ep["edgeType"] = etype
+            changed = _changed_fields(ep, current.get(matched_eid) or {})
             if not changed:
                 resolutions.append(_resolution(row, "unchanged", matched_eid))
                 continue
@@ -221,8 +253,9 @@ def resolve_rows(
         else:
             eid = mint_id()
             edge_to_eid[key] = eid
-            ops.append({"op": "create", "entity_kind": "edge", "entity_id": eid,
-                        "payload": _no_deletes(_edge_payload(row, seid, teid))})
+            ep = _no_deletes(_edge_payload(row, seid, teid))
+            ep["edgeType"] = etype
+            ops.append({"op": "create", "entity_kind": "edge", "entity_id": eid, "payload": ep})
             resolutions.append(_resolution(row, "create", eid))
 
     return ops, resolutions

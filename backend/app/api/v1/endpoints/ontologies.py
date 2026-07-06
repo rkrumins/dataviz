@@ -18,6 +18,7 @@ from backend.app.services.workspace_visibility import (
     ensure_ontology_visible,
 )
 from backend.app.ontology.resolver import (
+    case_insensitive_type_id_collisions,
     parse_entity_definitions,
     parse_relationship_definitions,
     validate_ontology,
@@ -88,6 +89,21 @@ async def _invalidate_ontology_caches(
     )
 
 
+def _reject_case_insensitive_type_dupes(req) -> None:
+    """422 if the request declares two entity or relationship type ids that differ only
+    by case. This is the authoring-side half of the case-insensitive normalization mandate:
+    a payload's ``Has``/``HAS``/``has`` is normalized to the declared casing at the commit
+    boundary, which is only well-defined when each case-folded id maps to one declared id.
+    Only fields present on the request are checked."""
+    entity_ids = list((getattr(req, "entity_type_definitions", None) or {}).keys())
+    edge_ids = list((getattr(req, "relationship_type_definitions", None) or {}).keys())
+    edge_ids += list(getattr(req, "containment_edge_types", None) or [])
+    edge_ids += list(getattr(req, "lineage_edge_types", None) or [])
+    collisions = case_insensitive_type_id_collisions(entity_ids, edge_ids)
+    if collisions:
+        raise HTTPException(status_code=422, detail="; ".join(collisions))
+
+
 @router.get("", response_model=List[OntologyDefinitionResponse])
 async def list_ontologies(
     all_versions: bool = False,
@@ -122,6 +138,7 @@ async def create_ontology(
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
+    _reject_case_insensitive_type_dupes(req)
     result = await ontology_definition_repo.create_ontology(session, req)
     await _invalidate_ontology_caches(session, getattr(result, "id", None))
     return result
@@ -218,6 +235,7 @@ async def update_ontology(
     Update an ontology. If published, creates a new version instead.
     Returns the updated or newly created ontology.
     """
+    _reject_case_insensitive_type_dupes(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
     if not ontology:

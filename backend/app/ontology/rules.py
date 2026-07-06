@@ -32,10 +32,24 @@ def resolved_ontology_to_rules(resolved: ResolvedOntology) -> OntologyRules:
         )
         for type_id, entry in (resolved.relationship_type_definitions or {}).items()
     }
+    # UPPERCASE → declared casing, so the commit-boundary canonicalizer can restore the
+    # ontology's exact spelling (edge_types/containment are keyed UPPERCASE). Relationship
+    # ids win over the containment/lineage flat lists on a collision (the authoring guard
+    # forbids case-insensitive duplicates, so they agree in practice).
+    edge_type_canonical: dict = {}
+    for names in (
+        resolved.containment_edge_types or [],
+        resolved.lineage_edge_types or [],
+        list(resolved.relationship_type_definitions or {}),
+    ):
+        for t in names:
+            if t:
+                edge_type_canonical[t.upper()] = t
     return OntologyRules(
         entity_types=entity_types,
         edge_types=edge_types,
         containment_edge_types=frozenset(
             t.upper() for t in (resolved.containment_edge_types or [])
         ),
+        edge_type_canonical=edge_type_canonical,
     )

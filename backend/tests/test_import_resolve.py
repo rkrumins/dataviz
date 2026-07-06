@@ -120,6 +120,20 @@ def _run() -> None:
     assert by_row[1]["resolved_op"] == "create", by_row[1]          # 'table' ~ 'Table'
     assert by_row[2]["resolved_op"] == "invalid" and "MADE_UP" in by_row[2]["reasons"][0]
 
+    # ---- casing: the gate MATCHES case-insensitively AND the emitted op carries the ontology's
+    #      DECLARED casing, so the case-sensitive FalkorDB projection stays canonical (import does
+    #      NOT pass ontology_rules into apply_ops, so canonicalization must happen here). ----
+    c_mint = iter(["cn_id", "ce_id"])
+    c_ops, _ = resolve_rows([
+        {"_row_index": 0, "kind": "node", "op": "upsert", "entity_id": "", "urn": "urn:cn",
+         "entityType": "table", "displayName": "n", "qualifiedName": "qn"},
+        {"_row_index": 1, "kind": "edge", "op": "upsert", "entity_id": "",
+         "edgeType": "lineage", "sourceQualifiedName": "qn", "targetQualifiedName": "qn"},
+    ], _indexes(), mint_id=lambda: next(c_mint), ontology=ont)
+    c_by_kind = {o["entity_kind"]: o for o in c_ops}
+    assert c_by_kind["node"]["payload"]["entityType"] == "Table", c_ops
+    assert c_by_kind["edge"]["payload"]["edgeType"] == "LINEAGE", c_ops
+
     # ---- property deletion: sentinel removes an existing prop; deleting an absent prop is a no-op ----
     from backend.app.services.versioning.import_export.rowmodel import PROP_DELETE
     idx_d = _indexes()

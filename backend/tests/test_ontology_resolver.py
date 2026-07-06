@@ -6,6 +6,7 @@ import pytest
 from backend.app.ontology.resolver import (
     _find_containment_cycle,
     _humanize,
+    case_insensitive_type_id_collisions,
     check_coverage,
     derive_flat_lists,
     parse_entity_definitions,
@@ -258,3 +259,16 @@ def test_check_coverage_partial():
     assert report.uncovered_entity_types == ["B"]
     assert report.uncovered_relationship_types == ["EDGE"]
     assert 0 < report.coverage_percent < 100
+
+
+def test_case_insensitive_type_id_collisions():
+    # No collision when ids are distinct case-insensitively.
+    assert case_insensitive_type_id_collisions(["System", "Dataset"], ["HAS", "FLOWS_TO"]) == []
+    # Entity ids differing only by case → one message.
+    ent = case_insensitive_type_id_collisions(["Dataset", "dataset"], [])
+    assert len(ent) == 1 and "Entity" in ent[0] and "case" in ent[0].lower()
+    # Edge ids (incl. containment/lineage lists folded into edge_ids by the caller) collide.
+    edge = case_insensitive_type_id_collisions([], ["HAS", "has"])
+    assert len(edge) == 1 and "Relationship" in edge[0]
+    # Entity vs edge share a namespace boundary — an entity 'Has' and edge 'HAS' do NOT collide.
+    assert case_insensitive_type_id_collisions(["Has"], ["HAS"]) == []

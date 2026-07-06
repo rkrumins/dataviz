@@ -39,7 +39,10 @@ from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from .ontology import Ontology, OntologyRules, validate_entities, validate_entities_rich
+from .ontology import (
+    Ontology, OntologyRules, canonicalize_payload_types,
+    validate_entities, validate_entities_rich,
+)
 from .models import (
     BranchORM,
     BranchMemberORM,
@@ -582,6 +585,12 @@ class GraphVersioningService:
                     base_state[e] = cur            # so net_delta sees a delete
                     head_state[e] = None           # tombstone the descendant / incident edge
                     kind_by_entity[e] = "edge" if _is_edge_payload(cur) else "node"
+            # Canonicalize entity/edge-type casing to the ontology's declared spelling BEFORE
+            # the squash, so the folded version rows (and their projection) carry canonical
+            # casing regardless of what the client staged (a case variant never fails).
+            if ontology_rules is not None:
+                for v in head_state.values():
+                    canonicalize_payload_types(v, ontology_rules)
             deltas = net_delta(base_state, head_state)
 
             # Rich ontology gate — the authoritative check for staged edits (stage_changes
@@ -753,6 +762,13 @@ class GraphVersioningService:
         # (cross-entity conflict the per-entity merge can't see — §16.5 #8).
         self._cascade_incident_edges(merged_state)
         self._assert_referential_integrity(merged_state)
+
+        # Canonicalize type casing to the ontology's declared spelling before the squash, so
+        # a draft that accumulated a case variant (Has/HAS/has) publishes canonical rows —
+        # the case-sensitive FalkorDB projection then matches the containment predicate.
+        if ontology_rules is not None:
+            for v in merged_state.values():
+                canonicalize_payload_types(v, ontology_rules)
 
         deltas = net_delta(theirs, merged_state)   # what publish adds to main
         new_seq = graph.main_head_commit_seq + 1
@@ -4186,6 +4202,15 @@ class GraphVersioningService:
                 rich_viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
                 if rich_viol:
                     raise OntologyViolation(rich_viol)
+
+            # Canonicalize entity/edge-type casing to the ontology's declared spelling before
+            # the delta is content-hashed and written, so a write-through (or the repair script)
+            # that carries a case variant lands canonical rows — the case-sensitive FalkorDB
+            # projection then matches the containment predicate. Ungated by enforcement mode:
+            # normalization is always safe (a case variant is never a violation).
+            if ontology_rules is not None:
+                for v in new_vals.values():
+                    canonicalize_payload_types(v, ontology_rules)
 
             deltas = net_delta({k: cur_vals.get(k) for k in new_vals}, new_vals)
             if not deltas:

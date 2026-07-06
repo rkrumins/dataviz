@@ -69,6 +69,11 @@ class OntologyRules:
     entity_types: Mapping[str, EntityRule] = field(default_factory=dict)
     edge_types: Mapping[str, EdgeRule] = field(default_factory=dict)
     containment_edge_types: FrozenSet[str] = frozenset()
+    # UPPERCASED(edge-type id) → the ontology's exact declared casing. ``edge_types``
+    # and ``containment_edge_types`` are keyed UPPERCASE (the case-insensitive lookup
+    # contract), which loses the declared casing; this restores it so canonicalization
+    # rewrites to what the ontology (and the FalkorDB projection) actually use.
+    edge_type_canonical: Mapping[str, str] = field(default_factory=dict)
 
     def canonical_entity_type(self, name: Optional[str]) -> Optional[str]:
         """Exact match, else case-insensitive; ``None`` if the type is unknown."""
@@ -81,6 +86,51 @@ class OntologyRules:
             if k.upper() == upper:
                 return k
         return None
+
+    def canonical_edge_type(self, name: Optional[str]) -> Optional[str]:
+        """Declared casing for an edge/relationship type matched case-insensitively
+        against the ontology (relationship ids + containment/lineage lists); ``None``
+        if unknown. The edge-dimension parity of :meth:`canonical_entity_type`.
+
+        Falls back to the UPPERCASE form when the declared-casing map is absent (an
+        ``OntologyRules`` built without it), which still normalizes a case variant to a
+        single canonical spelling."""
+        if not name:
+            return None
+        upper = str(name).upper()
+        declared = self.edge_type_canonical.get(upper)
+        if declared is not None:
+            return declared
+        if upper in self.edge_types:
+            return upper
+        if upper in self.containment_edge_types:
+            return upper
+        return None
+
+
+def canonicalize_payload_types(payload: Optional[Mapping], rules: Optional[OntologyRules]) -> None:
+    """Rewrite a payload's ``entityType``/``edgeType`` to the ontology's exact declared
+    casing in place, when they match a declared type case-insensitively.
+
+    USER MANDATE (2026-07-06): a case variant of a declared type (``Has``/``HAS``/``has``)
+    must NEVER be a violation — normalize it. FalkorDB matches relationship types
+    case-sensitively, so a lowercase ``has`` projects as ``:has`` and misses the
+    ``:HAS`` containment predicate, flattening the hierarchy; rewriting the payload at
+    the commit boundary keeps the durable payload — and therefore the projection —
+    canonical. Idempotent; leaves unknown or missing types untouched (the rich gate
+    decides those). No-op when ``rules`` is ``None`` or ``payload`` is not a ``dict``."""
+    if rules is None or not isinstance(payload, dict):
+        return
+    et = payload.get("entityType")
+    if et:
+        canon = rules.canonical_entity_type(et)
+        if canon and canon != et:
+            payload["entityType"] = canon
+    edt = payload.get("edgeType")
+    if edt:
+        canon = rules.canonical_edge_type(edt)
+        if canon and canon != edt:
+            payload["edgeType"] = canon
 
 
 def _rich_edge_src_tgt(payload: Mapping) -> Tuple[Optional[str], Optional[str]]:
