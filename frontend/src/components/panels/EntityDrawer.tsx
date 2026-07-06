@@ -404,8 +404,12 @@ export function EntityDrawer({
   const propertiesBag: Record<string, any> =
     (formData.properties as Record<string, any> | undefined) ?? {}
 
+  // NOTE: no local <AnimatePresence> here. The drawer is conditionally
+  // rendered inside ContextViewCanvas's right-rail AnimatePresence, which
+  // owns the exit animation; a nested AnimatePresence wrapping an
+  // always-rendered child creates its own presence context and can strand
+  // the exiting aside (StrictMode / rapid open-close).
   return (
-    <AnimatePresence>
       <motion.aside
         ref={drawerRef}
         data-panel="entity-drawer"
@@ -727,7 +731,6 @@ export function EntityDrawer({
         </div>
         </div>
       </motion.aside>
-    </AnimatePresence>
   )
 }
 

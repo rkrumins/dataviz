@@ -2288,18 +2288,17 @@ export function ContextViewCanvas({
           inspecting a hit in the entity drawer).
           Right rail: mutually exclusive — selection > edge-panel > creation. */}
       <div className="flex-1 flex flex-row min-h-0 overflow-hidden">
-      <AnimatePresence>
-        {advancedSearchOpen && (
-          <SearchMapPanel
-            key="search-map-panel"
-            open={advancedSearchOpen}
-            onClose={() => setAdvancedSearchOpen(false)}
-            viewId={activeView?.id ?? ''}
-            onRevealNode={revealSearchHit}
-            onFrameMatches={handleFrameMatches}
-          />
-        )}
-      </AnimatePresence>
+      {/* SearchMapPanel is internally AnimatePresence-gated on `open` —
+          wrapping it in another AnimatePresence + conditional double-gates
+          the exit (the unmount races the inner exit animation and can
+          strand it). Render persistently; it owns its own presence. */}
+      <SearchMapPanel
+        open={advancedSearchOpen}
+        onClose={() => setAdvancedSearchOpen(false)}
+        viewId={activeView?.id ?? ''}
+        onRevealNode={revealSearchHit}
+        onFrameMatches={handleFrameMatches}
+      />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
         searchQuery={searchQuery}
@@ -2783,23 +2782,25 @@ export function ContextViewCanvas({
             onToggleFilter={toggleEdgeFilter}
           />
         )}
-        {/* Property Manager — independent right-rail panel. Unlike the
-            selection-driven panels above it isn't mutually exclusive: it
-            sits to the right of whichever inspector is open so the user
-            can author display rules while a node is selected. */}
-        <PropertyManagerDrawer
-          key="property-manager-drawer"
-          viewId={activeView?.id ?? ''}
-          open={propertyManagerOpen}
-          onClose={() => setPropertyManagerOpen(false)}
-          knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
-          knownLayers={storeLayers.map((l) => l.name)}
-          onSearchPredicate={(p) => {
-            useSearchStore.getState().requestSearchRun(p)
-            setAdvancedSearchOpen(true)
-          }}
-        />
       </AnimatePresence>
+      {/* Property Manager — independent right-rail panel. Unlike the
+          selection-driven panels above it isn't mutually exclusive: it
+          sits to the right of whichever inspector is open so the user
+          can author display rules while a node is selected. It is
+          persistently mounted and internally AnimatePresence-gated on
+          `open`, so it lives OUTSIDE the exit-managed block above —
+          nesting a second presence context there can strand its exit. */}
+      <PropertyManagerDrawer
+        viewId={activeView?.id ?? ''}
+        open={propertyManagerOpen}
+        onClose={() => setPropertyManagerOpen(false)}
+        knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+        knownLayers={storeLayers.map((l) => l.name)}
+        onSearchPredicate={(p) => {
+          useSearchStore.getState().requestSearchRun(p)
+          setAdvancedSearchOpen(true)
+        }}
+      />
       </div>{/* end flex-row wrapper */}
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}

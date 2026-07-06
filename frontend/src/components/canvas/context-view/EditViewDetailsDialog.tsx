@@ -15,11 +15,13 @@
  */
 
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, PenLine, Loader2, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useToast } from '@/components/ui/toast'
+import { Backdrop } from '@/components/ui/Backdrop'
 
 /** Provenance fields shown in the dialog's quiet footer. */
 type ViewProvenance = Pick<View, 'createdByName' | 'createdAt' | 'updatedBy' | 'updatedByName' | 'updatedAt'>
@@ -99,23 +101,31 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
     }
   }
 
-  return (
-    <AnimatePresence>
-      {open && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50"
-          onClick={onClose}
-        >
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            onClick={e => e.stopPropagation()}
-            className="w-full max-w-md bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
-          >
+  if (typeof document === 'undefined') return null
+
+  return createPortal(
+    <>
+      {/* Backdrop — plain CSS transition, never inside AnimatePresence: an
+          interrupted exit (StrictMode double-invoke, rapid toggle) strands a
+          fixed-inset-0 motion node that eats every click until refresh.
+          See components/ui/Backdrop.tsx. */}
+      <Backdrop open={open} onClick={onClose} zClassName="z-[70]" className="bg-black/50" />
+
+      {/* Centering layer: always-mounted, transparent to clicks (they fall
+          through to the Backdrop beneath → outside-click still closes). */}
+      <div className="fixed inset-0 z-[71] flex items-center justify-center p-4 pointer-events-none">
+        <AnimatePresence>
+          {open && (
+            <motion.div
+              key="edit-view-details"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="pointer-events-auto w-full max-w-md bg-canvas-elevated border border-glass-border rounded-2xl shadow-lg overflow-hidden flex flex-col max-h-[90vh]"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Edit view details"
+            >
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-glass-border shrink-0">
               <div className="flex items-center gap-3">
@@ -216,8 +226,10 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
               </button>
             </div>
           </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+          )}
+        </AnimatePresence>
+      </div>
+    </>,
+    document.body,
   )
 }
