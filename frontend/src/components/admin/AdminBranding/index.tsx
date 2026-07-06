@@ -14,8 +14,23 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useQuery } from '@tanstack/react-query'
 import {
     Palette, Type, ImageIcon, Scale, Loader2, Check, Upload, Trash2,
-    RotateCcw, AlertCircle, Info,
+    RotateCcw, AlertCircle, Info, Sparkles,
 } from 'lucide-react'
+
+/** Built-in brand marks the admin can apply in one click. Paths resolve to
+ *  self-contained SVGs in /public and flow through the ordinary
+ *  logoUrl/faviconUrl fields — the animated variant is used for the logo
+ *  (CSS animation plays when an SVG is loaded via <img>), the static variant
+ *  for the favicon (browsers don't animate favicons). */
+const BUILTIN_MARKS = [
+    {
+        id: 'graph-constellation',
+        name: 'Graph constellation',
+        blurb: 'Animated node-graph — the “preparing your graph” mark.',
+        logoUrl: '/brand-graph-mark.svg',
+        faviconUrl: '/brand-graph-icon.svg',
+    },
+] as const
 import {
     fetchAdminBranding, updateBranding, uploadBrandingImage, resetBranding,
     type Branding, type BrandingPatch,
@@ -153,6 +168,28 @@ export function AdminBranding() {
         }
     }
 
+    /** Apply a built-in mark as BOTH logo and favicon in one click. Writes the
+     *  asset paths and clears any uploaded image data so the paths win
+     *  (uploads otherwise take precedence). Persists immediately, like upload. */
+    async function applyBuiltInMark(mark: (typeof BUILTIN_MARKS)[number]) {
+        setSaving(true)
+        setSaveError(null)
+        try {
+            absorb(await updateBranding({
+                logoUrl: mark.logoUrl,
+                faviconUrl: mark.faviconUrl,
+                logoData: '', logoMime: '',
+                faviconData: '', faviconMime: '',
+                expectedVersion: version,
+            }))
+            setSaved(true)
+        } catch (e) {
+            setSaveError(errMsg(e))
+        } finally {
+            setSaving(false)
+        }
+    }
+
     /** Clear an uploaded image so the URL field / default mark takes over. */
     async function handleClearImage(kind: 'logo' | 'favicon') {
         setSaving(true)
@@ -252,6 +289,44 @@ export function AdminBranding() {
                         title="Logo & favicon"
                         blurb="Upload an image or point to a hosted URL. Uploads take precedence; SVG or PNG up to 1 MB."
                     >
+                        {/* Built-in marks — one click sets both logo and favicon. */}
+                        <div className="flex flex-col gap-2">
+                            <div className="text-xs font-medium text-ink-muted">Built-in marks</div>
+                            {BUILTIN_MARKS.map((mark) => {
+                                const active = resolvedLogo === mark.logoUrl && resolvedFavicon === mark.faviconUrl
+                                return (
+                                    <div
+                                        key={mark.id}
+                                        className="flex items-center gap-3.5 rounded-xl border border-glass-border bg-canvas/40 p-3"
+                                    >
+                                        <img
+                                            src={mark.logoUrl}
+                                            alt={mark.name}
+                                            className="h-11 w-11 shrink-0 rounded-lg object-contain shadow-sm"
+                                        />
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-sm font-semibold text-ink">{mark.name}</div>
+                                            <div className="text-xs text-ink-muted">{mark.blurb}</div>
+                                        </div>
+                                        {active ? (
+                                            <span className="inline-flex shrink-0 items-center gap-1.5 text-xs font-semibold text-accent-business">
+                                                <Check className="h-4 w-4" /> In use
+                                            </span>
+                                        ) : (
+                                            <button
+                                                onClick={() => applyBuiltInMark(mark)}
+                                                disabled={saving}
+                                                className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-accent-lineage px-3.5 py-2 text-sm font-medium text-white transition hover:brightness-110 disabled:opacity-50"
+                                            >
+                                                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                                Use this mark
+                                            </button>
+                                        )}
+                                    </div>
+                                )
+                            })}
+                        </div>
+
                         <ImageField
                             label="Logo"
                             help="Shown in the top bar. Falls back to the default mark when empty."
