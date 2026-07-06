@@ -18,6 +18,7 @@ import { BoundedQueue } from '@/lib/concurrency'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -262,24 +263,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // ── Reference / Context View ────────────────────────
                     // Strategy: load ONLY the entities that are relevant to this view.
                     //
-                    // If the view has explicit layer assignments (entityAssignments),
-                    // load those specific entities by URN. This matches exactly what
-                    // the user configured in the ViewWizard/LayerStudio.
+                    // If the view has canonical layer assignments, load those specific
+                    // entities by URN. This matches exactly what the user configured in
+                    // the wizard/canvas (both now write referenceLayout.assignments).
                     //
                     // If no assignments exist (new/empty view), fall back to loading
                     // by entity type so the user has something to work with.
 
-                    const viewLayers = activeView?.layout?.referenceLayout?.layers ?? []
                     const viewTypes = activeView?.content?.visibleEntityTypes ?? []
 
-                    // Collect all explicitly assigned entity URNs across all layers
+                    // Collect all assigned root URNs from the canonical assignment map.
+                    const { assignments } = normalizeReferenceLayout(activeView?.layout?.referenceLayout)
                     const assignedUrns = new Set<string>()
-                    for (const layer of viewLayers) {
-                        if (layer.entityAssignments) {
-                            for (const assignment of layer.entityAssignments) {
-                                if (assignment.entityId) assignedUrns.add(assignment.entityId)
-                            }
-                        }
+                    for (const [urn, entry] of Object.entries(assignments)) {
+                        if (entry?.layerId) assignedUrns.add(urn)
                     }
 
                     const hasExplicitAssignments = assignedUrns.size > 0

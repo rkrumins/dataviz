@@ -1,7 +1,8 @@
 /**
  * One Review & Save = ONE atomic commit. These tests pin that saveStagedChangesToDraft folds every
- * edit type — including layer moves — into a SINGLE /graph/changes call, and that the commit is
- * atomic (a failure throws; nothing is half-saved).
+ * GRAPH-DATA edit type into a SINGLE /graph/changes call, that the commit is atomic (a failure
+ * throws; nothing is half-saved), and that layer placement (assign_layer / move_to_layer) is VIEW
+ * config — it produces ZERO graph ops (it persists to referenceLayout.assignments via the canvas).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -26,18 +27,23 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
     mockApply.mockResolvedValue({ commitId: 'x', assigned: {} } as any)
   })
 
-  it('folds a layer move into the single batch as a node layerAssignment update', async () => {
+  it('produces ZERO graph ops for an assign_layer change (view config, not graph data)', async () => {
     await saveStagedChangesToDraft(
       [sc({ type: 'assign_layer', targetId: 'urn:x', targetUrn: 'urn:x', after: { layerId: 'warehouse' } })],
       target,
     )
-    expect(mockApply).toHaveBeenCalledTimes(1)
-    expect(mockApply.mock.calls[0][3]).toEqual([
-      { op: 'update', kind: 'node', id: 'urn:x', payload: { layerAssignment: 'warehouse' } },
-    ])
+    expect(mockApply).not.toHaveBeenCalled() // no graph ops → no commit
   })
 
-  it('sends structural edits AND layer moves in ONE commit (not two)', async () => {
+  it('produces ZERO graph ops for a move_to_layer change (view config, not graph data)', async () => {
+    await saveStagedChangesToDraft(
+      [sc({ type: 'move_to_layer', targetId: 'urn:x', targetUrn: 'urn:x', after: { layerId: 'warehouse' } })],
+      target,
+    )
+    expect(mockApply).not.toHaveBeenCalled()
+  })
+
+  it('sends structural edits in ONE commit and DROPS layer moves from the graph batch', async () => {
     await saveStagedChangesToDraft(
       [
         sc({ type: 'rename_entity', targetId: 'urn:a', targetUrn: 'urn:a', after: { label: 'A' } }),
@@ -48,7 +54,7 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
     expect(mockApply).toHaveBeenCalledTimes(1) // ONE atomic commit
     expect(mockApply.mock.calls[0][3]).toEqual([
       { op: 'update', kind: 'node', id: 'urn:a', payload: { displayName: 'A' } },
-      { op: 'update', kind: 'node', id: 'urn:x', payload: { layerAssignment: 'warehouse' } },
+      // no layerAssignment op — the assign_layer is view config, persisted separately
     ])
   })
 
@@ -66,7 +72,7 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
     expect(mockApply).toHaveBeenCalledTimes(1)
   })
 
-  it('skips logical/pseudo nodes (no backend entity to update)', async () => {
+  it('a lone layer move produces no commit (no graph ops at all)', async () => {
     await saveStagedChangesToDraft(
       [sc({ type: 'assign_layer', targetId: 'logical:group-1', after: { layerId: 'warehouse' } })],
       target,
@@ -74,7 +80,7 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
     expect(mockApply).not.toHaveBeenCalled()
   })
 
-  it('collapses a nested create + its containment edge + a layer move into ONE call', async () => {
+  it('collapses a nested create + its containment edge into ONE call, WITHOUT any layer op', async () => {
     await saveStagedChangesToDraft(
       [
         sc({ id: 'p', type: 'create_entity', targetId: 'urn:staged:p', targetUrn: 'urn:staged:p', after: { entityType: 'Layer', displayName: 'P' } }),
@@ -83,12 +89,12 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
       ],
       target,
     )
-    expect(mockApply).toHaveBeenCalledTimes(1) // ONE atomic commit for creates + edge + layer
+    expect(mockApply).toHaveBeenCalledTimes(1) // ONE atomic commit for creates + edge only
     expect(mockApply.mock.calls[0][3]).toEqual([
       { op: 'create', kind: 'node', ref: 'urn:staged:p', payload: { entityType: 'Layer', displayName: 'P' } },
       { op: 'create', kind: 'node', ref: 'urn:staged:c', payload: { entityType: 'Object', displayName: 'C' } },
       { op: 'create', kind: 'edge', ref: 'contains-urn:staged:c', payload: { edgeType: 'CONTAINS', sourceEntityId: 'urn:staged:p', targetEntityId: 'urn:staged:c' } },
-      { op: 'update', kind: 'node', id: 'urn:staged:c', payload: { layerAssignment: 'L1' } },
+      // the assign_layer for urn:staged:c does NOT appear — it's view config, remapped temp→real via remapEntityId
     ])
   })
 

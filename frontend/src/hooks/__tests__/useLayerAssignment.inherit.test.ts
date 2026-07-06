@@ -12,7 +12,7 @@ import { renderHook } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useLayerAssignment } from '../useLayerAssignment'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import type { ViewLayerConfig } from '@/types/schema'
+import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 
 type TestNode = { id: string; data: Record<string, unknown> }
 const node = (id: string, type: string): TestNode => ({ id, data: { urn: id, type, label: id } })
@@ -105,5 +105,76 @@ describe('useLayerAssignment — containment children inherit the parent layer (
     expect(map.get('a')).toBe('L-parentType')
     expect(map.get('b')).toBe('L-parentType') // inherits a, no break-out
     expect(map.get('d')).toBe('L-parentType') // inherits down the chain
+  })
+})
+
+// Curated-scope resolution with the canonical `assignments` map: `inheritsChildren: false`
+// is the ONLY escape from the hard-inherit rule.
+function resolveCurated(opts: {
+  nodes: TestNode[]
+  sortedLayers: ViewLayerConfig[]
+  assignments: Record<string, LayerAssignmentEntry>
+  parentMap: Map<string, string>
+  childMap: Map<string, string[]>
+}): Map<string, string> {
+  const nodeMap = new Map<string, TestNode>(opts.nodes.map(n => [n.id, n]))
+  const { result } = renderHook(() =>
+    useLayerAssignment({
+      nodes: opts.nodes,
+      sortedLayers: opts.sortedLayers,
+      nodeEdgeFingerprint: opts.nodes.map(n => n.id).join(','),
+      instanceAssignments: new Map(),
+      effectiveAssignments: new Map(),
+      nodeMap,
+      childMap: opts.childMap,
+      parentMap: opts.parentMap,
+      assignments: opts.assignments,
+      branchCreatedUrns: new Set(),
+    }),
+  )
+  return result.current.nodeLayerMap
+}
+
+describe('useLayerAssignment — inheritsChildren gate (canonical assignments)', () => {
+  const twoCols = () => [layer('A', 0, []), layer('B', 1, [])]
+  const pc = () => ({ parentMap: new Map([['c', 'p']]), childMap: new Map([['p', ['c']]]) })
+
+  it('DEFAULT (inheritsChildren true): child hard-inherits the parent, ignoring its own explicit entry', () => {
+    const { parentMap, childMap } = pc()
+    const map = resolveCurated({
+      nodes: [node('p', 'domain'), node('c', 'table')],
+      sortedLayers: twoCols(),
+      assignments: { p: { layerId: 'A', inheritsChildren: true }, c: { layerId: 'B', inheritsChildren: true } },
+      parentMap,
+      childMap,
+    })
+    expect(map.get('p')).toBe('A')
+    expect(map.get('c')).toBe('A') // hard-inherit wins over c's own explicit B
+  })
+
+  it('inheritsChildren:false lets the child take its OWN explicit assignment', () => {
+    const { parentMap, childMap } = pc()
+    const map = resolveCurated({
+      nodes: [node('p', 'domain'), node('c', 'table')],
+      sortedLayers: twoCols(),
+      assignments: { p: { layerId: 'A', inheritsChildren: false }, c: { layerId: 'B', inheritsChildren: true } },
+      parentMap,
+      childMap,
+    })
+    expect(map.get('p')).toBe('A')
+    expect(map.get('c')).toBe('B') // no longer forced to inherit A
+  })
+
+  it('inheritsChildren:false with no child entry: the child falls out in curated scope', () => {
+    const { parentMap, childMap } = pc()
+    const map = resolveCurated({
+      nodes: [node('p', 'domain'), node('c', 'table')],
+      sortedLayers: twoCols(),
+      assignments: { p: { layerId: 'A', inheritsChildren: false } },
+      parentMap,
+      childMap,
+    })
+    expect(map.get('p')).toBe('A')
+    expect(map.has('c')).toBe(false) // no explicit entry, no inheritance → dropped
   })
 })

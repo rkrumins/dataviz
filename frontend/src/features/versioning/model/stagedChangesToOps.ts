@@ -154,8 +154,8 @@ export function stagedChangesToOps(
         }
         break
       }
-      // assign_layer / move_to_layer → folded into the same batch by saveStagedChangesToDraft as
-      // node `layerAssignment` updates (not view-config here).
+      // assign_layer / move_to_layer / layer_config → VIEW config, not graph data. They persist to
+      // referenceLayout via persistReferenceLayout and produce ZERO graph ops here.
       default:
         break
     }

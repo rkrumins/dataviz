@@ -35,16 +35,10 @@ export async function saveStagedChangesToDraft(
   target: DraftSaveTarget,
 ): Promise<{ commitId?: string | null }> {
   // ── Build ONE op batch ──────────────────────────────────────────────────────────────────────
+  // Layer placement (assign_layer / move_to_layer) is VIEW config, not graph data — it produces
+  // ZERO graph ops. It persists to the view's referenceLayout.assignments via persistReferenceLayout;
+  // on save, `remapEntityId` re-keys a created entity's assignment temp→real (see the canvas caller).
   const ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes
-  for (const c of changes) {                                 // fold layer moves into the SAME batch
-    if (c.type !== 'assign_layer' && c.type !== 'move_to_layer') continue
-    const layerId = (c.after as { layerId?: string } | undefined)?.layerId
-    const rawId = c.targetUrn ?? c.targetId
-    // Logical/pseudo groups have no backend entity. A fresh node's temp urn stays as-is and resolves
-    // server-side against the batch's creates.
-    if (!layerId || !rawId || rawId.startsWith('logical:')) continue
-    ops.push({ op: 'update', kind: 'node', id: rawId, payload: { layerAssignment: layerId } })
-  }
 
   if (ops.length === 0) return { commitId: null }
 

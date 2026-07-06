@@ -73,7 +73,7 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
-import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
+import type { ViewLayerConfig } from '@/types/schema'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
@@ -491,7 +491,6 @@ export function ContextViewCanvas({
   const storeLayers = useReferenceModelStore(s => s.layers)
   const syncStatus = useReferenceModelStore(s => s.syncStatus)
   const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
-  const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
   const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
@@ -697,35 +696,32 @@ export function ContextViewCanvas({
   const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
-    // Capture the previous layer for diff display before mutation.
-    const prevAssignment = useReferenceModelStore.getState().effectiveAssignments.get(entityId)
-    const prevLayerId = prevAssignment?.layerId
-    const prevLayer = storeLayers.find(l => l.id === prevLayerId)
-    const targetLayer = storeLayers.find(l => l.id === layerId)
-    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
-    const entityName = (entity?.data?.label as string) ?? entityId
-    // The node's own persisted layer BEFORE the move — restored on discard.
-    const prevNodeLayer = entity?.data?.layerAssignment as string | undefined
+    const before = currentLayout()
+    // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
+    const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
 
-    const result = assignEntityToLayer(entityId, layerId)
-    if (!result.success && result.conflict?.type === 'containment_locked') {
-      setAssignmentWarning(result.conflict.message)
-      // Auto-dismiss after 5 seconds
+    // Containment hard rule: a child cannot be placed in a different layer than its parent subtree.
+    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entityId, layerId)
+    if (conflict?.type === 'containment_locked') {
+      setAssignmentWarning(conflict.message)
       if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
       assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
       return
     }
 
-    // Stamp the node's OWN `layerAssignment` so the move is consistent locally
-    // (drawer, node-property placement fallback) and matches what gets persisted.
-    useCanvasStore.getState().updateNode(entityId, { layerAssignment: layerId })
+    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const entityName = (entity?.data?.label as string) ?? entityId
+    const prevLayerId = before.assignments[entityId]?.layerId
+    const prevLayer = before.layers.find(l => l.id === prevLayerId)
+    const targetLayer = before.layers.find(l => l.id === layerId)
 
-    // Surface the assignment in the staged-changes review panel. On Save it is
-    // persisted by saveStagedChangesToDraft Phase 3 as an ISOLATED node update to
-    // this entity's `layerAssignment` — outside the atomic structural batch, so a
-    // layer failure can never take other edits down.
-    const stagedChanges = useStagedChangesStore.getState()
-    stagedChanges.stageOrReplace(
+    // Descendants with their own explicit entries are cleared so they inherit the parent's new layer.
+    const clearDescendants = explicitDescendants(entityId, parentMap, before.assignments)
+    const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants })
+    persistReferenceLayout(after)
+
+    // Surface it in Review & Save as a VIEW-LAYOUT change: no graph op, undoable via discard/reapply.
+    useStagedChangesStore.getState().stageOrReplace(
       (c) => c.type === 'assign_layer' && c.targetId === entityId,
       {
         type: 'assign_layer',
@@ -734,17 +730,11 @@ export function ContextViewCanvas({
         before: { layerId: prevLayerId, layerName: prevLayer?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
-        discard: () => {
-          useCanvasStore.getState().updateNode(entityId, { layerAssignment: prevNodeLayer })
-          if (prevLayerId) {
-            useReferenceModelStore.getState().assignEntityToLayer(entityId, prevLayerId)
-          } else {
-            useReferenceModelStore.getState().removeEntityAssignment(entityId)
-          }
-        },
+        discard: () => persistReferenceLayout(before),
+        reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [assignEntityToLayer, storeLayers, nodes])
+  }, [currentLayout, persistReferenceLayout, nodes])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -1223,11 +1213,25 @@ export function ContextViewCanvas({
 
   // === Extracted Hooks ===
 
+  // Canonical reference layout (assignments + scope) for THIS view — the authoritative render source
+  // (replaces the reference-model store's per-layer entityAssignments). Memoized on the raw config so
+  // the assignment resolver only recomputes on a real layout change.
+  const activeReferenceLayout = useMemo(
+    () => normalizeReferenceLayout(activeView?.layout?.referenceLayout),
+    [activeView?.layout?.referenceLayout],
+  )
+  const activeEntityScope = useMemo(
+    () => deriveEntityScope(activeView?.content, activeReferenceLayout),
+    [activeView?.content, activeReferenceLayout],
+  )
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
+    assignments: activeReferenceLayout.assignments,
+    entityScope: activeEntityScope,
   })
 
   // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
@@ -1319,85 +1323,49 @@ export function ContextViewCanvas({
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
   // updateView — the actual schema mutation happens during applyAll.
+  // Right-click "move to layer": same canonical write path as handleAssignToLayer (persist the view's
+  // referenceLayout.assignments; NO graph op). Kept as its own `move_to_layer` staged type for the
+  // review panel, with identical persist/discard/reapply semantics.
   const moveToLayer = useCallback((nodeId: string, layerId: string) => {
-    if (!activeView || !activeView.id) return
-
     const entity = displayMap.get(nodeId)
     if (!entity) return
-
     if (entity.isLogical) {
-      console.warn("Moving logical nodes not yet supported via context menu")
+      console.warn('Moving logical nodes not yet supported via context menu')
       return
     }
 
-    const layers = activeView.layout.referenceLayout?.layers || defaultReferenceModelLayers
-    const targetLayer = layers.find(l => l.id === layerId)
-
-    const addRuleToNode = (nodes: LogicalNodeConfig[], targetId: string): LogicalNodeConfig[] => {
-      return nodes.map(node => {
-        if (node.id === targetId) {
-          return {
-            ...node,
-            rules: [
-              ...(node.rules || []),
-              { id: `rule-${Date.now()}`, priority: 100, urnPattern: entity.urn }
-            ]
-          }
-        }
-        if (node.children) {
-          return { ...node, children: addRuleToNode(node.children, targetId) }
-        }
-        return node
-      })
+    const before = currentLayout()
+    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entity.urn, layerId)
+    if (conflict?.type === 'containment_locked') {
+      setAssignmentWarning(conflict.message)
+      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
+      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
+      interactions.closeContextMenu()
+      return
     }
 
-    const buildUpdatedLayers = () => layers.map(l => {
-      if (l.id === layerId) {
-        return {
-          ...l,
-          rules: [
-            ...(l.rules || []),
-            { id: `rule-${Date.now()}`, priority: 100, urnPattern: entity.urn }
-          ]
-        }
-      }
-      if (l.logicalNodes) {
-        const updatedLogicalNodes = addRuleToNode(l.logicalNodes, layerId)
-        if (updatedLogicalNodes !== l.logicalNodes) {
-          return { ...l, logicalNodes: updatedLogicalNodes }
-        }
-      }
-      return l
-    })
+    const targetLayer = before.layers.find(l => l.id === layerId)
+    const prevLayerId = before.assignments[entity.urn]?.layerId
+    const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
+    const after = assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants })
+    persistReferenceLayout(after)
 
-    const previousLayout = activeView.layout
-
-    useStagedChangesStore.getState().stage({
-      type: 'move_to_layer',
-      targetId: nodeId,
-      targetUrn: entity.urn,
-      before: { layout: previousLayout },
-      after: { layerId, layerName: targetLayer?.name },
-      summary: `Move-to-layer rule: '${entity.name}' → ${targetLayer?.name ?? layerId}`,
-      apply: async () => {
-        const updatedLayers = buildUpdatedLayers()
-        useSchemaStore.getState().updateView(activeView.id, {
-          layout: {
-            ...activeView.layout,
-            referenceLayout: {
-              ...activeView.layout.referenceLayout,
-              layers: updatedLayers
-            }
-          }
-        })
+    useStagedChangesStore.getState().stageOrReplace(
+      (c) => (c.type === 'move_to_layer' || c.type === 'assign_layer') && c.targetId === nodeId,
+      {
+        type: 'move_to_layer',
+        targetId: nodeId,
+        targetUrn: entity.urn,
+        before: { layerId: prevLayerId, layerName: before.layers.find(l => l.id === prevLayerId)?.name },
+        after: { layerId, layerName: targetLayer?.name },
+        summary: `Move '${entity.name}' → ${targetLayer?.name ?? layerId}`,
+        discard: () => persistReferenceLayout(before),
+        reapply: () => persistReferenceLayout(after),
       },
-      discard: () => {
-        // No mutation occurred yet — discard is a no-op.
-      },
-    })
+    )
 
     interactions.closeContextMenu()
-  }, [activeView, displayMap, interactions])
+  }, [displayMap, parentMap, currentLayout, persistReferenceLayout, interactions])
 
   // Stage a view-layout change so it (a) shows in Review & Save under "View layout", (b) is undoable via
   // the shared Undo/Redo (undo runs `discard` → persistReferenceLayout(before)), while staying DECOUPLED
@@ -2447,7 +2415,7 @@ export function ContextViewCanvas({
         onEditViewDetails={handleEditViewDetails}
         onShareView={() => void handleShareView()}
         syncStatus={syncStatus}
-        onRetrySync={() => { if (scopeWsId) void saveToBackend(scopeWsId) }}
+        onRetrySync={() => { void flushLayoutSave() }}
         isDraft={isDraft}
         canManage={canManage}
         canEnterEdit={canEnterEdit}
@@ -2598,7 +2566,7 @@ export function ContextViewCanvas({
               // history. Invalidate the whole versioning namespace so saved changes appear at once
               // (a save is user-initiated and infrequent, so the broad refetch is fine).
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
-              await saveToBackend(scopeWsId)   // view/blueprint config (layers) — not graph entities
+              await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
               closeStagedChangesPanel()
               showToast('success', 'Saved to draft.')
             } catch (e) {
@@ -2611,7 +2579,7 @@ export function ContextViewCanvas({
             ? await applyStagedChanges(provider, scopeWsId)
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
-            await saveToBackend(scopeWsId)
+            await flushLayoutSave()
             closeStagedChangesPanel()
           }
         }} />
