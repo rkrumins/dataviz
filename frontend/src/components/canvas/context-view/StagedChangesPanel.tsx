@@ -50,9 +50,10 @@ const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
   layer_config: 'Layers',
 }
 
-// Layer-config changes are VIEW presentation, not data-source changes — the review groups them under
+// View-layout changes (layer definitions AND entity placement) are VIEW presentation, not data-source
+// changes — they persist to referenceLayout, produce zero graph ops, and the review groups them under
 // their own "View layout" banner, visually separated from everything that touches the graph.
-const LAYER_CONFIG_TYPE: StagedChangeType = 'layer_config'
+const VIEW_LAYOUT_TYPES: ReadonlySet<StagedChangeType> = new Set(['layer_config', 'assign_layer', 'move_to_layer'])
 
 // Color tokens shared between row tints and section headings.
 const TONE = {
@@ -149,16 +150,16 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
 
   // Split into data-source changes vs view-layout changes so the review can banner them separately —
   // layer edits never touch the data source, and the UI should make that obvious.
-  const dataGrouped = useMemo(() => grouped.filter(([type]) => type !== LAYER_CONFIG_TYPE), [grouped])
-  const layerGrouped = useMemo(() => grouped.filter(([type]) => type === LAYER_CONFIG_TYPE), [grouped])
-  const layerCount = useMemo(() => changes.filter(c => c.type === LAYER_CONFIG_TYPE).length, [changes])
+  const dataGrouped = useMemo(() => grouped.filter(([type]) => !VIEW_LAYOUT_TYPES.has(type)), [grouped])
+  const layerGrouped = useMemo(() => grouped.filter(([type]) => VIEW_LAYOUT_TYPES.has(type)), [grouped])
+  const layerCount = useMemo(() => changes.filter(c => VIEW_LAYOUT_TYPES.has(c.type)).length, [changes])
 
   const total = changes.length
   const failedCount = changes.filter(c => c.error).length
 
   const summaryStats = useMemo(() => ({
     creates: changes.filter(c => c.type === 'create_entity' || c.type === 'create_edge').length,
-    edits: changes.filter(c => c.type === 'rename_entity' || c.type === 'assign_layer' || c.type === 'move_to_layer' || c.type === 'edit_edge' || c.type === 'reverse_edge').length,
+    edits: changes.filter(c => c.type === 'rename_entity' || c.type === 'edit_edge' || c.type === 'reverse_edge').length,
     deletes: changes.filter(c => c.type === 'delete_entity' || c.type === 'delete_edge').length,
   }), [changes])
 
