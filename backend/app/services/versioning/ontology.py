@@ -170,7 +170,18 @@ def validate_entities_rich(
                               f"Known types: {sorted(rules.entity_types)}",
                 })
         elif kind == "edge":
-            edt = str(payload.get("edgeType") or payload.get("edge_type") or "")
+            edt = str(payload.get("edgeType") or payload.get("edge_type") or "").strip()
+            if not edt:
+                # A create with no edgeType can't be typed against a declared schema — reject it
+                # with a clear, actionable reason (distinct from an unknown type). Unconstrained
+                # schemas (no declared edge types) leave it open, as before.
+                if rules.edge_types:
+                    out.append({
+                        "entity_id": eid, "kind": "edge", "rule": "missing_edge_type",
+                        "reason": "Edge is missing edgeType — expected one of "
+                                  f"{sorted(rules.edge_types)}.",
+                    })
+                continue
             edt_upper = edt.upper()
             rule = rules.edge_types.get(edt_upper)
             if rules.edge_types and rule is None:

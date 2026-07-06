@@ -56,6 +56,22 @@ def test_unknown_edge_type_rejected():
     assert [v["rule"] for v in viol] == ["unknown_edge_type"]
 
 
+def test_missing_edge_type_rejected_under_strict():
+    # A create edge with no/empty edgeType can't be typed against a declared schema → rejected
+    # with a clear, distinct reason. Normalization can't help (there is nothing to canonicalize).
+    for payload in ({"sourceEntityId": "ds1", "targetEntityId": "ds2"},
+                    {"edgeType": "", "sourceEntityId": "ds1", "targetEntityId": "ds2"},
+                    {"edgeType": "   ", "sourceEntityId": "ds1", "targetEntityId": "ds2"}):
+        viol = validate_entities_rich([("e", "edge", payload, "create")], TYPES, RULES)
+        assert [v["rule"] for v in viol] == ["missing_edge_type"], payload
+        assert "missing edgeType" in viol[0]["reason"]
+    # An unconstrained schema (no declared edge types) leaves a missing edgeType open.
+    open_rules = OntologyRules(entity_types={"Dataset": EntityRule()})
+    assert validate_entities_rich(
+        [("e", "edge", {"sourceEntityId": "ds1", "targetEntityId": "ds2"}, "create")],
+        TYPES, open_rules) == []
+
+
 def test_edge_source_and_target_compatibility():
     assert validate_entities_rich([_edge("ok", "ds1", "ds2", "FLOWS_TO")], TYPES, RULES) == []
     viol = validate_entities_rich([_edge("bad", "sys1", "col1", "FLOWS_TO")], TYPES, RULES)

@@ -273,3 +273,53 @@ def test_case_insensitive_type_id_collisions():
     assert len(edge) == 1 and "Relationship" in edge[0]
     # Entity vs edge share a namespace boundary — an entity 'Has' and edge 'HAS' do NOT collide.
     assert case_insensitive_type_id_collisions(["Has"], ["HAS"]) == []
+
+
+# ---------------------------------------------------------------------------
+# suggest_*_from_stats — case-insensitive dedupe (authoring-guard safety)
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace
+from backend.app.ontology.resolver import (
+    suggest_entity_defs_from_stats,
+    suggest_relationship_defs_from_stats,
+)
+
+
+def _stat(sid, count=1, icon=None, color=None):
+    return SimpleNamespace(id=sid, count=count, icon=icon, color=color)
+
+
+def test_suggest_rel_defs_dedupe_prefers_defaults_casing():
+    # graph carries both 'contains' and 'CONTAINS'; SYSTEM defaults declare 'CONTAINS' → ONE def.
+    defs = suggest_relationship_defs_from_stats([_stat("contains", 3), _stat("CONTAINS", 1)])
+    assert list(defs.keys()) == ["CONTAINS"]
+    assert "also seen as: contains" in (defs["CONTAINS"].description or "")
+
+
+def test_suggest_rel_defs_dedupe_by_majority_then_first_seen():
+    # not in defaults → majority count wins…
+    defs = suggest_relationship_defs_from_stats([_stat("knows", 2), _stat("KNOWS", 5)], base_defaults={})
+    assert list(defs.keys()) == ["KNOWS"]
+    assert "also seen as: knows" in defs["KNOWS"].description
+    # …and a count tie falls back to first-seen.
+    tie = suggest_relationship_defs_from_stats([_stat("owns", 1), _stat("OWNS", 1)], base_defaults={})
+    assert list(tie.keys()) == ["owns"]
+
+
+def test_suggest_rel_defs_dedupe_preserves_existing_any_case():
+    existing = {"HAS": RelationshipTypeDefEntry(name="Has")}
+    defs = suggest_relationship_defs_from_stats(
+        [_stat("has", 9)], existing_defs=existing, base_defaults={})
+    assert list(defs.keys()) == ["HAS"]     # existing kept; no lowercase variant added
+
+
+def test_suggest_entity_defs_dedupe_case_insensitive():
+    defs = suggest_entity_defs_from_stats([_stat("Layer", 4), _stat("layer", 1)], base_defaults={})
+    assert list(defs.keys()) == ["Layer"]   # majority
+    assert "also seen as: layer" in defs["Layer"].description
+
+
+def test_suggest_defs_no_dedupe_when_distinct():
+    defs = suggest_relationship_defs_from_stats([_stat("owns", 1), _stat("uses", 1)], base_defaults={})
+    assert set(defs.keys()) == {"owns", "uses"}
+    assert "also seen as" not in (defs["owns"].description or "")

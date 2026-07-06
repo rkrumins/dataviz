@@ -671,6 +671,7 @@ async def import_ontology_new(
     Import a semantic layer from exported JSON, creating a new draft.
     Validates the JSON structure against the export format.
     """
+    _reject_case_insensitive_type_dupes(req)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
         await _invalidate_ontology_caches(session, getattr(result, "ontology_id", None))
@@ -697,6 +698,7 @@ async def import_ontology_into(
     - System target → rejected (clone first).
     - No changes detected → returns status="no_changes" without modification.
     """
+    _reject_case_insensitive_type_dupes(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)

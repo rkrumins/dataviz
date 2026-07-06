@@ -314,8 +314,9 @@ def case_insensitive_type_id_collisions(
             if first is not None and first != n:
                 out.append(
                     f"{kind} types '{first}' and '{n}' differ only by case; type ids must be "
-                    f"unique case-insensitively — rename one of them, or if the vocabulary is "
-                    f"genuinely case-distinct, keep one id here and alias the other at mapping time."
+                    f"unique case-insensitively — rename or remove one so they differ by more than "
+                    f"case (if the vocabulary is genuinely case-distinct, keep one id here and alias "
+                    f"the other at mapping time)."
                 )
             else:
                 seen.setdefault(key, str(n))
@@ -453,6 +454,44 @@ def check_coverage(
 # ---------------------------------------------------------------------------
 
 
+def _group_stats_by_casefold(stats: List[Any]) -> Dict[str, List[Any]]:
+    """``{casefolded id: [stat, …]}`` preserving first-seen order. A source graph carrying both
+    ``has`` and ``HAS`` yields one group — suggesting BOTH would collide with the authoring guard
+    (case-insensitive-unique type ids) the moment the user saves the suggested ontology."""
+    groups: Dict[str, List[Any]] = {}
+    for st in stats:
+        groups.setdefault(str(st.id).lower(), []).append(st)
+    return groups
+
+
+def _canonical_stat_id(casefold: str, variants: List[Any], defaults: Dict[str, Dict]) -> str:
+    """Canonical spelling for a case-collision group: (a) the defaults' spelling if a default type
+    matches case-insensitively (e.g. ``HAS`` from SYSTEM_RELATIONSHIP_TYPES), else (b) the
+    highest-instance-count variant, else (c) the first seen (``variants`` order breaks count ties)."""
+    for k in defaults:                         # (a) defaults casing wins
+        if k.lower() == casefold:
+            return k
+    best_id, best_count = None, -1             # (b) majority count, (c) first-seen tiebreak
+    for st in variants:
+        c = int(getattr(st, "count", 0) or 0)
+        if c > best_count:
+            best_id, best_count = st.id, c
+    return best_id if best_id is not None else casefold
+
+
+def _also_seen_note(variants: List[Any], canonical: str) -> str:
+    """"also seen as: …" for the merged case variants (empty when nothing was merged)."""
+    others = [st.id for st in variants if st.id != canonical]
+    seen = list(dict.fromkeys(others))         # dedupe, preserve order
+    return ("also seen as: " + ", ".join(seen)) if seen else ""
+
+
+def _with_note(description: Optional[str], note: str) -> Optional[str]:
+    if not note:
+        return description
+    return f"{description} ({note})" if description else note
+
+
 def suggest_entity_defs_from_stats(
     entity_type_stats: List[Any],
     existing_defs: Optional[Dict[str, EntityTypeDefEntry]] = None,
@@ -461,8 +500,10 @@ def suggest_entity_defs_from_stats(
     """
     Build suggested entity definitions from graph introspection stats.
 
-    For each entity type found in the graph:
-    - If already in existing_defs → keep as-is (do not overwrite user customisation).
+    Case-collision variants (``layer``/``Layer``) are merged into ONE def keyed by the canonical
+    spelling (see :func:`_canonical_stat_id`); the merged variants are noted in the description.
+    For each remaining entity type:
+    - If already in existing_defs (any case) → keep as-is (do not overwrite user customisation).
     - If in base_defaults → hydrate from defaults.
     - Otherwise → generate a generic fallback.
     """
@@ -470,22 +511,26 @@ def suggest_entity_defs_from_stats(
     defaults = base_defaults or SYSTEM_ENTITY_TYPES
     existing = existing_defs or {}
     result: Dict[str, EntityTypeDefEntry] = dict(existing)
+    existing_lc = {k.lower() for k in result}
 
-    for stat in entity_type_stats:
-        eid = stat.id
-        if eid in result:
-            continue  # preserve user customisation
+    for casefold, variants in _group_stats_by_casefold(entity_type_stats).items():
+        if casefold in existing_lc:
+            continue  # preserve user customisation (any case)
+        eid = _canonical_stat_id(casefold, variants, defaults)
         if eid in defaults:
-            result[eid] = _entity_def_from_dict(defaults[eid])
+            edef = _entity_def_from_dict(defaults[eid])
         else:
-            icon = getattr(stat, "icon", None) or "Box"
-            color = getattr(stat, "color", None) or "#6366f1"
-            result[eid] = EntityTypeDefEntry(
+            st0 = variants[0]
+            icon = getattr(st0, "icon", None) or "Box"
+            color = getattr(st0, "color", None) or "#6366f1"
+            edef = EntityTypeDefEntry(
                 name=_humanize(eid),
                 plural_name=_humanize(eid) + "s",
                 description=f"Entity type discovered in graph: {eid}",
                 visual=EntityVisualData(icon=icon, color=color),
             )
+        edef.description = _with_note(edef.description, _also_seen_note(variants, eid))
+        result[eid] = edef
 
     return result
 
@@ -499,21 +544,21 @@ def suggest_relationship_defs_from_stats(
     defaults = base_defaults or SYSTEM_RELATIONSHIP_TYPES
     existing = existing_defs or {}
     result: Dict[str, RelationshipTypeDefEntry] = dict(existing)
+    existing_lc = {k.lower() for k in result}
 
-    for stat in edge_type_stats:
-        rid = stat.id
-        if rid in result:
-            continue
-        rid_upper = rid.upper()
-        if rid_upper in defaults:
-            result[rid] = _rel_def_from_dict(defaults[rid_upper])
-        elif rid in defaults:
-            result[rid] = _rel_def_from_dict(defaults[rid])
+    for casefold, variants in _group_stats_by_casefold(edge_type_stats).items():
+        if casefold in existing_lc:
+            continue  # preserve user customisation (any case)
+        rid = _canonical_stat_id(casefold, variants, defaults)
+        if rid in defaults:
+            rdef = _rel_def_from_dict(defaults[rid])
         else:
-            result[rid] = RelationshipTypeDefEntry(
+            rdef = RelationshipTypeDefEntry(
                 name=_humanize(rid),
                 description=f"Relationship type discovered in graph: {rid}",
             )
+        rdef.description = _with_note(rdef.description, _also_seen_note(variants, rid))
+        result[rid] = rdef
 
     return result
 
