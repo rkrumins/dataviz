@@ -231,31 +231,25 @@ export function useLayerAssignment({
         const nodeLayerId = rawNodeLayer && validLayerIds.has(rawNodeLayer) ? rawNodeLayer : undefined
         if (instanceAssignment) {
           myLayerId = instanceAssignment.layerId
-        } else if (viewIsCurated) {
-          // 2a. Curated (closed-scope) mode: the view's canonical assignments are
-          //     authoritative. Only entities in ``explicitAssignments`` get a
-          //     layer; everything else drops out. This is what makes the
-          //     canvas mirror the wizard's "if you didn't drag it, it's
-          //     not in the view" mental model. We deliberately do NOT consult
-          //     the node's own `layerAssignment` here — it is a GLOBAL node
-          //     property, so honouring it in a closed-scope view would leak in
-          //     entities this view never assigned (cross-view contamination).
+        } else if (explicitAssignments.has(nodeId)) {
+          // 2a. Canonical per-node assignment (referenceLayout.assignments) — AUTHORITATIVE in BOTH
+          //     scopes. A user's explicit placement overrides type rules / backend even in an open
+          //     ('all') view, and is the closed-scope authority. This is what lets a canvas assign
+          //     render WITHOUT flipping the view's scope (scope is pinned per the persist path), and
+          //     it makes the canvas mirror the wizard's "if you didn't place it, it's not here" model.
           myLayerId = explicitAssignments.get(nodeId)
-          // 2a-delta. LEAK-SAFE exception: an entity CREATED IN THIS BRANCH's
-          //     draft (its urn is in `branchCreatedDelta`) has no persisted
-          //     `entityAssignment` yet, so the rule above drops it and it would
-          //     never render. Honour its durable, view-valid `layerAssignment`
-          //     (already validated into `nodeLayerId`) — scoped STRICTLY to the
-          //     delta, so no arbitrary global-property node can leak in. Explicit
-          //     entityAssignments (above) still win.
-          if (!myLayerId && nodeLayerId) {
+        } else if (viewIsCurated) {
+          // 2b. Curated (closed-scope): an unlisted root drops out, EXCEPT a branch-created node
+          //     placed by its own durable, view-valid `layerAssignment` (leak-safe delta exception —
+          //     only delta nodes qualify, so no arbitrary global-property node leaks in). We do NOT
+          //     otherwise consult the node's global `layerAssignment` in curated scope.
+          if (nodeLayerId) {
             const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
             if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
           }
         } else {
-          // 2b. Open-scope mode: empty / new view with no explicit
-          //     assignments. Fall back to backend → node property → rules →
-          //     inheritance so the user has data to start dragging from.
+          // 2c. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
+          //     the user has data to start from (canonical assignments already handled above).
           const backendAssignment = effectiveAssignments.get(nodeId)
           if (backendAssignment?.layerId) {
             myLayerId = backendAssignment.layerId

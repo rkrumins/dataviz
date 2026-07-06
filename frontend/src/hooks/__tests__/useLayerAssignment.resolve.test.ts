@@ -46,6 +46,9 @@ function resolve(opts: {
   nodes: TestNode[]
   sortedLayers: ViewLayerConfig[]
   assignments?: Record<string, LayerAssignmentEntry>
+  entityScope?: 'all' | 'curated'
+  effectiveAssignments?: Map<string, { layerId: string }>
+  instanceAssignments?: Map<string, { layerId: string }>
   branchCreatedUrns?: Set<string>
 }): Map<string, string> {
   const nodeMap = new Map<string, TestNode>(opts.nodes.map(n => [n.id, n]))
@@ -54,12 +57,13 @@ function resolve(opts: {
       nodes: opts.nodes,
       sortedLayers: opts.sortedLayers,
       nodeEdgeFingerprint: opts.nodes.map(n => n.id).join(','),
-      instanceAssignments: new Map(),
-      effectiveAssignments: new Map(),
+      instanceAssignments: opts.instanceAssignments ?? new Map(),
+      effectiveAssignments: opts.effectiveAssignments ?? new Map(),
       nodeMap,
       childMap: new Map(),
       parentMap: new Map(),
       assignments: opts.assignments,
+      entityScope: opts.entityScope,
       branchCreatedUrns: opts.branchCreatedUrns,
     }),
   )
@@ -152,5 +156,52 @@ describe('useLayerAssignment — closed-scope branch-created delta', () => {
       branchCreatedUrns: new Set(),
     })
     expect(map.get('n')).toBe('objects')
+  })
+
+  it('OPEN scope: a canonical assignment is authoritative and overrides the backend placement', () => {
+    // The view stays open ('all'), but the user's explicit canvas assignment must render — even though
+    // the backend engine would place this node elsewhere. (Regression guard for the pinned-scope model:
+    // a canvas assign in an open view renders WITHOUT flipping the view to curated.)
+    const map = resolve({
+      nodes: [node('n', 'obj')],
+      sortedLayers: twoLayers(),
+      assignments: { n: assign('concepts') },
+      entityScope: 'all',
+      effectiveAssignments: new Map([['n', { layerId: 'objects' }]]),
+    })
+    expect(map.get('n')).toBe('concepts') // canonical wins over the 'objects' backend placement
+  })
+
+  it('OPEN scope: an UNassigned node still resolves via the backend (canonical only overrides its own node)', () => {
+    const map = resolve({
+      nodes: [node('assigned', 'obj'), node('other', 'obj')],
+      sortedLayers: twoLayers(),
+      assignments: { assigned: assign('concepts') },
+      entityScope: 'all',
+      effectiveAssignments: new Map([['other', { layerId: 'objects' }]]),
+    })
+    expect(map.get('assigned')).toBe('concepts')
+    expect(map.get('other')).toBe('objects') // unaffected — open view keeps showing rule-placed nodes
+  })
+
+  it('a stale store instanceAssignment SHADOWS the canonical assignment for a root (why the canvas clears it on move)', () => {
+    // Repro of the reviewer-confirmed regression: a session-created root keeps an instanceAssignment
+    // that wins at top priority, so a later canonical move to a different layer does not render until
+    // the canvas clears the store entry (handleAssignToLayer/moveToLayer call removeEntityAssignment).
+    const shadowed = resolve({
+      nodes: [node('n', 'obj')],
+      sortedLayers: twoLayers(),
+      assignments: { n: assign('concepts') }, // canonical says concepts
+      instanceAssignments: new Map([['n', { layerId: 'objects' }]]), // stale store entry says objects
+    })
+    expect(shadowed.get('n')).toBe('objects') // instanceAssignment wins — the shadow
+    // Once the store entry is cleared, the canonical value takes over:
+    const cleared = resolve({
+      nodes: [node('n', 'obj')],
+      sortedLayers: twoLayers(),
+      assignments: { n: assign('concepts') },
+      instanceAssignments: new Map(),
+    })
+    expect(cleared.get('n')).toBe('concepts')
   })
 })

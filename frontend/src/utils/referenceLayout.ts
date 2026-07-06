@@ -126,3 +126,17 @@ export function deriveEntityScope(
     }
     return Object.keys(layout.assignments).length > 0 ? 'curated' : 'all'
 }
+
+/**
+ * The entityScope a canvas gesture must PIN, computed from the PRE-gesture state so a gesture never
+ * flips a view's scope implicitly: an explicit `content.entityScope` passes through unchanged, else it
+ * derives from the view's CURRENT (pre-mutation) layout. Net effect — a view operating open stays
+ * 'all' when you drag-assign; a curated view stays 'curated'; the first persist just pins the prior
+ * effective mode explicitly. Pass the RAW pre-gesture `referenceLayout` (it is normalized here).
+ */
+export function scopeForPersist(
+    content: ViewContentConfig | undefined,
+    preReferenceLayout: unknown,
+): 'all' | 'curated' {
+    return deriveEntityScope(content, normalizeReferenceLayout(preReferenceLayout))
+}

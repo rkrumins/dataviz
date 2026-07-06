@@ -89,7 +89,7 @@ import { StartEditingDialog } from './StartEditingDialog'
 import { AddLayerColumn } from './AddLayerColumn'
 import * as layerOps from './layerMutations'
 import * as assignmentOps from './assignmentMutations'
-import { normalizeReferenceLayout, deriveEntityScope, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -594,15 +594,22 @@ export function ContextViewCanvas({
   const persistReferenceLayout = useCallback((next: NormalizedReferenceLayout) => {
     const view = useSchemaStore.getState().getActiveView()
     if (!view?.id) return
-    // Canonical-clean: only layers + assignments (currentLayout already stripped legacy shapes).
+    // Pin the scope from the PRE-gesture state so a canvas gesture NEVER flips a view's scope
+    // implicitly: an open view stays 'all' (assigns render via the canonical map, not the scope),
+    // a curated view stays 'curated'. `view` here is pre-write, so its layout is the pre-gesture one.
+    const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
+    // Canonical-clean: only layers + assignments (currentLayout already stripped legacy shapes). Mirror
+    // the pinned scope into content.entityScope locally so it's explicit for the NEXT gesture (the
+    // durable updateViewLayout writes it too).
     const referenceLayout = { layers: next.layers, assignments: next.assignments }
     useSchemaStore.getState().updateView(view.id, {
       layout: { ...(view.layout ?? {}), referenceLayout },
+      content: { ...view.content, entityScope },
     })
     // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
     // prior blueprint-autosync gate).
     if (!canManage) return
-    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope: deriveEntityScope(view.content, next) }
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope }
     if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
     layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
   }, [canManage, doLayoutSave])
@@ -719,6 +726,11 @@ export function ContextViewCanvas({
     const clearDescendants = explicitDescendants(entityId, parentMap, before.assignments)
     const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants })
     persistReferenceLayout(after)
+    // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
+    // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
+    // canonical move until reload. Clear it so the canonical value renders immediately (on discard the
+    // node falls back to its durable node-property/delta placement — the pre-move layer).
+    useReferenceModelStore.getState().removeEntityAssignment(entityId)
 
     // Surface it in Review & Save as a VIEW-LAYOUT change: no graph op, undoable via discard/reapply.
     useStagedChangesStore.getState().stageOrReplace(
@@ -1349,6 +1361,8 @@ export function ContextViewCanvas({
     const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
     const after = assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants })
     persistReferenceLayout(after)
+    // Clear any stale store instanceAssignment so the canonical move renders immediately (see handleAssignToLayer).
+    useReferenceModelStore.getState().removeEntityAssignment(entity.urn)
 
     useStagedChangesStore.getState().stageOrReplace(
       (c) => (c.type === 'move_to_layer' || c.type === 'assign_layer') && c.targetId === nodeId,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveEntityScope, normalizeReferenceLayout } from '../referenceLayout'
+import { deriveEntityScope, normalizeReferenceLayout, scopeForPersist } from '../referenceLayout'
 import type { LayerAssignmentEntry, ViewContentConfig } from '@/types/schema'
 
 describe('normalizeReferenceLayout', () => {
@@ -242,5 +242,31 @@ describe('deriveEntityScope', () => {
         const content = { entityScope: 'bogus' } as unknown as ViewContentConfig
         expect(deriveEntityScope(content, curatedLayout)).toBe('curated')
         expect(deriveEntityScope(content, emptyLayout)).toBe('all')
+    })
+})
+
+describe('scopeForPersist — a canvas gesture never flips scope implicitly', () => {
+    it('(a) open view (no explicit scope, no pre-gesture assignments) pins "all"', () => {
+        expect(scopeForPersist(undefined, { layers: [], assignments: {} })).toBe('all')
+    })
+
+    it('(b) view with existing pre-gesture assignments pins "curated" (canonical OR legacy shape)', () => {
+        expect(scopeForPersist(undefined, { layers: [], assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true } } })).toBe('curated')
+        // legacy per-layer entityAssignments are up-converted by normalizeReferenceLayout, so a
+        // pre-canonical curated view still pins 'curated'.
+        expect(scopeForPersist(undefined, { layers: [{ id: 'l1', name: 'L1', order: 0, entityTypes: [], entityAssignments: [{ entityId: 'urn:a', layerId: 'l1', inheritsChildren: true, priority: 1 }] }] })).toBe('curated')
+    })
+
+    it('(c) explicit content.entityScope passes through unchanged regardless of the pre-gesture layout', () => {
+        const openContent = { entityScope: 'all' } as ViewContentConfig
+        const curatedContent = { entityScope: 'curated' } as ViewContentConfig
+        // explicit 'all' even though pre-gesture assignments exist
+        expect(scopeForPersist(openContent, { layers: [], assignments: { 'urn:a': { layerId: 'l1', inheritsChildren: true } } })).toBe('all')
+        // explicit 'curated' even though there are no pre-gesture assignments
+        expect(scopeForPersist(curatedContent, { layers: [], assignments: {} })).toBe('curated')
+    })
+
+    it('tolerates a missing/undefined pre-gesture layout (new view) → "all"', () => {
+        expect(scopeForPersist(undefined, undefined)).toBe('all')
     })
 })
