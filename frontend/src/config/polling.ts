@@ -58,7 +58,33 @@ export const POLLING_INTERVALS = {
    * poll is essentially free.
    */
   permissions: 60_000,
+  /**
+   * Canvas auto-retry cadence while the graph provider is warming up
+   * (loading its dataset) or briefly unavailable. Deliberately NOT tight:
+   * a graph that's reloading takes seconds-to-minutes, so hammering every
+   * 2-3s just multiplies load across every affected user with no faster
+   * recovery. A few gentle, JITTERED attempts (see PROVIDER_RETRY_MAX_ATTEMPTS)
+   * catch a quick recovery; after that the canvas stops and offers an
+   * explicit Retry. Jitter avoids a thundering herd when 100s of users hit
+   * the same outage; the retry also pauses entirely while the tab is hidden.
+   * Overridable per-deployment via VITE_PROVIDER_RETRY_INTERVAL_MS.
+   */
+  providerRetry: (() => {
+    const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_INTERVAL_MS)
+    return Number.isFinite(env) && env >= 2_000 ? env : 10_000
+  })(),
 } as const
+
+/**
+ * How many times the canvas auto-retries a warming/unavailable provider
+ * before it stops and shows an explicit "Retry" button. Bounded on purpose:
+ * unbounded background retries across 100s of users is exactly the load
+ * spike we must avoid. Overridable via VITE_PROVIDER_RETRY_MAX_ATTEMPTS.
+ */
+export const PROVIDER_RETRY_MAX_ATTEMPTS = (() => {
+  const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_MAX_ATTEMPTS)
+  return Number.isFinite(env) && env >= 0 ? env : 5
+})()
 
 /**
  * Add bounded jitter to a base interval. Used to prevent lockstep

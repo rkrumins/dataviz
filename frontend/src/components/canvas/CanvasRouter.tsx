@@ -57,7 +57,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  const { hydrationError, hydrationStatus, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
+  const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
   useLoadingToast(
     'hydration',
@@ -186,8 +186,8 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
         {(hydrationStatus === 'warming' || hydrationStatus === 'unavailable') && (
           <ProviderUnavailableOverlay
-            message={hydrationError ?? ''}
             warming={hydrationStatus === 'warming'}
+            onRetry={retryHydration}
           />
         )}
 
@@ -207,12 +207,15 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   )
 }
 
-function ProviderUnavailableOverlay({ message, warming = false }: { message: string; warming?: boolean }) {
+function ProviderUnavailableOverlay({ warming = false, onRetry }: { warming?: boolean; onRetry?: () => void }) {
   // "Warming" is the transient, self-resolving case (the graph provider is
   // loading its dataset on restart): a calm, non-alarm spinner tone, because
   // the data is fine and the hook auto-retries. A hard outage keeps the amber
   // warning icon. Neither ever shows the empty "Start building" state — that
   // false-empty over real data was the reported "my entities vanished" bug.
+  // The canvas auto-retries a few times at a gentle interval; the explicit
+  // "Retry now" button lets the user re-check on demand (and covers the case
+  // where the bounded auto-retries have been exhausted).
   return (
     <div className="absolute inset-0 z-20 flex items-center justify-center bg-canvas/80 backdrop-blur-sm pointer-events-none">
       <div className="flex flex-col items-center gap-3 max-w-sm text-center pointer-events-auto">
@@ -229,13 +232,17 @@ function ProviderUnavailableOverlay({ message, warming = false }: { message: str
         </h3>
         <p className="text-sm text-ink-muted">
           {warming
-            ? 'The graph service is loading your data. This view will fill in automatically in a moment — no action needed.'
-            : message}
+            ? 'The graph service is loading your data. Your data is safe — this view will fill in automatically in a moment.'
+            : 'The graph provider is not responding right now. Your data is safe — this view will load once the provider is back.'}
         </p>
-        {!warming && (
-          <p className="text-xs text-ink-muted/70">
-            The canvas will automatically reload when the provider recovers.
-          </p>
+        {onRetry && (
+          <button
+            onClick={onRetry}
+            className="mt-1 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:bg-accent-lineage/90 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Retry now
+          </button>
         )}
       </div>
     </div>

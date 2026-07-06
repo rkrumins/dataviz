@@ -19,6 +19,7 @@ import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
+import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -98,6 +99,8 @@ export interface UseGraphHydrationResult {
     /** Authoritative terminal state. Drives the canvas overlay/empty-state so a
      *  failed/warming/loading load is never rendered as an empty graph. */
     hydrationStatus: HydrationStatus
+    /** Explicit user-triggered retry for a warming/unavailable provider. */
+    retryHydration: () => void
 }
 
 interface UseGraphHydrationOptions {
@@ -631,25 +634,38 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch])
 
-    // Auto-retry while the provider is warming/unavailable, so the canvas
-    // recovers on its own once the graph is back — no manual refresh. Both
-    // warming and hard-down auto-recover the moment the provider answers, so
-    // both retry persistently (~30 attempts, ≈4 min of 8s-capped backoff) then
-    // stop. CRITICALLY, a retry does NOT clear hydrationStatus/error — it only
-    // re-arms the load (retryEpoch); the status flips to 'ready' only by a
-    // SUCCESSFUL load (markReady). So the overlay stays put and can never blink
-    // to "Start building" between attempts. retryEpoch is a dep so this effect
-    // re-evaluates after each attempt and schedules the next while still failed.
+    // Explicit, user-triggered retry (the overlay's "Retry" button, or when a
+    // background tab is brought back to the foreground). Re-arms a fresh round
+    // of auto-retries. Kept stable so the overlay button identity doesn't churn.
+    const retryHydration = useCallback(() => {
+        retryCountRef.current = 0
+        initializedKeyRef.current = null
+        setRetryEpoch(e => e + 1)
+    }, [])
+
+    // Auto-retry while the provider is warming/unavailable — but SCALE-SAFELY:
+    //  • a configurable, deliberately-unhurried interval (POLLING_INTERVALS.
+    //    providerRetry, default 10s), NOT a tight 2-3s loop that would multiply
+    //    load across every affected user with no faster recovery;
+    //  • JITTERED, so 100s of users hitting the same outage don't retry in
+    //    lockstep (thundering herd);
+    //  • BOUNDED to PROVIDER_RETRY_MAX_ATTEMPTS (default 5) — after that the
+    //    canvas stops auto-retrying and the overlay shows an explicit Retry;
+    //  • PAUSED entirely while the tab is hidden (no background-tab hammering).
+    // A retry NEVER clears the status/overlay — only a SUCCESSFUL load
+    // (markReady) flips to 'ready', so the overlay can't blink to "Start
+    // building" between attempts. retryEpoch is a dep so this re-evaluates after
+    // each attempt and schedules the next while still failed and under budget.
     useEffect(() => {
         if (!enableHydration) return
         if (hydrationStatus !== 'warming' && hydrationStatus !== 'unavailable') {
             retryCountRef.current = 0
             return
         }
-        const maxRetries = 30
-        if (retryCountRef.current >= maxRetries) return
+        if (retryCountRef.current >= PROVIDER_RETRY_MAX_ATTEMPTS) return
+        if (typeof document !== 'undefined' && document.hidden) return
         const attempt = retryCountRef.current + 1
-        const delay = Math.min(2000 * 2 ** (attempt - 1), 8000) // 2s, 4s, 8s, 8s…
+        const delay = withJitter(POLLING_INTERVALS.providerRetry)
         const t = setTimeout(() => {
             retryCountRef.current = attempt
             initializedKeyRef.current = null   // re-arm the hydration effect
@@ -657,6 +673,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         }, delay)
         return () => clearTimeout(t)
     }, [enableHydration, hydrationStatus, retryEpoch])
+
+    // Resume retrying the moment a hidden tab returns to the foreground (the
+    // auto-retry above pauses while hidden), so a user coming back to a warming
+    // canvas gets an immediate attempt instead of waiting out the interval.
+    useEffect(() => {
+        if (!enableHydration || typeof document === 'undefined') return
+        const onVisible = () => {
+            if (document.hidden) return
+            const s = useCanvasStore.getState().hydrationStatus
+            if (s === 'warming' || s === 'unavailable') retryHydration()
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        return () => document.removeEventListener('visibilitychange', onVisible)
+    }, [enableHydration, retryHydration])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
@@ -901,5 +931,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         hydrationPhase,
         hydrationError,
         hydrationStatus,
+        /** Explicit user retry (overlay "Retry" button). Re-arms a fresh round
+         *  of bounded auto-retries. */
+        retryHydration,
     }
 }
