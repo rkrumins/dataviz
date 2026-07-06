@@ -25,14 +25,21 @@ export const POLLING_INTERVALS = {
   /**
    * Active announcements (banner). Backend's admin config can
    * override this per-deployment via `/announcements/config`; this is
-   * the fallback used until the config response lands.
+   * the fallback used until the config response lands. 60s (was 15s):
+   * this was the highest-frequency idle poll in the app — at fleet
+   * scale it dominated baseline request volume for a surface where a
+   * minute of announcement latency is invisible. Ops can still dial
+   * it down remotely via the admin config when a faster banner is
+   * genuinely needed.
    */
-  announcements: 15_000,
+  announcements: 60_000,
   /**
    * Provider health/status. Background poll for the connection status
-   * indicator across all configured providers.
+   * indicator across all configured providers. 60s (was 30s): the
+   * indicator is advisory; real outages surface through request
+   * failures and the health banner long before this poll.
    */
-  providerStatus: 30_000,
+  providerStatus: 60_000,
   /**
    * Aggregation job history — only ticks while a job is actually
    * pending/running. Bumped from 3s to 5s because below 5s the UI

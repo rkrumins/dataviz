@@ -11,17 +11,19 @@
  * modal on read), so for non-admin users the fetch fails quietly and the map is
  * simply empty — callers should treat a missing entry as "provider unknown".
  */
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useMemo, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useAnyWorkspacePermission } from '@/store/auth'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 
+const EMPTY_CATALOG: CatalogItemResponse[] = []
+const EMPTY_PROVIDERS: ProviderResponse[] = []
+
 export function useDataSourceProviderMap() {
   const workspaces = useWorkspacesStore(s => s.workspaces)
-  const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
-  const [providers, setProviders] = useState<ProviderResponse[]>([])
 
   // Mirror the backend gates (catalog.py / providers.py both `requires(...,
   // workspace_any=True)`) so users without access don't fire two
@@ -31,23 +33,25 @@ export function useDataSourceProviderMap() {
   const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
   const canRead = canReadCatalog && canReadProviders
 
-  useEffect(() => {
-    if (!canRead) return
-    let cancelled = false
-    Promise.all([catalogService.list(), providerService.list()])
-      .then(([cats, provs]) => {
-        if (cancelled) return
-        setCatalogItems(cats)
-        setProviders(provs)
-      })
-      .catch(() => {
-        // Non-admin (403) or transient failure — leave the map empty so callers
-        // gracefully omit the provider detail rather than erroring.
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [canRead])
+  // Shared React Query caches — same keys/queryFns as useBlankScopeOptions,
+  // so every consumer of either hook reads one cached list instead of
+  // firing its own pair of requests per mount. A failed fetch leaves
+  // `data` undefined → empty map → callers gracefully omit the provider
+  // detail, matching the old catch-and-ignore behavior.
+  const catalogQuery = useQuery({
+    queryKey: ['catalog', 'list'],
+    queryFn: () => catalogService.list(),
+    enabled: canRead,
+    staleTime: 5 * 60_000,
+  })
+  const providersQuery = useQuery({
+    queryKey: ['providers', 'list'],
+    queryFn: () => providerService.list(),
+    enabled: canRead,
+    staleTime: 5 * 60_000,
+  })
+  const catalogItems = catalogQuery.data ?? EMPTY_CATALOG
+  const providers = providersQuery.data ?? EMPTY_PROVIDERS
 
   const map = useMemo(() => {
     const catMap: Record<string, CatalogItemResponse> = {}

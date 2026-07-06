@@ -79,8 +79,13 @@ class PoolRole(str, Enum):
 # Default pool sizing per role. Tuned for the web tier (~4 uvicorn
 # workers per replica); worker / control-plane tiers should override
 # via env vars in their deployment manifests. Totals (with PROVIDER_PROBE):
-# 20+10 + 8+4 + 10+5 + 4+2 + 2+0 = 65 peak connections per process,
-# still inside Postgres' default max_connections=100.
+# 20+10 + 8+4 + 10+5 + 4+2 + 2+0 = 65 peak connections PER PROCESS.
+# That is per gunicorn worker: viz alone can reach 65 × GUNICORN_WORKERS
+# (=4 → 260), plus controlplane / aggregation-worker / stats-service /
+# standalone projector pools — far beyond Postgres' default
+# max_connections=100. The compose file therefore raises the server to
+# ``POSTGRES_MAX_CONNECTIONS`` (default 400); keep that knob in sync
+# with any pool or worker-count change here.
 _POOL_DEFAULTS: dict[PoolRole, dict[str, int]] = {
     PoolRole.WEB:            {"pool_size": 20, "max_overflow": 10},
     PoolRole.JOBS:           {"pool_size": 8,  "max_overflow": 4},
