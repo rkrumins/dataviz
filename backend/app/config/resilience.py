@@ -60,13 +60,22 @@ FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"
 # Health/readiness probes — must respond fast for K8s.
 HTTP_TIMEOUT_HEALTH_SECS: float = float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))
 # Read-only graph queries — bounded by per-query timeouts below.
-HTTP_TIMEOUT_GRAPH_SECS: float = float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))
+# Default 60 to match the tier list in main.py (_TimeoutMiddleware reads
+# the env var directly with default "60"); the two defaults MUST agree —
+# a 15 here would kill /edges/between mid-flight (40s query budget) for
+# any deployer who trusts this file. The env var is the single knob.
+HTTP_TIMEOUT_GRAPH_SECS: float = float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))
 # Trace routes (/trace/v2, /trace/expand on v1; /trace, /trace/expand on
 # v2). Deep BFS traversals legitimately exceed the 15s graph budget;
 # matches the frontend TRACE_MS default so neither side aborts first.
 HTTP_TIMEOUT_TRACE_SECS: float = float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))
 # Write-heavy aggregation operations.
 HTTP_TIMEOUT_AGGREGATION_SECS: float = float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))
+# Versioning routes — projection reconcile/rebuild do request-scoped
+# full-graph work that legitimately exceeds the 30s default on large
+# graphs. Mirrors the tier in main.py; keep below nginx proxy_read_timeout
+# (180s) so the proxy never wins the race.
+HTTP_TIMEOUT_VERSIONING_SECS: float = float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))
 # Default for all other endpoints.
 HTTP_TIMEOUT_DEFAULT_SECS: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 

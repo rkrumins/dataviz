@@ -348,7 +348,7 @@ export class NotUpToDateError extends Error {
 // Fetch helper — JSON + structured domain errors
 // ============================================
 
-async function vfetch<T>(url: string, init?: RequestInit): Promise<T> {
+async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
   let res: Response
   try {
     res = await fetchWithTimeout(url, init)
@@ -539,7 +539,13 @@ export function reconcileProjection(
   graphId: string,
   opts: { deep?: boolean } = {},
 ): Promise<DriftReport> {
-  return vfetch<DriftReport>(`${base(wsId)}/graphs/${graphId}/projection/reconcile`, jsonBody({ deep: !!opts.deep }))
+  // Deep reconcile is a request-scoped full-graph scan — match the
+  // backend's 120s versioning tier so the FE's 30s default doesn't
+  // abort a legitimately long-running drift report first.
+  return vfetch<DriftReport>(`${base(wsId)}/graphs/${graphId}/projection/reconcile`, {
+    ...jsonBody({ deep: !!opts.deep }),
+    timeoutMs: 120_000,
+  })
 }
 
 export function abandonDraft(wsId: string, graphId: string, branchId: string): Promise<Branch> {

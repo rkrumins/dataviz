@@ -1312,6 +1312,13 @@ class _TimeoutMiddleware:
             ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
             ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
             ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
+            # Versioning carries request-scoped full-graph work (projection
+            # reconcile drift reports, rebuild catch-up) that legitimately
+            # runs past the 30s default on large graphs; the ws-segment
+            # collapse below makes this match /api/v1/{ws}/versioning/...
+            # Keep below nginx's proxy_read_timeout (180s) so the proxy
+            # never wins the race against this tier.
+            ("/api/v1/versioning/",   float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
@@ -1480,8 +1487,12 @@ app.add_middleware(
     expose_headers=["X-Provider-Health", "X-Cache-Status"],
 )
 
-# GZip compression for responses > 1 KB
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# GZip compression for responses > 1 KB. compresslevel=6 (zlib default)
+# instead of Starlette's default 9: level 9 costs roughly double the CPU
+# for a ~1-3% size win, and this compression runs ON the event loop — on
+# multi-MB graph payloads that stall blocks every other request on the
+# worker, including /health.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # Structured JSON access log + X-Process-Time header
 app.add_middleware(StructuredLoggingMiddleware)
