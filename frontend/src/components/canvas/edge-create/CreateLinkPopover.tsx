@@ -102,6 +102,17 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
     }
   }, [isOpen, sourceUrn])
 
+  // Self-heal: if the popover is "open" but can no longer render (the
+  // source node vanished from the canvas store after a reload / branch
+  // switch), close it. Otherwise the component returns null below while
+  // the store stays open — leaving the CAPTURE-phase Escape swallower
+  // armed (eating Escape for every drawer/menu app-wide) and the
+  // outside-click closer dead (ref.current is null), with nothing
+  // visible to dismiss. Only a refresh recovers from that state.
+  useEffect(() => {
+    if (isOpen && (!sourceUrn || !sourceNode || !anchor)) close()
+  }, [isOpen, sourceUrn, sourceNode, anchor, close])
+
   // Autofocus the search input while on the target step.
   useEffect(() => {
     if (!isOpen || targetUrn) return

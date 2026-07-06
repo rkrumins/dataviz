@@ -491,6 +491,13 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             ? 'The graph provider for this view is unavailable. The view definition is loaded but graph data cannot be displayed.'
                             : msg
                     )
+                    // Terminal: the attempt is over. Without this, the phase
+                    // stays stuck at roots/edges/children forever and every
+                    // "am I still hydrating?" gate (ghost shimmer overlay,
+                    // empty-state hero) keeps rendering the loading state —
+                    // infinite pulse animations included — until a refresh.
+                    // The error surface is driven by hydrationError, not phase.
+                    setHydrationPhase('complete')
                 }
             }
         }
