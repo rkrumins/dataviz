@@ -3,8 +3,10 @@ import { BookOpen, ArrowLeft, Sun, Moon } from 'lucide-react'
 import { DocsSidebar } from '@/components/docs/DocsSidebar'
 import { usePreferencesStore } from '@/store/preferences'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { useBrand } from '@/store/branding'
 
 export function DocsPage() {
+  const { appName } = useBrand()
   useDocumentTitle('Docs')
   const { setTheme } = usePreferencesStore()
   const isDark = document.documentElement.classList.contains('dark')
@@ -17,7 +19,7 @@ export function DocsPage() {
       <header className="shrink-0 h-12 flex items-center justify-between px-4 border-b border-glass-border bg-canvas-elevated">
         <div className="flex items-center gap-3">
           <BookOpen className="w-4 h-4 text-accent-lineage" />
-          <span className="text-sm font-bold text-ink">Synodic Docs</span>
+          <span className="text-sm font-bold text-ink">{appName} Docs</span>
         </div>
         <div className="flex items-center gap-2">
           <button

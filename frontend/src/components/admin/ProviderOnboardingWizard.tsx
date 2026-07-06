@@ -23,6 +23,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useBrand } from '@/store/branding'
 import {
   providerService,
   type ConnectionTestResult,
@@ -486,6 +487,7 @@ export function ProviderOnboardingWizard({
   onUpdated,
 }: ProviderOnboardingWizardProps) {
   const navigate = useNavigate()
+  const { appName } = useBrand()
   const { showToast } = useToast()
   const modalRef = useRef<HTMLDivElement>(null)
 
@@ -904,7 +906,7 @@ export function ProviderOnboardingWizard({
         <div>
           <h3 className="text-lg font-semibold text-ink">Choose your provider type</h3>
           <p className="mt-0.5 text-sm text-ink-muted">
-            Start by choosing the infrastructure you want Synodic to connect to.
+            Start by choosing the infrastructure you want {appName} to connect to.
           </p>
         </div>
       </motion.div>
@@ -966,7 +968,7 @@ export function ProviderOnboardingWizard({
             </span>
           </div>
           <p className="mt-0.5 text-sm text-ink-muted">
-            Add the infrastructure details Synodic needs in order to connect and validate access.
+            Add the infrastructure details {appName} needs in order to connect and validate access.
           </p>
         </div>
       </motion.div>
@@ -1263,7 +1265,7 @@ export function ProviderOnboardingWizard({
             </li>
             <li className="flex items-start gap-2">
               <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
-              After saving, Synodic will test the connection before you move on to data sources.
+              After saving, {appName} will test the connection before you move on to data sources.
             </li>
           </ul>
 
@@ -1381,7 +1383,7 @@ export function ProviderOnboardingWizard({
           <div>
             <h4 className="text-sm font-semibold text-ink">Enable custom mapping</h4>
             <p className="mt-1 text-xs text-ink-muted">
-              Skip this if your graph already follows Synodic’s default schema conventions.
+              Skip this if your graph already follows {appName}’s default schema conventions.
             </p>
           </div>
           <label className="relative inline-flex cursor-pointer items-center">
@@ -1531,7 +1533,7 @@ export function ProviderOnboardingWizard({
               exit={{ opacity: 0, y: -8 }}
               className="mt-5 rounded-xl border border-emerald-500/20 bg-emerald-500/8 px-4 py-4 text-sm text-emerald-700 dark:text-emerald-300"
             >
-              Synodic will assume the default property names such as <code className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs">urn</code>, <code className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs">displayName</code>, and <code className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs">entityType</code>.
+              {appName} will assume the default property names such as <code className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs">urn</code>, <code className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs">displayName</code>, and <code className="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-xs">entityType</code>.
             </motion.div>
           )}
         </AnimatePresence>
@@ -1554,7 +1556,7 @@ export function ProviderOnboardingWizard({
           Review your provider configuration
         </h3>
         <p className="mt-2 text-slate-500">
-          Confirm the infrastructure details below before Synodic validates the connection.
+          Confirm the infrastructure details below before {appName} validates the connection.
         </p>
       </motion.div>
 
@@ -1607,7 +1609,7 @@ export function ProviderOnboardingWizard({
             <p className="text-sm text-slate-500">
               {formData.username
                 ? `The provider will be created with username ${formData.username}.`
-                : 'No credentials were entered. Synodic will connect with the host and port settings only.'}
+                : `No credentials were entered. ${appName} will connect with the host and port settings only.`}
             </p>
           </div>
 
@@ -1662,7 +1664,7 @@ export function ProviderOnboardingWizard({
                 : connectivityCheck.state === 'failure'
                   ? connectivityCheck.result?.error || 'Connection test failed.'
                   : connectivityCheck.state === 'checking'
-                    ? 'Synodic is probing the provider now. This should only take a few seconds.'
+                    ? `${appName} is probing the provider now. This should only take a few seconds.`
                     : mode === 'create'
                       ? 'Run a live connection test before creating the provider so you know these settings are reachable.'
                       : 'Save changes as-is, or re-test later from the provider management flow if you need to validate connectivity.'}
@@ -1695,7 +1697,7 @@ export function ProviderOnboardingWizard({
                 <div className="flex-1">
                   <p className="text-sm font-medium uppercase tracking-wide text-slate-500">Schema Mapping</p>
                   <p className="font-semibold text-slate-800 dark:text-slate-200">
-                    {formData.schemaMappingEnabled ? 'Custom mapping enabled' : 'Default Synodic schema'}
+                    {formData.schemaMappingEnabled ? 'Custom mapping enabled' : `Default ${appName} schema`}
                   </p>
                 </div>
                 <Check className="h-5 w-5 text-green-500" />
@@ -1717,7 +1719,7 @@ export function ProviderOnboardingWizard({
                 </div>
               ) : (
                 <p className="text-sm text-slate-500">
-                  The default Synodic property names will be used for this provider.
+                  The default {appName} property names will be used for this provider.
                 </p>
               )}
             </div>

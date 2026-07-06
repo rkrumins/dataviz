@@ -8,6 +8,7 @@ import {
     Sparkles,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useBrand } from '@/store/branding'
 
 interface DashboardOnboardingProps {
     completedSteps: string[]
@@ -45,6 +46,7 @@ export function DashboardOnboarding({
     onBrowseTemplates,
     onDismiss,
 }: DashboardOnboardingProps) {
+    const { appName } = useBrand()
     const completedCount = ONBOARDING_STEPS.filter(s =>
         completedSteps.includes(s.id)
     ).length
@@ -84,7 +86,7 @@ export function DashboardOnboarding({
                 <h1 className="text-4xl md:text-5xl font-extrabold text-ink tracking-tight mb-3 leading-[1.1]">
                     Welcome to{' '}
                     <span className="bg-gradient-to-r from-accent-business to-accent-explore bg-clip-text text-transparent">
-                        Synodic
+                        {appName}
                     </span>
                 </h1>
                 <p className="text-base text-ink-muted max-w-md mx-auto">
