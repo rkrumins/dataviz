@@ -203,4 +203,36 @@ describe('ViewWizard — submit (edit path)', () => {
     // over the "no assignments -> all" derivation.
     expect(body.entityScope).toBe('curated')
   })
+
+  it('leaves the modal open (no onClose/onComplete) when updateViewLayout fails', async () => {
+    updateViewLayoutMock.mockRejectedValue(new Error('layout save failed'))
+    const onComplete = vi.fn()
+    const onClose = vi.fn()
+    const view = makeView(baseConfig({
+      layers: [{ id: 'l1', name: 'Layer 1', entityTypes: [], order: 0 }],
+      assignments: {},
+    }))
+    getViewMock.mockResolvedValue(view)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard mode="edit" viewId="v1" isOpen onClose={onClose} onComplete={onComplete} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }))
+
+    await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(1))
+    // The view's own fields were saved (updateView succeeded); only the layout
+    // write failed — the modal must stay open rather than silently discarding
+    // the user's layer/assignment edits.
+    expect(updateViewMock).toHaveBeenCalledTimes(1)
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /save changes/i })).toBeInTheDocument()
+  })
 })

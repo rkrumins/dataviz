@@ -1008,15 +1008,22 @@ function ViewWizardBody({
                     // The layout endpoint is the single writer of referenceLayout — write
                     // the full layers+assignments (a new view has no prior layout to race).
                     const entityScope = deriveEntityScope(undefined, normalizedLayout)
-                    const layoutResult = await updateViewLayout(result.data.id, {
-                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
-                        entityScope,
-                    })
-                    const savedView = viewToViewConfig(layoutResult)
-                    useSchemaStore.getState().addOrUpdateView(savedView)
-                    onComplete?.(savedView)
-                    onClose()
-                    navigate(`/views/${result.data.id}`)
+                    try {
+                        const layoutResult = await updateViewLayout(result.data.id, {
+                            referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                            entityScope,
+                        })
+                        const savedView = viewToViewConfig(layoutResult)
+                        useSchemaStore.getState().addOrUpdateView(savedView)
+                        onComplete?.(savedView)
+                        onClose()
+                        navigate(`/views/${result.data.id}`)
+                    } catch (err) {
+                        // The view itself was created; only its layout failed to save. Leave
+                        // the modal open (isSubmitting resets below) so the user can retry
+                        // rather than silently losing their layer/assignment edits.
+                        console.error('[ViewWizard] updateViewLayout failed after create', err)
+                    }
                 }
             } else if (viewId) {
                 const result = await viewService.updateView(viewId, {
@@ -1036,14 +1043,21 @@ function ViewWizardBody({
                     // from the submitted assignments — a deliberate wizard save is allowed to
                     // set scope explicitly, unlike implicit canvas gestures.
                     const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
-                    const layoutResult = await updateViewLayout(viewId, {
-                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
-                        entityScope,
-                    })
-                    const savedView = viewToViewConfig(layoutResult)
-                    useSchemaStore.getState().addOrUpdateView(savedView)
-                    onComplete?.(savedView)
-                    onClose()
+                    try {
+                        const layoutResult = await updateViewLayout(viewId, {
+                            referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                            entityScope,
+                        })
+                        const savedView = viewToViewConfig(layoutResult)
+                        useSchemaStore.getState().addOrUpdateView(savedView)
+                        onComplete?.(savedView)
+                        onClose()
+                    } catch (err) {
+                        // The rest of the view saved; only its layout failed. Leave the modal
+                        // open (isSubmitting resets below) so the user can retry rather than
+                        // silently losing their layer/assignment edits.
+                        console.error('[ViewWizard] updateViewLayout failed after update', err)
+                    }
                 }
             }
         } finally {
