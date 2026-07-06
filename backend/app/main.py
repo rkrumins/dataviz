@@ -1168,6 +1168,7 @@ async def _provider_error_handler(request, exc):
 # the breaker is open, this handler fires in <1ms with no network I/O.
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
+    ProviderLoading as _ProviderLoading,
     ProviderUnavailable as _ProviderUnavailable,
 )
 
@@ -1190,6 +1191,32 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
         content={
             "detail": {
                 "code": "PROVIDER_BUSY",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderLoading is a subclass of ProviderUnavailable but semantically a
+# transient "warming up" state (FalkorDB replaying its RDB on restart). Map
+# to 503 + Retry-After with a distinct PROVIDER_LOADING code so the frontend
+# shows a friendly "graph is starting up" state and auto-retries, instead of
+# the generic unavailable/empty state. Registered BEFORE the parent handler
+# so FastAPI's MRO match picks this one for loading instances.
+@app.exception_handler(_ProviderLoading)
+async def _provider_loading_handler(request, exc: _ProviderLoading):
+    logger.info(
+        "Provider loading on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_LOADING",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,

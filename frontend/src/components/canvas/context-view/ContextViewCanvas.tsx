@@ -1600,6 +1600,7 @@ export function ContextViewCanvas({
   //      site below.) The previous `nodes.length === 0` global gate killed
   //      ghosts in empty layers the moment any one layer received a node.
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
+  const hydrationFailed = useCanvasStore((s) => s.hydrationFailed)
   const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
@@ -1610,8 +1611,8 @@ export function ContextViewCanvas({
   // global one has a single key that recycles between phases, so users with the
   // canvas focused want a sticky in-context indicator that the entities AND
   // edges loads both happened — even if hydration is fast.
-  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded')
-  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded')
+  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
+  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
   useLoadingToast('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
   useLoadingToast('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
   useLoadingToast('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')

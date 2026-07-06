@@ -46,6 +46,17 @@ interface LoadChildrenOptions {
 
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
 
+/** Thrown by the reference-view load when the view SHOULD have entities
+ *  (has assignments / branch-created delta) but every fetch failed — so the
+ *  canvas surfaces the failure instead of a false "empty / Start building".
+ *  `warming` = the provider is starting up (retryable), vs a hard outage. */
+class HydrationLoadError extends Error {
+    constructor(public warming: boolean) {
+        super(warming ? 'PROVIDER_LOADING' : 'provider-unavailable')
+        this.name = 'HydrationLoadError'
+    }
+}
+
 export interface UseGraphHydrationResult {
     /** Load children for a node (empty string = load roots). */
     loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<void>
@@ -69,6 +80,10 @@ export interface UseGraphHydrationResult {
     hydrationPhase: HydrationPhase
     /** Error message if hydration failed (e.g. provider unavailable). */
     hydrationError: string | null
+    /** True when the failure is the graph provider *warming up* (loading its
+     *  dataset on restart) — a transient, self-resolving state that the hook
+     *  auto-retries. Drives a friendly "starting up" overlay vs a hard error. */
+    hydrationWarming: boolean
 }
 
 interface UseGraphHydrationOptions {
@@ -202,6 +217,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
     const [hydrationPhase, setHydrationPhase] = useState<HydrationPhase>('idle')
     const [hydrationError, setHydrationError] = useState<string | null>(null)
+    const [hydrationWarming, setHydrationWarming] = useState(false)
+    // Bumped to re-run the hydration effect for a bounded/persistent auto-retry
+    // while the provider is warming up (see the retry effect below).
+    const [retryEpoch, setRetryEpoch] = useState(0)
+    const retryCountRef = useRef(0)
 
     // Prevent infinite retries when API returns [] for roots
     const rootsAttemptedForRef = useRef<string | null>(null)
@@ -295,6 +315,22 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // (0 outside a draft / with an empty delta) — logging only.
                     let deltaLoadedCount = 0
 
+                    // Track whether any node fetch FAILED (vs legitimately returned
+                    // []). A per-batch .catch(()=>[]) tolerates a partial failure,
+                    // but must not silently turn a TOTAL failure into "empty graph"
+                    // — that's what rendered a warming provider as "Start building".
+                    let anyBatchErrored = false
+                    let anyWarming = false
+                    const safeGetNodes = async (q: Parameters<typeof provider.getNodes>[0]): Promise<GraphNode[]> => {
+                        try {
+                            return await provider.getNodes(q)
+                        } catch (e) {
+                            anyBatchErrored = true
+                            if (String((e as Error)?.message ?? e).includes('PROVIDER_LOADING')) anyWarming = true
+                            return [] as GraphNode[]
+                        }
+                    }
+
                     if (hasExplicitAssignments) {
                         // ── Assignment-driven loading ──
                         // Load the specific entities assigned to layers by URN,
@@ -312,8 +348,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                         const batchResults = await Promise.all(
                             urnBatches.map(batch =>
-                                provider.getNodes({ urns: batch as any[], limit: batch.length })
-                                    .catch(() => [] as GraphNode[])
+                                safeGetNodes({ urns: batch as any[], limit: batch.length })
                             )
                         )
                         allNodes = batchResults.flat()
@@ -338,13 +373,17 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                         const rootResults = await Promise.all(
                             rootTypes.map(et =>
-                                provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
-                                    .catch(() => [] as GraphNode[])
+                                safeGetNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
                             )
                         )
                         allNodes = rootResults.flat()
                         if (controller.signal.aborted) return
                         if (allNodes.length === 0) {
+                            // Any fetch error → warming/outage, not "empty" (see the
+                            // shared empty-check above for the rationale).
+                            if (anyBatchErrored) {
+                                throw new HydrationLoadError(anyWarming)
+                            }
                             setHydrationPhase('complete')
                             return
                         }
@@ -356,8 +395,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (remainingTypes.length > 0) {
                             const childResults = await Promise.all(
                                 remainingTypes.map(et =>
-                                    provider.getNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
-                                        .catch(() => [] as GraphNode[])
+                                    safeGetNodes({ entityTypes: [et], limit: PER_TYPE_LIMIT })
                                 )
                             )
                             const childNodes = childResults.flat()
@@ -367,9 +405,25 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     }
 
                     if (allNodes.length === 0) {
+                        // Distinguish "failed to load" from "genuinely empty" by the
+                        // ONLY reliable signal: did a fetch error? A healthy provider
+                        // returns [] with no error for a truly empty view; a
+                        // down/warming provider throws. If ANY fetch errored we must
+                        // surface warming/outage (overlay + auto-retry) — never a false
+                        // "No entities yet / Start building" over data that may exist.
+                        // (Assignments/draft-state are NOT part of this decision — a
+                        // Published view with no assignments still must not lie "empty"
+                        // when the provider is down.)
+                        if (anyBatchErrored) {
+                            throw new HydrationLoadError(anyWarming)
+                        }
                         setHydrationPhase('complete')   // empty view — terminal, not a stall
                         return
                     }
+
+                    // A successful load clears any prior warming/error state.
+                    setHydrationError(null)
+                    setHydrationWarming(false)
 
                     // Show nodes immediately, then fetch edges
                     setGraph(
@@ -488,19 +542,33 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 setHydrationPhase('complete')
             } catch (err) {
                 if (!controller.signal.aborted) {
-                    console.error('[useGraphHydration] Hydration failed:', err)
                     const msg = err instanceof Error ? err.message : 'Failed to load graph data'
+                    // "Warming up" = the provider is loading its dataset (restart) —
+                    // transient and auto-retried, shown with a friendly tone. Anything
+                    // else that looks like a connectivity failure is a hard unavailable.
+                    const warming = (err instanceof HydrationLoadError && err.warming)
+                        || msg.includes('PROVIDER_LOADING')
+                    const unavailable = warming
+                        || err instanceof HydrationLoadError
+                        || msg.includes('circuit') || msg.includes('timed out') || msg.includes('503')
+                    if (warming) {
+                        console.warn('[useGraphHydration] Provider warming up — retrying:', msg)
+                    } else {
+                        console.error('[useGraphHydration] Hydration failed:', err)
+                    }
+                    setHydrationWarming(warming)
                     setHydrationError(
-                        msg.includes('circuit') || msg.includes('timed out') || msg.includes('503')
-                            ? 'The graph provider for this view is unavailable. The view definition is loaded but graph data cannot be displayed.'
-                            : msg
+                        warming
+                            ? 'Your graph is starting up…'
+                            : unavailable
+                                ? 'The graph provider for this view is unavailable. The view definition is loaded but graph data cannot be displayed.'
+                                : msg
                     )
-                    // Terminal: the attempt is over. Without this, the phase
-                    // stays stuck at roots/edges/children forever and every
-                    // "am I still hydrating?" gate (ghost shimmer overlay,
-                    // empty-state hero) keeps rendering the loading state —
-                    // infinite pulse animations included — until a refresh.
-                    // The error surface is driven by hydrationError, not phase.
+                    // Terminal: the attempt is over. Without this, the phase stays
+                    // stuck at roots/edges/children forever and every "am I still
+                    // hydrating?" gate keeps rendering the loading state until a
+                    // refresh. The error surface is driven by hydrationError; the
+                    // retry effect below re-arms hydration while warming.
                     setHydrationPhase('complete')
                 }
             }
@@ -519,7 +587,30 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch])
+
+    // Auto-retry while the provider is warming up (or briefly unavailable), so
+    // the canvas recovers on its own once the graph finishes loading — no manual
+    // refresh. Persistent-but-bounded: ~20 attempts for a warming provider
+    // (covers a multi-minute dataset reload), fewer for a hard outage. Each
+    // retry re-arms the hydration effect via retryEpoch. On success hydration
+    // clears hydrationError, which resets the counter here.
+    useEffect(() => {
+        if (!enableHydration) return
+        if (!hydrationError) { retryCountRef.current = 0; return }
+        const maxRetries = hydrationWarming ? 20 : 3
+        if (retryCountRef.current >= maxRetries) return
+        const attempt = retryCountRef.current + 1
+        const delay = Math.min(2000 * 2 ** (attempt - 1), 8000) // 2s, 4s, 8s, 8s…
+        const t = setTimeout(() => {
+            retryCountRef.current = attempt
+            initializedKeyRef.current = null   // re-arm the hydration effect
+            setHydrationError(null)
+            setHydrationWarming(false)
+            setRetryEpoch(e => e + 1)
+        }, delay)
+        return () => clearTimeout(t)
+    }, [enableHydration, hydrationError, hydrationWarming])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 
@@ -763,5 +854,6 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         failedNodes,
         hydrationPhase,
         hydrationError,
+        hydrationWarming,
     }
 }

@@ -120,6 +120,11 @@ export function useLoadingToast(
   isLoading: boolean,
   message: string,
   successMessage?: string,
+  /** When true at the loading→done transition, hide the loading toast WITHOUT
+   *  showing the success message — for when the operation ended in failure
+   *  (e.g. hydration errored) so we never report "Entities loaded" over an
+   *  empty/errored canvas. */
+  suppressSuccess?: boolean,
 ) {
   const { showLoading, hideLoading, showToast } = useToast()
   // Tracks whether we previously showed a loading toast for this key.
@@ -134,13 +139,13 @@ export function useLoadingToast(
       wasLoadingRef.current = true
     } else {
       hideLoading(key)
-      if (wasLoadingRef.current && successMessage) {
+      if (wasLoadingRef.current && successMessage && !suppressSuccess) {
         showToast('success', successMessage)
       }
       wasLoadingRef.current = false
     }
     return () => hideLoading(key)
-  }, [isLoading, key, message, successMessage, showLoading, hideLoading, showToast])
+  }, [isLoading, key, message, successMessage, suppressSuccess, showLoading, hideLoading, showToast])
 }
 
 // ─── Visual constants ─────────────────────────────────────────────────────

@@ -131,6 +131,10 @@ interface CanvasState {
   // without each owning their own hydration hook.
   hydrationPhase: HydrationPhase
   setHydrationPhase: (phase: HydrationPhase) => void
+  /** True when the initial hydration failed (provider down/warming). Mirrored
+   *  from CanvasRouter so downstream toasts/empty-states don't report success. */
+  hydrationFailed: boolean
+  setHydrationFailed: (failed: boolean) => void
 
   // Active Lens
   activeLensId: string | null
@@ -355,6 +359,8 @@ export const useCanvasStore = create<CanvasState>()(
       loadingRegions: new Set(),
       hydrationPhase: 'idle',
       setHydrationPhase: (hydrationPhase) => set({ hydrationPhase }),
+      hydrationFailed: false,
+      setHydrationFailed: (hydrationFailed) => set({ hydrationFailed }),
       setLoading: (isLoading) => set({ isLoading }),
       addLoadingRegion: (region) => set((state) => {
         const newRegions = new Set(state.loadingRegions)

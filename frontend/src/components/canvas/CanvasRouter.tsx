@@ -57,7 +57,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  const { hydrationError, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
+  const { hydrationError, hydrationWarming, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
   useLoadingToast(
     'hydration',
@@ -74,6 +74,13 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   useEffect(() => {
     setHydrationPhase(hydrationPhase)
   }, [hydrationPhase, setHydrationPhase])
+
+  // Mirror hydration failure too, so ContextViewCanvas's per-phase toasts can
+  // suppress their success message when the load actually errored.
+  const setHydrationFailed = useCanvasStore((s) => s.setHydrationFailed)
+  useEffect(() => {
+    setHydrationFailed(!!hydrationError)
+  }, [hydrationError, setHydrationFailed])
 
   // Clear trace state when the active view changes. The trace store is an
   // app-singleton; without this, a trace started in view A leaks into view
@@ -178,7 +185,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         </AnimatePresence>
 
         {hydrationError && (
-          <ProviderUnavailableOverlay message={hydrationError} />
+          <ProviderUnavailableOverlay message={hydrationError} warming={hydrationWarming} />
         )}
 
         {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
@@ -197,18 +204,36 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   )
 }
 
-function ProviderUnavailableOverlay({ message }: { message: string }) {
+function ProviderUnavailableOverlay({ message, warming = false }: { message: string; warming?: boolean }) {
+  // "Warming" is the transient, self-resolving case (the graph provider is
+  // loading its dataset on restart): a calm, non-alarm spinner tone, because
+  // the data is fine and the hook auto-retries. A hard outage keeps the amber
+  // warning icon. Neither ever shows the empty "Start building" state — that
+  // false-empty over real data was the reported "my entities vanished" bug.
   return (
     <div className="absolute inset-0 z-20 flex items-center justify-center bg-canvas/80 backdrop-blur-sm pointer-events-none">
       <div className="flex flex-col items-center gap-3 max-w-sm text-center pointer-events-auto">
-        <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-950/40 flex items-center justify-center">
-          <WifiOff className="w-5 h-5 text-amber-500" />
+        <div className={cn(
+          'w-10 h-10 rounded-full flex items-center justify-center',
+          warming ? 'bg-accent-lineage/10' : 'bg-amber-100 dark:bg-amber-950/40',
+        )}>
+          {warming
+            ? <Loader2 className="w-5 h-5 text-accent-lineage animate-spin" />
+            : <WifiOff className="w-5 h-5 text-amber-500" />}
         </div>
-        <h3 className="text-base font-semibold text-ink">Provider Unavailable</h3>
-        <p className="text-sm text-ink-muted">{message}</p>
-        <p className="text-xs text-ink-muted/70">
-          The canvas will automatically reload when the provider recovers.
+        <h3 className="text-base font-semibold text-ink">
+          {warming ? 'Your graph is starting up…' : 'Provider Unavailable'}
+        </h3>
+        <p className="text-sm text-ink-muted">
+          {warming
+            ? 'The graph service is loading your data. This view will fill in automatically in a moment — no action needed.'
+            : message}
         </p>
+        {!warming && (
+          <p className="text-xs text-ink-muted/70">
+            The canvas will automatically reload when the provider recovers.
+          </p>
+        )}
       </div>
     </div>
   )

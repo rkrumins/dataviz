@@ -202,6 +202,31 @@ class ProviderBusy(ProviderUnavailable):
         super().__init__(provider_name, reason, retry_after_seconds)
 
 
+class ProviderLoading(ProviderUnavailable):
+    """Flow-control signal — the provider is starting up, NOT broken.
+
+    Raised when a backing store reports it is loading its dataset into
+    memory (e.g. FalkorDB / redis ``BusyLoadingError`` while replaying an
+    RDB snapshot on restart). This is transient and self-resolving: the
+    provider will answer normally once the load finishes.
+
+    Subclasses ``ProviderUnavailable`` so existing HTTP handlers map it to
+    503 + ``Retry-After`` unchanged, but it is registered as a *logical*
+    (ignored) exception below so the circuit breaker does NOT count it
+    toward ``fail_max`` — counting a warm-up as a failure would open the
+    breaker for its reset window and turn a few-second reload into a
+    30s+ outage. Per ``(provider_id, graph_name)`` like every other
+    provider signal: one instance warming never affects another.
+    """
+
+
+# Register at import time (before any CircuitBreakerProxy is constructed) so
+# the ``except proxy._ignored`` clause in breaker_guarded catches ProviderLoading
+# ahead of the ``except ProviderUnavailable`` counting clause — a warming
+# instance is re-raised untouched and its breaker stays closed.
+register_logical_exception(ProviderLoading)
+
+
 class _AsyncCircuitBreaker:
     """Minimal async-safe circuit-breaker state machine.
 

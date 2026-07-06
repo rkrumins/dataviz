@@ -88,6 +88,18 @@ try:  # pragma: no cover - redis is always installed in practice
 except Exception:  # pragma: no cover
     _TRANSIENT_REDIS_EXC = ()
 
+# BusyLoadingError (subclass of redis ConnectionError) is raised while
+# FalkorDB replays its RDB snapshot into memory on restart — a transient,
+# self-resolving "warming up" state, NOT a real outage. Matched by identity
+# so it can be split off from the generic transient-connection path (which
+# would retry it for ~1.75s and then trip the breaker on a load that takes
+# many seconds). See _is_loading_error below.
+try:  # pragma: no cover - redis is always installed in practice
+    from redis.exceptions import BusyLoadingError as _RedisBusyLoadingError
+    _LOADING_REDIS_EXC: tuple = (_RedisBusyLoadingError,)
+except Exception:  # pragma: no cover
+    _LOADING_REDIS_EXC = ()
+
 
 def _is_cluster_routing_error(exc: BaseException) -> bool:
     """True when *exc* (or its cause) is a cluster slot-moved/ASK/down error
@@ -149,6 +161,26 @@ def _is_missing_graph_error(exc: BaseException) -> bool:
             break
         msg = str(seen).lower()
         if "empty key" in msg and "graph" in msg:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _is_loading_error(exc: BaseException) -> bool:
+    """True when *exc* is FalkorDB reporting it is loading its dataset into
+    memory (RDB replay on restart) — a transient, self-resolving "warming"
+    state, NOT an outage. Matched by isinstance against redis
+    ``BusyLoadingError`` AND by message (``LOADING Redis is loading the
+    dataset in memory``) since the signal can arrive wrapped. Walks the
+    ``__cause__``/``__context__`` chain like the siblings above.
+    """
+    seen = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        if _LOADING_REDIS_EXC and isinstance(seen, _LOADING_REDIS_EXC):
+            return True
+        if "loading the dataset in memory" in str(seen).lower():
             return True
         seen = seen.__cause__ or seen.__context__
     return False
@@ -1111,6 +1143,20 @@ class FalkorDBProvider(GraphDataProvider):
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    # FalkorDB is loading its RDB into memory on restart — a
+                    # transient "warming up" state, not an outage. Fast-fail
+                    # with ProviderLoading (a logical/ignored signal, so the
+                    # breaker stays CLOSED and this instance recovers the moment
+                    # its load finishes) instead of retrying for ~1.75s and then
+                    # tripping the breaker on a load that takes many seconds.
+                    # The caller (FE) polls per the Retry-After hint.
+                    if _is_loading_error(exc):
+                        from backend.common.adapters import ProviderLoading
+                        raise ProviderLoading(
+                            provider_name=self._graph_name,
+                            reason="graph is starting up (loading dataset into memory)",
+                            retry_after_seconds=5,
+                        ) from exc
                     cluster = (
                         self._conn_cfg is not None
                         and self._conn_cfg.mode == "cluster"
