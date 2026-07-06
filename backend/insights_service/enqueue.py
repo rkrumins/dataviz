@@ -246,6 +246,11 @@ async def mark_stats_changed(data_source_id: str, workspace_id: str) -> None:
     if not data_source_id or not workspace_id:
         return
     try:
+        # Counts-neutral graph edits (re-parenting) must still force a
+        # top-level rematerialization; the counts poll consumes this flag.
+        await get_redis().set(
+            f"insights:toplevel:dirty:{data_source_id}", "1", ex=86400,
+        )
         won = await get_redis().set(
             f"insights:stats:cooldown:{data_source_id}",
             "1",

@@ -381,7 +381,11 @@ async def test_mark_stats_changed_cooldown_and_redis_tolerance(monkeypatch) -> N
     cooldown_state = {"held": False}
 
     class _FakeRedis:
-        async def set(self, _key, _val, nx=False, ex=None):
+        async def set(self, key, _val, nx=False, ex=None):
+            # The top-level dirty flag is set unconditionally on every
+            # write; only the cooldown key drives the coalescing gate.
+            if not str(key).startswith("insights:stats:cooldown:"):
+                return True
             if cooldown_state["held"]:
                 return None
             cooldown_state["held"] = True

@@ -26,6 +26,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from backend.app.config import resilience
 from backend.app.db.engine import get_jobs_session
 from backend.app.db.models import DataSourcePollingConfigORM, WorkspaceDataSourceORM
 from backend.app.db.repositories.stats_repo import (
@@ -35,6 +36,14 @@ from backend.app.db.repositories.stats_repo import (
 )
 from backend.app.registry.provider_registry import provider_registry
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.top_level_cache import (
+    TOP_LEVEL_MATERIALIZE_LIMIT,
+    build_top_level_payload,
+    consume_dirty_flag,
+    containment_digest,
+    restore_dirty_flag,
+    should_rematerialize,
+)
 
 from . import admission
 from .schemas import StatsJobEnvelope
@@ -54,13 +63,18 @@ _COUNTS_PARITY_CHECK = (
 
 async def _open_context(
     envelope: StatsJobEnvelope, *, resolve_ontology: bool,
-) -> tuple[Any, Any, str, Optional[Any]]:
+) -> tuple[Any, Any, str, Optional[Any], Optional[Any]]:
     """One short JOBS session: build the workspace-scoped engine and
-    resolve ``provider_id`` (admission-gate granularity). For the deep
-    facet, also resolve ontology metadata while the session is open —
-    it is an in-memory cache hit after the eager resolution inside
-    ``for_workspace``, but a TTL re-resolve must never land on a closed
-    session. Returns ``(engine, provider, provider_id, ontology_meta)``.
+    resolve ``provider_id`` (admission-gate granularity). Also capture
+    the resolved ontology (containment / root types) while the session
+    is open — the counts lane needs it to build the top-level
+    materialization digest. For the deep facet, additionally resolve the
+    flat ontology metadata. Both ontology reads are in-memory cache hits
+    after the eager resolution inside ``for_workspace``, but a TTL
+    re-resolve must never land on a closed session. The resolved-ontology
+    capture is best-effort (warning + None on failure) so counts never
+    fail because ontology resolution did. Returns
+    ``(engine, provider, provider_id, ontology_meta, resolved)``.
     """
     async with get_jobs_session() as session:
         engine = await ContextEngine.for_workspace(
@@ -93,7 +107,18 @@ async def _open_context(
                 )
             ontology_meta = await engine.get_ontology_metadata()
 
-    return engine, provider, provider_id, ontology_meta
+        # Best-effort: the counts lane materializes the top-level payload
+        # only when this resolves, and must not fail when it doesn't.
+        resolved = None
+        try:
+            resolved = await engine.get_resolved_ontology()
+        except Exception as exc:
+            logger.warning(
+                "_open_context: resolved-ontology capture failed for ds=%s: %s",
+                envelope.data_source_id, exc,
+            )
+
+    return engine, provider, provider_id, ontology_meta, resolved
 
 
 async def _stamp_poll_success(session, data_source_id: str) -> None:
@@ -112,7 +137,7 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
     bug); the provider still write-through primes that cache on the way
     out, so discovery / web-tier callers get poll-fresh values.
     """
-    _engine, provider, provider_id, _ = await _open_context(
+    engine, provider, provider_id, _, resolved = await _open_context(
         envelope, resolve_ontology=False,
     )
 
@@ -146,6 +171,72 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
         node_count=node_count,
     )
 
+    # Large graphs: materialize the top-level-nodes payload so the
+    # /top-level endpoint serves pages out of Postgres instead of running
+    # the expensive live roots query per request. Change-detected against
+    # the stored payload's fingerprint + a Redis dirty flag so steady-
+    # state polls do zero extra provider work. Fully isolated from the
+    # counts write above — a roots-query failure must never lose counts.
+    if node_count >= resilience.STATS_POLL_LARGE_THRESHOLD and resolved is not None:
+        from backend.app.db.repositories.stats_repo import (
+            get_data_source_stats,
+            set_top_level_nodes,
+        )
+        dirty = False
+        try:
+            async with get_jobs_session() as session:
+                stored = await get_data_source_stats(session, envelope.data_source_id)
+                raw = stored.top_level_nodes if stored is not None else None
+            stored_payload = None
+            if raw:
+                try:
+                    stored_payload = json.loads(raw)
+                except (TypeError, ValueError):
+                    stored_payload = None
+
+            dirty = await consume_dirty_flag(envelope.data_source_id)
+            digest = containment_digest(
+                getattr(resolved, "containment_edge_types", None) or [],
+                getattr(resolved, "root_entity_types", None) or [],
+            )
+            if not should_rematerialize(
+                stored_payload, fresh_stats=stats, digest=digest, dirty=dirty,
+            ):
+                logger.debug(
+                    "top_level_materialize.skip ds=%s — payload current",
+                    envelope.data_source_id,
+                )
+            else:
+                # Second, separate admission acquisition. The roots query
+                # runs with NO DB session held (session discipline: never
+                # hold a session across provider IO); the admission gate
+                # from the counts fetch above is already released.
+                async with admission.gate(provider_id, op_kind="stats_poll"):
+                    result = await engine.get_top_level_or_orphan_nodes(
+                        limit=TOP_LEVEL_MATERIALIZE_LIMIT,
+                        include_child_count=True,
+                        query_timeout=resilience.STATS_POLL_TIMEOUT_LARGE_SECS,
+                    )
+                payload_json = build_top_level_payload(
+                    result, stats=stats, digest=digest,
+                )
+                async with get_jobs_session() as session:
+                    await set_top_level_nodes(
+                        session, envelope.data_source_id, payload_json,
+                    )
+                logger.info(
+                    "top_level_materialize.done ds=%s totalCount=%s nodes=%d truncated=%s",
+                    envelope.data_source_id, result.total_count, len(result.nodes),
+                    result.has_more or len(result.nodes) < result.total_count,
+                )
+        except Exception as exc:
+            logger.warning(
+                "top_level_materialize.failed ds=%s: %s",
+                envelope.data_source_id, exc,
+            )
+            if dirty:
+                await restore_dirty_flag(envelope.data_source_id)
+
 
 async def collect_deep(envelope: StatsJobEnvelope) -> None:
     """Deep facet — one ``get_schema_stats`` pass serves everything.
@@ -163,7 +254,7 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
     re-profiling everything every interval and it costing two grouped
     scans per unchanged graph (near-zero with INSIGHTS_FAST_COUNTS).
     """
-    engine, provider, provider_id, ontology_meta = await _open_context(
+    engine, provider, provider_id, ontology_meta, _ = await _open_context(
         envelope, resolve_ontology=True,
     )
 
