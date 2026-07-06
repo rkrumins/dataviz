@@ -86,6 +86,8 @@ import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
 import { StartEditingDialog } from './StartEditingDialog'
+import { AddLayerColumn } from './AddLayerColumn'
+import * as layerOps from './layerMutations'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
@@ -1294,6 +1296,62 @@ export function ContextViewCanvas({
 
     interactions.closeContextMenu()
   }, [activeView, displayMap, interactions])
+
+  // User-created layers: append a ViewLayerConfig to the view's layout so the new column renders
+  // immediately (the canvas reads activeView.layout.referenceLayout.layers). Persistence is automatic
+  // — the view→referenceModel sync mirrors it and the debounced saveToBackend commits it, so writing
+  // the VIEW config (never the store directly, which the sync would revert) is all we do. Nodes created
+  // in the new column pick up its id via hierarchyBuilderStore → the durable `layerAssignment`, which
+  // is honoured on reload precisely because the layer id now exists in the view (the validLayerIds gate).
+  // Write a new layers array to the view's layout. Local updateView → the canvas re-renders (it reads
+  // this array); the view→referenceModel sync + debounced saveToBackend then persist it. All four
+  // layer ops (add/rename/delete/reorder) funnel through here; the pure list math lives in layerOps.
+  const persistLayers = useCallback((nextLayers: ViewLayerConfig[]) => {
+    if (!activeView?.id) return
+    useSchemaStore.getState().updateView(activeView.id, {
+      layout: {
+        ...(activeView.layout ?? {}),
+        referenceLayout: {
+          ...(activeView.layout?.referenceLayout ?? {}),
+          layers: nextLayers,
+        },
+      },
+    })
+  }, [activeView])
+
+  const currentLayers = useCallback(
+    () => activeView?.layout?.referenceLayout?.layers ?? defaultReferenceModelLayers,
+    [activeView],
+  )
+
+  const addLayer = useCallback((name: string) => {
+    const layers = currentLayers()
+    const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
+    persistLayers(layerOps.appendLayer(layers, {
+      id: `layer-${Date.now()}`,
+      name,
+      description: '',
+      icon: 'Layers',
+      color: palette[layers.length % palette.length],
+      entityTypes: [],
+      order: layers.length,
+    }))
+  }, [currentLayers, persistLayers])
+
+  const renameLayer = useCallback((id: string, name: string) => {
+    const trimmed = name.trim()
+    if (trimmed) persistLayers(layerOps.renameLayer(currentLayers(), id, trimmed))
+  }, [currentLayers, persistLayers])
+
+  const deleteLayer = useCallback((id: string) => {
+    persistLayers(layerOps.removeLayer(currentLayers(), id))
+  }, [currentLayers, persistLayers])
+
+  // Reorder a layer column (drag). Entities keep their layerAssignment, so they render wherever the
+  // layer now sits — nodes and their edges move with it for free.
+  const reorderLayer = useCallback((draggedId: string, targetId: string) => {
+    persistLayers(layerOps.reorderLayer(currentLayers(), draggedId, targetId))
+  }, [currentLayers, persistLayers])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -2605,10 +2663,16 @@ export function ContextViewCanvas({
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
                 onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
+                // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
+                onRenameLayer={isDraft ? renameLayer : undefined}
+                onDeleteLayer={isDraft ? deleteLayer : undefined}
+                onReorderLayer={isDraft ? reorderLayer : undefined}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
               />
             ))}
+            {/* Draft-only: create your own layers (columns) to organise nodes into. */}
+            {isDraft && <AddLayerColumn onAdd={addLayer} />}
           </div>
 
 

@@ -64,6 +64,11 @@ interface LayerColumnProps {
   failedNodes?: Set<string>
   onScroll?: () => void
   onAssignToLayer?: (entityId: string) => void
+  /** Draft-only layer management. Presence gates each affordance — the parent passes these only in
+   *  Edit mode, so View mode stays read-only. Reorder moves the column; its nodes/edges follow. */
+  onRenameLayer?: (layerId: string, name: string) => void
+  onDeleteLayer?: (layerId: string) => void
+  onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
   /** True during initial canvas hydration when this layer has no nodes yet.
    * Shows the ghost-card stack instead of the "No entities yet" empty state.
    * See ContextViewCanvas where this is computed from useCanvasStore.hydrationPhase. */
@@ -115,6 +120,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   failedNodes,
   onScroll,
   onAssignToLayer,
+  onRenameLayer,
+  onDeleteLayer,
+  onReorderLayer,
   isHydratingInitial = false,
   revealTarget,
 }: LayerColumnProps) {
@@ -141,6 +149,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
   const [isDragOver, setIsDragOver] = useState(false)
   const [focusIndex, setFocusIndex] = useState(-1)
+  // Draft layer-management: inline rename, delete-confirm, and which kind of drag is hovering
+  // (a layer being reordered vs an entity being reassigned) so the drop hint reads right.
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [draftName, setDraftName] = useState(layer.name)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [dragKind, setDragKind] = useState<'entity' | 'layer' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   const toggleSearchNode = useCallback((nodeId: string) => {
@@ -682,16 +696,27 @@ export const LayerColumn = React.memo(function LayerColumn({
         }}
         onClick={() => isCollapsed && setIsCollapsed(false)}
         onDragOver={(e) => {
-          e.preventDefault()
-          e.dataTransfer.dropEffect = 'move'
-          setIsDragOver(true)
+          const types = e.dataTransfer.types
+          const isLayer = types.includes('text/x-layer-id')
+          const isEntity = types.includes('text/x-entity-id')
+          // Only accept a drag this column can actually handle (getData is unreadable in dragover, so
+          // gate on the presence of the typed key + the matching handler).
+          if ((isLayer && onReorderLayer) || (isEntity && onAssignToLayer)) {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'move'
+            setIsDragOver(true)
+            setDragKind(isLayer ? 'layer' : 'entity')
+          }
         }}
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragOver(false)
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) { setIsDragOver(false); setDragKind(null) }
         }}
         onDrop={(e) => {
           e.preventDefault()
           setIsDragOver(false)
+          setDragKind(null)
+          const layerId = e.dataTransfer.getData('text/x-layer-id')
+          if (layerId && onReorderLayer) { onReorderLayer(layerId, layer.id); return }
           const entityId = e.dataTransfer.getData('text/x-entity-id')
           if (entityId && onAssignToLayer) onAssignToLayer(entityId)
         }}
@@ -705,7 +730,7 @@ export const LayerColumn = React.memo(function LayerColumn({
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 border border-white/20 backdrop-blur-sm">
               <LucideIcons.MoveRight className="w-3.5 h-3.5" style={{ color: layer.color }} />
               <span className="text-xs font-medium" style={{ color: layer.color }}>
-                Move to {layer.name}
+                {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
               </span>
             </div>
           </div>
@@ -729,9 +754,17 @@ export const LayerColumn = React.memo(function LayerColumn({
               </button>
             )}
             <div
+              draggable={!!onReorderLayer}
+              onDragStart={onReorderLayer ? (e) => {
+                e.stopPropagation()
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('text/x-layer-id', layer.id)
+              } : undefined}
+              title={onReorderLayer ? `Drag to reorder ${layer.name}` : undefined}
               className={cn(
                 "rounded-xl flex items-center justify-center flex-shrink-0 shadow-sm transition-all duration-300",
-                isCollapsed ? "w-10 h-10" : "w-9 h-9 group-hover/column:scale-105 group-hover/column:shadow-md"
+                isCollapsed ? "w-10 h-10" : "w-9 h-9 group-hover/column:scale-105 group-hover/column:shadow-md",
+                onReorderLayer && "cursor-grab active:cursor-grabbing"
               )}
               style={{
                 background: `linear-gradient(145deg, ${layer.color}25 0%, ${layer.color}15 100%)`,
@@ -783,11 +816,38 @@ export const LayerColumn = React.memo(function LayerColumn({
             </div>
           ) : (
             <>
-              <LayerHeaderTitle
-                name={layer.name}
-                description={layer.description}
-                color={layer.color}
-              />
+              {isRenaming && onRenameLayer ? (
+                <input
+                  autoFocus
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    e.stopPropagation()
+                    if (e.key === 'Enter') { onRenameLayer(layer.id, draftName); setIsRenaming(false) }
+                    if (e.key === 'Escape') { setDraftName(layer.name); setIsRenaming(false) }
+                  }}
+                  onBlur={() => { onRenameLayer(layer.id, draftName); setIsRenaming(false) }}
+                  className="flex-1 min-w-0 px-2 py-1 rounded-lg bg-canvas-overlay border border-accent-lineage/60 text-sm font-semibold text-ink outline-none"
+                />
+              ) : (
+                <div className="flex-1 min-w-0 flex items-center gap-1">
+                  <LayerHeaderTitle
+                    name={layer.name}
+                    description={layer.description}
+                    color={layer.color}
+                  />
+                  {onRenameLayer && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDraftName(layer.name); setIsRenaming(true) }}
+                      className="opacity-0 group-hover/column:opacity-100 p-1 rounded text-ink-muted hover:text-ink hover:bg-white/10 transition-all flex-shrink-0"
+                      title="Rename layer"
+                    >
+                      <LucideIcons.Pencil className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="flex items-center gap-2">
                 {/* Loading pill — replaces the entity-count pill while this
                     layer is hydrating with no entities yet. Premium spinner +
@@ -840,6 +900,38 @@ export const LayerColumn = React.memo(function LayerColumn({
                   >
                     <LucideIcons.LayoutGrid className="w-3.5 h-3.5" />
                   </button>
+                )}
+                {/* Delete — hover-revealed trash → inline check/✗ confirm (the check's tooltip warns
+                    when the layer has entities: they fall back to the default layer on removal). */}
+                {onDeleteLayer && (
+                  confirmingDelete ? (
+                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); setConfirmingDelete(false) }}
+                        title={totalCount > 0
+                          ? `Delete — ${totalCount} ${totalCount === 1 ? 'entity' : 'entities'} will move to the default layer`
+                          : 'Delete layer'}
+                        className="p-1.5 rounded-lg bg-rose-500/15 text-rose-500 hover:bg-rose-500/25 transition-all"
+                      >
+                        <LucideIcons.Check className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false) }}
+                        title="Cancel"
+                        className="p-1.5 rounded-lg text-ink-muted hover:bg-white/10 transition-all"
+                      >
+                        <LucideIcons.X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true) }}
+                      className="opacity-0 group-hover/column:opacity-100 p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-all duration-200"
+                      title={`Delete ${layer.name}`}
+                    >
+                      <LucideIcons.Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )
                 )}
               </div>
             </>
