@@ -56,6 +56,7 @@ import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/fea
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
 import { EntityHistory } from '@/features/versioning/components/EntityHistory'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -276,6 +277,9 @@ export function EntityDrawer({
     ])
     const changedKeys: string[] = []
     for (const k of allKeys) {
+      // Layer placement is VIEW config now (referenceLayout.assignments, managed on the canvas), not an
+      // editable node property — never stage it as an update_entity field.
+      if (k === 'layerAssignment') continue
       if (JSON.stringify(previousData[k]) !== JSON.stringify(formData[k])) {
         changedKeys.push(k)
       }
@@ -1303,6 +1307,16 @@ function EditModeContent({
   onPropertiesChange,
   onCopyUrn,
 }: EditModeContentProps) {
+  // Layer placement is VIEW config now (referenceLayout.assignments), managed on the canvas — not an
+  // editable node property. Show the RESOLVED layer name read-only (explicit assignment; inherited
+  // placement resolves live on the canvas). A Context View node's id IS its urn, so the map is keyed here.
+  const activeView = useActiveView()
+  const resolvedLayerName = useMemo(() => {
+    const { layers, assignments } = normalizeReferenceLayout(activeView?.layout?.referenceLayout)
+    const layerId = assignments[urn]?.layerId
+    if (!layerId) return ''
+    return layers.find((l) => l.id === layerId)?.name ?? layerId
+  }, [activeView?.layout?.referenceLayout, urn])
   return (
     <div className="p-5 space-y-5">
       {/* Core Fields */}
@@ -1419,13 +1433,9 @@ function EditModeContent({
               <LucideIcons.Layers className="w-3.5 h-3.5" />
               Layer
             </label>
-            <input
-              type="text"
-              value={(formData.layerAssignment as string) || ''}
-              onChange={(e) => onChange('layerAssignment', e.target.value)}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm"
-              placeholder="Layer assignment..."
-            />
+            <div className="w-full px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border border-transparent text-ink-muted text-sm">
+              {resolvedLayerName || <span className="italic opacity-60">Placed on the canvas</span>}
+            </div>
           </div>
           {(formData.lastSyncedAt || typeof formData.childCount === 'number') && (
             <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl bg-black/5 dark:bg-white/[0.03] text-xs">

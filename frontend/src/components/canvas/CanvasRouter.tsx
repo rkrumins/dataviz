@@ -113,6 +113,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   const { restoredCount, dismissRestored, discardAllStaged } = useStagedDraftPersistence(
     currentBranchId ? stagedScopeKey : null,
     currentBranchId,
+    hydrationPhase === 'complete',
   )
 
   // A brand-new blank model opens ready to build: auto-open (or resume) the

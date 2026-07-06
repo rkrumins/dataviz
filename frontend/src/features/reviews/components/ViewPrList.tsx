@@ -83,7 +83,7 @@ export function ViewPrList({
       ) : (
         <div className="space-y-1.5">
           {rows.map((pr) => (
-            <PrListRow key={pr.prId} pr={pr} onOpen={() => setSelected(pr.prId)} />
+            <PrListRow key={pr.prId} wsId={wsId} pr={pr} onOpen={() => setSelected(pr.prId)} />
           ))}
         </div>
       )}

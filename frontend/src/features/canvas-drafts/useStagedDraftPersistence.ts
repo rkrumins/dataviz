@@ -3,14 +3,18 @@
  * to the live stores so unsaved Context View work survives a refresh.
  *
  * Mount it once per canvas (CanvasRouter). It:
- *  - On scope resolve, attempts a restore: a safe snapshot (right branch, not
- *    mid-commit) is replayed onto the canvas + the review op-log, and its
- *    count is surfaced for the "Restored N unsaved changes" banner; an unsafe
- *    one is discarded (see reconcileSnapshot).
- *  - Subscribes to the staged store and persists a debounced snapshot on every
- *    change, marks it 'committing' while a save runs, and clears it the moment
- *    the store empties (after a successful save OR a discard-all) — so the save
- *    path itself needs no edit.
+ *  - Once initial hydration COMPLETES, attempts a restore: a safe snapshot
+ *    (right branch, not mid-commit) is appended onto the canvas + the review
+ *    op-log, its count surfaced for the "Restored N unsaved changes" banner;
+ *    an unsafe one is discarded. Restore waits for hydration on purpose — the
+ *    hydration effect clears the canvas and then replaces it with server
+ *    (committed) nodes, so a restore that ran earlier would be wiped. Appending
+ *    after hydration layers the unsaved delta on top of the committed draft.
+ *  - Persists a debounced snapshot on every change, marks it 'committing'
+ *    while a save runs, clears it when the store empties (after a successful
+ *    save OR a discard-all — so the save path needs no edit), and flushes
+ *    synchronously on beforeunload so the last edits in the debounce window
+ *    aren't lost to a fast refresh.
  *
  * Returns the restored count (for the banner) + a discardAll that clears the
  * staged work AND its snapshot in one shot.
@@ -50,18 +54,37 @@ function hydrateChange(sc: SerializableChange): StagedChange {
   return { ...sc, discard: rebuildDiscard(sc) }
 }
 
+/** Build a fresh snapshot from live store state, or null when nothing is staged. */
+function buildSnapshot(scopeKey: string, branchId: string | null): StagedDraftSnapshot | null {
+  const staged = useStagedChangesStore.getState()
+  if (staged.changes.length === 0) return null
+  const cs = useCanvasStore.getState()
+  return {
+    version: SNAPSHOT_VERSION,
+    scopeKey,
+    branchId,
+    phase: 'staged',
+    savedAt: 0,
+    changes: staged.changes.map(toSerializableChange),
+    pendingNodes: cs.nodes.filter((n) => n.data?.isPending),
+    pendingEdges: cs.edges.filter((e) => e.data?.isPending),
+  }
+}
+
 export function useStagedDraftPersistence(
   scopeKey: string | null,
   currentBranchId: string | null,
+  hydrationComplete: boolean,
 ) {
   const [restoredCount, setRestoredCount] = useState(0)
   const dismissRestored = useCallback(() => setRestoredCount(0), [])
 
-  // Restore runs at most once per scope key.
+  // Restore runs at most once per scope key, and only AFTER hydration settles
+  // (else the hydration's setGraph(server) would overwrite the restored nodes).
   const restoredForKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!scopeKey) return
+    if (!scopeKey || !hydrationComplete) return
     if (restoredForKeyRef.current === scopeKey) return
     restoredForKeyRef.current = scopeKey
 
@@ -73,8 +96,9 @@ export function useStagedDraftPersistence(
     }
     if (verdict === 'noop' || !snapshot) return
 
-    // Replay: optimistic canvas first (exact positions/badges), then the
-    // review op-log so Save + the review panel see the same changes.
+    // Append the unsaved delta ON TOP of the hydrated (committed) canvas:
+    // optimistic nodes/edges first (exact positions/badges), then the review
+    // op-log so Save + the review panel see the same changes.
     const cs = useCanvasStore.getState()
     if (snapshot.pendingNodes.length) cs.addNodes(snapshot.pendingNodes)
     if (snapshot.pendingEdges.length) cs.addEdges(snapshot.pendingEdges)
@@ -85,31 +109,12 @@ export function useStagedDraftPersistence(
       lastApplyResult: null,
     })
     setRestoredCount(snapshot.changes.length)
-  }, [scopeKey, currentBranchId])
+  }, [scopeKey, currentBranchId, hydrationComplete])
 
   // Persist on change; mark committing during a save; clear when empty.
   const writeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!scopeKey) return
-    const persistNow = () => {
-      const staged = useStagedChangesStore.getState()
-      if (staged.changes.length === 0) {
-        clearSnapshot(scopeKey)
-        return
-      }
-      const cs = useCanvasStore.getState()
-      const snapshot: StagedDraftSnapshot = {
-        version: SNAPSHOT_VERSION,
-        scopeKey,
-        branchId: currentBranchId,
-        phase: 'staged',
-        savedAt: 0, // stamped at write time is unnecessary; ordering is by store state
-        changes: staged.changes.map(toSerializableChange),
-        pendingNodes: cs.nodes.filter((n) => n.data?.isPending),
-        pendingEdges: cs.edges.filter((e) => e.data?.isPending),
-      }
-      writeSnapshot(snapshot)
-    }
 
     const unsub = useStagedChangesStore.subscribe((state, prev) => {
       // A save going in-flight: freeze the snapshot as 'committing' so a crash
@@ -126,11 +131,24 @@ export function useStagedDraftPersistence(
         return
       }
       if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
-      writeTimerRef.current = setTimeout(persistNow, WRITE_DEBOUNCE_MS)
+      writeTimerRef.current = setTimeout(() => {
+        const snapshot = buildSnapshot(scopeKey, currentBranchId)
+        if (snapshot) writeSnapshot(snapshot)
+        else clearSnapshot(scopeKey)
+      }, WRITE_DEBOUNCE_MS)
     })
+
+    // Flush synchronously on unload so edits still inside the debounce window
+    // survive a fast refresh (the debounced timer would never fire).
+    const flush = () => {
+      const snapshot = buildSnapshot(scopeKey, currentBranchId)
+      if (snapshot) writeSnapshot(snapshot)
+    }
+    window.addEventListener('beforeunload', flush)
 
     return () => {
       unsub()
+      window.removeEventListener('beforeunload', flush)
       if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
     }
   }, [scopeKey, currentBranchId])
