@@ -13,7 +13,7 @@
 import { Suspense, useMemo, useEffect } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, Loader2, RefreshCw, WifiOff } from 'lucide-react'
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
@@ -27,6 +27,7 @@ import { BranchBehindBanner } from '@/features/versioning/components/BranchBehin
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
+import { CanvasProviderStateOverlay } from './CanvasProviderStateOverlay'
 import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
@@ -185,7 +186,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         </AnimatePresence>
 
         {(hydrationStatus === 'warming' || hydrationStatus === 'unavailable') && (
-          <ProviderUnavailableOverlay
+          <CanvasProviderStateOverlay
             warming={hydrationStatus === 'warming'}
             onRetry={retryHydration}
           />
@@ -204,48 +205,6 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     </div>
     </ReactFlowProvider>
     </ErrorBoundary>
-  )
-}
-
-function ProviderUnavailableOverlay({ warming = false, onRetry }: { warming?: boolean; onRetry?: () => void }) {
-  // "Warming" is the transient, self-resolving case (the graph provider is
-  // loading its dataset on restart): a calm, non-alarm spinner tone, because
-  // the data is fine and the hook auto-retries. A hard outage keeps the amber
-  // warning icon. Neither ever shows the empty "Start building" state — that
-  // false-empty over real data was the reported "my entities vanished" bug.
-  // The canvas auto-retries a few times at a gentle interval; the explicit
-  // "Retry now" button lets the user re-check on demand (and covers the case
-  // where the bounded auto-retries have been exhausted).
-  return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center bg-canvas/80 backdrop-blur-sm pointer-events-none">
-      <div className="flex flex-col items-center gap-3 max-w-sm text-center pointer-events-auto">
-        <div className={cn(
-          'w-10 h-10 rounded-full flex items-center justify-center',
-          warming ? 'bg-accent-lineage/10' : 'bg-amber-100 dark:bg-amber-950/40',
-        )}>
-          {warming
-            ? <Loader2 className="w-5 h-5 text-accent-lineage animate-spin" />
-            : <WifiOff className="w-5 h-5 text-amber-500" />}
-        </div>
-        <h3 className="text-base font-semibold text-ink">
-          {warming ? 'Your graph is starting up…' : 'Provider Unavailable'}
-        </h3>
-        <p className="text-sm text-ink-muted">
-          {warming
-            ? 'The graph service is loading your data. Your data is safe — this view will fill in automatically in a moment.'
-            : 'The graph provider is not responding right now. Your data is safe — this view will load once the provider is back.'}
-        </p>
-        {onRetry && (
-          <button
-            onClick={onRetry}
-            className="mt-1 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:bg-accent-lineage/90 transition-colors"
-          >
-            <RefreshCw className="w-4 h-4" />
-            Retry now
-          </button>
-        )}
-      </div>
-    </div>
   )
 }
 
