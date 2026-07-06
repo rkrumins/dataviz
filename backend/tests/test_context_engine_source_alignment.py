@@ -108,6 +108,27 @@ async def test_day_n_upper_graph_gets_alias_map_and_drift():
 
 
 @pytest.mark.asyncio
+async def test_stale_aliases_cleared_when_derive_fails(monkeypatch):
+    """If alignment derivation throws, the swallow-all guard must NOT leave a prior
+    ontology's aliases on the provider — they are reset to empty up front."""
+    provider = _AliasRecordingProvider(observed_rel=["HAS", "TO"])
+    engine = ContextEngine(provider=provider, ontology_service=_DeclaredHasToService())
+    engine._workspace_id = "ws"
+
+    import backend.app.ontology.source_alignment as sa
+
+    def _boom(**_kw):
+        raise RuntimeError("simulated derive failure")
+
+    monkeypatch.setattr(sa, "derive_alignment", _boom)
+    await engine._resolve_ontology()
+
+    # The defensive up-front reset ran; the real (never-computed) map was not applied.
+    assert provider.alias_calls, "aliases must be reset even when derive fails"
+    assert provider.alias_calls[-1] == {"rel": {}, "ent": {}}
+
+
+@pytest.mark.asyncio
 async def test_day_0_matching_graph_has_no_drift_but_aliases_for_uppercasing():
     """Day-0: a has/to graph read under a has/to ontology has NO user drift, but the
     provider uppercases its containment set internally, so the observed lowercase spelling

@@ -186,6 +186,19 @@ def test_provider_identity_without_aliases():
     assert p._alias_rel_types(["HAS"]) == ["HAS"]
 
 
+def test_provider_aliases_entity_types_to_observed_spelling():
+    """Entity labels are case-sensitive too: a declared `Table` filter must render `TABLE`
+    against a TABLE graph (get_nodes label-union, get_children post-filter)."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p.set_source_type_aliases({}, {"TABLE": ["TABLE"]})
+    assert p._alias_entity_types(["Table"]) == ["TABLE"]
+    # No entity alias → identity (governed graph).
+    p.set_source_type_aliases({}, {})
+    assert p._alias_entity_types(["Table"]) == ["Table"]
+
+
 def test_provider_aliases_lineage_accessor_to_observed_spelling():
     """The lineage accessor (used by accessor-driven rendering like deep-search) translates
     to observed spellings too; classification still reads the raw uppercase set."""

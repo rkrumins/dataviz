@@ -1857,7 +1857,11 @@ class FalkorDBProvider(GraphDataProvider):
         # instead of MATCH (n) WHERE toLower(labels(n)[0]) IN $types which scans all nodes.
         use_label_union = bool(query.entity_types) and not query.urns
         if use_label_union:
-            types = [str(t) for t in query.entity_types]
+            # Align declared entity types to the graph's observed label spelling (Task E):
+            # the label-union MATCH (n:Label) is case-sensitive, so a `Table` filter must
+            # become `TABLE` against a TABLE graph. The non-union path below already compares
+            # case-insensitively (toLower). Identity for governed graphs.
+            types = list(self._alias_entity_types([str(t) for t in query.entity_types]))
             # Build per-label conditions (shared across all UNION branches)
             shared_conditions = []
         else:
@@ -2194,6 +2198,9 @@ class FalkorDBProvider(GraphDataProvider):
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS)
+        # Align the entity-type post-filter to the graph's observed label spelling (Task E),
+        # so a declared `Table` still matches a TABLE-graph node. Identity for governed graphs.
+        entity_types = self._alias_entity_types(entity_types) if entity_types else entity_types
         nodes = []
         for row in (result.result_set or []):
             # Extract node and childCount
@@ -4042,14 +4049,15 @@ class FalkorDBProvider(GraphDataProvider):
                 resume_created=resume_created,
             )
 
-        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
+            else list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
 
         # Filter AGGREGATED out of any explicit lineage whitelist —
         # feeding existing AGGREGATED edges back through aggregation
         # produces second-order edges that compound on every re-run.
         if lineage_edge_types:
-            effective_lineage_types = [t for t in lineage_edge_types if t != "AGGREGATED"]
+            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
             if not effective_lineage_types:
                 logger.warning(
                     "bulk_rebuild: lineage_edge_types contained only AGGREGATED "
@@ -4557,9 +4565,10 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.app.services.aggregation.cancel import JobCancelled
         from datetime import datetime, timezone
 
-        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
+            else list(self._get_containment_edge_types())
         if lineage_edge_types:
-            effective = [t for t in lineage_edge_types if t and t != "AGGREGATED"]
+            effective = self._alias_rel_types([t for t in lineage_edge_types if t and t != "AGGREGATED"])
         else:
             effective = await self._derive_lineage_types_from_cache(containment)
         # Stable, sorted, de-duplicated order so the cursor's type_index
@@ -5440,7 +5449,8 @@ class FalkorDBProvider(GraphDataProvider):
                 resume_created=resume_created,
             )
 
-        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
+            else list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
 
         # Filter AGGREGATED out of any explicit lineage whitelist. The
@@ -5454,7 +5464,7 @@ class FalkorDBProvider(GraphDataProvider):
         # count whereas the seed-script fallback branch (``NOT IN
         # exclude_types``) already excluded AGGREGATED correctly.
         if lineage_edge_types:
-            effective_lineage_types = [t for t in lineage_edge_types if t != "AGGREGATED"]
+            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
             if not effective_lineage_types:
                 logger.warning(
                     "materialize_aggregated_edges_batch: lineage_edge_types contained "
@@ -5774,8 +5784,10 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
         
-        safe_containment = [_sanitize_label(t) for t in containment_edges]
-        safe_lineage = [_sanitize_label(t) for t in lineage_edges]
+        # Per-source alignment (Task E): render the source's observed spellings so a
+        # case-variant graph isn't missed by the case-sensitive patterns below.
+        safe_containment = [_sanitize_label(t) for t in self._alias_rel_types(containment_edges)]
+        safe_lineage = [_sanitize_label(t) for t in self._alias_rel_types(lineage_edges)]
         
         # If no lineage edges defined, return just the node
         if not safe_lineage:
@@ -6010,6 +6022,11 @@ class FalkorDBProvider(GraphDataProvider):
         # in FalkorDB and what set_containment_edge_types stores internally.
         ctypes = [t.upper() for t in (containment_edge_types or [])]
         ltypes = [t.upper() for t in (lineage_edge_types or [])] if lineage_edge_types else None
+        # Per-source alignment (Task E): translate the uppercased declared types to THIS
+        # graph's observed spellings so the case-sensitive :TYPE / type(r) IN patterns below
+        # match a differently-cased graph. Identity for governed/canonical graphs.
+        ctypes = self._alias_rel_types(ctypes)
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
         # Focus node — needed for the response shape regardless of trace outcome
         focus_node = await self.get_node(urn)
@@ -6407,6 +6424,11 @@ class FalkorDBProvider(GraphDataProvider):
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         ctypes = [t.upper() for t in (containment_edge_types or [])]
         ltypes = [t.upper() for t in (lineage_edge_types or [])] if lineage_edge_types else None
+        # Per-source alignment (Task E): translate the uppercased declared types to THIS
+        # graph's observed spellings so the case-sensitive :TYPE / type(r) IN patterns below
+        # match a differently-cased graph. Identity for governed/canonical graphs.
+        ctypes = self._alias_rel_types(ctypes)
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a

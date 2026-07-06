@@ -447,6 +447,13 @@ class ContextEngine:
         from backend.app.ontology.source_alignment import (
             derive_alignment, MISSING_OBSERVED)
 
+        # Defensively clear any prior ontology's aliases up front. The caller wraps this
+        # method in a swallow-all try/except, so a failure below must not leave stale
+        # cross-ontology aliases on the provider (honours the setter's "always reset"
+        # contract). The success path resets them to the computed map at the end.
+        if hasattr(self.provider, "set_source_type_aliases"):
+            self.provider.set_source_type_aliases({}, {})
+
         declared_rel = (set(resolved.containment_edge_types or [])
                         | set(resolved.lineage_edge_types or [])
                         | set((resolved.relationship_type_definitions or {}).keys()))

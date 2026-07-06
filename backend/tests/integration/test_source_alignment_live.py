@@ -21,6 +21,7 @@ import pytest_asyncio
 
 from backend.app.ontology.source_alignment import derive_alignment
 from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.common.models.graph import NodeQuery
 
 pytestmark = pytest.mark.asyncio
 
@@ -106,6 +107,56 @@ async def test_dayN_uppercase_graph_nests_with_same_ontology():
         assert await _urns_top_level(p) == {"te_root"}
         assert await _urns_children(p, None) == {"te_child"}
         assert await _urns_children(p, ["has"]) == {"te_child"}
+    finally:
+        await p._graph.delete()
+
+
+@skip_if_down
+async def test_dayN_trace_lineage_reads_nonempty_with_alignment():
+    """FIX 1: the trace/lineage read path also honours alignment. A `TO`-graph traced under
+    an ontology declaring `to` returns the lineage edge only once aligned."""
+    host, port = _host_port()
+    name = f"gvt_align_trace_{uuid.uuid4().hex[:6]}"
+    p = FalkorDBProvider(host=host, port=port, graph_name=name)
+    await p._ensure_connected()
+    try:
+        await p._graph.query(
+            "CREATE (a:Dataset {urn:'te_a', displayName:'A'}) "
+            "CREATE (b:Dataset {urn:'te_b', displayName:'B'}) "
+            "CREATE (a)-[:TO]->(b)")                    # observed lineage spelling = TO
+        alias = _alias_for(["has", "to"], ["HAS", "TO"])   # declared has/to; observed HAS/TO
+
+        # Unaligned: declared `to` renders :to and misses :TO → empty trace.
+        p.set_source_type_aliases({})
+        base = await p.get_trace_lineage("te_b", "upstream", 3, ["has"], ["to"])
+        assert len(base.edges) == 0
+
+        # Aligned: `to` → observed `TO` → the lineage edge is found.
+        p.set_source_type_aliases(alias)
+        traced = await p.get_trace_lineage("te_b", "upstream", 3, ["has"], ["to"])
+        assert len(traced.edges) >= 1
+    finally:
+        await p._graph.delete()
+
+
+@skip_if_down
+async def test_entity_case_variant_get_nodes_matches_with_alignment():
+    """FIX 2: entity-label alignment — a declared `Table` filter matches a `TABLE`-labelled
+    node via the case-sensitive label-union only once the entity alias is injected."""
+    host, port = _host_port()
+    name = f"gvt_align_ent_{uuid.uuid4().hex[:6]}"
+    p = FalkorDBProvider(host=host, port=port, graph_name=name)
+    await p._ensure_connected()
+    try:
+        await p._graph.query("CREATE (:TABLE {urn:'te_tbl', displayName:'T'})")  # observed label
+        q = NodeQuery(entityTypes=["Table"], includeChildCount=False, limit=10)  # declared casing
+
+        p.set_source_type_aliases({}, {})
+        assert len(await p.get_nodes(q)) == 0                 # :Table misses :TABLE
+
+        p.set_source_type_aliases({}, {"TABLE": ["TABLE"]})
+        got = await p.get_nodes(q)
+        assert {n.urn for n in got} == {"te_tbl"}
     finally:
         await p._graph.delete()
 
