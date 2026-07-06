@@ -49,6 +49,17 @@ class _FakeSession:
             return self._graph
         raise AssertionError(f"unexpected get({model!r})")
 
+    async def scalar(self, clause):
+        # Single-flight advisory-lock acquire — project_graph holds it for the run; it always
+        # grants here (contention is covered by test_projection_single_flight).
+        assert "pg_try_advisory_lock" in str(clause), str(clause)
+        return True
+
+    async def execute(self, clause):
+        # Single-flight advisory-lock release, run in project_graph's finally.
+        assert "pg_advisory_unlock" in str(clause), str(clause)
+        return None
+
 
 def _fake_session_factory(ps, graph):
     @contextlib.asynccontextmanager

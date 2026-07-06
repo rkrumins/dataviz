@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -55,6 +56,8 @@ from .models import (
 # Strip reserved keys from incoming node `properties` so they don't pollute stored payloads (and
 # flood the projector with reserved-key-drop warnings). The provider owns the canonical key set.
 from backend.app.providers.falkordb_provider import _sanitize_node_properties
+
+logger = logging.getLogger(__name__)
 
 # Keys read out of a payload into denormalised, queryable version columns.
 _NODE_DENORM = {
@@ -1547,9 +1550,14 @@ class GraphVersioningService:
         parent = await s.get(GraphORM, fork.fork_parent_graph_id)
         if parent is None:
             raise ValueError("fork parent missing")
+        # A missing fork base is a corrupt fork row, not an empty genesis — merging against
+        # base 0 would treat the entire parent history as the fork's addition. Fail loud.
+        if fork.fork_base_commit_seq is None:
+            raise ValueError(
+                f"fork {fork.id} missing fork_base_commit_seq — refusing merge against empty base")
         parent_main = await self._main_branch_id(s, parent.id)
         fork_main = await self._main_branch_id(s, fork.id)
-        base = await self._state_as_of(s, parent.id, parent_main, fork.fork_base_commit_seq or 0)
+        base = await self._state_as_of(s, parent.id, parent_main, fork.fork_base_commit_seq)
         ours = await self._composed_state(s, fork.id, fork_main)
         theirs = await self._composed_state(s, parent.id, parent_main)
 
@@ -4021,6 +4029,17 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             bid = branch_id or await self._main_branch_id(s, graph_id)
+            branch = await s.get(BranchORM, bid)
+
+            # Serialize main-advancing writes on this graph BEFORE reading the head, so a
+            # write-through composes against — and advances — the current main atomically
+            # (head read → commit → head advance): the same lock publish/merge/revert take,
+            # without which a write-through racing a merge reads a stale head and spuriously
+            # trips NotUpToDate / flaps the projection target. Drafts stay lock-free — their
+            # append races are resolved by the unique commit_seq constraint + _retry_seq head
+            # CAS. Xact-scoped, so _retry_seq re-takes it on each fresh-session attempt.
+            if branch.kind == "main":
+                await self._lock_graph(s, graph_id)
 
             # Resolve ops → new payloads for the AFFECTED entities only.
             new_vals: Dict[str, Optional[dict]] = {}
@@ -4179,7 +4198,6 @@ class GraphVersioningService:
                 CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
             ).order_by(CommitORM.commit_seq.desc()).limit(1)) or 0
             new_seq = last + 1
-            branch = await s.get(BranchORM, bid)
             commit = CommitORM(
                 graph_id=graph_id, branch_id=bid, commit_seq=new_seq,
                 parent_commit_id=branch.head_commit_id, kind="edit",
@@ -4388,6 +4406,9 @@ class GraphVersioningService:
             main_id = await self._main_branch_id(s, graph_id)
             if branch_id == main_id:
                 parent_main = await self._main_branch_id(s, graph.fork_parent_graph_id)
+                if graph.fork_base_commit_seq is None:
+                    logger.warning("fork %s has no fork_base_commit_seq; reconstructing base at "
+                                   "genesis (0)", graph_id)
                 state.update(await self._state_as_of(
                     s, graph.fork_parent_graph_id, parent_main,
                     graph.fork_base_commit_seq or 0,
@@ -4626,6 +4647,9 @@ class GraphVersioningService:
             main_id = await self._main_branch_id(s, graph_id)
             if branch_id == main_id:
                 pmain = await self._main_branch_id(s, graph.fork_parent_graph_id)
+                if graph.fork_base_commit_seq is None:
+                    logger.warning("fork %s has no fork_base_commit_seq; resolving %s at parent "
+                                   "genesis (0)", graph_id, entity_id)
                 return await self._entity_value_at(
                     s, graph.fork_parent_graph_id, pmain, entity_id,
                     min(seq, graph.fork_base_commit_seq or 0),

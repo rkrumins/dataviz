@@ -25,7 +25,7 @@ import logging
 import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import literal, select
+from sqlalchemy import func, literal, select
 
 from . import config, db
 from .reconcile import falkor_counts, pg_live_counts
@@ -207,7 +207,35 @@ class FalkorProjector:
         await (await self._graph_client(name, provider_id)).delete()
 
     async def project_graph(self, graph_id: str) -> Dict[str, object]:
-        """Catch a graph's FalkorDB projection up to its target watermark."""
+        """Catch a graph's FalkorDB projection up to its target watermark.
+
+        Single-flight per graph: publish/merge fan out one ``project_now`` each, so two
+        near-simultaneous first merges on a blank graph could otherwise run overlapping
+        full-seed DROP+reseed passes and corrupt the cache. The DROP+MERGE apply runs OUTSIDE
+        any Postgres transaction, so a transaction-scoped lock cannot cover it — hold a
+        SESSION-level advisory lock on a dedicated connection for the whole projection. A
+        second concurrent projection finds the lock held and returns ``skipped: in-flight``
+        without touching the cache; the lock is released (and the connection closed) in a
+        finally so a later projection is never wedged. Different graphs use different keys.
+        """
+        lock_scope = self._session()
+        lock_s = await lock_scope.__aenter__()
+        lock_arg = func.hashtext(f"gvproj:{graph_id}")
+        acquired = False
+        try:
+            acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
+            if not acquired:
+                return {"noop": True, "skipped": "in-flight"}
+            return await self._project_graph_locked(graph_id)
+        finally:
+            try:
+                if acquired:
+                    await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
+            finally:
+                await lock_scope.__aexit__(None, None, None)
+
+    async def _project_graph_locked(self, graph_id: str) -> Dict[str, object]:
+        """Projection body — runs under the single-flight lock held by :meth:`project_graph`."""
         # Self-heal the target FIRST (re-points an orphaned graph to the data source's real graph and
         # resets the watermark to replay full main into it). Returns the now-unread orphan to reclaim.
         orphan = await self._target_resolver(self._svc, graph_id) if self._target_resolver else None
