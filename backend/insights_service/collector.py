@@ -181,6 +181,7 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
         from backend.app.db.repositories.stats_repo import (
             get_data_source_stats,
             set_top_level_nodes,
+            touch_top_level_freshness,
         )
         dirty = False
         try:
@@ -202,6 +203,14 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             if not should_rematerialize(
                 stored_payload, fresh_stats=stats, digest=digest, dirty=dirty,
             ):
+                # Verified unchanged — advance freshness like the deep lane's
+                # unchanged path (touch_schema_freshness), timestamp-only. Without
+                # this the timestamp only ever moved on a real rematerialize, so a
+                # stable large graph aged past the serve path's absolute-expiry
+                # tier and every request fell back to the live O(N) scan this
+                # feature exists to avoid. No provider work here → short session.
+                async with get_jobs_session() as session:
+                    await touch_top_level_freshness(session, envelope.data_source_id)
                 logger.debug(
                     "top_level_materialize.skip ds=%s — payload current",
                     envelope.data_source_id,
@@ -217,18 +226,42 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
                         include_child_count=True,
                         query_timeout=resilience.STATS_POLL_TIMEOUT_LARGE_SECS,
                     )
-                payload_json = build_top_level_payload(
-                    result, stats=stats, digest=digest,
+                # Fail-safe against a mid-query ontology re-resolve. The roots
+                # query internally re-resolves the ontology (300s TTL), which the
+                # preceding counts scan + admission wait can outlast on big
+                # graphs. A lapse re-resolves — possibly to a fallback
+                # introspection ontology with different containment/root types —
+                # under which the roots result was built, while `digest` still
+                # reflects the pre-query ontology. Recompute post-query (a cache
+                # hit in the normal case) and, if it moved, skip the write so we
+                # never persist nodes stamped with a digest that doesn't match the
+                # ontology they were computed under; the next poll retries.
+                post_resolved = await engine.get_resolved_ontology()
+                post_digest = containment_digest(
+                    getattr(post_resolved, "containment_edge_types", None) or [],
+                    getattr(post_resolved, "root_entity_types", None) or [],
                 )
-                async with get_jobs_session() as session:
-                    await set_top_level_nodes(
-                        session, envelope.data_source_id, payload_json,
+                if post_digest != digest:
+                    logger.warning(
+                        "top_level_materialize.ontology_shifted ds=%s — digest "
+                        "changed mid-query (pre=%s post=%s), skipping persist",
+                        envelope.data_source_id, digest, post_digest,
                     )
-                logger.info(
-                    "top_level_materialize.done ds=%s totalCount=%s nodes=%d truncated=%s",
-                    envelope.data_source_id, result.total_count, len(result.nodes),
-                    result.has_more or len(result.nodes) < result.total_count,
-                )
+                    if dirty:
+                        await restore_dirty_flag(envelope.data_source_id)
+                else:
+                    payload_json = build_top_level_payload(
+                        result, stats=stats, digest=digest,
+                    )
+                    async with get_jobs_session() as session:
+                        await set_top_level_nodes(
+                            session, envelope.data_source_id, payload_json,
+                        )
+                    logger.info(
+                        "top_level_materialize.done ds=%s totalCount=%s nodes=%d truncated=%s",
+                        envelope.data_source_id, result.total_count, len(result.nodes),
+                        result.has_more or len(result.nodes) < result.total_count,
+                    )
         except Exception as exc:
             logger.warning(
                 "top_level_materialize.failed ds=%s: %s",

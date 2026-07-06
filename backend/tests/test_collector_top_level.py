@@ -85,15 +85,20 @@ def _wire(
     stats: dict,
     resolved,
     stored_top_level=None,
+    stored_updated_at=None,
     tl_result=None,
     tl_raises=None,
+    resolved_after=None,
     dirty: bool = False,
 ):
     """Shared fakes for ``collect_counts`` materialization tests.
 
     Returns a namespace of observations: ``events`` (ordered session /
-    provider-IO trace), ``upserts``, ``tl_calls``, ``sets``, ``consumed``,
-    ``restored``, ``polling_config``.
+    provider-IO trace), ``upserts``, ``tl_calls``, ``sets``, ``touched``,
+    ``consumed``, ``restored``, ``polling_config``.
+
+    ``resolved_after`` (when set) is what ``get_resolved_ontology`` returns
+    AFTER the roots query runs — simulating a mid-query ontology re-resolve.
     """
     events: list[str] = []
     polling_config = SimpleNamespace(
@@ -101,6 +106,7 @@ def _wire(
     )
     stored_row = SimpleNamespace(
         top_level_nodes=stored_top_level,
+        top_level_updated_at=stored_updated_at,
         node_count=stats["nodeCount"],
         edge_count=stats["edgeCount"],
     )
@@ -125,14 +131,18 @@ def _wire(
 
     provider = SimpleNamespace(get_stats=fake_get_stats)
 
+    resolved_state = {"current": resolved}
+
     async def fake_get_resolved_ontology():
-        return resolved
+        return resolved_state["current"]
 
     tl_calls: list[dict] = []
 
     async def fake_top_level(**kw):
         events.append("io:get_top_level")
         tl_calls.append(kw)
+        if resolved_after is not None:
+            resolved_state["current"] = resolved_after
         if tl_raises is not None:
             raise tl_raises
         return tl_result
@@ -174,8 +184,18 @@ def _wire(
         events.append("set_top_level")
         sets.append(payload_json)
 
+    touched: list[str] = []
+
+    async def fake_touch_freshness(_session, ds_id):
+        events.append("touch_freshness")
+        touched.append(ds_id)
+        # Mirror the real helper: advance the freshness marker, leave the
+        # stored payload bytes untouched.
+        stored_row.top_level_updated_at = datetime.now(timezone.utc).isoformat()
+
     monkeypatch.setattr(stats_repo, "get_data_source_stats", fake_get_ds_stats)
     monkeypatch.setattr(stats_repo, "set_top_level_nodes", fake_set_top_level)
+    monkeypatch.setattr(stats_repo, "touch_top_level_freshness", fake_touch_freshness)
 
     consumed: list[str] = []
     restored: list[str] = []
@@ -194,7 +214,7 @@ def _wire(
 
     return SimpleNamespace(
         events=events, upserts=upserts, tl_calls=tl_calls, sets=sets,
-        reads=reads, consumed=consumed, restored=restored,
+        touched=touched, reads=reads, consumed=consumed, restored=restored,
         polling_config=polling_config, stored_row=stored_row,
     )
 
@@ -353,6 +373,64 @@ async def test_resolved_none_skips_materialization(monkeypatch) -> None:
     assert obs.consumed == []
     assert obs.tl_calls == []
     assert obs.sets == []
+
+
+@pytest.mark.asyncio
+async def test_steady_state_skip_advances_freshness(monkeypatch) -> None:
+    """Finding 1: the skip branch must advance ``top_level_updated_at`` (like
+    the deep lane's touch_schema_freshness) so a stable large graph's payload
+    never ages into the serve path's absolute-expiry tier and forces the live
+    O(N) scan. Timestamp-only — the payload bytes are untouched and the roots
+    query never runs."""
+    stats = _stats(150_000)
+    digest = containment_digest(_CONTAINMENT, _ROOTS)
+    stored = _stored_payload(stats, digest)
+    old_ts = "2000-01-01T00:00:00+00:00"
+    obs = _wire(
+        monkeypatch, stats=stats, resolved=_resolved(),
+        stored_top_level=stored, stored_updated_at=old_ts,
+        tl_result=_tl_result(3), dirty=False,
+    )
+
+    await collector.collect_counts(_envelope())
+
+    # Engine roots method not called, payload not rewritten...
+    assert obs.tl_calls == []
+    assert obs.sets == []
+    # ...but freshness advanced off the stale timestamp, payload bytes intact.
+    assert obs.touched == ["ds1"]
+    assert obs.stored_row.top_level_updated_at > old_ts
+    assert obs.stored_row.top_level_nodes == stored
+    assert len(obs.upserts) == 1  # counts still refreshed
+
+
+@pytest.mark.asyncio
+async def test_ontology_shift_mid_query_skips_persist(monkeypatch) -> None:
+    """Finding 2: if the ontology re-resolves mid roots-query (TTL lapse) to a
+    shape different from the digest stamped pre-query, do NOT persist — the
+    nodes were computed under a different ontology than the digest claims. The
+    counts write + poll-success stamp stay intact and the consumed dirty flag
+    is restored so the next poll retries. No exception escapes."""
+    stats = _stats(150_000)
+    before = _resolved(["CONTAINS"], ["dataset"])
+    after = _resolved(["OWNS"], ["schema"])  # different digest
+    assert containment_digest(
+        ["CONTAINS"], ["dataset"]
+    ) != containment_digest(["OWNS"], ["schema"])
+    obs = _wire(
+        monkeypatch, stats=stats, resolved=before,
+        stored_top_level=None, resolved_after=after,
+        tl_result=_tl_result(3), dirty=True,
+    )
+
+    await collector.collect_counts(_envelope())
+
+    assert len(obs.tl_calls) == 1                       # roots query ran
+    assert obs.sets == []                               # but nothing persisted
+    assert obs.consumed == ["ds1"]
+    assert obs.restored == ["ds1"]                      # consumed dirty flag restored
+    assert len(obs.upserts) == 1                        # counts write intact
+    assert obs.polling_config.last_status == "success"  # poll-success stamp intact
 
 
 @pytest.mark.asyncio

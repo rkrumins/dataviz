@@ -143,3 +143,17 @@ async def set_top_level_nodes(session: AsyncSession, ds_id: str, payload_json: s
     existing.top_level_nodes = payload_json
     existing.top_level_updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
+
+
+async def touch_top_level_freshness(session: AsyncSession, ds_id: str) -> None:
+    """Advance the top-level freshness marker WITHOUT rewriting the payload —
+    used when the counts lane verifies the materialized ``top_level_nodes``
+    payload is still current (fingerprint + digest match, not dirty), so the
+    1-3MB payload is left untouched but its ``top_level_updated_at`` timestamp
+    advances (the deep lane's ``touch_schema_freshness`` analog). No-ops if the
+    row is missing (mirrors ``set_top_level_nodes``)."""
+    existing = await get_data_source_stats(session, ds_id)
+    if existing is None:
+        return
+    existing.top_level_updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()
