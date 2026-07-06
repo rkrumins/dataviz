@@ -111,7 +111,7 @@ describe('useHierarchyOutline', () => {
     seedNode('urn:real:domain1', 'domain', 'Sales Domain')
     const onEntityStaged = vi.fn()
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', layerId: null, initialTypeId: null, onEntityStaged }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', initialTypeId: null, onEntityStaged }),
     )
 
     // Single allowed child of 'domain' -> auto-inferred silently.
@@ -134,6 +134,10 @@ describe('useHierarchyOutline', () => {
     const after = afterOf(change)
     expect(after.parentUrn).toBe('urn:real:domain1')
     expect(after.containmentEdgeType).toBe('CONTAINS')
+    // Layer placement is canonical view-config now, written by the caller from
+    // `onEntityStaged` — the create payload itself carries no layerAssignment.
+    expect(after.properties?.layerAssignment).toBeUndefined()
+    expect(node?.data.properties?.layerAssignment).toBeUndefined()
 
     expect(onEntityStaged).toHaveBeenCalledWith(tempUrn, 'urn:real:domain1')
   })
@@ -141,7 +145,7 @@ describe('useHierarchyOutline', () => {
   it('2. commitAndNest sets the next active parent to the new tempUrn; committing again nests under it', () => {
     seedNode('urn:real:domain1', 'domain', 'Sales Domain')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', initialTypeId: null }),
     )
 
     act(() => result.current.setName('Analytics'))
@@ -164,7 +168,7 @@ describe('useHierarchyOutline', () => {
   it('3. indent on an empty row targets the last committed row; indent under a leaf type is blocked with a plain-language reason', () => {
     seedNode('urn:real:container1', 'container', 'Raw Container')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', initialTypeId: null }),
     )
 
     // Commit a 'dataset' child of the container, then indent onto it.
@@ -197,7 +201,7 @@ describe('useHierarchyOutline', () => {
   it('4. outdent walks up one level at a time and refuses to go above scopeParentUrn', () => {
     seedNode('urn:real:domain1', 'domain', 'Sales Domain')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', initialTypeId: null }),
     )
 
     act(() => result.current.setName('Platform'))
@@ -226,7 +230,7 @@ describe('useHierarchyOutline', () => {
     seedNode('urn:real:container1', 'container', 'Container One')
     seedNode('urn:real:container2', 'container', 'Container Two')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', initialTypeId: null }),
     )
 
     // Multi-allowed (container, dataset both valid); no history yet -> sorted default.
@@ -245,7 +249,7 @@ describe('useHierarchyOutline', () => {
   it('6. edge auto-pick prefers literal CONTAINS among 2+ allowed options', () => {
     seedNode('urn:real:container1', 'container', 'Raw Container')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', initialTypeId: null }),
     )
 
     expect(result.current.edgeOptions.map((o) => o.edgeType).sort()).toEqual(['BELONGS_TO', 'CONTAINS'])
@@ -255,7 +259,7 @@ describe('useHierarchyOutline', () => {
   it('7. blockedReason + canCommit=false when the chosen type has zero allowed containment edges', () => {
     seedNode('urn:real:container1', 'container', 'Raw Container')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', initialTypeId: null }),
     )
 
     // secretRoom IS listed in container.canContain but has no valid containment edge.
@@ -267,9 +271,9 @@ describe('useHierarchyOutline', () => {
     expect(result.current.canCommit).toBe(false)
   })
 
-  it('8. stageRows threads parents depth-first, skips issue rows + their descendants, returns the staged count, and stamps layerAssignment', () => {
+  it('8. stageRows threads parents depth-first, skips issue rows + their descendants, returns the staged count, and stamps NO layerAssignment (placement is canonical view-config, written by the caller)', () => {
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: null, layerId: 'layer1', initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
     )
 
     const rows: ParsedOutlineRow[] = [
@@ -295,12 +299,14 @@ describe('useHierarchyOutline', () => {
 
     expect(afterOf(analyticsChange).parentUrn).toBe(salesChange.targetUrn)
     expect(afterOf(rawChange).parentUrn).toBe(analyticsChange.targetUrn)
-    expect(afterOf(salesChange).properties?.layerAssignment).toBe('layer1')
+    expect(afterOf(salesChange).properties?.layerAssignment).toBeUndefined()
+    expect(afterOf(analyticsChange).properties?.layerAssignment).toBeUndefined()
+    expect(afterOf(rawChange).properties?.layerAssignment).toBeUndefined()
   })
 
   it('9. removeRow cascades: discarding a staged parent also removes its staged child from staged changes + canvas', () => {
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: null, layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
     )
 
     act(() => result.current.setName('Sales'))
@@ -323,7 +329,7 @@ describe('useHierarchyOutline', () => {
 
   it('10. vanished-parent fallback resets active.parentUrn to scopeParentUrn when the retargeted row is removed', () => {
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: null, layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
     )
 
     act(() => result.current.setName('Sales'))
@@ -343,7 +349,7 @@ describe('useHierarchyOutline', () => {
   it('11. a blocked indent does not gate a later valid sibling commit: typing a name clears the stale reason', () => {
     seedNode('urn:real:container1', 'container', 'Raw Container')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:container1', initialTypeId: null }),
     )
 
     // Stage a dataset, nest under it, stage a leaf column — then a blocked indent.
@@ -373,7 +379,7 @@ describe('useHierarchyOutline', () => {
 
   it('12. descendantCount counts staged descendants transitively (2 / 1 / 0 for a 3-level chain)', () => {
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: null, layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
     )
 
     act(() => result.current.setName('Sales'))
@@ -393,7 +399,7 @@ describe('useHierarchyOutline', () => {
 
   it('13. renameRow updates the staged change after.displayName and the optimistic canvas label', () => {
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: null, layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
     )
 
     act(() => result.current.setName('Sales'))
@@ -409,7 +415,7 @@ describe('useHierarchyOutline', () => {
   it('14. tree scopes to the CURRENT batch: a fresh open() clears the ADDING list without un-staging the previous set; the next set staged shows only itself', () => {
     seedNode('urn:real:domain1', 'domain', 'Sales Domain')
     const { result } = renderHook(() =>
-      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', layerId: null, initialTypeId: null }),
+      useHierarchyOutline({ scopeParentUrn: 'urn:real:domain1', initialTypeId: null }),
     )
 
     // Stage set A.
@@ -440,7 +446,7 @@ describe('useHierarchyOutline', () => {
 
     const { result } = renderHook(() => {
       const scopeParentUrn = useHierarchyBuilderStore((s) => s.parentUrn)
-      return useHierarchyOutline({ scopeParentUrn, layerId: null, initialTypeId: null })
+      return useHierarchyOutline({ scopeParentUrn, initialTypeId: null })
     })
 
     expect(result.current.active.parentUrn).toBe('urn:real:domain1')

@@ -98,6 +98,43 @@ describe('assignmentMutations — remapAssignmentUrn', () => {
   })
 })
 
+// Documents the exact sequence of canonical-layout snapshots ContextViewCanvas produces for
+// "create into A -> move to B -> undo" (Task 3b §4). Since Task 3, `handleAssignToLayer` snapshots
+// `before = currentLayout()` FRESH at move time and stages `discard: () => persistReferenceLayout(before)`
+// — so once the create path (Task 3b §3) writes a canonical entry for the temp urn at CREATE time,
+// that entry IS what `before` captures on a later move, and undo (which runs the staged change's
+// `discard`) restores it. No node-property fallback is involved. The ContextViewCanvas wiring itself
+// isn't unit-testable without mounting the whole canvas (same constraint noted in the Task 3 fix-round
+// for the instanceAssignment-shadow fix) — this test exercises the pure mutations that back it, and the
+// wiring was verified by tracing handleAssignToLayer/onEntityStaged/onRowStaged/discard by hand.
+describe('assignmentMutations — create -> move -> undo (documents the ContextViewCanvas discard fallback, Task 3b §4)', () => {
+  it('a session-created root keeps its CREATE-time layer after a later move is undone', () => {
+    // 1. onEntityStaged/onRowStaged (create into layer A) writes a canonical entry keyed by the temp urn.
+    const afterCreate = assignEntities(layout(), ['urn:staged:x'], 'A')
+    expect(afterCreate.assignments['urn:staged:x'].layerId).toBe('A')
+
+    // 2. handleAssignToLayer (move to B) snapshots `before` FRESH — it sees the create-time entry, and
+    //    assignEntities returns a NEW object, so `before` stays untouched by the move.
+    const before = afterCreate
+    const after = assignEntities(before, ['urn:staged:x'], 'B')
+    expect(after.assignments['urn:staged:x'].layerId).toBe('B')
+    expect(before.assignments['urn:staged:x'].layerId).toBe('A')
+
+    // 3. Undo runs the staged assign_layer change's `discard: () => persistReferenceLayout(before)`.
+    const afterUndo = before
+    expect(afterUndo.assignments['urn:staged:x'].layerId).toBe('A')
+  })
+
+  it('remap on save re-keys the CURRENT (possibly moved) entry temp->real without losing its layer', () => {
+    const afterCreate = assignEntities(layout(), ['urn:staged:x'], 'A')
+    const afterMove = assignEntities(afterCreate, ['urn:staged:x'], 'B')
+
+    const remapped = remapAssignmentUrn(afterMove, 'urn:staged:x', 'urn:real:x')
+    expect(remapped.assignments['urn:staged:x']).toBeUndefined()
+    expect(remapped.assignments['urn:real:x'].layerId).toBe('B')
+  })
+})
+
 describe('assignmentMutations — checkAssignmentConflict', () => {
   const parentMap = new Map<string, string>([
     ['child', 'parent'],

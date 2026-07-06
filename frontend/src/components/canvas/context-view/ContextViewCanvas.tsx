@@ -401,6 +401,8 @@ export function ContextViewCanvas({
     assignEntityToLayer: (entityId: string, layerId: string) => { success: boolean }
     parentMap: Map<string, string>
     setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
+    currentLayout: () => NormalizedReferenceLayout
+    persistReferenceLayout: (next: NormalizedReferenceLayout) => void
   } | null>(null)
 
   // Duplicate a node's whole subtree as freshly-staged copies. onNodeCopied
@@ -408,13 +410,20 @@ export function ContextViewCanvas({
   // ContextView only renders nodes that resolve to a layer, so without
   // per-node assignment the descendant copies would vanish (don't rely on
   // containment inheritance; assign explicitly). Reuses the same layer
-  // resolution the create flow's onEntityStaged uses.
+  // resolution the create flow's onEntityStaged uses. Writes BOTH the
+  // canonical view-config entry (keyed by the copy's temp urn, remapped to
+  // its real urn on save — same as a create) and the optimistic session
+  // assignment (immediate render feedback before the canonical write's
+  // debounce/re-render lands).
   const { duplicateSubtree } = useDuplicateSubtree({
     onNodeCopied: (originalId, _originalUrn, copyUrn) => {
       const wiring = duplicateWiringRef.current
       if (!wiring) return
       const layer = wiring.nodeLayerMap.get(originalId) ?? wiring.sortedLayers[0]?.id
-      if (layer) wiring.assignEntityToLayer(copyUrn, layer)
+      if (layer) {
+        wiring.assignEntityToLayer(copyUrn, layer)
+        wiring.persistReferenceLayout(assignmentOps.assignEntities(wiring.currentLayout(), [copyUrn], layer))
+      }
     },
   })
 
@@ -1249,7 +1258,9 @@ export function ContextViewCanvas({
   // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
   // ref declaration near the interactions call). Read lazily by onNodeCopied /
   // onNodeDuplicated so each duplicate action sees live layer state.
-  duplicateWiringRef.current = { nodeLayerMap, sortedLayers, assignEntityToLayer, parentMap, setExpandedNodes }
+  duplicateWiringRef.current = {
+    nodeLayerMap, sortedLayers, assignEntityToLayer, parentMap, setExpandedNodes, currentLayout, persistReferenceLayout,
+  }
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
@@ -2333,9 +2344,9 @@ export function ContextViewCanvas({
   // the rail's onEntityStaged: the creation layer → else the root parent's
   // layer → else the first layer. Fixed for the whole batch (Build's
   // parentUrn/layerId don't change mid-Apply, unlike the rail's per-row live
-  // retarget). Passed to BuildPanel both to stamp a DURABLE layerAssignment
-  // at stage time (mirrors the rail's create-time properties.layerAssignment)
-  // and for the optimistic session assignEntityToLayer below.
+  // retarget). Passed to BuildPanel's placement hint and used by onRowStaged
+  // below to write both the canonical view-config entry and the optimistic
+  // session assignEntityToLayer.
   const buildLayerId = builderLayerId
     ?? (builderParentUrn ? nodeLayerMap.get(builderParentUrn) : undefined)
     ?? sortedLayers[0]?.id
@@ -2571,8 +2582,13 @@ export function ContextViewCanvas({
                 provider,
                 // Re-key each new entity's layer assignment temp→real as its create resolves,
                 // so a node created in a layer keeps its layer column after Save — and survives
-                // any later create/commit failure without flashing out of the view.
-                remapEntityId,
+                // any later create/commit failure without flashing out of the view. Re-keys BOTH
+                // the canonical view-config entry (assignEntities/onEntityStaged wrote it at
+                // create time, keyed by the temp urn) and the session store mirror.
+                remapEntityId: (oldId, newId) => {
+                  remapEntityId(oldId, newId)
+                  persistReferenceLayout(assignmentOps.remapAssignmentUrn(currentLayout(), oldId, newId))
+                },
                 message: `Canvas edits (${stagedChangeList.length})`,
               })
               // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).
@@ -2812,11 +2828,17 @@ export function ContextViewCanvas({
               // The layered view only renders nodes that resolve to a layer, so
               // a freshly-staged node is invisible until assigned. Assign it to
               // the creation layer → else the parent's layer → else the first
-              // layer (an instanceAssignment wins even in closed-scope views).
+              // layer. Writes the canonical view-config entry (keyed by the temp
+              // urn, remapped to the real urn on save) plus the optimistic
+              // session assignment (an instanceAssignment wins even in
+              // closed-scope views, before the canonical write's render lands).
               const layer = builderLayerId
                 ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
                 ?? sortedLayers[0]?.id
-              if (layer) assignEntityToLayer(tempUrn, layer)
+              if (layer) {
+                assignEntityToLayer(tempUrn, layer)
+                persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [tempUrn], layer))
+              }
               if (parentUrn) {
                 setExpandedNodes(prev => new Set([...prev, parentUrn]))
               }
@@ -2830,11 +2852,14 @@ export function ContextViewCanvas({
             layerId={buildLayerId}
             typeLayerMap={buildTypeLayerMapMemo}
             onRowStaged={(row, urn) => {
-              // Optimistic session assignment for immediate display (the durable
-              // per-row layerAssignment is already stamped at stage time). Resolve
-              // the SAME auto-by-type layer as the durable stamp, per row.
+              // Auto-by-type per row: writes the canonical view-config entry
+              // (keyed by the row's temp urn, remapped to its real urn on save)
+              // plus the optimistic session assignment for immediate display.
               const layer = resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
-              if (layer) assignEntityToLayer(urn, layer)
+              if (layer) {
+                assignEntityToLayer(urn, layer)
+                persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [urn], layer))
+              }
             }}
           />
         )}

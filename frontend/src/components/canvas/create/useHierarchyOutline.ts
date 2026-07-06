@@ -69,11 +69,10 @@ function sortByLevelThenName(types: EntityTypeSchema[]): EntityTypeSchema[] {
 
 export function useHierarchyOutline(opts: {
   scopeParentUrn: string | null
-  layerId: string | null
   initialTypeId: string | null
   onEntityStaged?: (tempUrn: string, parentUrn?: string) => void
 }) {
-  const { scopeParentUrn, layerId, initialTypeId, onEntityStaged } = opts
+  const { scopeParentUrn, initialTypeId, onEntityStaged } = opts
 
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
@@ -303,7 +302,6 @@ export function useHierarchyOutline(opts: {
     const properties: Record<string, unknown> = {
       ...active.details.fieldValues,
       ...(active.details.description.trim() ? { description: active.details.description.trim() } : {}),
-      ...(layerId ? { layerAssignment: layerId } : {}),
     }
     const tempUrn = stageEntity({
       entityType: active.typeId,
@@ -319,7 +317,7 @@ export function useHierarchyOutline(opts: {
     onEntityStaged?.(tempUrn, active.parentUrn ?? undefined)
     setActive((prev) => ({ ...prev, name: '', details: { description: '', tags: '', fieldValues: {} } }))
     return tempUrn
-  }, [canCommit, active, layerId, stageEntity, depthForParent, onEntityStaged, registerBatchUrn])
+  }, [canCommit, active, stageEntity, depthForParent, onEntityStaged, registerBatchUrn])
 
   const commitAndNest = useCallback((): string | null => {
     const tempUrn = commitSibling()
@@ -424,16 +422,11 @@ export function useHierarchyOutline(opts: {
         const contains = edgeOpts.find((o) => o.edgeType.toUpperCase() === 'CONTAINS')
         const edgeType = edgeOpts.length > 0 ? (contains ?? edgeOpts[0]).edgeType : undefined
 
-        const properties: Record<string, unknown> = {
-          ...(layerId ? { layerAssignment: layerId } : {}),
-        }
-
         const tempUrn = stageEntity({
           entityType: row.typeId,
           displayName: row.name,
           parentUrn: parentUrn ?? undefined,
           containmentEdgeType: edgeType,
-          properties,
         })
 
         typeByTempUrn.set(tempUrn, row.typeId)
@@ -445,7 +438,7 @@ export function useHierarchyOutline(opts: {
 
       return count
     },
-    [stageEntity, parentTypeOf, relationshipTypes, containmentEdgeTypes, layerId, onEntityStaged, registerBatchUrn],
+    [stageEntity, parentTypeOf, relationshipTypes, containmentEdgeTypes, onEntityStaged, registerBatchUrn],
   )
 
   return {

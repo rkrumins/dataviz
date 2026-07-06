@@ -151,11 +151,7 @@ export function BuildPanel({ onClose, layerId, typeLayerMap, onRowStaged }: Buil
     if (!canApply) return
     setApplying(true)
     try {
-      // Auto-by-type: each row's durable layer is its TYPE's column (else the
-      // fallback). Shared with the canvas's optimistic `onRowStaged` assignment.
-      const layerIdForRow = (row: BuildRow) =>
-        resolveRowLayer(row, { typeLayerMap: typeLayerMap ?? new Map(), fallbackLayerId: layerId })
-      await stageBuildRows(stageable, { rootParentUrn: parentUrn, layerIdForRow, onRowStaged })
+      await stageBuildRows(stageable, { rootParentUrn: parentUrn, onRowStaged })
       reset()
       onClose()
     } finally {

@@ -113,7 +113,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     setName, setType, setEdgeType, setDetails, retarget,
     commitSibling, commitAndNest, indent, outdent,
     renameRow, updateRowDetails, removeRow, descendantCount, stageRows,
-  } = useHierarchyOutline({ scopeParentUrn, layerId, initialTypeId, onEntityStaged })
+  } = useHierarchyOutline({ scopeParentUrn, initialTypeId, onEntityStaged })
 
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
