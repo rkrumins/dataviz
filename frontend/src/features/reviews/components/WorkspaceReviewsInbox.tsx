@@ -8,7 +8,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import {
   Inbox, Loader2, Search, X, ChevronDown, GitPullRequestArrow, GitMerge,
-  AlertTriangle, UserCheck,
+  AlertTriangle, CircleUserRound,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -21,7 +21,7 @@ import { PrDetailDrawer } from './PrDetailDrawer'
 const OPEN_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts'])
 const READY_STATUSES = new Set(['mergeable', 'approved'])
 const PAGE = 20
-type Scope = 'open' | 'awaiting' | 'all'
+type Scope = 'open' | 'mine' | 'all'
 
 // ── Compact filter dropdown (button + popover) ───────────────────────────────
 function FilterSelect({
@@ -132,10 +132,10 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
   const [visible, setVisible] = useState(PAGE)
   const [openPrId, setOpenPrId] = useState<string | null>(initialPrId ?? null)
 
-  // "Awaiting my review" = I'm a requested reviewer AND not the author (the old logic counted
-  // anything I authored, so "mine" collapsed into "all" for a solo admin).
-  const awaiting = useCallback(
-    (pr: ReviewItem['pr']) => (pr.reviewers ?? []).includes(user?.id ?? '') && pr.actor !== user?.id,
+  // "Raised by you" = PRs you authored. (Swapped in for the old reviewer-inbox scope, which is
+  // always empty in workflows that don't assign reviewers; the Author filter still covers everyone.)
+  const raisedByMe = useCallback(
+    (pr: ReviewItem['pr']) => !!user?.id && pr.actor === user.id,
     [user],
   )
 
@@ -159,7 +159,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
     const q = search.trim().toLowerCase()
     return all.filter(({ pr, sourceLabel }) => {
       if (scope === 'open' && !OPEN_STATUSES.has(pr.status)) return false
-      if (scope === 'awaiting' && !awaiting(pr)) return false
+      if (scope === 'mine' && !raisedByMe(pr)) return false
       if (authorFilter && pr.actor !== authorFilter) return false
       if (sourceFilter && sourceLabel !== sourceFilter) return false
       if (q) {
@@ -168,7 +168,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
       }
       return true
     })
-  }, [all, scope, authorFilter, sourceFilter, search, awaiting])
+  }, [all, scope, authorFilter, sourceFilter, search, raisedByMe])
 
   // Reset the visible window whenever the active filter set changes.
   useEffect(() => { setVisible(PAGE) }, [scope, authorFilter, sourceFilter, search])
@@ -177,8 +177,8 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
     open: all.filter(({ pr }) => OPEN_STATUSES.has(pr.status)).length,
     ready: all.filter(({ pr }) => READY_STATUSES.has(pr.status)).length,
     attention: all.filter(({ pr }) => pr.status === 'conflicts' || (pr.behind && (pr.behindBy ?? 0) > 0)).length,
-    awaiting: all.filter(({ pr }) => awaiting(pr)).length,
-  }), [all, awaiting])
+    mine: all.filter(({ pr }) => raisedByMe(pr)).length,
+  }), [all, raisedByMe])
 
   const loading = Object.keys(feeds).length < dataSources.length
   const hasFilters = !!(authorFilter || sourceFilter || search.trim())
@@ -186,7 +186,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
 
   const SCOPES: Array<{ key: Scope; label: string }> = [
     { key: 'open', label: 'Open' },
-    { key: 'awaiting', label: 'Awaiting you' },
+    { key: 'mine', label: 'Raised by you' },
     { key: 'all', label: 'All' },
   ]
 
@@ -202,7 +202,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
         <StatCard icon={GitPullRequestArrow} label="Open requests" count={stats.open} tone="indigo" active={scope === 'open'} onClick={() => setScope('open')} />
         <StatCard icon={GitMerge} label="Ready to merge" count={stats.ready} tone="emerald" onClick={() => { setScope('all'); }} />
         <StatCard icon={AlertTriangle} label="Needs attention" count={stats.attention} tone="amber" onClick={() => { setScope('all'); }} />
-        <StatCard icon={UserCheck} label="Awaiting your review" count={stats.awaiting} tone="violet" active={scope === 'awaiting'} onClick={() => setScope('awaiting')} />
+        <StatCard icon={CircleUserRound} label="Raised by you" count={stats.mine} tone="violet" active={scope === 'mine'} onClick={() => setScope('mine')} />
       </div>
 
       {/* Filter bar */}
@@ -255,10 +255,14 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
           <div className="text-center py-20">
             <Inbox className="w-9 h-9 text-ink-muted/40 mx-auto mb-3" />
             <p className="text-sm font-semibold text-ink">
-              {hasFilters ? 'No requests match your filters' : scope === 'awaiting' ? 'Nothing awaiting your review' : scope === 'open' ? 'No open requests' : 'No requests yet'}
+              {hasFilters ? 'No requests match your filters' : scope === 'mine' ? "You haven't raised any requests" : scope === 'open' ? 'No open requests' : 'No requests yet'}
             </p>
-            <p className="text-xs text-ink-muted mt-1">
-              {hasFilters ? 'Try clearing a filter.' : 'Open a merge request from a draft to start a review.'}
+            <p className="text-xs text-ink-muted mt-1 max-w-md mx-auto leading-relaxed">
+              {hasFilters
+                ? 'Try clearing a filter or search term.'
+                : scope === 'mine'
+                  ? 'Merge requests you open from a draft will appear here.'
+                  : 'Open a merge request from a draft to start a review.'}
             </p>
           </div>
         )}
