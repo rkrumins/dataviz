@@ -406,6 +406,15 @@ class ContextEngine:
                             await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
                         except Exception:
                             pass  # best-effort, don't block resolution
+                    # Per-source vocabulary alignment (Task E): reconcile the ontology's
+                    # declared type spellings with what THIS source graph actually uses so a
+                    # case-variant third-party graph (has/to vs HAS/TO) reads correctly, and
+                    # surface the mismatch as drift. Never blocks resolution.
+                    try:
+                        await self._apply_source_alignment(
+                            resolved, introspected_entity_ids, introspected_rel_ids)
+                    except Exception as exc:
+                        logger.warning("source vocabulary alignment failed (non-fatal): %s", exc)
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -425,6 +434,71 @@ class ContextEngine:
             self._resolved_ontology_cache = fallback
             self._resolved_ontology_cache_ts = time.monotonic()
             return fallback
+
+    async def _apply_source_alignment(self, resolved, observed_entity_ids, observed_rel_ids):
+        """Derive the per-source vocabulary alignment (declared spelling → this graph's
+        observed spelling), inject it into the provider as an alias map, and persist the
+        drift summary. Best-effort DB work: aliases are injected even when the DB is
+        unavailable, so reads stay correct regardless.
+
+        Governed/versioned graphs are canonicalized at the commit boundary (Task C), so
+        their observed spellings already equal the declared ones — the alignment is an
+        identity and the alias map is empty (cheap short-circuit)."""
+        from backend.app.ontology.source_alignment import (
+            derive_alignment, MISSING_OBSERVED)
+
+        declared_rel = (set(resolved.containment_edge_types or [])
+                        | set(resolved.lineage_edge_types or [])
+                        | set((resolved.relationship_type_definitions or {}).keys()))
+        declared_ent = set((resolved.entity_type_definitions or {}).keys())
+        observed_rel = list(observed_rel_ids or [])
+        observed_ent = list(observed_entity_ids or [])
+
+        def _build(explicit_rel=None, explicit_ent=None):
+            a = derive_alignment(
+                declared_relationship_types=declared_rel,
+                declared_entity_types=declared_ent,
+                observed_relationship_types=observed_rel,
+                observed_entity_types=observed_ent,
+                explicit_relationship_mappings=explicit_rel,
+                explicit_entity_mappings=explicit_ent,
+            )
+            # Entity types are introspected only via containment participation, so a
+            # declared type absent from that (incomplete) view isn't reliably "missing".
+            # Keep entity ALIASES (case variants), drop noisy entity missing-drift.
+            a.entity_entries = {k: v for k, v in a.entity_entries.items()
+                                if v.kind != MISSING_OBSERVED}
+            return a
+
+        alignment = _build()
+        ds_id = getattr(self, "_data_source_id", None)
+        if ds_id:
+            try:
+                from backend.app.db.engine import get_session_factory
+                from backend.app.db.repositories.data_source_repo import get_data_source_orm
+                from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+                async with get_session_factory()() as s:
+                    ds = await get_data_source_orm(s, ds_id)
+                    ont_id = getattr(ds, "ontology_id", None) if ds else None
+                    ex_rel, ex_ent = await osm_repo.load_explicit_mappings(s, ds_id, ont_id)
+                    if ex_rel or ex_ent:
+                        alignment = _build(ex_rel, ex_ent)
+                    await osm_repo.persist_alignment(
+                        s, data_source_id=ds_id, ontology_id=ont_id, alignment=alignment)
+                    await s.commit()
+            except Exception as exc:
+                logger.debug("source alignment DB step skipped (non-fatal): %s", exc)
+
+        self._source_alignment = alignment
+        if hasattr(self.provider, "set_source_type_aliases"):
+            self.provider.set_source_type_aliases(
+                alignment.rel_alias_map(), alignment.entity_alias_map())
+
+    async def get_source_alignment(self):
+        """Public accessor for the per-source vocabulary alignment (drift surface).
+        Resolves the ontology first so the alignment reflects the live schema."""
+        await self._resolve_ontology()
+        return getattr(self, "_source_alignment", None)
 
     async def _get_resolved_ontology(self):
         """Return the cached ResolvedOntology, refreshing via _resolve_ontology() if needed."""

@@ -102,7 +102,8 @@ class VersionedWriteProvider:
                         self._gid = (await self._svc.enable_versioning(
                             data_source_id=self._ds, workspace_id=self._ws,
                             actor=self._actor, provider=self._inner,
-                            falkor_graph_name=self._falkor_graph_name))["graph_id"]
+                            falkor_graph_name=self._falkor_graph_name,
+                            ontology_rules=self._ontology_rules))["graph_id"]
         return self._gid
 
     async def _record(self, ops: List[dict], message: str) -> None:

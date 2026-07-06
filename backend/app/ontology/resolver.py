@@ -568,6 +568,23 @@ def suggest_relationship_defs_from_stats(
 # ---------------------------------------------------------------------------
 
 
+def collect_merged_variants(
+    stats: List[Any], defaults: Optional[Dict[str, Dict]] = None,
+) -> Dict[str, List[dict]]:
+    """Per canonical type id, the source spellings folded into it — ONLY for types the
+    source spelled more than one way (Task E §1c). Mirrors the dedupe in
+    :func:`suggest_relationship_defs_from_stats`, so the review UI can show each merge
+    inline (``{canonical_id: [{"spelling", "count"}, …]}``) instead of only in prose."""
+    out: Dict[str, List[dict]] = {}
+    for casefold, variants in _group_stats_by_casefold(stats).items():
+        if len(variants) < 2:
+            continue
+        cid = _canonical_stat_id(casefold, variants, defaults or {})
+        out[cid] = [{"spelling": str(st.id), "count": int(getattr(st, "count", 0) or 0)}
+                    for st in variants]
+    return out
+
+
 def _humanize(type_id: str) -> str:
     """Convert camelCase or UPPER_CASE type IDs to human-readable names."""
     import re

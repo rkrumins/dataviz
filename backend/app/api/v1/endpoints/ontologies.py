@@ -778,7 +778,16 @@ async def suggest_ontology(
 
         matches.sort(key=lambda m: m.jaccard_score, reverse=True)
 
+    # Surface the suggester's case-variant merges structurally (Task E §1c) so the review
+    # UI can show "this graph spells HAS 3 ways — merged into one" with a split affordance.
+    from backend.app.ontology.defaults import SYSTEM_ENTITY_TYPES, SYSTEM_RELATIONSHIP_TYPES
+    from backend.app.ontology.resolver import collect_merged_variants
+    merged_variants: dict = {}
+    merged_variants.update(collect_merged_variants(stats.entity_type_stats, SYSTEM_ENTITY_TYPES))
+    merged_variants.update(collect_merged_variants(stats.edge_type_stats, SYSTEM_RELATIONSHIP_TYPES))
+
     return OntologySuggestResponse(
         suggested=suggestion,
         matchingOntologies=matches[:5],
+        mergedVariants=merged_variants,
     )

@@ -10,11 +10,31 @@ the base and subsequent write-through edits coincide. Idempotent per graph.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from backend.common.models.graph import EdgeQuery, NodeQuery
 
 logger = logging.getLogger(__name__)
+
+
+def canonicalize_rows(rows: List[dict], ontology_rules) -> int:
+    """Rewrite each bootstrap row's ``entityType``/``edgeType`` to the ontology's
+    declared casing IN PLACE (Task E seed canonicalization). Reuses the Task C
+    commit-boundary canonicalizer so OUR versioned copy is internally case-consistent
+    from its first (``import``) commit — a case variant of a declared type never
+    diverges from later manual edits that canonicalize. Unknown types pass through
+    unchanged (bulk-ingest semantics); the SOURCE graph is never touched. Returns how
+    many rows had a type rewritten. No-op when ``ontology_rules`` is ``None``."""
+    if ontology_rules is None:
+        return 0
+    from backend.app.services.versioning.ontology import canonicalize_payload_types
+    changed = 0
+    for row in rows:
+        before = (row.get("entityType"), row.get("edgeType"))
+        canonicalize_payload_types(row, ontology_rules)
+        if (row.get("entityType"), row.get("edgeType")) != before:
+            changed += 1
+    return changed
 
 
 async def collect_provider_rows(provider, *, batch: int = 2000) -> List[dict]:
@@ -49,14 +69,20 @@ async def collect_provider_rows(provider, *, batch: int = 2000) -> List[dict]:
 
 async def bootstrap_versioned_graph(
     svc, provider, graph_id: str, actor: str, *, batch: int = 2000, session=None,
+    ontology_rules=None,
 ) -> Dict[str, object]:
     """Stream ``provider``'s full node/edge set into the versioned graph as one ``import``
     commit (paged by ``batch``). Reuses ``GraphVersioningService.bulk_ingest`` and is
     idempotent on ``bootstrap:{graph_id}`` (a re-run replays the first import).
 
     Pass ``session`` to seed inside a caller's transaction (so create-graph + seed are
-    one atomic unit). The whole import is atomic regardless — see ``bulk_ingest``."""
+    one atomic unit). The whole import is atomic regardless — see ``bulk_ingest``.
+    Pass ``ontology_rules`` (when the data source has an assigned ontology) to
+    canonicalize case-variant type spellings in OUR copy before ingest (Task E)."""
     rows = await collect_provider_rows(provider, batch=batch)
+    canon = canonicalize_rows(rows, ontology_rules)
+    if canon:
+        logger.info("bootstrap %s: canonicalized %d row type spellings", graph_id, canon)
     report = await svc.bulk_ingest(
         graph_id=graph_id, rows=rows, actor=actor,
         idempotency_key=f"bootstrap:{graph_id}", message="bootstrap import", session=session,

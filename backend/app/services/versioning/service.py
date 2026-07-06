@@ -246,7 +246,7 @@ class GraphVersioningService:
     async def enable_versioning(
         self, *, data_source_id: str, workspace_id: str, actor: str,
         provider=None, falkor_graph_name: Optional[str] = None,
-        kind: str = "manual", batch: int = 2000,
+        kind: str = "manual", batch: int = 2000, ontology_rules=None,
     ) -> Dict[str, object]:
         """Turn on versioning for a data source that may ALREADY hold data in its provider
         (e.g. a FalkorDB-only graph). The supported, explicit enablement entry point.
@@ -267,8 +267,15 @@ class GraphVersioningService:
                     "imported": 0, "rows": 0}
         rows = None
         if provider is not None:
-            from backend.app.providers.versioned_bootstrap import collect_provider_rows
+            from backend.app.providers.versioned_bootstrap import (
+                canonicalize_rows, collect_provider_rows)
             rows = await collect_provider_rows(provider, batch=batch)   # slow paging — OUTSIDE the txn
+            # Seed-time canonicalization (Task E): make OUR versioned copy internally
+            # case-consistent when the source has an assigned ontology. Source untouched.
+            canon = canonicalize_rows(rows, ontology_rules)
+            if canon:
+                logger.info("enable_versioning %s: canonicalized %d row type spellings",
+                            data_source_id, canon)
         try:
             async with self._session() as s:
                 gid = (await self.create_graph(

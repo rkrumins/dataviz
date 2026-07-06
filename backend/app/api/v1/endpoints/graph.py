@@ -119,11 +119,16 @@ async def bootstrap_versioned_graph_endpoint(
     from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
+    # Seed-time canonicalization (Task E): if the source has an assigned ontology, pass
+    # its rules so the bootstrap import writes OUR copy in canonical casing. None (no
+    # assigned ontology) leaves source spellings untouched.
+    ontology_rules = await _resolve_ontology_rules(engine)
     # Single idempotent enablement path: already-enabled → returns the graph untouched;
     # else create-graph + full provider import in ONE transaction (paging happens outside
     # it). Never leaves a half-enabled graph that would hijack reads while empty.
     return await svc.enable_versioning(
-        data_source_id=dataSourceId, workspace_id=ws_id, actor=actor, provider=engine.provider)
+        data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
+        provider=engine.provider, ontology_rules=ontology_rules)
 
 
 @router.post("/resync")
@@ -147,6 +152,63 @@ async def resync_versioned_graph_endpoint(
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
     return await svc.resync_from_provider(
         graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+
+
+@router.get("/vocab-alignment")
+async def get_vocab_alignment(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Per-source vocabulary-alignment drift for the DS panel warning (Task E). Cheap,
+    DB-only read of the profile the canvas read path maintains — no provider call. When
+    the source spells relationship/entity types differently than the ontology declares
+    (``has`` vs ``HAS``), those are aligned automatically and reported here so the panel
+    can say so in plain language. ``hasDrift=false`` (or a missing profile) → nothing to
+    show."""
+    import json as _json
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    ds = await get_data_source_orm(session, ds_id)
+    ont_id = getattr(ds, "ontology_id", None) if ds else None
+    row = await osm_repo.get_mapping(session, ds_id, ont_id)
+    if row is None:
+        return {"hasDrift": False, "driftDetails": [], "lastSeenAt": None}
+    try:
+        details = _json.loads(row.drift_details) if row.drift_details else []
+    except (ValueError, TypeError):
+        details = []
+    return {"hasDrift": bool(row.has_drift), "driftDetails": details,
+            "schemaHash": row.last_seen_schema_hash, "lastSeenAt": row.last_seen_at}
+
+
+@router.post("/vocab-alignment/confirm")
+async def confirm_vocab_variant(
+    ws_id: Optional[str] = None,
+    dataSourceId: str = Query(..., description="Data source whose variant decision to record."),
+    declared: str = Query(..., description="The declared type id the variants merged into."),
+    keepMerged: bool = Query(True, description="Keep the merge (true) or split into distinct types (false)."),
+    dimension: str = Query("relationship", description="relationship | entity"),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Record a user's Keep/Split decision for a same-source multi-variant type (Task E
+    §1b). Reversible and never re-asked: the entry flips to explicit so auto-alignment
+    won't overwrite it. Reads already used the proposed merge, so this only confirms or
+    narrows it."""
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+    ds = await get_data_source_orm(session, dataSourceId)
+    ont_id = getattr(ds, "ontology_id", None) if ds else None
+    row = await osm_repo.set_variant_decision(
+        session, data_source_id=dataSourceId, ontology_id=ont_id,
+        declared=declared, keep_merged=keepMerged, dimension=dimension)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no alignment profile for this data source")
+    await session.commit()
+    return {"declared": declared, "keepMerged": keepMerged, "hasDrift": bool(row.has_drift)}
 
 
 # ------------------------------------------------------------------ #

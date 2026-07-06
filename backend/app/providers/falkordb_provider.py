@@ -1666,6 +1666,52 @@ class FalkorDBProvider(GraphDataProvider):
         self._resolved_lineage_types: Set[str] = {t.upper() for t in lineage_edge_types}
         self._resolved_edge_metadata_set = True
 
+    def set_source_type_aliases(
+        self,
+        relationship_aliases: Dict[str, List[str]],
+        entity_aliases: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        """Per-source vocabulary alignment (Task E): ``UPPER(declared) → [observed
+        spelling(s)]`` for types the graph spells differently than the ontology
+        declares. Injected by ``ContextEngine._resolve_ontology`` from live
+        introspection. FalkorDB matches relationship types / labels case-SENSITIVELY,
+        so a ``[:HAS]`` pattern misses a ``has`` graph; :meth:`_alias_rel_types`
+        translates declared → observed at the single point a type set becomes Cypher.
+
+        Empty maps (governed/canonical graphs, where observed == declared) make the
+        translation an identity. Always call this on resolution so a stale alias set
+        from a prior ontology can't leak into the next query."""
+        self._source_rel_aliases: Dict[str, List[str]] = {
+            str(k).upper(): [str(s) for s in v] for k, v in (relationship_aliases or {}).items()}
+        self._source_entity_aliases: Dict[str, List[str]] = {
+            str(k).upper(): [str(s) for s in v] for k, v in (entity_aliases or {}).items()}
+
+    def _alias_types(self, types, alias_attr: str):
+        """Translate each declared/canonical type to the source's observed spelling(s)
+        via the injected alias map; identity when there's no alias (governed graphs,
+        or a type the source spells the same). A declared type can expand to MULTIPLE
+        observed spellings (same-source multi-variant), so all are matched at once."""
+        if not types:
+            return types
+        aliases = getattr(self, alias_attr, None)
+        if not aliases:
+            return types
+        out: List[str] = []
+        for t in types:
+            mapped = aliases.get(str(t).upper())
+            if mapped:
+                out.extend(mapped)
+            else:
+                out.append(t)
+        seen = list(dict.fromkeys(out))          # dedupe, preserve order
+        return set(seen) if isinstance(types, (set, frozenset)) else seen
+
+    def _alias_rel_types(self, types):
+        return self._alias_types(types, "_source_rel_aliases")
+
+    def _alias_entity_types(self, types):
+        return self._alias_types(types, "_source_entity_aliases")
+
     def _get_containment_edge_types(self) -> Set[str]:
         """Return the authoritative containment edge type set.
 
@@ -1683,7 +1729,10 @@ class FalkorDBProvider(GraphDataProvider):
         configure containment now do so by editing the ontology.
         """
         if getattr(self, "_resolved_containment_types_set", False):
-            return self._resolved_containment_types
+            # Translate the (uppercased) canonical set to the source's observed
+            # spellings so the case-SENSITIVE Cypher patterns match a differently-
+            # cased graph. Identity for governed/canonical graphs.
+            return self._alias_rel_types(self._resolved_containment_types)
         raise ProviderConfigurationError(
             "Containment edge types are not configured for this provider. "
             "ContextEngine / aggregation must call set_containment_edge_types() "
@@ -2089,7 +2138,7 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> List[GraphNode]:
         await self._ensure_connected()
         # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
-        target_edge_types = set(edge_types) if edge_types is not None else set(self._get_containment_edge_types())
+        target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
         if not rel_list:
             # No containment types defined — hierarchy is flat, no children exist
@@ -2176,7 +2225,8 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
-        target_edge_types = set(edge_types) if edge_types is not None else set(self._get_containment_edge_types())
+        target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
+        lineage_edge_types = self._alias_rel_types(lineage_edge_types) if lineage_edge_types else lineage_edge_types
         rel_list = list(target_edge_types)
         if not rel_list:
             # No containment types — return empty result
@@ -2343,6 +2393,10 @@ class FalkorDBProvider(GraphDataProvider):
         # "flat graph, every node is top-level".
         containment = self._get_containment_edge_types()
         containment_rel_types = "|".join([_sanitize_label(t) for t in sorted(containment)])
+        # Align entity-type labels/roots to the source's observed spellings (labels are
+        # case-sensitive too), so root classification and the label-union filter match.
+        root_entity_types = self._alias_entity_types(root_entity_types)
+        entity_types = self._alias_entity_types(entity_types)
         root_types_set = {str(t) for t in (root_entity_types or [])}
 
         params: Dict[str, Any] = {"limit": int(limit)}

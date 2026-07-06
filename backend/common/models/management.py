@@ -575,9 +575,19 @@ class OntologyMatchResult(BaseModel):
         populate_by_name = True
 
 
+class MergedTypeVariant(BaseModel):
+    spelling: str
+    count: int = 0
+
+
 class OntologySuggestResponse(BaseModel):
     suggested: OntologyCreateRequest
     matching_ontologies: List[OntologyMatchResult] = Field(default_factory=list, alias="matchingOntologies")
+    # Canonical suggested type id → the source spellings merged into it (Task E §1c).
+    # Present only for types the source spelled >1 way; the suggest-review UI shows these
+    # inline with a "split" affordance so a same-source multi-variant is a visible decision.
+    merged_variants: Dict[str, List[MergedTypeVariant]] = Field(
+        default_factory=dict, alias="mergedVariants")
 
     class Config:
         populate_by_name = True

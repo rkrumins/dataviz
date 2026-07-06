@@ -21,6 +21,7 @@ import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
+import { VocabAlignmentWarning } from './VocabAlignmentWarning'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
 // ─────────────────────────────────────────────────────────────────────
@@ -336,6 +337,10 @@ export function DataSourceDetailPanel({
                                     viewer can't manage data sources here. */}
                             </div>
                         </div>
+
+                        {/* Per-source vocabulary-alignment drift (Task E) — own component,
+                            no overlap with the header chips. */}
+                        <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
