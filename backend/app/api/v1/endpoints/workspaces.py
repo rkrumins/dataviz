@@ -587,12 +587,17 @@ async def get_cached_stats_bulk(
             "updatedAt": cache.updated_at,
         }
 
-    return JSONResponse(
-        content={
-            "data": data,
-            "meta": {"status": "fresh", "source": "postgres", "count": len(data)},
-        }
+    # build_meta (not a hand-rolled dict): the FE's isCacheEnvelope guard
+    # requires status/source/age_seconds/ttl_seconds/missing_fields on
+    # meta — a partial meta fails the guard and fetchEnveloped hands the
+    # WHOLE envelope to callers instead of ``data``.
+    meta = build_meta(
+        status="fresh",
+        source="postgres",
+        data_source_id="*",  # bulk response — per-entry ids live in the data keys
     )
+    meta["count"] = len(data)
+    return JSONResponse(content={"data": data, "meta": meta})
 
 
 @router.get("/{workspace_id}/datasources/{ds_id}/cached-stats")
