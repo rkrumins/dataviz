@@ -111,3 +111,23 @@ async def upsert_data_source_stats_counts(
     session.add(new_stats)
     await session.flush()
     return new_stats
+
+
+async def set_top_level_nodes(session: AsyncSession, ds_id: str, payload_json: str) -> None:
+    """Stamp the materialized top-level-nodes payload onto an existing row.
+
+    Counts-lane helper: called right after ``upsert_data_source_stats_counts``
+    in the same session, so the row is expected to already exist. No-ops if
+    it's somehow missing (mirrors ``touch_schema_freshness``) rather than
+    creating a bare row here.
+
+    NOTE: the deep-lane ``upsert_data_source_stats`` intentionally never
+    touches ``top_level_nodes``/``top_level_updated_at`` — these two columns
+    are owned exclusively by the counts-lane materialization.
+    """
+    existing = await get_data_source_stats(session, ds_id)
+    if existing is None:
+        return
+    existing.top_level_nodes = payload_json
+    existing.top_level_updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()

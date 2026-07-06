@@ -708,6 +708,8 @@ class DataSourceStatsORM(Base):
     # drives the scheduler's deep-poll due-ness. NULL until the first
     # deep poll lands.
     schema_updated_at = Column(Text, nullable=True)
+    top_level_nodes = Column(Text, nullable=True)        # JSON payload, NULL = never materialized
+    top_level_updated_at = Column(Text, nullable=True)   # ISO timestamp, freshness marker
 
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")
