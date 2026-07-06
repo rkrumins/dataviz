@@ -1756,7 +1756,11 @@ class FalkorDBProvider(GraphDataProvider):
         gate is that lineage classification is per-data-source.
         """
         if getattr(self, "_resolved_edge_metadata_set", False):
-            return self._resolved_lineage_types
+            # Translate to the source's observed spellings (parity with the containment
+            # accessor) so accessor-driven lineage rendering (e.g. deep-search) matches a
+            # differently-cased graph. Classification reads the raw uppercase set directly,
+            # so it is unaffected.
+            return self._alias_rel_types(self._resolved_lineage_types)
         raise ProviderConfigurationError(
             "Lineage edge types are not configured for this provider. "
             "ContextEngine / aggregation must call set_resolved_edge_metadata() "

@@ -184,3 +184,14 @@ def test_provider_identity_without_aliases():
     # No aliases injected (governed/canonical graph) → identity.
     assert p._get_containment_edge_types() == {"HAS"}
     assert p._alias_rel_types(["HAS"]) == ["HAS"]
+
+
+def test_provider_aliases_lineage_accessor_to_observed_spelling():
+    """The lineage accessor (used by accessor-driven rendering like deep-search) translates
+    to observed spellings too; classification still reads the raw uppercase set."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p.set_resolved_edge_metadata({}, ["to"])           # declared lineage (stored UPPER)
+    p.set_source_type_aliases({"TO": ["to"]})          # observed spelling
+    assert p._get_lineage_edge_types() == {"to"}
