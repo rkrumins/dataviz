@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { Node, Edge, Viewport } from '@xyflow/react'
-import type { HydrationPhase } from '@/hooks/useGraphHydration'
+import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
 
 export interface LineageNode extends Node {
   data: {
@@ -131,10 +131,11 @@ interface CanvasState {
   // without each owning their own hydration hook.
   hydrationPhase: HydrationPhase
   setHydrationPhase: (phase: HydrationPhase) => void
-  /** True when the initial hydration failed (provider down/warming). Mirrored
-   *  from CanvasRouter so downstream toasts/empty-states don't report success. */
-  hydrationFailed: boolean
-  setHydrationFailed: (failed: boolean) => void
+  /** Authoritative hydration status, mirrored from CanvasRouter so downstream
+   *  canvas components (empty-state, toasts, ghosts) derive their UI from ONE
+   *  source and never render a failed/loading load as an empty graph. */
+  hydrationStatus: HydrationStatus
+  setHydrationStatus: (status: HydrationStatus) => void
 
   // Active Lens
   activeLensId: string | null
@@ -359,8 +360,8 @@ export const useCanvasStore = create<CanvasState>()(
       loadingRegions: new Set(),
       hydrationPhase: 'idle',
       setHydrationPhase: (hydrationPhase) => set({ hydrationPhase }),
-      hydrationFailed: false,
-      setHydrationFailed: (hydrationFailed) => set({ hydrationFailed }),
+      hydrationStatus: 'loading',
+      setHydrationStatus: (hydrationStatus) => set({ hydrationStatus }),
       setLoading: (isLoading) => set({ isLoading }),
       addLoadingRegion: (region) => set((state) => {
         const newRegions = new Set(state.loadingRegions)

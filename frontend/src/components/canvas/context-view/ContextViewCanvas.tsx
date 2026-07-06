@@ -1600,7 +1600,8 @@ export function ContextViewCanvas({
   //      site below.) The previous `nodes.length === 0` global gate killed
   //      ghosts in empty layers the moment any one layer received a node.
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
-  const hydrationFailed = useCanvasStore((s) => s.hydrationFailed)
+  const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
+  const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'unavailable'
   const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
@@ -2615,8 +2616,12 @@ export function ContextViewCanvas({
 
         {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
             empty model, and the first-steps companion while building. Both are
-            scoped to kind === 'blank' so every other view is untouched. */}
-        {isBlankModel && !isHydratingInitial && nodes.length === 0 && (
+            scoped to kind === 'blank' so every other view is untouched.
+            Gated on hydrationStatus === 'ready': the "Start building" hero shows
+            ONLY after a load actually SUCCEEDED and returned zero nodes — never
+            while loading, warming, or unavailable (those show the overlay), so a
+            failed/slow load can't masquerade as an empty model. */}
+        {isBlankModel && hydrationStatus === 'ready' && nodes.length === 0 && (
           <BlankCanvasEmptyState
             modelName={activeView?.name ?? null}
             isDraft={isDraft}

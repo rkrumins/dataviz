@@ -57,30 +57,30 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  const { hydrationError, hydrationWarming, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
+  const { hydrationError, hydrationStatus, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
   useLoadingToast(
     'hydration',
-    isInitialLoad && !hydrationError,
+    isInitialLoad && hydrationStatus === 'loading',
     hydrationPhase === 'roots' ? 'Loading entities' : hydrationPhase === 'edges' ? 'Loading edges' : 'Preparing view',
     'Canvas ready',
+    // Never announce "Canvas ready" when the load ended warming/unavailable.
+    hydrationStatus === 'warming' || hydrationStatus === 'unavailable',
   )
 
-  // Mirror hydration phase into the canvas store so downstream components
-  // (ContextViewCanvas → LayerColumn ghost cards, GhostLineageOverlay) can
-  // drive their ghost-loading UI without each calling useGraphHydration with
-  // their own state.
+  // Mirror hydration phase + status into the canvas store so downstream
+  // components (ContextViewCanvas empty-state/toasts, LayerColumn ghost cards,
+  // GhostLineageOverlay) derive their UI from ONE authoritative source and
+  // never render a failed/loading load as an empty graph.
   const setHydrationPhase = useCanvasStore((s) => s.setHydrationPhase)
   useEffect(() => {
     setHydrationPhase(hydrationPhase)
   }, [hydrationPhase, setHydrationPhase])
 
-  // Mirror hydration failure too, so ContextViewCanvas's per-phase toasts can
-  // suppress their success message when the load actually errored.
-  const setHydrationFailed = useCanvasStore((s) => s.setHydrationFailed)
+  const setHydrationStatus = useCanvasStore((s) => s.setHydrationStatus)
   useEffect(() => {
-    setHydrationFailed(!!hydrationError)
-  }, [hydrationError, setHydrationFailed])
+    setHydrationStatus(hydrationStatus)
+  }, [hydrationStatus, setHydrationStatus])
 
   // Clear trace state when the active view changes. The trace store is an
   // app-singleton; without this, a trace started in view A leaks into view
@@ -184,8 +184,11 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           </motion.div>
         </AnimatePresence>
 
-        {hydrationError && (
-          <ProviderUnavailableOverlay message={hydrationError} warming={hydrationWarming} />
+        {(hydrationStatus === 'warming' || hydrationStatus === 'unavailable') && (
+          <ProviderUnavailableOverlay
+            message={hydrationError ?? ''}
+            warming={hydrationStatus === 'warming'}
+          />
         )}
 
         {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
