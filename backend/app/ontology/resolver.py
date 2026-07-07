@@ -7,6 +7,7 @@ Design constraints:
 - Input and output types are from models.py or the standard library.
 """
 from collections import deque
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Set
 
 from .models import (
@@ -275,6 +276,34 @@ def resolve_ontology(
         for t in (assigned.lineage_edge_types or []):
             if t not in lineage:
                 lineage.append(t)
+
+    # Self-consistent endpoint constraints. A relationship's source/target type list is only
+    # meaningful for entity types that actually exist in THIS ontology. A constraint that
+    # references ONLY absent types — e.g. a system-default FLOWS_TO carrying
+    # dataset/dataJob/column/schemaField endpoints bolted onto a manual ontology whose entity
+    # types are layer/object/group/attribute — is unsatisfiable and would block EVERY edge of
+    # that type, even though the ontology clearly intends the relationship to be usable. Filter
+    # each constraint to the ontology's own entity types (case-insensitive); a now-empty list is
+    # "unrestricted" (both the commit gate and the frontend already treat empty as "any → any"),
+    # so drawn lineage between the ontology's real types is permitted. Genuinely self-consistent
+    # constraints (ingested ontologies, whose entity types ARE the endpoint types) keep every
+    # existing type and enforce exactly as before — this only ever removes references to types
+    # that don't exist, never adds a constraint, so it can only relax, never break.
+    entity_ids_lower = {k.lower() for k in entity_defs}
+
+    def _self_consistent_endpoints(types: List[str]) -> List[str]:
+        if not types:
+            return types
+        return [t for t in types if str(t).lower() in entity_ids_lower]
+
+    rel_defs = {
+        rid: replace(
+            rd,
+            source_types=_self_consistent_endpoints(rd.source_types),
+            target_types=_self_consistent_endpoints(rd.target_types),
+        )
+        for rid, rd in rel_defs.items()
+    }
 
     return ResolvedOntology(
         entity_type_definitions=entity_defs,

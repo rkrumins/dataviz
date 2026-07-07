@@ -323,3 +323,40 @@ def test_suggest_defs_no_dedupe_when_distinct():
     defs = suggest_relationship_defs_from_stats([_stat("owns", 1), _stat("uses", 1)], base_defaults={})
     assert set(defs.keys()) == {"owns", "uses"}
     assert "also seen as" not in (defs["owns"].description or "")
+
+
+def test_resolve_ontology_self_consistent_endpoint_constraints():
+    """A relationship endpoint constraint referencing only entity types ABSENT from the
+    ontology is unsatisfiable and must be treated as unrestricted (empty) — otherwise it
+    silently blocks EVERY edge of that type (e.g. a system-default FLOWS_TO with dataset/
+    dataJob endpoints on a manual ontology whose types are layer/object/group/attribute).
+    Constraints that DO reference existing types keep exactly those (partial → subset),
+    and self-consistent constraints are untouched."""
+    assigned = OntologyData(
+        id="o1", name="Manual", version=1,
+        entity_type_definitions={
+            "attribute": {"name": "Attribute"}, "object": {"name": "Object"},
+            "layer": {"name": "Layer"}, "group": {"name": "Group"},
+        },
+        relationship_type_definitions={
+            # all endpoints absent → relaxed to unrestricted
+            "FLOWS_TO": {"name": "Flows To", "is_lineage": True,
+                         "source_types": ["dataset", "dataJob", "column", "schemaField"],
+                         "target_types": ["dataset", "dataJob", "column", "schemaField"]},
+            # self-consistent → preserved verbatim
+            "CONTAINS": {"name": "Contains", "is_containment": True,
+                         "source_types": ["layer", "object"], "target_types": ["object", "attribute"]},
+            # partial overlap → keep only the type that exists
+            "LINKS": {"name": "Links", "is_lineage": True,
+                      "source_types": ["dataset", "attribute"], "target_types": []},
+        },
+        containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS_TO"],
+    )
+    r = resolve_ontology(None, assigned)
+    ft = r.relationship_type_definitions["FLOWS_TO"]
+    ct = r.relationship_type_definitions["CONTAINS"]
+    lk = r.relationship_type_definitions["LINKS"]
+    assert ft.source_types == [] and ft.target_types == []          # vacuous → unrestricted
+    assert sorted(ct.source_types) == ["layer", "object"]           # consistent → kept
+    assert sorted(ct.target_types) == ["attribute", "object"]
+    assert lk.source_types == ["attribute"] and lk.target_types == []  # partial → subset
