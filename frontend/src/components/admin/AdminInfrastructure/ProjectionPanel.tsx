@@ -30,6 +30,10 @@ const KIND_LABEL: Record<string, string> = {
     manual: 'Manual', authoritative: 'Authoritative', hybrid: 'Hybrid', blank: 'Blank',
 }
 
+const PROVIDER_LABEL: Record<string, string> = {
+    falkordb: 'FalkorDB', neo4j: 'Neo4j', spanner: 'Spanner', datahub: 'DataHub', mock: 'Mock',
+}
+
 interface Props {
     projection: ProjectionSection | null
     providers: GraphProvider[] | null
@@ -108,14 +112,19 @@ export function ProjectionPanel({ projection, providers }: Props) {
                                             >
                                                 <td className="px-5 py-2.5">
                                                     <div className="flex items-center gap-2">
-                                                        <span className="font-semibold text-ink truncate max-w-[220px]" title={row.dataSourceId}>{name}</span>
+                                                        <span className={cn('truncate max-w-[220px]', row.dataSourceLabel ? 'font-semibold text-ink' : 'font-mono text-[11px] text-ink-secondary')} title={row.dataSourceId}>{name}</span>
+                                                        {row.providerType && (
+                                                            <span className="inline-flex px-1.5 py-px rounded-full border border-indigo-500/20 bg-indigo-500/10 text-[9px] uppercase tracking-wide text-indigo-600 dark:text-indigo-400 shrink-0">
+                                                                {PROVIDER_LABEL[row.providerType] ?? row.providerType}
+                                                            </span>
+                                                        )}
                                                         {row.kind && (
                                                             <span className="inline-flex px-1.5 py-px rounded-full border border-glass-border bg-black/5 dark:bg-white/5 text-[9px] uppercase tracking-wide text-ink-muted shrink-0">
                                                                 {KIND_LABEL[row.kind] ?? row.kind}
                                                             </span>
                                                         )}
                                                     </div>
-                                                    <span className="text-[10px] text-ink-muted">{ws}</span>
+                                                    <span className="text-[10px] text-ink-muted">{ws}{row.providerName ? ` · ${row.providerName}` : ''}</span>
                                                 </td>
                                                 <td className="px-3 py-2.5 text-right whitespace-nowrap">
                                                     <span className="tabular-nums font-semibold text-ink">{row.lag}</span>

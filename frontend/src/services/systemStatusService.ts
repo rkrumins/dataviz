@@ -51,6 +51,11 @@ export interface DlqSource {
     dataSourceId: string
     workspaceId: string | null
     count: number
+    /** Resolved from the management DB so the UI shows a name, not an id. */
+    label?: string | null
+    workspaceName?: string | null
+    providerName?: string | null
+    providerType?: string | null
 }
 
 export interface DlqDepth {
@@ -98,6 +103,9 @@ export interface ProjectionWorstRow {
     workspaceName: string | null
     dataSourceId: string
     dataSourceLabel: string | null
+    /** The provider backing this data source (falkordb/neo4j/…). */
+    providerName: string | null
+    providerType: string | null
     kind: string | null
     falkorGraphName: string | null
     falkorProvider: string | null

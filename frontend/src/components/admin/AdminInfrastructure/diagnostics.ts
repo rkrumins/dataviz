@@ -141,15 +141,24 @@ export function buildDiagnostics(snap: SystemStatusSnapshot): Insight[] {
             const reasons = dlq.reasons ?? {}
             const topReason = Object.entries(reasons).sort((a, b) => b[1] - a[1])[0]
             const sources = dlq.topSources ?? []
-            const blank = sources.filter(s => (s.workspaceId ?? '').startsWith('ws_blank_'))
+            // Prefer the resolved data-source name; the id is a last resort.
+            const srcName = (s: typeof sources[number]) =>
+                s.label ?? (s.workspaceName ? `a source in ${s.workspaceName}` : s.dataSourceId)
+            // A source that didn't resolve to any management record no longer
+            // exists (deleted or never finished provisioning) — generic, no
+            // id-prefix guessing.
+            const orphaned = sources.filter(s => !s.label && !s.workspaceName)
+            const named = sources.filter(s => s.label || s.workspaceName)
             const why: string[] = []
             if (topReason?.[0] === 'max_delivery_attempts_exceeded') {
                 why.push('Each of these jobs failed its retry limit and was parked in the dead-letter queue rather than retried forever.')
             }
-            if (blank.length) {
-                why.push(`The heaviest offenders are blank-workspace data sources (${blank.map(s => s.dataSourceId).slice(0, 2).join(', ')}) — a source that was created but whose provider is unreachable or was never connected, so every poll errors out.`)
-            } else if (sources.length) {
-                why.push(`A few data sources (${sources.slice(0, 2).map(s => s.dataSourceId).join(', ')}) account for most of the queue — a handful of broken sources usually dominate a DLQ.`)
+            if (orphaned.length) {
+                why.push(`Most reference data sources that no longer exist (${orphaned.slice(0, 2).map(s => s.dataSourceId).join(', ')}) — the source was deleted or never finished provisioning, so its queued polls can never succeed and keep dead-lettering.`)
+            }
+            if (named.length) {
+                const top = named[0]
+                why.push(`${named.slice(0, 2).map(srcName).join(', ')}${top.providerType ? ` (on ${top.providerType})` : ''} ${named.length === 1 ? 'is' : 'are'} still registered but failing every poll — usually an unreachable provider.`)
             }
             out.push({
                 id: `dlq:${family}`,
@@ -161,18 +170,17 @@ export function buildDiagnostics(snap: SystemStatusSnapshot): Insight[] {
                     (topReason ? `. Dominant reason: ${topReason[0].replace(/_/g, ' ')}.` : '.'),
                 why,
                 resolution: [
-                    sources.length
-                        ? `Check the top offender’s provider health (Providers → ${sources[0].dataSourceId}). If the source is dead or was never connected, disable its polling so it stops failing.`
-                        : 'Inspect a sample of the dead-lettered jobs to find the failing source.',
-                    'Once the underlying source is fixed, redrive the DLQ. If the jobs are obsolete, purge it.',
+                    ...(orphaned.length ? ['The jobs for deleted sources are safe to purge — the sources are gone and they will never succeed.'] : []),
+                    ...(named.length ? [`Check the provider for ${srcName(named[0])}${named[0].providerName ? ` (${named[0].providerName})` : ''}; if it’s dead or unreachable, fix or disable it so polling stops failing.`] : []),
+                    'After fixing (or if the jobs are obsolete), redrive or purge the DLQ.',
                 ],
                 commands: [
                     { label: 'Inspect the newest failures', cmd: `XREVRANGE ${dlq.name} + - COUNT 5` },
                 ],
                 evidence: [
                     ...(sources.slice(0, 3).map(s => ({
-                        label: s.dataSourceId,
-                        value: `${s.count}${(s.workspaceId ?? '').startsWith('ws_blank_') ? ' · blank ws' : ''}`,
+                        label: srcName(s),
+                        value: `${s.count}${!s.label && !s.workspaceName ? ' · deleted' : ''}${s.providerType ? ` · ${s.providerType}` : ''}`,
                     }))),
                 ],
             })

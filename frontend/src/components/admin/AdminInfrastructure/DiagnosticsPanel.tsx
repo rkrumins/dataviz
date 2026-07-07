@@ -134,7 +134,13 @@ function InsightCard({ insight, defaultOpen }: { insight: Insight; defaultOpen?:
 }
 
 export function DiagnosticsPanel({ snapshot }: { snapshot: SystemStatusSnapshot }) {
-    const insights = buildDiagnostics(snapshot)
+    const insights = useMemo(() => buildDiagnostics(snapshot), [snapshot])
+    const [page, setPage] = useState(0)
+
+    const pageCount = Math.max(1, Math.ceil(insights.length / PAGE_SIZE))
+    const current = Math.min(page, pageCount - 1)
+    const start = current * PAGE_SIZE
+    const slice = insights.slice(start, start + PAGE_SIZE)
 
     return (
         <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden">
@@ -142,7 +148,7 @@ export function DiagnosticsPanel({ snapshot }: { snapshot: SystemStatusSnapshot 
                 <Wrench className="w-4 h-4 text-indigo-500" />
                 <div>
                     <h2 className="text-sm font-semibold text-ink">Diagnostics &amp; remediation</h2>
-                    <p className="text-[11px] text-ink-muted">What each signal means, why it might be happening, and how to resolve it.</p>
+                    <p className="text-[11px] text-ink-muted">What each signal means, why it might be happening, and how to resolve it. Expand a finding for the details.</p>
                 </div>
                 {insights.length > 0 && (
                     <span className="ml-auto text-[11px] text-ink-muted">{insights.length} finding{insights.length === 1 ? '' : 's'}</span>
@@ -154,9 +160,39 @@ export function DiagnosticsPanel({ snapshot }: { snapshot: SystemStatusSnapshot 
                     No issues detected — every component is within its healthy thresholds.
                 </div>
             ) : (
-                <div className="px-4 pb-4 space-y-3">
-                    {insights.map(insight => <InsightCard key={insight.id} insight={insight} />)}
-                </div>
+                <>
+                    <div className="px-4 pb-3 space-y-3">
+                        {slice.map((insight, i) => (
+                            <InsightCard key={insight.id} insight={insight} defaultOpen={current === 0 && i === 0} />
+                        ))}
+                    </div>
+                    {pageCount > 1 && (
+                        <div className="px-5 py-3 border-t border-glass-border flex items-center justify-between">
+                            <span className="text-[11px] text-ink-muted">
+                                Showing {start + 1}–{Math.min(start + PAGE_SIZE, insights.length)} of {insights.length}
+                            </span>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={() => setPage(p => Math.max(0, p - 1))}
+                                    disabled={current === 0}
+                                    className="p-1.5 rounded-md text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                                    aria-label="Previous page"
+                                >
+                                    <ChevronLeft className="w-4 h-4" />
+                                </button>
+                                <span className="text-[11px] text-ink-secondary tabular-nums px-1">{current + 1} / {pageCount}</span>
+                                <button
+                                    onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+                                    disabled={current >= pageCount - 1}
+                                    className="p-1.5 rounded-md text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                                    aria-label="Next page"
+                                >
+                                    <ChevronRight className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </>
             )}
         </div>
     )

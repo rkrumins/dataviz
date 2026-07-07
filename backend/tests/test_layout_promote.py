@@ -14,6 +14,8 @@ referential-integrity pass drops assignments pointing at a deleted layer.
 """
 import copy
 
+import pytest
+
 from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
@@ -236,3 +238,57 @@ class TestRobustness:
         first = merge_layout_3way(f, p, d)
         second = merge_layout_3way(f, p, d)
         assert first == second
+
+
+class TestFullConfigGuard:
+    """A bare referenceLayout carries `layers`/`assignments` at top level; a
+    FULL view config instead nests them under `layout.referenceLayout` and
+    carries `content`/`layout` wrappers. Passing a full config where a bare
+    referenceLayout is expected used to silently normalize to EMPTY (every
+    published layer/assignment looked deleted → wiped the published layout).
+    The guard auto-unwraps a recoverable `layout.referenceLayout`, else raises.
+    """
+
+    def _full_config(self, layers=None, assignments=None):
+        return {
+            "content": {"entityScope": "curated"},
+            "layout": {"referenceLayout": _layout(layers, assignments)},
+            "filters": {},
+        }
+
+    def test_full_config_input_is_auto_unwrapped_not_wiped(self):
+        # A full config accidentally passed as the DRAFT is unwrapped to its
+        # bare referenceLayout instead of normalizing to empty and wiping.
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = _layout(layers=[_layer("l1", "A", 0)])
+        d = self._full_config(
+            layers=[_layer("l1", "A", 0), _layer("l2", "New", 1)],
+            assignments={"urn:b": _assign("l2")},
+        )
+        result = merge_layout_3way(f, p, d)
+        assert _ids(result) == ["l1", "l2"]
+        assert result["assignments"]["urn:b"]["layerId"] == "l2"
+
+    def test_full_config_input_on_published_side_preserved(self):
+        # Same guard applies to any side — published passed as a full config
+        # keeps its layers rather than looking wholesale-deleted.
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = self._full_config(layers=[_layer("l1", "A", 0), _layer("lpub", "Pub", 1)])
+        d = _layout(layers=[_layer("l1", "A", 0)])
+        result = merge_layout_3way(f, p, d)
+        assert _ids(result) == ["l1", "lpub"]
+
+    def test_full_config_without_reference_layout_raises(self):
+        # A full config that carries `content` but no recoverable
+        # `layout.referenceLayout` is unrecoverable → loud ValueError rather
+        # than a silent wipe.
+        bad = {"content": {"entityScope": "all"}, "filters": {}}
+        with pytest.raises(ValueError, match="bare referenceLayout"):
+            merge_layout_3way(_layout(), _layout(), bad)
+
+    def test_empty_and_none_still_normalize_to_empty(self):
+        # The guard must not fire on genuinely-empty / irrelevant inputs.
+        assert merge_layout_3way({}, None, {}) == {"layers": [], "assignments": {}}
+        assert merge_layout_3way(
+            {"foo": 1}, {"bar": 2}, {}
+        ) == {"layers": [], "assignments": {}}

@@ -571,6 +571,77 @@ async def probe_graph_service() -> dict:
         return _svc("graphService", "Graph Service", "down", error=_err(exc))
 
 
+# ── Shared data-source directory (id → human name + backing provider) ─
+
+async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
+    """Resolve data-source ids to display info from the management DB.
+
+    Returns ``{ds_id: {label, workspaceId, workspaceName, providerName,
+    providerType}}``. One outer-joined query; returns ``{}`` on any failure
+    so callers degrade to raw ids. Shared by every surface that would
+    otherwise show a meaningless ``ds_<id>`` (projection, DLQ offenders).
+    """
+    ids = list({i for i in ds_ids if i})
+    if not ids:
+        return {}
+    from sqlalchemy import select
+
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.db.models import (
+        ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
+    )
+
+    out: dict[str, dict] = {}
+    try:
+        async with asyncio.timeout(_BUDGET_DB):
+            async with get_session_factory(PoolRole.READONLY)() as s:
+                rows = (await s.execute(
+                    select(
+                        WorkspaceDataSourceORM.id,
+                        WorkspaceDataSourceORM.label,
+                        WorkspaceDataSourceORM.workspace_id,
+                        WorkspaceORM.name.label("workspace_name"),
+                        ProviderORM.name.label("provider_name"),
+                        ProviderORM.provider_type.label("provider_type"),
+                    )
+                    .outerjoin(WorkspaceORM,
+                               WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id)
+                    .outerjoin(ProviderORM,
+                               ProviderORM.id == WorkspaceDataSourceORM.provider_id)
+                    .where(WorkspaceDataSourceORM.id.in_(ids))
+                )).all()
+        for r in rows:
+            out[r.id] = {
+                "label": r.label,
+                "workspaceId": r.workspace_id,
+                "workspaceName": r.workspace_name,
+                "providerName": r.provider_name,
+                "providerType": r.provider_type,
+            }
+    except Exception as exc:
+        logger.warning("data-source resolution failed: %s", exc)
+    return out
+
+
+async def _present_data_source_ids() -> list[str]:
+    """The ids of data sources that currently EXIST in the management DB.
+
+    Versioned-graph metrics are scoped to these so the numbers reflect live
+    entities — the graphver store has no GC, so graphs for deleted sources
+    (and dev/test seed graphs) accumulate and would otherwise dominate every
+    count and the projection list.
+    """
+    from sqlalchemy import select
+
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    async with asyncio.timeout(_BUDGET_DB):
+        async with get_session_factory(PoolRole.READONLY)() as s:
+            return list((await s.execute(
+                select(WorkspaceDataSourceORM.id))).scalars().all())
+
+
 # ── Data-plane sections ──────────────────────────────────────────────
 
 async def _stream_depth(redis, stream: str, group: str) -> dict:
@@ -721,6 +792,20 @@ async def probe_streams() -> Optional[dict]:
         logger.warning("streams probe failed: %s", exc)
         return None
 
+    # Name the DLQ offenders so the UI shows "Customer 360 (falkordb)" rather
+    # than a raw ds_<id>. One shared lookup across every DLQ's top sources.
+    directory = await _resolve_data_sources(
+        [src["dataSourceId"]
+         for dlq in dlqs for src in (dlq.get("topSources") or [])])
+    for dlq in dlqs:
+        for src in dlq.get("topSources") or []:
+            info = directory.get(src["dataSourceId"])
+            if info:
+                src["label"] = info["label"]
+                src["workspaceName"] = info["workspaceName"]
+                src["providerName"] = info["providerName"]
+                src["providerType"] = info["providerType"]
+
     return {"streams": streams, "dlqs": dlqs}
 
 
@@ -784,6 +869,15 @@ async def probe_projection_lag() -> Optional[dict]:
     from backend.app.services.versioning.db import graphver_session
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
+    # Scope to graphs backed by a data source that still exists — orphaned /
+    # seed graphs would otherwise flood both the counts and the worst list.
+    try:
+        present_ids = await _present_data_source_ids()
+    except Exception as exc:
+        logger.warning("projection-lag probe failed (present ids): %s", exc)
+        return None
+    present = GraphORM.data_source_id.in_(present_ids)
+
     lag = GraphORM.main_head_commit_seq - func.coalesce(
         ProjectionStateORM.projected_commit_seq, 0)
     status = func.coalesce(ProjectionStateORM.status, "idle")
@@ -803,6 +897,7 @@ async def probe_projection_lag() -> Optional[dict]:
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+        .where(present)
     )
     worst_stmt = (
         select(
@@ -817,6 +912,7 @@ async def probe_projection_lag() -> Optional[dict]:
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+        .where(present)
         .where(or_(lag > 0, ProjectionStateORM.last_error.isnot(None),
                    ProjectionStateORM.status.in_(("projecting", "rebuilding"))))
         .order_by(lag.desc())
@@ -832,32 +928,36 @@ async def probe_projection_lag() -> Optional[dict]:
         logger.warning("projection-lag probe failed: %s", exc)
         return None
 
-    # The graphver store holds only logical refs (data_source_id /
-    # workspace_id) — resolve human names from the management DB so the
-    # table reads "Customer 360 · Sales workspace", not "ds_sr_df567f".
-    labels: dict[str, Optional[str]] = {}
-    ws_names: dict[str, Optional[str]] = {}
-    try:
-        from backend.app.db.engine import PoolRole, get_session_factory
-        from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+    # The graphver store holds only logical refs — resolve each graph's
+    # data source to its human name + backing provider (shared directory)
+    # so the table reads "Customer 360 (falkordb) · Sales", not "ds_sr_df567f".
+    directory = await _resolve_data_sources(
+        [r.data_source_id for r in worst_rows if r.data_source_id])
 
-        ds_ids = list({r.data_source_id for r in worst_rows if r.data_source_id})
-        ws_ids = list({r.workspace_id for r in worst_rows if r.workspace_id})
-        if ds_ids or ws_ids:
-            async with asyncio.timeout(_BUDGET_DB):
-                async with get_session_factory(PoolRole.READONLY)() as s:
-                    if ds_ids:
-                        for row in (await s.execute(select(
-                            WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
-                        ).where(WorkspaceDataSourceORM.id.in_(ds_ids)))).all():
-                            labels[row.id] = row.label
-                    if ws_ids:
-                        for row in (await s.execute(select(
-                            WorkspaceORM.id, WorkspaceORM.name,
-                        ).where(WorkspaceORM.id.in_(ws_ids)))).all():
-                            ws_names[row.id] = row.name
-    except Exception as exc:
-        logger.warning("projection name resolution failed: %s", exc)
+    def _row(r) -> dict:
+        info = directory.get(r.data_source_id) or {}
+        return {
+            "graphId": r.id,
+            "workspaceId": r.workspace_id,
+            "workspaceName": info.get("workspaceName"),
+            "dataSourceId": r.data_source_id,
+            "dataSourceLabel": info.get("label"),
+            "providerName": info.get("providerName"),
+            "providerType": info.get("providerType"),
+            "kind": r.kind,
+            "falkorGraphName": r.falkor_graph_name,
+            "falkorProvider": r.falkor_provider,
+            "committed": r.main_head_commit_seq,
+            "projected": r.projected_commit_seq,
+            "target": r.target_commit_seq,
+            "lag": r.lag,
+            "status": r.status,
+            "lastError": r.last_error,
+            "lastProjectedAt": r.last_projected_at,
+            "progressDone": r.progress_done,
+            "progressTotal": r.progress_total,
+            "updatedAt": r.updated_at,
+        }
 
     return {
         "totalGraphs": agg.total,
@@ -868,29 +968,7 @@ async def probe_projection_lag() -> Optional[dict]:
         "evicted": agg.evicted,
         "failed": agg.failed,
         "maxLag": agg.max_lag,
-        "worst": [
-            {
-                "graphId": r.id,
-                "workspaceId": r.workspace_id,
-                "workspaceName": ws_names.get(r.workspace_id),
-                "dataSourceId": r.data_source_id,
-                "dataSourceLabel": labels.get(r.data_source_id),
-                "kind": r.kind,
-                "falkorGraphName": r.falkor_graph_name,
-                "falkorProvider": r.falkor_provider,
-                "committed": r.main_head_commit_seq,
-                "projected": r.projected_commit_seq,
-                "target": r.target_commit_seq,
-                "lag": r.lag,
-                "status": r.status,
-                "lastError": r.last_error,
-                "lastProjectedAt": r.last_projected_at,
-                "progressDone": r.progress_done,
-                "progressTotal": r.progress_total,
-                "updatedAt": r.updated_at,
-            }
-            for r in worst_rows
-        ],
+        "worst": [_row(r) for r in worst_rows],
     }
 
 
@@ -1047,15 +1125,17 @@ async def probe_outbox(app_state) -> Optional[dict]:
 async def probe_overview(app_state) -> Optional[dict]:
     """System-at-a-glance inventory — the key components and their scale.
 
-    Cheap counts + in-memory provider states + a planner-estimate for the
-    large commits table (an exact count(*) would be a seq scan)."""
-    from sqlalchemy import func, select, text
+    Versioned-graph metrics (graphs, commits, open reviews) are scoped to
+    graphs backed by a data source that still exists, so the numbers reflect
+    LIVE entities — not the orphaned/seed graphs the store never GCs."""
+    from sqlalchemy import and_, func, select
 
     from backend.app.db.engine import PoolRole, get_session_factory
 
     out: dict = {}
 
     # Management inventory (small tables — exact counts are cheap).
+    present_ids: list[str] = []
     try:
         from backend.app.db.models import (
             ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
@@ -1065,8 +1145,9 @@ async def probe_overview(app_state) -> Optional[dict]:
             async with get_session_factory(PoolRole.READONLY)() as s:
                 out["workspaces"] = (await s.execute(
                     select(func.count()).select_from(WorkspaceORM))).scalar()
-                out["dataSources"] = (await s.execute(
-                    select(func.count()).select_from(WorkspaceDataSourceORM))).scalar()
+                present_ids = list((await s.execute(
+                    select(WorkspaceDataSourceORM.id))).scalars().all())
+                out["dataSources"] = len(present_ids)
                 total_p, active_p = (await s.execute(select(
                     func.count(),
                     func.count().filter(ProviderORM.is_active.is_(True)),
@@ -1075,26 +1156,35 @@ async def probe_overview(app_state) -> Optional[dict]:
     except Exception as exc:
         logger.warning("overview management counts failed: %s", exc)
 
-    # Versioned-graph scale (graphver store).
+    # Versioned-graph scale (graphver store), scoped to live data sources.
     try:
-        from backend.app.services.versioning import config as gv_config
         from backend.app.services.versioning.db import graphver_session
-        from backend.app.services.versioning.models import GraphORM, MergeRequestORM
+        from backend.app.services.versioning.models import (
+            CommitORM, GraphORM, MergeRequestORM,
+        )
 
-        schema = gv_config.graphver_schema()
+        live_graph_ids = select(GraphORM.id).where(
+            GraphORM.data_source_id.in_(present_ids))
         async with asyncio.timeout(_BUDGET_DB):
             async with graphver_session() as s:
-                out["versionedGraphs"] = (await s.execute(
-                    select(func.count()).select_from(GraphORM))).scalar()
+                total_graphs = (await s.execute(
+                    select(func.count()).select_from(GraphORM))).scalar() or 0
+                live_graphs = (await s.execute(
+                    select(func.count()).where(
+                        GraphORM.data_source_id.in_(present_ids))
+                    .select_from(GraphORM))).scalar() or 0
+                out["versionedGraphs"] = live_graphs
+                # Graphs whose data source no longer exists — the store has no
+                # GC, so these accumulate (cleanup candidates).
+                out["orphanedGraphs"] = max(0, total_graphs - live_graphs)
                 out["openReviews"] = (await s.execute(
-                    select(func.count()).select_from(MergeRequestORM).where(
+                    select(func.count()).select_from(MergeRequestORM).where(and_(
                         MergeRequestORM.status.in_(
-                            ("open", "conflicts", "mergeable", "approved"))))).scalar()
-                # commits is partitioned (reltuples on the parent is -1), so
-                # count it directly — bounded by the probe budget; a huge
-                # prod table that overruns simply degrades to null.
+                            ("open", "conflicts", "mergeable", "approved")),
+                        MergeRequestORM.graph_id.in_(live_graph_ids))))).scalar()
                 out["commits"] = (await s.execute(
-                    text(f"SELECT count(*) FROM {schema}.commits"))).scalar()
+                    select(func.count()).select_from(CommitORM).where(
+                        CommitORM.graph_id.in_(live_graph_ids)))).scalar()
     except Exception as exc:
         logger.warning("overview graphver scale failed: %s", exc)
 

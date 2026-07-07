@@ -45,12 +45,37 @@ from backend.app.services.layout_config import parse_reference_layout
 _ABSENT = object()
 
 
+def _guard_bare_layout(layout: dict) -> dict:
+    """Guard against a FULL view config being passed where a bare
+    ``referenceLayout`` is expected.
+
+    A bare referenceLayout carries ``layers``/``assignments`` at top level; a
+    full view config instead nests them under ``layout.referenceLayout`` and
+    carries ``content``/``layout`` wrappers. Without this guard a full config
+    double-nests to ``{"layout": {"referenceLayout": {"layout": ...}}}`` and
+    normalizes to EMPTY — so every published layer/assignment looks deleted and
+    the merge silently WIPES the published layout. Auto-unwrap a recoverable
+    ``layout.referenceLayout``; otherwise raise so the mistake is loud."""
+    looks_like_full_config = "layout" in layout or "content" in layout
+    is_bare_layout = "layers" in layout or "assignments" in layout
+    if looks_like_full_config and not is_bare_layout:
+        nested = layout.get("layout")
+        if isinstance(nested, dict) and isinstance(nested.get("referenceLayout"), dict):
+            return nested["referenceLayout"]
+        raise ValueError(
+            "merge_layout_3way expects a bare referenceLayout, got a full view config"
+        )
+    return layout
+
+
 def _normalize(layout: Any) -> tuple[list[dict], dict[str, dict]]:
     """Up-convert a bare ``referenceLayout`` dict to ``(layers, assignments)``
     via the shared parser — the single source of truth for the
     entityAssignments / exact-rule up-convert semantics. Non-dict input (None,
     ``{}``, malformed) normalizes to empty rather than raising."""
     raw = layout if isinstance(layout, dict) else {}
+    if raw:
+        raw = _guard_bare_layout(raw)
     parsed = parse_reference_layout({"layout": {"referenceLayout": raw}})
     return parsed.layers, parsed.assignments
 
