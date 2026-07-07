@@ -8,7 +8,7 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
-    BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
+    Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
     UserCog, Users2, KeyRound, Network, History, Palette,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -34,6 +34,7 @@ const adminGroups = [
         path: '',
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
+            { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
@@ -70,7 +71,8 @@ export function AdminPage() {
     // Hooks called in fixed order; entries the user lacks perms for
     // drop out of the group. ``useAdminSectionSpec`` resolves the live
     // spec from the store.
-    const overviewVisible      = useNavPermission(useAdminSectionSpec('overview'))
+    const overviewVisible       = useNavPermission(useAdminSectionSpec('overview'))
+    const infrastructureVisible = useNavPermission(useAdminSectionSpec('infrastructure'))
     const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
     const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
@@ -81,7 +83,8 @@ export function AdminPage() {
     const auditVisible         = useNavPermission(useAdminSectionSpec('audit'))
 
     const itemVisibility: Record<string, boolean> = {
-        overview:      overviewVisible,
+        overview:       overviewVisible,
+        infrastructure: infrastructureVisible,
         branding:      brandingVisible,
         features:      featuresVisible,
         announcements: announcementsVisible,

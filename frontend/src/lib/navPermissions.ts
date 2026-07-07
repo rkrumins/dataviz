@@ -67,7 +67,8 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
  * groups admin can land there without being a full super-admin.
  */
 export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec> = {
-    overview:      { kind: 'perm', perm: 'system:admin' },
+    overview:       { kind: 'perm', perm: 'system:admin' },
+    infrastructure: { kind: 'perm', perm: 'system:admin' },
     branding:      { kind: 'perm', perm: 'system:admin' },
     features:      { kind: 'perm', perm: 'system:admin' },
     announcements: { kind: 'perm', perm: 'system:admin' },

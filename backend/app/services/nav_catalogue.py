@@ -68,6 +68,7 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
 # admin can land there without being a full super-admin.
 _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     "overview":      ("Global Overview", NavSpecPerm(perm="system:admin")),
+    "infrastructure": ("Infrastructure", NavSpecPerm(perm="system:admin")),
     "branding":      ("Branding",        NavSpecPerm(perm="system:admin")),
     "features":      ("Features",        NavSpecPerm(perm="system:admin")),
     "announcements": ("Announcements",   NavSpecPerm(perm="system:admin")),

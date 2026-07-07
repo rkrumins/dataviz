@@ -5,7 +5,7 @@ from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, stats_admin,
-    insights, me,
+    insights, me, system_status,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
     versioning,
@@ -228,6 +228,12 @@ api_router.include_router(
 # Cache-only reads for pre-registration discovery.
 api_router.include_router(
     insights.router, prefix="/admin/insights", tags=["admin:insights"],
+    dependencies=[Depends(requires("system:admin"))],
+)
+# Infrastructure status: /api/v1/admin/system/status — super-admin
+# single-pane snapshot of every backing service + data-plane lag.
+api_router.include_router(
+    system_status.router, prefix="/admin/system", tags=["admin:system-status"],
     dependencies=[Depends(requires("system:admin"))],
 )
 
