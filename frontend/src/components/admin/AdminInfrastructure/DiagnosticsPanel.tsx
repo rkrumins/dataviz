@@ -5,13 +5,16 @@
  * copy-able commands). Data-driven — it renders whatever insights the
  * engine produces, with no per-service or per-provider special-casing.
  */
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
     AlertTriangle, XCircle, Info, Lightbulb, Wrench, Check, Copy, CheckCircle2,
+    ChevronDown, ChevronRight, ChevronLeft,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { SystemStatusSnapshot } from '@/services/systemStatusService'
 import { buildDiagnostics, type Insight, type Severity } from './diagnostics'
+
+const PAGE_SIZE = 5
 
 const SEV: Record<Severity, { border: string; chip: string; icon: typeof Info; iconCls: string }> = {
     critical: { border: 'border-l-red-500', chip: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20', icon: XCircle, iconCls: 'text-red-500' },
@@ -41,12 +44,20 @@ function CommandRow({ cmd }: { cmd: string }) {
     )
 }
 
-function InsightCard({ insight }: { insight: Insight }) {
+function InsightCard({ insight, defaultOpen }: { insight: Insight; defaultOpen?: boolean }) {
+    const [open, setOpen] = useState(defaultOpen ?? false)
     const meta = SEV[insight.severity]
     const SevIcon = meta.icon
+    const Chevron = open ? ChevronDown : ChevronRight
     return (
-        <div className={cn('border border-glass-border border-l-2 rounded-xl bg-canvas-elevated p-4', meta.border)}>
-            <div className="flex items-start gap-2.5">
+        <div className={cn('border border-glass-border border-l-2 rounded-xl bg-canvas-elevated', meta.border)}>
+            {/* Header — the whole row toggles the card (collapsed shows the
+                what + evidence; expanded reveals why + how + commands). */}
+            <button
+                onClick={() => setOpen(o => !o)}
+                className="w-full text-left p-4 flex items-start gap-2.5 group"
+                aria-expanded={open}
+            >
                 <SevIcon className={cn('w-4 h-4 mt-0.5 shrink-0', meta.iconCls)} />
                 <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -54,6 +65,7 @@ function InsightCard({ insight }: { insight: Insight }) {
                             {insight.category}
                         </span>
                         <h3 className="text-sm font-semibold text-ink">{insight.title}</h3>
+                        <Chevron className="w-4 h-4 ml-auto shrink-0 text-ink-muted group-hover:text-ink-secondary transition-colors" />
                     </div>
                     <p className="text-xs text-ink-secondary mt-1.5 leading-relaxed">{insight.symptom}</p>
 
@@ -67,7 +79,11 @@ function InsightCard({ insight }: { insight: Insight }) {
                             ))}
                         </div>
                     )}
+                </div>
+            </button>
 
+            {open && (
+                <div className="px-4 pb-4 pl-[42px] -mt-1">
                     {insight.why.length > 0 && (
                         <div className="mt-3 rounded-lg bg-amber-500/5 border border-amber-500/15 p-2.5">
                             <div className="flex items-center gap-1.5 mb-1.5">
@@ -112,7 +128,7 @@ function InsightCard({ insight }: { insight: Insight }) {
                         </div>
                     )}
                 </div>
-            </div>
+            )}
         </div>
     )
 }
