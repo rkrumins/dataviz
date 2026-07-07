@@ -627,6 +627,7 @@ export function LayerStudio({
                     {/* Left: Layer hierarchy */}
                     <LayerHierarchyPanel
                         layers={layers}
+                        assignments={assignments}
                         activeTarget={activeTarget}
                         logicalNodes={logicalNodes}
                         onSetActiveTarget={setActiveTarget}
