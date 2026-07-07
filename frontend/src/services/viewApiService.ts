@@ -350,6 +350,11 @@ export async function updateView(viewId: string, data: ViewUpdateRequest): Promi
  * Update a view's layer layout (layers + assignments) in isolation — does
  * not touch name/content (other than entityScope)/filters/any other
  * config key. See backend `view_repo.update_view_layout`.
+ *
+ * `branchId` — when an open draft is editing, pass its active branch id so
+ * the write lands on that branch's layout overlay instead of the published
+ * view row (the backend routes on `?branchId`). Omit on Published/main so
+ * the write updates the base config as before.
  */
 export async function updateViewLayout(
     viewId: string,
@@ -358,8 +363,10 @@ export async function updateViewLayout(
         entityScope?: 'all' | 'curated'
         displayRules?: unknown[]
     },
+    branchId?: string,
 ): Promise<View> {
-    return apiFetch<View>(`/api/v1/views/${viewId}/layout`, {
+    const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
+    return apiFetch<View>(`/api/v1/views/${viewId}/layout${qs}`, {
         method: 'PUT',
         body: JSON.stringify(body),
     })

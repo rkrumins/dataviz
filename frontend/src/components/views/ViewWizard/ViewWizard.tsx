@@ -44,6 +44,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { useBranchStore } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
 import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
 import { provisionBlankGraph, type BlankGraphResult } from '@/services/versioningApiService'
@@ -1038,13 +1039,10 @@ function ViewWizardBody({
                     console.error('[ViewWizard] updateViewLayout failed after create', err)
                 }
             } else if (viewId) {
-                // Ordering dependency: buildViewConfig's `content` block never carries
-                // entityScope, so this updateView call's config PUT (base's referenceLayout
-                // is preserved, but content is rebuilt) transiently wipes content.entityScope
-                // — the immediately-following updateViewLayout call is what restores it. If
-                // that layout write fails (caught below), the view is left with entityScope
-                // wiped until a successful retry. Task 5/6 make scope explicit everywhere,
-                // closing this window; for now it's a narrow gap between two awaited calls.
+                // This updateView writes the published/base row (name/filters/visible-types
+                // stay base-global even in a draft). buildViewConfig now preserves the base's
+                // existing content.entityScope, so the config PUT no longer wipes it — the
+                // scope for this branch's layout is owned by the branch overlay (below).
                 const result = await viewService.updateView(viewId, {
                     name: formData.name,
                     description: formData.description,
@@ -1062,11 +1060,17 @@ function ViewWizardBody({
                     // from the submitted assignments — a deliberate wizard save is allowed to
                     // set scope explicitly, unlike implicit canvas gestures.
                     const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
+                    // When a draft is open for THIS view, route the layout write to the branch
+                    // overlay (null on Published → base write), so wizard layer/scope edits on a
+                    // draft don't leak to Published — mirrors the canvas debounced saver.
+                    const branchId = useBranchStore.getState().branchIdForScope(
+                        resolvedWorkspaceId, resolvedDataSourceId, viewId,
+                    ) ?? undefined
                     try {
                         const layoutResult = await updateViewLayout(viewId, {
                             referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
                             entityScope,
-                        })
+                        }, branchId)
                         const savedView = viewToViewConfig(layoutResult)
                         useSchemaStore.getState().addOrUpdateView(savedView)
                         onComplete?.(savedView)

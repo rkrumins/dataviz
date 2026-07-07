@@ -70,6 +70,12 @@ function buildViewConfig(
     base?: Record<string, unknown>,
 ): Record<string, unknown> {
     const baseReferenceLayout = (base?.layout as { referenceLayout?: unknown } | undefined)?.referenceLayout
+    // Preserve the base's existing entityScope: this builder rebuilds `content`
+    // wholesale, and `content.entityScope` is owned by the layout write (branch
+    // overlay when a draft is open). Dropping it here would wipe the published
+    // scope on a plain metadata save — a leak when the layout write is going to
+    // the overlay rather than the base. Absent on create (no base).
+    const baseEntityScope = (base?.content as { entityScope?: unknown } | undefined)?.entityScope
     return {
         icon: request.icon ?? 'Layout',
         content: {
@@ -78,6 +84,7 @@ function buildViewConfig(
             defaultDepth: 5,
             maxDepth: 10,
             rootEntityTypes: ['domain'],
+            ...(baseEntityScope !== undefined ? { entityScope: baseEntityScope } : {}),
         },
         layout: {
             type: request.layoutType,

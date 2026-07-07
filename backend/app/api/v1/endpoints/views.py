@@ -456,6 +456,7 @@ async def update_view(
 async def update_view_layout(
     view_id: str = Path(...),
     req: ViewLayoutUpdateRequest = Body(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -465,6 +466,13 @@ async def update_view_layout(
     Layout-only: does not touch name/description/content (other than
     entityScope)/filters/or any other config key — see
     ``view_repo.update_view_layout`` for the merge + validation logic.
+
+    ``branchId`` — when a draft branch is editing, the frontend threads its
+    active branch id here so the write lands on that branch's
+    ``view_layout_overlays`` row instead of the published ``views.config``.
+    This keeps a draft's layer/assignment edits from leaking to Published (or
+    other branches) until the draft is promoted. Omitted (base/published edit)
+    → the published row is updated in place, exactly as before.
     """
     existing = await view_repo.get_view(session, view_id)
     if not existing:
@@ -480,9 +488,14 @@ async def update_view_layout(
             )
 
     try:
-        view = await view_repo.update_view_layout(
-            session, view_id, req, user_id=_user_id(user),
-        )
+        if branch_id:
+            view = await view_repo.update_overlay_layout(
+                session, view_id, branch_id, req,
+            )
+        else:
+            view = await view_repo.update_view_layout(
+                session, view_id, req, user_id=_user_id(user),
+            )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     if not view:

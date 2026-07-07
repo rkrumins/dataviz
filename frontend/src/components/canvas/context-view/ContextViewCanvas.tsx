@@ -569,7 +569,15 @@ export function ContextViewCanvas({
   // store no longer persists layers/assignments — Task 5 demotes it to a render cache).
   const layoutSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingLayoutSave = useRef<
-    { viewId: string; referenceLayout: NormalizedReferenceLayout; entityScope: 'all' | 'curated' } | null
+    {
+      viewId: string
+      referenceLayout: NormalizedReferenceLayout
+      entityScope: 'all' | 'curated'
+      // The draft branch the edit was made on (null on Published/main). Routes the
+      // durable PUT to the branch's layout overlay so a draft edit never mutates the
+      // published base — see updateViewLayout / the backend ?branchId routing.
+      branchId: string | null
+    } | null
   >(null)
   // Sync indicator DERIVED from the canvas debounce (replaces the deleted store syncStatus): 'saving'
   // from the moment a save is armed until the durable PUT settles, else 'idle'. The header subline
@@ -588,7 +596,7 @@ export function ContextViewCanvas({
         // Always send the live display rules so a layer-only save never wipes them (the endpoint
         // replaces referenceLayout wholesale, then re-nests displayRules only when supplied).
         displayRules: useReferenceModelStore.getState().displayRules,
-      })
+      }, pending.branchId ?? undefined)
     } catch (err) {
       // Swallow to avoid unhandled-rejection noise; the next edit re-arms the save.
       console.error('[ContextViewCanvas] layout save failed', err)
@@ -636,9 +644,9 @@ export function ContextViewCanvas({
     // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
     // prior blueprint-autosync gate).
     if (!canManage) return
-    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope }
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope, branchId: effectiveBranchId }
     armLayoutSave()
-  }, [canManage, armLayoutSave])
+  }, [canManage, armLayoutSave, effectiveBranchId])
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -695,9 +703,9 @@ export function ContextViewCanvas({
         referenceLayout: { layers: norm.layers, assignments: norm.assignments, displayRules },
       },
     })
-    pendingLayoutSave.current = { viewId: view.id, referenceLayout: norm, entityScope }
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout: norm, entityScope, branchId: effectiveBranchId }
     armLayoutSave()
-  }, [displayRules, canManage, armLayoutSave])
+  }, [displayRules, canManage, armLayoutSave, effectiveBranchId])
 
   // Step 2: Load assignments from backend when layers are synced and nodes are available
   // Uses a ref to track what we've computed for, preventing cascading re-fetches.
