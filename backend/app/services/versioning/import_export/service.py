@@ -43,6 +43,7 @@ class ImportExportService:
         store=None,
         scope_resolver=None,
         ontology_resolver=None,
+        layout_writer=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -53,6 +54,10 @@ class ImportExportService:
         # Optional async ``(workspace_id, data_source_id) -> {node_types, edge_types} | None`` — the
         # live ontology types for the per-row import gate. Injected the same way.
         self._ontology_resolver = ontology_resolver
+        # Optional async ``(workspace_id, data_source_id, view_id, created_node_facts,
+        # batch_edge_facts) -> {added: N}`` — writes canonical layer assignments for a view-scoped
+        # import's newly-created top-level entities. Injected at the API layer (management-DB access).
+        self._layout_writer = layout_writer
 
     @property
     def store(self):
@@ -180,7 +185,37 @@ class ImportExportService:
         ontology = None
         if self._ontology_resolver is not None:
             ontology = await self._ontology_resolver(ws, ds)
-        return await ImportWorker(self._svc, self._store, scope=scope, ontology=ontology).run(job_id)
+        worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology)
+        summary = await worker.run(job_id)
+        # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
+        # assignments so the curated view shows them right away. Best-effort — never fails the import.
+        if view_id and self._layout_writer is not None and worker.created_node_facts:
+            await self._apply_view_layout(job_id, ws, ds, view_id, worker)
+        return summary
+
+    async def _apply_view_layout(self, job_id, ws, ds, view_id, worker) -> None:
+        """Hand the import's newly-created top-level entities to the injected layout writer and record
+        the outcome on ``job.summary`` (``viewAssignments: {added: N}`` or ``{error: ...}``). The
+        import is already committed and marked ``completed`` by the worker before this runs, so any
+        failure here is isolated: it is logged + noted, never raised (which would flip the job to
+        ``failed`` via ``run_import_safe``)."""
+        try:
+            try:
+                result = await self._layout_writer(
+                    ws, ds, view_id, worker.created_node_facts, worker.batch_edge_facts)
+                note = {"added": int((result or {}).get("added", 0))}
+            except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
+                logger.exception("view layout write-back failed for import job %s", job_id)
+                note = {"error": str(exc)[:500]}
+            async with db.graphver_session() as s:
+                row = await s.get(JobORM, job_id)
+                if row is not None:
+                    summary = dict(row.summary or {})
+                    summary["viewAssignments"] = note
+                    row.summary = summary
+                    row.updated_at = _now()
+        except Exception:  # pragma: no cover - defensive; must never fail the completed import
+            logger.exception("recording view-assignment summary failed for import job %s", job_id)
 
     async def create_export_job(
         self,

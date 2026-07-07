@@ -90,12 +90,90 @@ def _append_replace_deletes(ops, resolutions, indexes, scope_nodes=None, scope_e
     return ops, len(absent_edges) + len(absent_nodes)
 
 
+def _first_layer_id(layers: List[dict]) -> str:
+    """The view's first layer (order 0). Stable sort keeps list order on ties / missing order."""
+    return sorted(
+        layers, key=lambda l: l.get("order") if isinstance(l.get("order"), (int, float)) else 0
+    )[0]["id"]
+
+
+def _match_layer_signal(signal, layers: List[dict], fallback_id: str) -> str:
+    """Resolve a row's ``layerAssignment`` signal to a layer id: an exact layer-id match wins, then
+    a case-insensitive layer-NAME match; otherwise the ``fallback_id`` (the view's first layer)."""
+    if signal:
+        s = str(signal).strip()
+        for layer in layers:
+            if layer.get("id") == s:
+                return layer["id"]
+        sl = s.lower()
+        for layer in layers:
+            if str(layer.get("name") or "").strip().lower() == sl:
+                return layer["id"]
+    return fallback_id
+
+
+def compute_import_root_assignments(
+    created_nodes: List[Dict[str, Any]],
+    batch_edges: List[tuple],
+    containment_types,
+    layers: List[dict],
+    existing_assignments: Dict[str, Any],
+    *,
+    now: str = None,
+) -> Dict[str, dict]:
+    """The NEW canonical assignment entries (``key -> LayerAssignmentEntry``) to add for a view-scoped
+    import's newly-created **top-level** entities — so a curated view renders them immediately.
+
+    ``created_nodes`` are ``{eid, urn, layer_signal}`` for the batch's create-node ops; ``batch_edges``
+    are ``(src_eid, tgt_eid, edge_type)`` for its create-edge ops. TOP-LEVEL = a created node that is
+    NOT the child (containment-edge target) of any edge in the batch. A created node's containment
+    parent edge is ALWAYS itself new (the edge references the new node's fresh eid), so the batch's own
+    edges fully determine parentage — this subsumes the "descendant of an already-in-scope root" case
+    (any such descendant has a batch parent edge). Descendants therefore get NO entry: containment
+    inheritance places them under their root at read time.
+
+    Never overwrites an ``existing_assignments`` key. The key is the node's projection key — its
+    ``urn``, or ``gv:<eid>`` when it has none (mirrors the projector's node key). Target layer is the
+    row's ``layerAssignment`` signal when it names a layer id / name in ``layers``, else the first
+    layer. ``assignedBy`` is ``'import'``, ``inheritsChildren`` true. Returns ``{}`` when there are no
+    layers to place into or no new roots.
+    """
+    valid_layers = [l for l in (layers or []) if isinstance(l, dict) and l.get("id")]
+    if not valid_layers:
+        return {}
+    cont = {str(t).strip().upper() for t in (containment_types or [])}
+    child_eids = {tgt for (_src, tgt, etype) in batch_edges
+                  if tgt is not None and str(etype).strip().upper() in cont}
+    fallback_id = _first_layer_id(valid_layers)
+    stamp = now or _now()
+    new_entries: Dict[str, dict] = {}
+    for node in created_nodes:
+        eid = node.get("eid")
+        if eid in child_eids:                        # has a containment parent in the batch → inherits
+            continue
+        key = node.get("urn") or f"gv:{eid}"
+        if key in existing_assignments or key in new_entries:
+            continue                                 # never overwrite an existing / already-added entry
+        new_entries[key] = {
+            "layerId": _match_layer_signal(node.get("layer_signal"), valid_layers, fallback_id),
+            "inheritsChildren": True,
+            "assignedBy": "import",
+            "assignedAt": stamp,
+        }
+    return new_entries
+
+
 class ImportWorker:
     def __init__(self, versioning, store, scope=None, ontology=None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope          # view scope for scoped replace ({assigned_urns, ...}) | None
         self._ontology = ontology    # {node_types, edge_types} for the per-row gate | None
+        # Raw batch facts for the post-commit layout write-back (view-scoped imports): the created
+        # NODE entities ({eid, urn, layer_signal}) and the batch's create-edge triples. Collected in
+        # _resolve_and_build; the ImportExportService hands them to the injected layout writer.
+        self.created_node_facts: List[Dict[str, Any]] = []
+        self.batch_edge_facts: List[tuple] = []
 
     async def run(self, job_id: str) -> Dict[str, int]:
         job = await self._load_running(job_id)
@@ -191,6 +269,21 @@ class ImportWorker:
                 scope_nodes, scope_edges = _view_scope_eids(indexes, self._scope)
             ops, deleted_extra = _append_replace_deletes(
                 ops, resolutions, indexes, scope_nodes, scope_edges)
+
+        # Raw facts for the post-commit view layout write-back (created top-level entities). The eids
+        # are the stable minted ids resolve_rows assigned; the layout writer maps each to its
+        # projection key (urn or gv:<eid>) and reasons about parentage from the batch's own edges.
+        self.created_node_facts = [
+            {"eid": op["entity_id"], "urn": (op.get("payload") or {}).get("urn"),
+             "layer_signal": (op.get("payload") or {}).get("layerAssignment")}
+            for op in ops if op.get("op") == "create" and op.get("entity_kind") == "node"
+        ]
+        self.batch_edge_facts = [
+            ((op.get("payload") or {}).get("sourceEntityId"),
+             (op.get("payload") or {}).get("targetEntityId"),
+             (op.get("payload") or {}).get("edgeType"))
+            for op in ops if op.get("op") == "create" and op.get("entity_kind") == "edge"
+        ]
 
         await self._persist_resolutions(job_id, resolutions)
 

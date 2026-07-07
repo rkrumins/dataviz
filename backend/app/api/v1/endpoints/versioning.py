@@ -1987,6 +1987,48 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         return None
 
 
+async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_edges):
+    """Layout-writer hook (injected into ImportExportService): after a view-scoped import creates new
+    top-level entities, add canonical ``assignments`` entries (``assignedBy: 'import'``) to the view's
+    stored reference-layout so a **curated** view renders them immediately — in the draft (its
+    projection has the new entities) and after merge (they land on main). Reads the view's CURRENT
+    config, merges ONLY the new roots (never overwriting an existing urn's entry, preserving every
+    other config key), and writes via ``view_repo.update_view_layout`` in one update. Does NOT touch
+    ``entityScope`` (sticky-scope) — harmless placement overrides on an 'all' view, the payoff on a
+    'curated' one. Runs in the worker's background context, so it opens its own management-DB session.
+    Returns ``{added: N}``; the service isolates any error onto the job summary."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ViewORM
+    from backend.app.db.repositories import view_repo
+    from backend.app.services.versioning.import_export.import_worker import (
+        compute_import_root_assignments)
+    from backend.common.models.management import ViewLayoutUpdateRequest
+
+    async with get_async_session() as session:
+        view = await session.get(ViewORM, view_id)
+        if view is None:
+            return {"added": 0}
+        config = json.loads(view.config or "{}")
+        raw = (config.get("layout") or {}).get("referenceLayout")
+        if not isinstance(raw, dict):
+            raw = config.get("referenceLayout")        # legacy top-level spelling
+        if not isinstance(raw, dict) or not raw.get("layers"):
+            return {"added": 0}                          # no layers → nowhere to place the roots
+        existing = raw.get("assignments") if isinstance(raw.get("assignments"), dict) else {}
+        cont = await _live_containment_types(session, ws, ds)
+        new_entries = compute_import_root_assignments(
+            created_nodes, batch_edges, cont, raw.get("layers"), existing)
+        if not new_entries:
+            return {"added": 0}
+        merged = {**existing, **new_entries}
+        # Rewrite the whole referenceLayout (update_view_layout replaces it wholesale) — preserve its
+        # layers + every other key (displayRules, …), only extending the assignments map.
+        new_ref = {**raw, "layers": raw.get("layers"), "assignments": merged}
+        await view_repo.update_view_layout(
+            session, view_id, ViewLayoutUpdateRequest(reference_layout=new_ref))
+    return {"added": len(new_entries)}
+
+
 def get_import_export_service():
     """Injectable Import/Export service (reuses the versioning singleton; overridable in tests)."""
     global _ie_service
@@ -1994,7 +2036,8 @@ def get_import_export_service():
         from backend.app.services.versioning.import_export.service import ImportExportService
         _ie_service = ImportExportService(
             versioning=_service, scope_resolver=_resolve_export_view_scope,
-            ontology_resolver=_resolve_ontology_types)
+            ontology_resolver=_resolve_ontology_types,
+            layout_writer=_write_view_import_assignments)
     return _ie_service
 
 
