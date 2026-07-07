@@ -333,9 +333,16 @@ export async function createView(data: ViewCreateRequest): Promise<View> {
     })
 }
 
-/** Get a single view by ID (enriched with workspace name + favourite data) */
-export async function getView(viewId: string): Promise<View> {
-    return apiFetch<View>(`/api/v1/views/${viewId}`)
+/**
+ * Get a single view by ID (enriched with workspace name + favourite data).
+ *
+ * `branchId` — when an open draft is reading, pass its active branch id so the
+ * response projects that branch's layout overlay (base ⊕ overlay). Omit on
+ * Published/main (or when no overlay exists) → base config, unchanged.
+ */
+export async function getView(viewId: string, branchId?: string): Promise<View> {
+    const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
+    return apiFetch<View>(`/api/v1/views/${viewId}${qs}`)
 }
 
 /** Update an existing view */

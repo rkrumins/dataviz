@@ -615,8 +615,57 @@ export function ContextViewCanvas({
   /** Flush any pending debounced layout save NOW (no-op if none pending). Used by the Save button. */
   const flushLayoutSave = useCallback(async () => { await doLayoutSave() }, [doLayoutSave])
 
-  // Clear the pending debounce on unmount (matches the prior blueprint-autosync effect's cleanup).
-  useEffect(() => () => { if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current) }, [])
+  // On unmount, clear the debounce timer AND flush any armed save so a layout edit
+  // made just before navigating away (still inside the 1500ms window) is persisted
+  // to its branch's overlay — the single-slot pending payload carries its branchId,
+  // so a best-effort flush here can't leak to the wrong branch (doLayoutSave clears
+  // the timer + captures the pending synchronously before its first await).
+  useEffect(() => () => {
+    if (layoutSaveTimer.current) { clearTimeout(layoutSaveTimer.current); layoutSaveTimer.current = null }
+    if (pendingLayoutSave.current) void doLayoutSave()
+  }, [doLayoutSave])
+
+  // ─── Branch-aware re-read (BSL Phase 4) ─────────────────────────────────────────────────────────
+  // When the active view or its effective branch changes, re-fetch the BRANCH-EFFECTIVE view
+  // (base ⊕ the branch's layout overlay for a draft; base for Published / other branches — the backend
+  // ?branchId routing) and apply its layout + entityScope so the canvas repopulates for the new branch.
+  // This is the READ side that pairs with the Phase-3 WRITE routing: a draft now SEES its own overlay,
+  // while switching Published↔draft↔draft reloads the correct layout instead of showing the last branch's.
+  useEffect(() => {
+    const viewId = activeView?.id
+    if (!viewId) return
+    let cancelled = false
+    void (async () => {
+      // FLUSH-ON-SWITCH: the single-slot pendingLayoutSave still holds the PREVIOUS branch's edit (its
+      // payload carries that branch's id). Persist it BEFORE the re-fetch so switching branches within
+      // the debounce window never drops it (the slot would otherwise be overwritten by the next edit).
+      if (pendingLayoutSave.current) await flushLayoutSave()
+      if (cancelled) return
+      let full
+      try {
+        full = await getView(viewId, effectiveBranchId ?? undefined)
+      } catch (err) {
+        console.error('[ContextViewCanvas] branch-effective view re-fetch failed', err)
+        return
+      }
+      if (cancelled) return
+      // A local edit landed after we started (a new save is armed) → don't clobber the optimistic layout.
+      if (pendingLayoutSave.current) return
+      const view = useSchemaStore.getState().getActiveView()
+      if (!view || view.id !== viewId) return   // the active view switched under us
+      const nextRef = full.config?.layout?.referenceLayout
+      // Skip if the branch-effective layout equals what the store already has (no render thrash).
+      const currentNorm = normalizeReferenceLayout(view.layout?.referenceLayout)
+      const nextNorm = normalizeReferenceLayout(nextRef)
+      if (JSON.stringify(currentNorm) === JSON.stringify(nextNorm)) return
+      const nextScope = full.config?.content?.entityScope
+      useSchemaStore.getState().updateView(viewId, {
+        layout: { ...(view.layout ?? {}), referenceLayout: nextRef },
+        content: { ...view.content, entityScope: nextScope ?? view.content?.entityScope },
+      })
+    })()
+    return () => { cancelled = true }
+  }, [activeView?.id, effectiveBranchId, flushLayoutSave])
 
   /** The active view's CURRENT canonical layout, read LIVE so successive writes accumulate. Falls back
    *  to the default columns when the view has none, matching the prior `currentLayers()` behaviour. */

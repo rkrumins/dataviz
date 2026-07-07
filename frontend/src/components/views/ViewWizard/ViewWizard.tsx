@@ -44,7 +44,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useBranchStore } from '@/store/branchStore'
+import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { viewService } from '@/services/viewService'
 import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
 import { provisionBlankGraph, type BlankGraphResult } from '@/services/versioningApiService'
@@ -781,7 +781,11 @@ function ViewWizardBody({
         }
     }, [schema, resolvedDataSourceId])
 
-    const fullViewQuery = useViewFull(mode === 'edit' ? viewId : null)
+    // When editing a draft, hydrate the wizard from the BRANCH-EFFECTIVE view
+    // (base ⊕ overlay) — same branch the submit writes to (branchIdForScope
+    // below) — so a metadata edit never re-writes the overlay with base layout.
+    const wizardBranchId = useEffectiveBranchId(resolvedWorkspaceId, resolvedDataSourceId, viewId)
+    const fullViewQuery = useViewFull(mode === 'edit' ? viewId : null, wizardBranchId ?? undefined)
     const editingView = useMemo(() => {
         if (mode !== 'edit' || !fullViewQuery.data) return null
         return viewToViewConfig(fullViewQuery.data)
