@@ -317,6 +317,25 @@ async def _drop_view_layout_overlays(branch_id: Optional[str]) -> None:
         logger.warning("layout overlay drop for branch %s skipped: %s", branch_id, exc)
 
 
+async def _promote_view_layout_overlay(branch_id: Optional[str], actor: str) -> None:
+    """Fold a draft's layout overlay into the published base on publish / MR merge — the layer &
+    assignment CREATES, UPDATES and DELETES the draft made are 3-way-merged (vs the fork-point base)
+    into ``views.config`` so the published version reflects them, then the overlay is deleted. Runs
+    AFTER the graphver commit lands; best-effort by contract (mirroring ``_touch_views_data_updated``:
+    the management DB may be separate, no 2PC), so a failure logs and never fails the user's merge —
+    the overlay simply stays until a later publish retries."""
+    if not branch_id:
+        return
+    try:
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.repositories import view_repo
+        async with get_async_session() as session:
+            await view_repo.promote_overlays_for_branch(session, branch_id, actor=actor)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("layout overlay promote for branch %s skipped: %s", branch_id, exc)
+
+
 async def graph_in_workspace(
     ws_id: str,
     graph_id: str,
@@ -1400,6 +1419,7 @@ async def publish(
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
+    await _promote_view_layout_overlay(branch_id, user.id)   # fold the draft's layer/assignment edits into the published view
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
@@ -2678,5 +2698,7 @@ async def merge_merge_request(
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
+    _src_branch = _pr.get("source_branch_id")   # the merged draft — fold its layout overlay into the published view
+    await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}
