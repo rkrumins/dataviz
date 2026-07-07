@@ -42,10 +42,8 @@ export function useSystemStatus() {
         }
 
         for (const svc of snap.services) push(`latency:${svc.key}`, svc.latencyMs)
-        const agg = snap.streams?.aggregation.jobs
-        push('stream:aggregation.jobs', agg?.groupLag ?? agg?.len)
-        for (const [name, depth] of Object.entries(snap.streams?.insights.streams ?? {})) {
-            push(`stream:${name}`, depth.groupLag ?? depth.len)
+        for (const s of snap.streams?.streams ?? []) {
+            push(`stream:${s.name}`, s.groupLag ?? s.len)
         }
         push('projection:lagging', snap.projection?.lagging)
         setHistoryVersion(v => v + 1)

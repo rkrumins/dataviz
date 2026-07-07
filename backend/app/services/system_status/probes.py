@@ -65,6 +65,15 @@ _BUDGET_PROJECTION = 1.5
 # jobs are being claimed but not acked (worker wedged / timing out).
 _PENDING_AGE_DEGRADED_MS = 5 * 60 * 1000
 
+# A consumer idle longer than this while still holding PEL entries is
+# treated as dead — its pending messages are "orphaned" (read but never
+# acknowledged, and no live consumer is reclaiming them). 5 min is well
+# clear of any healthy inter-poll gap.
+DEAD_CONSUMER_IDLE_MS = 5 * 60 * 1000
+
+# How many recent DLQ entries to sample for the reason/offender breakdown.
+_DLQ_SAMPLE = 200
+
 
 # ── Shared lazy singletons (never created at import time) ───────────
 
@@ -572,9 +581,13 @@ async def _stream_depth(redis, stream: str, group: str) -> dict:
     XDEL/trim — both are absence, not failure.
     """
     now_ms = _now_ms()
-    out: dict = {"len": None, "pending": None, "oldestPendingAgeMs": None,
+    # ``group`` travels with the row so consumers (UI, diagnostics) never
+    # reconstruct Redis group-naming conventions — the backend owns them.
+    out: dict = {"group": group,
+                 "len": None, "pending": None, "oldestPendingAgeMs": None,
                  "consumers": None, "groupLag": None,
-                 "entriesAdded": None, "lastGeneratedId": None}
+                 "entriesAdded": None, "lastGeneratedId": None,
+                 "consumerDetail": None, "orphanedPending": None, "deadConsumers": None}
     try:
         out["len"] = int(await redis.xlen(stream))
     except Exception:
@@ -607,11 +620,31 @@ async def _stream_depth(redis, stream: str, group: str) -> dict:
         out["lastGeneratedId"] = sinfo.get("last-generated-id")
     except Exception:
         pass
+    # Per-consumer breakdown — the signal that turns "3.1k pending" into
+    # "3.1k stranded by a dead consumer": a consumer idle past the dead
+    # threshold while still holding PEL entries is orphaned work no live
+    # consumer is reclaiming.
+    try:
+        detail, orphaned, dead = [], 0, 0
+        for c in await redis.xinfo_consumers(stream, group):
+            idle = c.get("idle")
+            pend = int(c.get("pending") or 0)
+            detail.append({"name": c.get("name"), "pending": pend, "idleMs": idle})
+            if idle is not None and idle > DEAD_CONSUMER_IDLE_MS:
+                dead += 1
+                orphaned += pend
+        detail.sort(key=lambda d: d["pending"], reverse=True)
+        out["consumerDetail"] = detail
+        out["orphanedPending"] = orphaned
+        out["deadConsumers"] = dead
+    except Exception:
+        pass
     return out
 
 
 async def _dlq_depth(redis, stream: str) -> dict:
-    out: dict = {"len": None, "oldestAgeMs": None}
+    out: dict = {"len": None, "oldestAgeMs": None,
+                 "reasons": None, "topSources": None, "kinds": None, "sampled": None}
     try:
         out["len"] = int(await redis.xlen(stream))
         if out["len"] > 0:
@@ -620,13 +653,43 @@ async def _dlq_depth(redis, stream: str) -> dict:
                 head_ms = _msg_id_to_ms(head[0][0])
                 if head_ms is not None:
                     out["oldestAgeMs"] = max(0, _now_ms() - head_ms)
+            # Sample the most recent entries to explain WHY they died and
+            # WHICH sources dominate — a few bad data sources usually
+            # generate most of a DLQ.
+            reasons: dict[str, int] = {}
+            kinds: dict[str, int] = {}
+            sources: dict[tuple, int] = {}
+            sample = await redis.xrevrange(stream, count=_DLQ_SAMPLE)
+            for _mid, fields in sample:
+                reason = fields.get("reason") or "unknown"
+                reasons[reason] = reasons.get(reason, 0) + 1
+                kind = fields.get("kind")
+                if kind:
+                    kinds[kind] = kinds.get(kind, 0) + 1
+                ds = fields.get("data_source_id")
+                if ds:
+                    key = (ds, fields.get("workspace_id"))
+                    sources[key] = sources.get(key, 0) + 1
+            out["reasons"] = reasons
+            out["kinds"] = kinds
+            out["sampled"] = len(sample)
+            top = sorted(sources.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            out["topSources"] = [
+                {"dataSourceId": ds, "workspaceId": ws, "count": n}
+                for (ds, ws), n in top
+            ]
     except Exception:
         pass
     return out
 
 
 async def probe_streams() -> Optional[dict]:
-    """Depth + lag for both stream families and both DLQs, uniformly."""
+    """Depth + lag for every job stream + DLQ, as flat generic lists.
+
+    Each stream/DLQ is described by data (name, family, group, lane) rather
+    than a fixed two-family structure, so adding another producer is a
+    catalogue entry — not a schema change here or in the UI.
+    """
     from backend.app.services.aggregation.redis_client import (
         CONSUMER_GROUP, DLQ_STREAM as AGG_DLQ, JOBS_STREAM, get_redis,
     )
@@ -638,23 +701,76 @@ async def probe_streams() -> Optional[dict]:
     try:
         async with asyncio.timeout(_BUDGET_STREAMS):
             redis = get_redis()
-            agg_jobs = await _stream_depth(redis, JOBS_STREAM, CONSUMER_GROUP)
-            agg_dlq = await _dlq_depth(redis, AGG_DLQ)
-            insights: dict[str, dict] = {}
+            streams: list[dict] = [
+                {"name": JOBS_STREAM, "family": "aggregation",
+                 **await _stream_depth(redis, JOBS_STREAM, CONSUMER_GROUP)},
+            ]
             for cfg in ALL_STREAMS:
-                depth = await _stream_depth(redis, cfg.stream, cfg.group)
-                depth["kind"] = cfg.kind
-                depth["lane"] = cfg.lane
-                insights[cfg.stream] = depth
-            insights_dlq = await _dlq_depth(redis, INSIGHTS_DLQ)
+                streams.append({
+                    "name": cfg.stream, "family": "insights",
+                    "kind": cfg.kind, "lane": cfg.lane,
+                    **await _stream_depth(redis, cfg.stream, cfg.group),
+                })
+            dlqs: list[dict] = [
+                {"name": AGG_DLQ, "family": "aggregation",
+                 **await _dlq_depth(redis, AGG_DLQ)},
+                {"name": INSIGHTS_DLQ, "family": "insights",
+                 **await _dlq_depth(redis, INSIGHTS_DLQ)},
+            ]
     except Exception as exc:
         logger.warning("streams probe failed: %s", exc)
         return None
 
-    return {
-        "aggregation": {"jobs": agg_jobs, "dlq": agg_dlq},
-        "insights": {"streams": insights, "dlq": insights_dlq},
-    }
+    return {"streams": streams, "dlqs": dlqs}
+
+
+async def probe_graph_providers(app_state) -> Optional[list]:
+    """Registered graph data providers + reachability — provider-agnostic.
+
+    Reuses the shared ``resolve_provider_status`` resolver (the same one
+    behind ``/admin/providers/status`` and the blank-model gate), so this
+    covers FalkorDB, Neo4j, Spanner, DataHub and any future type with zero
+    per-type code and zero request-path I/O — it reads only the in-memory
+    circuit-breaker state and the background warmup cache.
+    """
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.db.repositories import provider_repo
+    from backend.app.providers.manager import provider_manager
+    from backend.app.providers.reachability import resolve_provider_status
+
+    try:
+        async with asyncio.timeout(_BUDGET_DB):
+            async with get_session_factory(PoolRole.READONLY)() as s:
+                providers = await provider_repo.list_providers(s)
+    except Exception as exc:
+        logger.warning("graph-providers probe failed: %s", exc)
+        return None
+
+    try:
+        breaker_states = provider_manager.report_provider_states()
+    except Exception:
+        breaker_states = {}
+    warmup_cache = (getattr(app_state, "provider_warmup_cache", None)
+                    or getattr(provider_manager, "warmup_cache", None) or {})
+
+    # readiness → the dashboard's shared status vocabulary.
+    _MAP = {"ready": "healthy", "unavailable": "down", "unknown": "unknown"}
+    out = []
+    for p in providers:
+        status, error = resolve_provider_status(
+            is_active=p.is_active, provider_id=p.id,
+            breaker_states=breaker_states, warmup_cache=warmup_cache,
+        )
+        out.append({
+            "id": p.id,
+            "name": p.name,
+            "type": p.provider_type,
+            "status": _MAP.get(status, "unknown"),
+            "error": error,
+            "isActive": p.is_active,
+        })
+    out.sort(key=lambda d: (d["status"] != "down", d["type"], d["name"] or ""))
+    return out or None
 
 
 async def probe_projection_lag() -> Optional[dict]:
@@ -691,17 +807,20 @@ async def probe_projection_lag() -> Optional[dict]:
     worst_stmt = (
         select(
             GraphORM.id, GraphORM.workspace_id, GraphORM.data_source_id,
-            ProjectionStateORM.falkor_graph_name, lag.label("lag"),
-            status.label("status"),
+            GraphORM.kind, GraphORM.main_head_commit_seq,
+            ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider,
+            ProjectionStateORM.projected_commit_seq, ProjectionStateORM.target_commit_seq,
+            lag.label("lag"), status.label("status"),
             ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
             ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
+            ProjectionStateORM.updated_at,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
         .where(or_(lag > 0, ProjectionStateORM.last_error.isnot(None),
                    ProjectionStateORM.status.in_(("projecting", "rebuilding"))))
         .order_by(lag.desc())
-        .limit(5)
+        .limit(8)
     )
 
     try:
@@ -712,6 +831,33 @@ async def probe_projection_lag() -> Optional[dict]:
     except Exception as exc:
         logger.warning("projection-lag probe failed: %s", exc)
         return None
+
+    # The graphver store holds only logical refs (data_source_id /
+    # workspace_id) — resolve human names from the management DB so the
+    # table reads "Customer 360 · Sales workspace", not "ds_sr_df567f".
+    labels: dict[str, Optional[str]] = {}
+    ws_names: dict[str, Optional[str]] = {}
+    try:
+        from backend.app.db.engine import PoolRole, get_session_factory
+        from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+
+        ds_ids = list({r.data_source_id for r in worst_rows if r.data_source_id})
+        ws_ids = list({r.workspace_id for r in worst_rows if r.workspace_id})
+        if ds_ids or ws_ids:
+            async with asyncio.timeout(_BUDGET_DB):
+                async with get_session_factory(PoolRole.READONLY)() as s:
+                    if ds_ids:
+                        for row in (await s.execute(select(
+                            WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
+                        ).where(WorkspaceDataSourceORM.id.in_(ds_ids)))).all():
+                            labels[row.id] = row.label
+                    if ws_ids:
+                        for row in (await s.execute(select(
+                            WorkspaceORM.id, WorkspaceORM.name,
+                        ).where(WorkspaceORM.id.in_(ws_ids)))).all():
+                            ws_names[row.id] = row.name
+    except Exception as exc:
+        logger.warning("projection name resolution failed: %s", exc)
 
     return {
         "totalGraphs": agg.total,
@@ -726,14 +872,22 @@ async def probe_projection_lag() -> Optional[dict]:
             {
                 "graphId": r.id,
                 "workspaceId": r.workspace_id,
+                "workspaceName": ws_names.get(r.workspace_id),
                 "dataSourceId": r.data_source_id,
+                "dataSourceLabel": labels.get(r.data_source_id),
+                "kind": r.kind,
                 "falkorGraphName": r.falkor_graph_name,
+                "falkorProvider": r.falkor_provider,
+                "committed": r.main_head_commit_seq,
+                "projected": r.projected_commit_seq,
+                "target": r.target_commit_seq,
                 "lag": r.lag,
                 "status": r.status,
                 "lastError": r.last_error,
                 "lastProjectedAt": r.last_projected_at,
                 "progressDone": r.progress_done,
                 "progressTotal": r.progress_total,
+                "updatedAt": r.updated_at,
             }
             for r in worst_rows
         ],
@@ -888,3 +1042,60 @@ async def probe_outbox(app_state) -> Optional[dict]:
         "oldestPendingAgeS": round(oldest_age_s, 1) if oldest_age_s is not None else None,
         "relayAlive": relay_alive,
     }
+
+
+async def probe_overview(app_state) -> Optional[dict]:
+    """System-at-a-glance inventory — the key components and their scale.
+
+    Cheap counts + in-memory provider states + a planner-estimate for the
+    large commits table (an exact count(*) would be a seq scan)."""
+    from sqlalchemy import func, select, text
+
+    from backend.app.db.engine import PoolRole, get_session_factory
+
+    out: dict = {}
+
+    # Management inventory (small tables — exact counts are cheap).
+    try:
+        from backend.app.db.models import (
+            ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
+        )
+
+        async with asyncio.timeout(_BUDGET_DB):
+            async with get_session_factory(PoolRole.READONLY)() as s:
+                out["workspaces"] = (await s.execute(
+                    select(func.count()).select_from(WorkspaceORM))).scalar()
+                out["dataSources"] = (await s.execute(
+                    select(func.count()).select_from(WorkspaceDataSourceORM))).scalar()
+                total_p, active_p = (await s.execute(select(
+                    func.count(),
+                    func.count().filter(ProviderORM.is_active.is_(True)),
+                ).select_from(ProviderORM))).one()
+                out["providers"] = {"total": total_p, "active": active_p}
+    except Exception as exc:
+        logger.warning("overview management counts failed: %s", exc)
+
+    # Versioned-graph scale (graphver store).
+    try:
+        from backend.app.services.versioning import config as gv_config
+        from backend.app.services.versioning.db import graphver_session
+        from backend.app.services.versioning.models import GraphORM, MergeRequestORM
+
+        schema = gv_config.graphver_schema()
+        async with asyncio.timeout(_BUDGET_DB):
+            async with graphver_session() as s:
+                out["versionedGraphs"] = (await s.execute(
+                    select(func.count()).select_from(GraphORM))).scalar()
+                out["openReviews"] = (await s.execute(
+                    select(func.count()).select_from(MergeRequestORM).where(
+                        MergeRequestORM.status.in_(
+                            ("open", "conflicts", "mergeable", "approved"))))).scalar()
+                # commits is partitioned (reltuples on the parent is -1), so
+                # count it directly — bounded by the probe budget; a huge
+                # prod table that overruns simply degrades to null.
+                out["commits"] = (await s.execute(
+                    text(f"SELECT count(*) FROM {schema}.commits"))).scalar()
+    except Exception as exc:
+        logger.warning("overview graphver scale failed: %s", exc)
+
+    return out or None

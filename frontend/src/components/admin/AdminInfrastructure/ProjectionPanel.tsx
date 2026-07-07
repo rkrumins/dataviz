@@ -1,13 +1,13 @@
 /**
- * ProjectionPanel — global Postgres → FalkorDB projection freshness.
- * Rollup chips (fresh / catching up / rebuilding / failed) + a worst-lag
- * table for the graphs that need attention; rows deep-link to their
- * workspace (the per-graph Data health rebuild lives there).
+ * ProjectionPanel — global source-of-truth → read-cache projection health.
+ * Rollup chips + a worst-lag table that names each graph (data-source label
+ * + workspace), shows how far behind it is, which provider hosts its cache,
+ * and any error. Rows deep-link to the workspace where a rebuild lives.
  */
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { ProjectionSection } from '@/services/systemStatusService'
+import type { GraphProvider, ProjectionSection } from '@/services/systemStatusService'
 import { compactNum, formatSince } from './meta'
 
 const CHIP_DEFS: { key: keyof ProjectionSection; label: string; cls: string; alwaysShow?: boolean }[] = [
@@ -26,8 +26,18 @@ const ROW_STATUS_CLS: Record<string, string> = {
     evicted: 'text-ink-muted',
 }
 
-export function ProjectionPanel({ projection }: { projection: ProjectionSection | null }) {
+const KIND_LABEL: Record<string, string> = {
+    manual: 'Manual', authoritative: 'Authoritative', hybrid: 'Hybrid', blank: 'Blank',
+}
+
+interface Props {
+    projection: ProjectionSection | null
+    providers: GraphProvider[] | null
+}
+
+export function ProjectionPanel({ projection, providers }: Props) {
     const navigate = useNavigate()
+    const providerById = new Map((providers ?? []).map(p => [p.id, p]))
 
     return (
         <div className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden">
@@ -36,7 +46,7 @@ export function ProjectionPanel({ projection }: { projection: ProjectionSection 
                     <GitBranch className="w-4 h-4 text-indigo-500" />
                     <div>
                         <h2 className="text-sm font-semibold text-ink">Versioned graph projection</h2>
-                        <p className="text-[11px] text-ink-muted">Postgres is the source of truth; FalkorDB is the read cache it feeds.</p>
+                        <p className="text-[11px] text-ink-muted">Postgres is the source of truth; each graph is projected into a read cache the app queries.</p>
                     </div>
                 </div>
                 {projection && (
@@ -73,8 +83,9 @@ export function ProjectionPanel({ projection }: { projection: ProjectionSection 
                                 <thead className="bg-black/5 dark:bg-white/5">
                                     <tr className="text-left text-[10px] uppercase tracking-wider text-ink-muted">
                                         <th className="px-5 py-2 font-semibold">Graph</th>
-                                        <th className="px-3 py-2 font-semibold text-right">Lag</th>
+                                        <th className="px-3 py-2 font-semibold text-right">Behind</th>
                                         <th className="px-3 py-2 font-semibold">State</th>
+                                        <th className="px-3 py-2 font-semibold">Read cache</th>
                                         <th className="px-3 py-2 font-semibold">Last projected</th>
                                         <th className="px-5 py-2 font-semibold">Error</th>
                                     </tr>
@@ -84,18 +95,34 @@ export function ProjectionPanel({ projection }: { projection: ProjectionSection 
                                         const progress = row.progressTotal
                                             ? Math.min(100, Math.round(((row.progressDone ?? 0) / row.progressTotal) * 100))
                                             : null
+                                        const name = row.dataSourceLabel ?? row.dataSourceId
+                                        const ws = row.workspaceName ?? row.workspaceId
+                                        const prov = row.falkorProvider ? providerById.get(row.falkorProvider) : null
+                                        const provLabel = prov ? prov.name : (row.falkorProvider ? row.falkorProvider : 'default')
                                         return (
                                             <tr
                                                 key={row.graphId}
                                                 onClick={() => navigate(`/workspaces/${row.workspaceId}`)}
-                                                className="border-t border-glass-border hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors"
+                                                className="border-t border-glass-border hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer transition-colors align-top"
                                                 title="Open workspace (Data health lives on the view)"
                                             >
                                                 <td className="px-5 py-2.5">
-                                                    <span className="font-mono text-[11px] text-ink-secondary">{row.dataSourceId}</span>
-                                                    <span className="ml-2 text-[10px] text-ink-muted">{row.workspaceId}</span>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="font-semibold text-ink truncate max-w-[220px]" title={row.dataSourceId}>{name}</span>
+                                                        {row.kind && (
+                                                            <span className="inline-flex px-1.5 py-px rounded-full border border-glass-border bg-black/5 dark:bg-white/5 text-[9px] uppercase tracking-wide text-ink-muted shrink-0">
+                                                                {KIND_LABEL[row.kind] ?? row.kind}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <span className="text-[10px] text-ink-muted">{ws}</span>
                                                 </td>
-                                                <td className="px-3 py-2.5 text-right tabular-nums font-semibold text-ink">{row.lag}</td>
+                                                <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                                                    <span className="tabular-nums font-semibold text-ink">{row.lag}</span>
+                                                    {row.committed != null && (
+                                                        <span className="text-[10px] text-ink-muted"> commits<br />{row.projected ?? 0}/{row.committed} applied</span>
+                                                    )}
+                                                </td>
                                                 <td className="px-3 py-2.5">
                                                     <span className={cn('font-medium', ROW_STATUS_CLS[row.status] ?? 'text-ink-secondary')}>
                                                         {row.status === 'idle' ? 'queued' : row.status}
@@ -106,8 +133,13 @@ export function ProjectionPanel({ projection }: { projection: ProjectionSection 
                                                         </div>
                                                     )}
                                                 </td>
+                                                <td className="px-3 py-2.5">
+                                                    <span className="text-ink-secondary">{provLabel}</span>
+                                                    <br />
+                                                    <span className="font-mono text-[10px] text-ink-muted">{row.falkorGraphName ?? 'not yet projected'}</span>
+                                                </td>
                                                 <td className="px-3 py-2.5 text-ink-muted whitespace-nowrap">{formatSince(row.lastProjectedAt) ?? 'never'}</td>
-                                                <td className="px-5 py-2.5 max-w-[260px]">
+                                                <td className="px-5 py-2.5 max-w-[220px]">
                                                     {row.lastError
                                                         ? <span className="font-mono text-[10px] text-red-600 dark:text-red-400 line-clamp-2 break-all">{row.lastError}</span>
                                                         : <span className="text-ink-muted">—</span>}

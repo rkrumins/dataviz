@@ -21,7 +21,15 @@ export interface ServiceEntry {
     detail: Record<string, unknown>
 }
 
+export interface ConsumerDetail {
+    name: string | null
+    pending: number
+    idleMs: number | null
+}
+
 export interface StreamDepth {
+    /** Consumer group name — supplied by the backend, not reconstructed. */
+    group: string
     len: number | null
     pending: number | null
     oldestPendingAgeMs: number | null
@@ -32,29 +40,77 @@ export interface StreamDepth {
     lastGeneratedId: string | null
     kind?: string
     lane?: string
+    /** Per-consumer PEL breakdown (largest pending first). */
+    consumerDetail: ConsumerDetail[] | null
+    /** Pending messages held by consumers past the dead-idle threshold. */
+    orphanedPending: number | null
+    deadConsumers: number | null
+}
+
+export interface DlqSource {
+    dataSourceId: string
+    workspaceId: string | null
+    count: number
 }
 
 export interface DlqDepth {
     len: number | null
     oldestAgeMs: number | null
+    /** Breakdown of why entries died (reason → count). */
+    reasons: Record<string, number> | null
+    /** Data sources generating the most dead-letters. */
+    topSources: DlqSource[] | null
+    kinds: Record<string, number> | null
+    sampled: number | null
+}
+
+/** A stream/DLQ carries its own identity (name, family) so the UI and
+ *  diagnostics stay generic — no hardcoded family structure. */
+export interface StreamDescriptor extends StreamDepth {
+    name: string
+    family: string
+}
+
+export interface DlqDescriptor extends DlqDepth {
+    name: string
+    family: string
 }
 
 export interface StreamsSection {
-    aggregation: { jobs: StreamDepth; dlq: DlqDepth }
-    insights: { streams: Record<string, StreamDepth>; dlq: DlqDepth }
+    streams: StreamDescriptor[]
+    dlqs: DlqDescriptor[]
+}
+
+/** A registered graph data provider (any type) + its resolved health. */
+export interface GraphProvider {
+    id: string
+    name: string
+    /** falkordb | neo4j | spanner | datahub | mock | … */
+    type: string
+    status: ServiceStatus
+    error: string | null
+    isActive: boolean
 }
 
 export interface ProjectionWorstRow {
     graphId: string
     workspaceId: string
+    workspaceName: string | null
     dataSourceId: string
+    dataSourceLabel: string | null
+    kind: string | null
     falkorGraphName: string | null
+    falkorProvider: string | null
+    committed: number | null
+    projected: number | null
+    target: number | null
     lag: number
     status: string
     lastError: string | null
     lastProjectedAt: string | null
     progressDone: number | null
     progressTotal: number | null
+    updatedAt: string | null
 }
 
 export interface ProjectionSection {
@@ -98,11 +154,22 @@ export interface OutboxSection {
     relayAlive: boolean | null
 }
 
+export interface OverviewSection {
+    workspaces?: number
+    dataSources?: number
+    providers?: { total: number; active: number }
+    versionedGraphs?: number
+    openReviews?: number
+    commits?: number
+}
+
 export interface SystemStatusSnapshot {
     status: 'healthy' | 'degraded' | 'down'
     generatedAt: string
     cacheAgeMs: number
+    overview: OverviewSection | null
     services: ServiceEntry[]
+    graphProviders: GraphProvider[] | null
     streams: StreamsSection | null
     projection: ProjectionSection | null
     aggregationJobs: AggregationJobsSection | null

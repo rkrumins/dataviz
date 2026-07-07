@@ -88,11 +88,14 @@ async def _assemble(app_state) -> dict:
         probes.probe_aggregation_jobs(app_state),
         probes.probe_stats_polling(),
         probes.probe_outbox(app_state),
+        probes.probe_overview(app_state),
+        probes.probe_graph_providers(app_state),
         return_exceptions=True,
     )
     (viz, mgmt_db, gv_db, bus_redis, cache_redis, falkordb,
      controlplane, worker, stats_svc, graph_svc,
-     streams, projection, agg_jobs, stats_polling, outbox) = results
+     streams, projection, agg_jobs, stats_polling, outbox, overview,
+     graph_providers) = results
 
     services = [
         _coerce_service(viz, "vizService", "Viz Service"),
@@ -111,6 +114,8 @@ async def _assemble(app_state) -> dict:
     agg_jobs = _coerce_data(agg_jobs)
     stats_polling = _coerce_data(stats_polling)
     outbox = _coerce_data(outbox)
+    overview = _coerce_data(overview)
+    graph_providers = _coerce_data(graph_providers)
 
     by_key = {tile["key"]: tile for tile in services}
 
@@ -121,9 +126,10 @@ async def _assemble(app_state) -> dict:
     # Stats service: it may be HTTP-unreachable (one replica behind a k8s
     # Service, or internal port) while demonstrably consuming its streams.
     stats_tile = by_key["statsService"]
-    insights_streams = ((streams or {}).get("insights") or {}).get("streams") or {}
-    insights_consumers = [d.get("consumers") for d in insights_streams.values()
-                          if d.get("consumers") is not None]
+    stream_rows = (streams or {}).get("streams") or []
+    dlq_rows = (streams or {}).get("dlqs") or []
+    insights_consumers = [s.get("consumers") for s in stream_rows
+                          if s.get("family") == "insights" and s.get("consumers") is not None]
     if stats_tile["status"] == "down" and insights_consumers \
             and max(insights_consumers) > 0:
         stats_tile["status"] = "degraded"
@@ -132,7 +138,7 @@ async def _assemble(app_state) -> dict:
         stats_tile["detail"]["consumers"] = max(insights_consumers)
     if stats_polling and (stats_polling.get("overdue") or 0) > 0:
         _degrade(stats_tile, f"{stats_polling['overdue']} data source(s) overdue")
-    insights_dlq = ((streams or {}).get("insights") or {}).get("dlq") or {}
+    insights_dlq = next((d for d in dlq_rows if d.get("family") == "insights"), {})
     if (insights_dlq.get("len") or 0) > 0:
         _degrade(stats_tile, f"DLQ {insights_dlq['len']}")
 
@@ -147,7 +153,9 @@ async def _assemble(app_state) -> dict:
     return {
         "status": overall,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "overview": overview,
         "services": services,
+        "graphProviders": graph_providers,
         "streams": streams,
         "projection": projection,
         "aggregationJobs": agg_jobs,

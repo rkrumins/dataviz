@@ -1,11 +1,18 @@
 /**
- * StreamsPanel — every Redis Stream (aggregation + insights families),
- * their DLQs, and the transactional-outbox relay in one delivery table:
- * depth, pending, oldest-pending age, consumer-group lag, consumers.
+ * StreamsPanel — every Redis Stream (all families), their DLQs, and the
+ * outbox relay in one delivery table: depth, pending, oldest-pending age,
+ * consumer-group lag, consumers. Rows are driven entirely by the flat
+ * ``streams``/``dlqs`` lists — no family structure is assumed here.
+ *
+ * A stream with orphaned pending (a dead consumer holding its PEL) is
+ * flagged inline and its per-consumer breakdown is expandable.
  */
-import { Waypoints } from 'lucide-react'
+import { useState } from 'react'
+import { AlertTriangle, ChevronDown, ChevronRight, Waypoints } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { OutboxSection, StreamDepth, StreamsSection } from '@/services/systemStatusService'
+import type {
+    OutboxSection, StreamDescriptor, StreamsSection,
+} from '@/services/systemStatusService'
 import { compactNum, formatAgeMs } from './meta'
 import { Sparkline } from './Sparkline'
 
@@ -15,44 +22,80 @@ interface Props {
     history: Map<string, number[]>
 }
 
-interface Row {
-    name: string
-    lane?: string
-    depth: StreamDepth | null
-    dlqLen?: number | null
-    dlqOldestMs?: number | null
-    isDlq?: boolean
-    historyKey?: string
-}
-
-function buildRows(streams: StreamsSection): Row[] {
-    const rows: Row[] = [{
-        name: 'aggregation.jobs',
-        depth: streams.aggregation.jobs,
-        historyKey: 'stream:aggregation.jobs',
-    }]
-    for (const [name, depth] of Object.entries(streams.insights.streams)) {
-        rows.push({ name, lane: depth.lane, depth, historyKey: `stream:${name}` })
-    }
-    rows.push({
-        name: 'aggregation.jobs.dlq', isDlq: true, depth: null,
-        dlqLen: streams.aggregation.dlq.len, dlqOldestMs: streams.aggregation.dlq.oldestAgeMs,
-    })
-    rows.push({
-        name: 'insights.dlq', isDlq: true, depth: null,
-        dlqLen: streams.insights.dlq.len, dlqOldestMs: streams.insights.dlq.oldestAgeMs,
-    })
-    return rows
-}
-
 const LANE_CLS: Record<string, string> = {
     fast: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
     heavy: 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400',
+    sweep: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-600 dark:text-indigo-400',
     purge: 'bg-black/5 dark:bg-white/5 border-glass-border text-ink-muted',
 }
 
 function Num({ value }: { value: number | null | undefined }) {
     return <span className="tabular-nums">{value == null ? '—' : compactNum(value)}</span>
+}
+
+function StreamRow({ s, history }: { s: StreamDescriptor; history?: number[] }) {
+    const [open, setOpen] = useState(false)
+    const orphaned = s.orphanedPending ?? 0
+    const hasDetail = (s.consumerDetail?.length ?? 0) > 0
+    return (
+        <>
+            <tr
+                className={cn('border-t border-glass-border transition-colors',
+                    hasDetail && 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5',
+                    orphaned > 0 && 'bg-amber-500/5')}
+                onClick={hasDetail ? () => setOpen(o => !o) : undefined}
+            >
+                <td className="px-5 py-2.5">
+                    <div className="flex items-center gap-1.5">
+                        {hasDetail
+                            ? (open ? <ChevronDown className="w-3 h-3 text-ink-muted" /> : <ChevronRight className="w-3 h-3 text-ink-muted" />)
+                            : <span className="w-3" />}
+                        <span className="font-mono text-[11px] text-ink-secondary">{s.name}</span>
+                        {s.lane && (
+                            <span className={cn('inline-flex px-1.5 py-px rounded-full border text-[9px] font-medium uppercase tracking-wide', LANE_CLS[s.lane] ?? LANE_CLS.purge)}>
+                                {s.lane}
+                            </span>
+                        )}
+                        {orphaned > 0 && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full border border-amber-500/20 bg-amber-500/10 text-[9px] font-semibold text-amber-600 dark:text-amber-400">
+                                <AlertTriangle className="w-2.5 h-2.5" /> {compactNum(orphaned)} orphaned
+                            </span>
+                        )}
+                    </div>
+                </td>
+                <td className="px-3 py-2.5 text-right"><Num value={s.len} /></td>
+                <td className="px-3 py-2.5 text-right"><Num value={s.pending} /></td>
+                <td className="px-3 py-2.5 text-right text-ink-muted whitespace-nowrap">{formatAgeMs(s.oldestPendingAgeMs) ?? '—'}</td>
+                <td className="px-3 py-2.5 text-right"><Num value={s.groupLag} /></td>
+                <td className="px-3 py-2.5 text-right"><Num value={s.consumers} /></td>
+                <td className="px-5 py-2.5 text-right">
+                    {history && history.length >= 3
+                        ? <Sparkline points={history} width={64} height={16} className="inline-block" />
+                        : <span className="text-ink-muted">—</span>}
+                </td>
+            </tr>
+            {open && hasDetail && (
+                <tr className="bg-black/[0.02] dark:bg-white/[0.02]">
+                    <td colSpan={7} className="px-5 py-2">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-muted mb-1">Consumers ({s.group})</div>
+                        <div className="space-y-1">
+                            {s.consumerDetail!.map((c, i) => {
+                                const dead = (c.idleMs ?? 0) > 5 * 60 * 1000 && c.pending > 0
+                                return (
+                                    <div key={i} className="flex items-center gap-2 text-[11px]">
+                                        <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', dead ? 'bg-amber-400' : 'bg-emerald-500')} />
+                                        <span className="font-mono text-ink-secondary">{c.name}</span>
+                                        <span className="text-ink-muted">· {c.pending} pending · idle {formatAgeMs(c.idleMs) ?? '—'}</span>
+                                        {dead && <span className="text-amber-600 dark:text-amber-400 font-medium">stranded</span>}
+                                    </div>
+                                )
+                            })}
+                        </div>
+                    </td>
+                </tr>
+            )}
+        </>
+    )
 }
 
 export function StreamsPanel({ streams, outbox, history }: Props) {
@@ -62,7 +105,7 @@ export function StreamsPanel({ streams, outbox, history }: Props) {
                 <Waypoints className="w-4 h-4 text-indigo-500" />
                 <div>
                     <h2 className="text-sm font-semibold text-ink">Delivery pipelines</h2>
-                    <p className="text-[11px] text-ink-muted">Redis Streams queue depth and consumer lag, plus the outbox relay.</p>
+                    <p className="text-[11px] text-ink-muted">Redis Streams queue depth and consumer lag, plus the outbox relay. Expand a row to see its consumers.</p>
                 </div>
             </div>
 
@@ -83,59 +126,36 @@ export function StreamsPanel({ streams, outbox, history }: Props) {
                             </tr>
                         </thead>
                         <tbody>
-                            {buildRows(streams).map((row) => {
-                                const dlqHot = row.isDlq && (row.dlqLen ?? 0) > 0
+                            {streams.streams.map(s => (
+                                <StreamRow key={s.name} s={s} history={history.get(`stream:${s.name}`)} />
+                            ))}
+                            {streams.dlqs.map(dlq => {
+                                const hot = (dlq.len ?? 0) > 0
                                 return (
-                                    <tr key={row.name} className={cn(
-                                        'border-t border-glass-border transition-colors',
-                                        dlqHot && 'bg-red-500/5',
-                                    )}>
+                                    <tr key={dlq.name} className={cn('border-t border-glass-border', hot && 'bg-red-500/5')}>
                                         <td className="px-5 py-2.5">
-                                            <span className={cn('font-mono text-[11px]',
-                                                dlqHot ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-ink-secondary')}>
-                                                {row.name}
-                                            </span>
-                                            {row.lane && (
-                                                <span className={cn('ml-2 inline-flex px-1.5 py-px rounded-full border text-[9px] font-medium uppercase tracking-wide', LANE_CLS[row.lane] ?? LANE_CLS.purge)}>
-                                                    {row.lane}
-                                                </span>
-                                            )}
+                                            <span className={cn('ml-[18px] font-mono text-[11px]', hot ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-ink-secondary')}>{dlq.name}</span>
                                         </td>
-                                        <td className={cn('px-3 py-2.5 text-right', dlqHot && 'text-red-600 dark:text-red-400 font-semibold')}>
-                                            <Num value={row.isDlq ? row.dlqLen : row.depth?.len} />
-                                        </td>
-                                        <td className="px-3 py-2.5 text-right"><Num value={row.depth?.pending} /></td>
-                                        <td className="px-3 py-2.5 text-right text-ink-muted whitespace-nowrap">
-                                            {formatAgeMs(row.isDlq ? row.dlqOldestMs : row.depth?.oldestPendingAgeMs) ?? '—'}
-                                        </td>
-                                        <td className="px-3 py-2.5 text-right"><Num value={row.depth?.groupLag} /></td>
-                                        <td className="px-3 py-2.5 text-right"><Num value={row.depth?.consumers} /></td>
-                                        <td className="px-5 py-2.5 text-right">
-                                            {row.historyKey && history.get(row.historyKey) ? (
-                                                <Sparkline points={history.get(row.historyKey)!} width={64} height={16} className="inline-block" />
-                                            ) : <span className="text-ink-muted">—</span>}
-                                        </td>
+                                        <td className={cn('px-3 py-2.5 text-right', hot && 'text-red-600 dark:text-red-400 font-semibold')}><Num value={dlq.len} /></td>
+                                        <td className="px-3 py-2.5 text-right text-ink-muted">—</td>
+                                        <td className="px-3 py-2.5 text-right text-ink-muted whitespace-nowrap">{formatAgeMs(dlq.oldestAgeMs) ?? '—'}</td>
+                                        <td className="px-3 py-2.5 text-right text-ink-muted">—</td>
+                                        <td className="px-3 py-2.5 text-right text-ink-muted">—</td>
+                                        <td className="px-5 py-2.5 text-right text-ink-muted">—</td>
                                     </tr>
                                 )
                             })}
                             {/* Outbox relay — the other delivery pipeline (Postgres → audit log). */}
-                            <tr className={cn('border-t border-glass-border',
-                                outbox && outbox.pending > 0 && 'bg-amber-500/5')}>
+                            <tr className={cn('border-t border-glass-border', outbox && outbox.pending > 0 && 'bg-amber-500/5')}>
                                 <td className="px-5 py-2.5">
-                                    <span className="font-mono text-[11px] text-ink-secondary">outbox relay</span>
-                                    <span className="ml-2 inline-flex px-1.5 py-px rounded-full border border-glass-border bg-black/5 dark:bg-white/5 text-[9px] uppercase tracking-wide text-ink-muted">
-                                        postgres
-                                    </span>
+                                    <span className="ml-[18px] font-mono text-[11px] text-ink-secondary">outbox relay</span>
+                                    <span className="ml-2 inline-flex px-1.5 py-px rounded-full border border-glass-border bg-black/5 dark:bg-white/5 text-[9px] uppercase tracking-wide text-ink-muted">postgres</span>
                                 </td>
                                 <td className="px-3 py-2.5 text-right"><Num value={outbox?.pending} /></td>
                                 <td className="px-3 py-2.5 text-right text-ink-muted">—</td>
-                                <td className="px-3 py-2.5 text-right text-ink-muted whitespace-nowrap">
-                                    {outbox?.oldestPendingAgeS != null ? formatAgeMs(outbox.oldestPendingAgeS * 1000) : '—'}
-                                </td>
+                                <td className="px-3 py-2.5 text-right text-ink-muted whitespace-nowrap">{outbox?.oldestPendingAgeS != null ? formatAgeMs(outbox.oldestPendingAgeS * 1000) : '—'}</td>
                                 <td className="px-3 py-2.5 text-right text-ink-muted">—</td>
-                                <td className="px-3 py-2.5 text-right text-ink-muted">
-                                    {outbox?.relayAlive == null ? '—' : outbox.relayAlive ? 'relay live' : 'relay dead'}
-                                </td>
+                                <td className="px-3 py-2.5 text-right text-ink-muted">{outbox?.relayAlive == null ? '—' : outbox.relayAlive ? 'relay live' : 'relay dead'}</td>
                                 <td className="px-5 py-2.5 text-right text-ink-muted">—</td>
                             </tr>
                         </tbody>

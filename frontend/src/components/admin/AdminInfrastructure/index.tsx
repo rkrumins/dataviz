@@ -10,13 +10,40 @@
  */
 import { Activity, AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { SystemStatusSnapshot } from '@/services/systemStatusService'
+import type { OverviewSection, SystemStatusSnapshot } from '@/services/systemStatusService'
 import { useSystemStatus } from './useSystemStatus'
 import { ServiceTile } from './ServiceTile'
 import { ProjectionPanel } from './ProjectionPanel'
 import { StreamsPanel } from './StreamsPanel'
-import { IssuesPanel } from './IssuesPanel'
+import { GraphProvidersPanel } from './GraphProvidersPanel'
+import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { compactNum, formatAgeMs } from './meta'
+
+function OverviewStrip({ overview }: { overview: OverviewSection | null }) {
+    if (!overview) return null
+    const items: { label: string; value: string | number | undefined }[] = [
+        { label: 'Workspaces', value: overview.workspaces },
+        { label: 'Data sources', value: overview.dataSources },
+        { label: 'Providers', value: overview.providers ? `${overview.providers.active}/${overview.providers.total}` : undefined },
+        { label: 'Versioned graphs', value: overview.versionedGraphs },
+        { label: 'Open reviews', value: overview.openReviews },
+        { label: 'Commits', value: overview.commits },
+    ]
+    const shown = items.filter(i => i.value != null)
+    if (!shown.length) return null
+    return (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {shown.map(i => (
+                <div key={i.label} className="border border-glass-border rounded-xl bg-canvas-elevated px-4 py-3">
+                    <p className="text-xl font-bold text-ink tabular-nums">
+                        {typeof i.value === 'number' ? compactNum(i.value) : i.value}
+                    </p>
+                    <p className="text-[10px] text-ink-muted mt-0.5 uppercase tracking-wide">{i.label}</p>
+                </div>
+            ))}
+        </div>
+    )
+}
 
 const HERO = {
     healthy: {
@@ -153,12 +180,18 @@ export function AdminInfrastructure() {
                         </span>
                     </div>
 
+                    {/* System at a glance — inventory of the key components */}
+                    <OverviewStrip overview={data.overview} />
+
                     {/* Service grid */}
                     <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
                         {data.services.map(svc => (
                             <ServiceTile key={svc.key} svc={svc} history={history.get(`latency:${svc.key}`)} />
                         ))}
                     </div>
+
+                    {/* Graph data providers (any type — FalkorDB, Neo4j, …) */}
+                    <GraphProvidersPanel providers={data.graphProviders} />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -187,9 +220,11 @@ export function AdminInfrastructure() {
                         />
                     </div>
 
-                    <ProjectionPanel projection={data.projection} />
+                    {/* Diagnostics & remediation — what's wrong, why, how to fix */}
+                    <DiagnosticsPanel snapshot={data} />
+
+                    <ProjectionPanel projection={data.projection} providers={data.graphProviders} />
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
-                    <IssuesPanel snapshot={data} />
                 </div>
             ) : null}
         </div>
