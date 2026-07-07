@@ -882,17 +882,18 @@ async def probe_projection_lag() -> Optional[dict]:
         ProjectionStateORM.projected_commit_seq, 0)
     status = func.coalesce(ProjectionStateORM.status, "idle")
 
+    err = ProjectionStateORM.last_error.isnot(None)
     agg_stmt = (
         select(
             func.count().label("total"),
-            func.count().filter(lag <= 0).label("fresh"),
-            func.count().filter(and_(lag > 0, status == "idle")).label("lagging"),
+            # in sync = caught up AND no projection error (mutually exclusive
+            # with failed, so the chips read consistently).
+            func.count().filter(and_(lag <= 0, ~err)).label("fresh"),
+            func.count().filter(and_(lag > 0, status == "idle", ~err)).label("lagging"),
             func.count().filter(status == "projecting").label("projecting"),
             func.count().filter(status == "rebuilding").label("rebuilding"),
             func.count().filter(status == "evicted").label("evicted"),
-            func.count().filter(
-                and_(ProjectionStateORM.last_error.isnot(None), lag > 0)
-            ).label("failed"),
+            func.count().filter(err).label("failed"),
             func.coalesce(func.max(lag), 0).label("max_lag"),
         )
         .select_from(GraphORM)

@@ -166,7 +166,10 @@ export interface OverviewSection {
     workspaces?: number
     dataSources?: number
     providers?: { total: number; active: number }
+    /** Graphs backed by a data source that still exists (live). */
     versionedGraphs?: number
+    /** Graphs whose data source was deleted — no GC, so they accumulate. */
+    orphanedGraphs?: number
     openReviews?: number
     commits?: number
 }

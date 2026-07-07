@@ -21,11 +21,14 @@ import { compactNum, formatAgeMs } from './meta'
 
 function OverviewStrip({ overview }: { overview: OverviewSection | null }) {
     if (!overview) return null
-    const items: { label: string; value: string | number | undefined }[] = [
+    const items: { label: string; value: string | number | undefined; sub?: string }[] = [
         { label: 'Workspaces', value: overview.workspaces },
         { label: 'Data sources', value: overview.dataSources },
-        { label: 'Providers', value: overview.providers ? `${overview.providers.active}/${overview.providers.total}` : undefined },
-        { label: 'Versioned graphs', value: overview.versionedGraphs },
+        { label: 'Providers', value: overview.providers ? `${overview.providers.active}/${overview.providers.total}` : undefined, sub: 'active / total' },
+        {
+            label: 'Versioned graphs', value: overview.versionedGraphs,
+            sub: overview.orphanedGraphs ? `${compactNum(overview.orphanedGraphs)} orphaned` : undefined,
+        },
         { label: 'Open reviews', value: overview.openReviews },
         { label: 'Commits', value: overview.commits },
     ]
@@ -39,6 +42,7 @@ function OverviewStrip({ overview }: { overview: OverviewSection | null }) {
                         {typeof i.value === 'number' ? compactNum(i.value) : i.value}
                     </p>
                     <p className="text-[10px] text-ink-muted mt-0.5 uppercase tracking-wide">{i.label}</p>
+                    {i.sub && <p className="text-[10px] text-ink-muted/70 mt-0.5">{i.sub}</p>}
                 </div>
             ))}
         </div>
