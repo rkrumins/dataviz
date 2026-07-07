@@ -210,6 +210,26 @@ export function buildDiagnostics(snap: SystemStatusSnapshot): Insight[] {
         })
     }
 
+    // ── Orphaned versioned graphs (no GC) ──
+    const orphaned = snap.overview?.orphanedGraphs ?? 0
+    if (orphaned > 0) {
+        out.push({
+            id: 'orphaned-graphs',
+            severity: 'info',
+            category: 'Storage',
+            title: `${orphaned.toLocaleString()} orphaned versioned graphs`,
+            symptom: `${orphaned.toLocaleString()} graphs reference a data source that no longer exists. They're excluded from the live counts above but still occupy storage (commits, versions, history).`,
+            why: [
+                'The versioning store has no garbage collection — deleting a data source leaves its graph, commits and history behind rather than removing them.',
+                'Dev/test seed graphs that were never tied to a real data source also accumulate here.',
+            ],
+            resolution: [
+                'Run (or schedule) a cleanup that drops graphver rows whose data_source_id no longer exists in the management DB.',
+                'Until GC ships this grows unbounded — a periodic prune reclaims the storage.',
+            ],
+        })
+    }
+
     // ── Stats polling overdue ──
     if ((snap.statsPolling?.overdue ?? 0) > 0) {
         out.push({
