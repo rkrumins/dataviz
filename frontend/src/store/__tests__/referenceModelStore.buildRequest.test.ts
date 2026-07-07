@@ -38,12 +38,12 @@ describe('referenceModelStore — buildAssignmentRequest (compute-request adapte
             entityScope: 'all',
         })
 
-        const cfg = req.assignments!['urn:b']
+        const cfg = req.assignments!['urn:b']!
         expect(cfg.entityId).toBe('urn:b')
         expect(cfg.priority).toBe(1000)
         expect(cfg.assignedBy).toBe('user')
         expect(typeof cfg.assignedAt).toBe('string')
-        expect(cfg.assignedAt.length).toBeGreaterThan(0)
+        expect(cfg.assignedAt!.length).toBeGreaterThan(0)
     })
 
     it("collapses an 'import' provenance to 'user' (EntityAssignmentConfig has no 'import')", () => {
@@ -51,8 +51,8 @@ describe('referenceModelStore — buildAssignmentRequest (compute-request adapte
             assignments: { 'urn:c': { layerId: 'L1', inheritsChildren: false, assignedBy: 'import' } },
             entityScope: 'curated',
         })
-        expect(req.assignments!['urn:c'].assignedBy).toBe('user')
-        expect(req.assignments!['urn:c'].inheritsChildren).toBe(false)
+        expect(req.assignments!['urn:c']!.assignedBy).toBe('user')
+        expect(req.assignments!['urn:c']!.inheritsChildren).toBe(false)
     })
 
     it('empty assignments → empty request map, scope threaded', () => {
