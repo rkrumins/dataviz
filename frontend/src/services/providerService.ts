@@ -129,7 +129,8 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     tcp_refused: "Connection refused — the server at the configured host/port is not reachable. Verify the address and that the database is running.",
     connect_timeout: "Connection timed out — the server did not respond within the budget. Check that the host is accessible from this network.",
     tls_handshake: "TLS/SSL error — could not establish a secure connection. Check certificates and that TLS settings match the server configuration.",
-    auth_failed: "Authentication failed — the server rejected the provided credentials. Verify username and password.",
+    auth_required: "This server requires authentication, but no credentials were provided. Add a username and password, then test again.",
+    auth_failed: "Authentication failed — the server rejected the provided credentials. Verify that the username and password are correct.",
     network_unreachable: "Network unreachable — the host is on a network this service cannot route to.",
     empty_reply: "The server accepted the connection but sent no reply — likely a protocol mismatch.",
     warmup_wall_clock_exceeded: "The connectivity probe exceeded its wall-clock budget. The provider may be overloaded.",
@@ -179,7 +180,14 @@ export function friendlyError(raw: string): string {
         return FRIENDLY_BY_CODE.connect_timeout
     if (lower.includes('name or service not known') || lower.includes('nodename nor servname') || lower.includes('getaddrinfo'))
         return FRIENDLY_BY_CODE.dns_unresolvable
-    if (lower.includes('authentication') || lower.includes('auth') || lower.includes('wrong password') || lower.includes('invalid credentials'))
+    // Distinguish "credentials rejected" from "server requires auth, none
+    // given" for legacy raw driver strings (the BE now sends auth_failed /
+    // auth_required codes directly, handled by the code lookup above).
+    if (lower.includes('wrongpass') || lower.includes('invalid username-password') || lower.includes('wrong password') || lower.includes('invalid credentials') || lower.includes('invalid password'))
+        return FRIENDLY_BY_CODE.auth_failed
+    if (lower.includes('noauth') || lower.includes('authentication required') || lower.includes('authentication is required'))
+        return FRIENDLY_BY_CODE.auth_required
+    if (lower.includes('authentication') || lower.includes('auth'))
         return FRIENDLY_BY_CODE.auth_failed
     if (lower.includes('ssl') || lower.includes('tls') || lower.includes('certificate'))
         return FRIENDLY_BY_CODE.tls_handshake
@@ -294,9 +302,10 @@ export const providerService = {
      * fresh, stale, computing, or unavailable. `data` is null on
      * computing / unavailable.
      */
-    listAssets(id: string): Promise<Envelope<AssetListPayload>> {
+    listAssets(id: string, signal?: AbortSignal): Promise<Envelope<AssetListPayload>> {
         return request<Envelope<AssetListPayload>>(
             `${INSIGHTS_API}/providers/${id}/assets`,
+            { signal },
         )
     },
 
@@ -308,9 +317,11 @@ export const providerService = {
     getAssetStats(
         providerId: string,
         assetName: string,
+        signal?: AbortSignal,
     ): Promise<Envelope<AssetStatsPayload>> {
         return request<Envelope<AssetStatsPayload>>(
             `${INSIGHTS_API}/providers/${providerId}/assets/${encodeURIComponent(assetName)}/stats`,
+            { signal },
         )
     },
 
@@ -339,6 +350,7 @@ export const providerService = {
      */
     refreshAllAssets(
         providerId: string,
+        assetNames?: string[],
     ): Promise<{
         provider_id: string
         jobs_queued: number
@@ -348,7 +360,15 @@ export const providerService = {
     }> {
         return request(
             `${INSIGHTS_API}/providers/${providerId}/assets/refresh`,
-            { method: 'POST' },
+            {
+                method: 'POST',
+                // Scope the per-asset fan-out to what the user is
+                // looking at; omitting the body keeps the legacy
+                // refresh-everything behavior.
+                ...(assetNames
+                    ? { body: JSON.stringify({ asset_names: assetNames }) }
+                    : {}),
+            },
         )
     },
 

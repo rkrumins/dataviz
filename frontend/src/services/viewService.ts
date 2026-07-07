@@ -55,8 +55,21 @@ export interface ViewServiceResult<T> {
 
 /**
  * Build the view config blob from the local request format.
+ *
+ * `base` — the view's CURRENT full config, passed only on update. When
+ * present, `layout.referenceLayout` is preserved VERBATIM rather than
+ * rebuilt from `request.layers` — layout goes exclusively through
+ * `updateViewLayout` now, so this is the single writer invariant: a plain
+ * `updateView` call must never clobber layers/assignments the layout
+ * endpoint owns. On create there is no prior layout to preserve, so the
+ * request's layers seed it directly (the wizard's immediate follow-up
+ * `updateViewLayout` call writes the full layout anyway).
  */
-function buildViewConfig(request: CreateViewRequest | UpdateViewRequest): Record<string, unknown> {
+function buildViewConfig(
+    request: CreateViewRequest | UpdateViewRequest,
+    base?: Record<string, unknown>,
+): Record<string, unknown> {
+    const baseReferenceLayout = (base?.layout as { referenceLayout?: unknown } | undefined)?.referenceLayout
     return {
         icon: request.icon ?? 'Layout',
         content: {
@@ -74,9 +87,9 @@ function buildViewConfig(request: CreateViewRequest | UpdateViewRequest): Record
                 nodeSpacing: 60,
                 levelSpacing: 120,
             } : undefined,
-            referenceLayout: request.layoutType === 'reference' ? {
-                layers: request.layers ?? [],
-            } : undefined,
+            referenceLayout: request.layoutType === 'reference'
+                ? (base ? baseReferenceLayout : { layers: request.layers ?? [], assignments: {} })
+                : undefined,
             lod: { enabled: false, levels: [] },
         },
         filters: {
@@ -122,14 +135,23 @@ class ViewServiceImpl {
 
     /**
      * Update an existing view, then sync to local store.
+     *
+     * `base` — the view's current full config (e.g. `View.config` from a prior
+     * fetch), so `buildViewConfig` can preserve `layout.referenceLayout`
+     * verbatim instead of rebuilding it from `request.layers`. Omit only for
+     * callers that never touch a reference-layout view.
      */
-    async updateView(id: string, request: UpdateViewRequest): Promise<ViewServiceResult<ViewConfiguration>> {
+    async updateView(
+        id: string,
+        request: UpdateViewRequest,
+        base?: Record<string, unknown>,
+    ): Promise<ViewServiceResult<ViewConfiguration>> {
         try {
             const result = await viewApi.updateView(id, {
                 name: request.name,
                 contextModelId: request.contextModelId,
                 ...(request.layoutType && { viewType: request.layoutType }),
-                config: buildViewConfig(request),
+                config: buildViewConfig(request, base),
                 visibility: request.visibility,
                 tags: request.tags,
             })

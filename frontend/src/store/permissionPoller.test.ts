@@ -36,11 +36,18 @@ vi.mock('@/services/authService', () => ({
 }))
 
 const setPermissionsMock = vi.fn()
-vi.mock('@/store/auth', () => ({
-    useAuthStore: {
-        getState: () => ({ setPermissions: setPermissionsMock }),
-    },
-}))
+vi.mock('@/store/auth', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@/store/auth')>()
+    return {
+        ...actual,
+        // Only the store is stubbed; ``claimsSnapshot`` stays the real
+        // export so the permuted-keys test exercises the actual shared
+        // canonicalizer the poller uses in production.
+        useAuthStore: {
+            getState: () => ({ setPermissions: setPermissionsMock }),
+        },
+    }
+})
 
 const invalidateQueriesMock = vi.fn(async () => undefined)
 vi.mock('@/main', () => ({

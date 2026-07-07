@@ -16,14 +16,14 @@ import asyncio
 import logging
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import resilience
-from backend.app.db.engine import PoolRole, get_session_factory
+from backend.app.db.engine import get_jobs_session, get_readonly_session
 from backend.app.db.models import (
     AssetDiscoveryCacheORM,
     DataSourcePollingConfigORM,
@@ -34,12 +34,13 @@ from backend.app.db.models import (
 
 from .config import StatsServiceConfig
 from .redis_streams import (
+    STATS_DEEP_STREAM,
     XAUTOCLAIM_MIN_IDLE_MS,
     enqueue,
     trim_streams_by_minid,
     try_claim,
 )
-from .schemas import StatsJobEnvelope
+from .schemas import StatsDeepJobEnvelope, StatsJobEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ class TickSummary:
     enqueued: int
     skipped_dedup: int
     materialized: int
+    deep_due: int = 0
+    deep_enqueued: int = 0
 
 
 _last_tick: Optional[TickSummary] = None
@@ -114,18 +117,64 @@ def _is_due(config: DataSourcePollingConfigORM, now: datetime, min_interval_secs
     return (now - last).total_seconds() >= interval
 
 
+def _is_deep_due(
+    config: DataSourcePollingConfigORM,
+    schema_updated_at: Optional[str],
+    now: datetime,
+    min_interval_secs: int,
+) -> bool:
+    """Deep-facet due-ness is driven by ``data_source_stats.schema_updated_at``
+    (stamped only by a completed deep poll), not the polling config's
+    ``last_polled_at`` (which the cheap counts facet owns)."""
+    if not config.is_enabled:
+        return False
+    if not schema_updated_at:
+        return True
+    try:
+        last = datetime.fromisoformat(schema_updated_at)
+    except ValueError:
+        return True
+    interval = max(config.interval_seconds or 0, min_interval_secs)
+    return (now - last).total_seconds() >= interval
+
+
+def _claim_ttl(config: StatsServiceConfig, node_count: Optional[int]) -> int:
+    """Size-aware dedup-claim TTL: ``clamp(2 × poll timeout, 180, dedup_ttl)``.
+
+    The flat 1200s TTL meant a crashed worker blocked re-enqueue for up
+    to 20 minutes even for a 2-second small-graph poll. Sizing by the
+    resolved poll timeout keeps the duplicate-poll protection for large
+    graphs while small graphs (the common case) recover in ≤3 minutes.
+    """
+    timeout = config.resolve_poll_timeout(int(node_count or 0))
+    return int(max(180, min(2 * timeout, config.dedup_ttl_secs)))
+
+
 async def _tick(config: StatsServiceConfig) -> TickSummary:
-    """Single scheduler pass. Returns a summary of what was seen and done."""
-    factory = get_session_factory(PoolRole.JOBS)
+    """Single scheduler pass. Routes each active data source to up to
+    two job kinds: a cheap counts poll (``stats_poll``, due off the
+    polling config) and a deep schema poll (``stats_deep``, due off
+    ``data_source_stats.schema_updated_at``). Returns a summary."""
     seen = due = enqueued = skipped_dedup = materialized = 0
+    deep_due = deep_enqueued = 0
     now = datetime.now(timezone.utc)
 
-    async with factory() as session:
+    async with get_jobs_session() as session:
         result = await session.execute(
-            select(WorkspaceDataSourceORM, DataSourcePollingConfigORM)
+            select(
+                WorkspaceDataSourceORM,
+                DataSourcePollingConfigORM,
+                DataSourceStatsORM.node_count,
+                DataSourceStatsORM.schema_updated_at,
+            )
             .join(
                 DataSourcePollingConfigORM,
                 WorkspaceDataSourceORM.id == DataSourcePollingConfigORM.data_source_id,
+                isouter=True,
+            )
+            .join(
+                DataSourceStatsORM,
+                WorkspaceDataSourceORM.id == DataSourceStatsORM.data_source_id,
                 isouter=True,
             )
             .where(WorkspaceDataSourceORM.is_active.is_(True))
@@ -133,37 +182,52 @@ async def _tick(config: StatsServiceConfig) -> TickSummary:
         rows = result.all()
         seen = len(rows)
 
-        for ds, polling_config in rows:
+        for ds, polling_config, node_count, schema_updated_at in rows:
             if polling_config is None:
                 polling_config = await _materialize_config(
                     session, ds.id, config.default_interval_secs, config.min_interval_secs
                 )
                 materialized += 1
 
-            if not _is_due(polling_config, now, config.min_interval_secs):
-                continue
-            due += 1
+            ttl = _claim_ttl(config, node_count)
 
-            claimed = await try_claim(ds.id, ttl_secs=config.dedup_ttl_secs)
-            if not claimed:
-                # Another replica already enqueued, or a previous job is
-                # still in-flight. Silently skip.
-                skipped_dedup += 1
-                continue
+            if _is_due(polling_config, now, config.min_interval_secs):
+                due += 1
+                if await try_claim(ds.id, ttl_secs=ttl):
+                    envelope = StatsJobEnvelope(
+                        data_source_id=ds.id,
+                        workspace_id=ds.workspace_id,
+                        enqueued_at=now,
+                    )
+                    msg_id = await enqueue(envelope.to_stream_fields())
+                    logger.info(
+                        "Enqueued stats job for ds=%s (workspace=%s, msg_id=%s)",
+                        ds.id, ds.workspace_id, msg_id,
+                    )
+                    enqueued += 1
+                else:
+                    # Another replica already enqueued, or a previous job
+                    # is still in-flight. Silently skip.
+                    skipped_dedup += 1
 
-            envelope = StatsJobEnvelope(
-                data_source_id=ds.id,
-                workspace_id=ds.workspace_id,
-                enqueued_at=now,
-            )
-            msg_id = await enqueue(envelope.to_stream_fields())
-            logger.info(
-                "Enqueued stats job for ds=%s (workspace=%s, msg_id=%s)",
-                ds.id, ds.workspace_id, msg_id,
-            )
-            enqueued += 1
-
-        await session.commit()
+            if _is_deep_due(polling_config, schema_updated_at, now, config.min_interval_secs):
+                deep_due += 1
+                if await try_claim(ds.id, ttl_secs=ttl, stream=STATS_DEEP_STREAM):
+                    deep_envelope = StatsDeepJobEnvelope(
+                        data_source_id=ds.id,
+                        workspace_id=ds.workspace_id,
+                        enqueued_at=now,
+                    )
+                    msg_id = await enqueue(
+                        deep_envelope.to_stream_fields(), stream=STATS_DEEP_STREAM,
+                    )
+                    logger.info(
+                        "Enqueued deep stats job for ds=%s (workspace=%s, msg_id=%s)",
+                        ds.id, ds.workspace_id, msg_id,
+                    )
+                    deep_enqueued += 1
+                else:
+                    skipped_dedup += 1
 
     return TickSummary(
         seen=seen,
@@ -171,6 +235,8 @@ async def _tick(config: StatsServiceConfig) -> TickSummary:
         enqueued=enqueued,
         skipped_dedup=skipped_dedup,
         materialized=materialized,
+        deep_due=deep_due,
+        deep_enqueued=deep_enqueued,
     )
 
 
@@ -189,8 +255,10 @@ async def run_scheduler(config: StatsServiceConfig, shutdown: asyncio.Event) -> 
             _last_tick = summary
             _last_tick_at = datetime.now(timezone.utc)
             logger.info(
-                "Scheduler tick: seen=%d due=%d enqueued=%d dedup_skipped=%d new_configs=%d",
+                "Scheduler tick: seen=%d due=%d enqueued=%d deep_due=%d "
+                "deep_enqueued=%d dedup_skipped=%d new_configs=%d",
                 summary.seen, summary.due, summary.enqueued,
+                summary.deep_due, summary.deep_enqueued,
                 summary.skipped_dedup, summary.materialized,
             )
         except asyncio.CancelledError:
@@ -206,13 +274,38 @@ async def run_scheduler(config: StatsServiceConfig, shutdown: asyncio.Event) -> 
     logger.info("Stats scheduler stopped")
 
 
-async def get_known_node_counts() -> dict[str, int]:
-    """Return {ds_id: node_count} from the stats cache. Used by the
-    worker to size poll timeouts. Read-only; safe on the READONLY pool."""
-    factory = get_session_factory(PoolRole.READONLY)
-    async with factory() as session:
-        result = await session.execute(select(DataSourceStatsORM))
-        return {row.data_source_id: (row.node_count or 0) for row in result.scalars()}
+async def get_due_backlog() -> dict:
+    """SQL-derived staleness gauges for /health: how many enabled
+    sources are past their poll interval, and how far the most overdue
+    one is. Independent of the Redis stream metrics — this is the
+    detector for stale-forever rows when stream depths look healthy
+    (or after a Redis flush wiped the queues)."""
+    now = datetime.now(timezone.utc)
+    async with get_readonly_session() as session:
+        rows = (
+            (await session.execute(select(DataSourcePollingConfigORM)))
+            .scalars()
+            .all()
+        )
+    backlog = 0
+    oldest_overdue_secs = 0
+    for cfg in rows:
+        if not cfg.is_enabled:
+            continue
+        if not cfg.last_polled_at:
+            backlog += 1
+            continue
+        try:
+            last = datetime.fromisoformat(cfg.last_polled_at)
+        except ValueError:
+            backlog += 1
+            continue
+        interval = max(cfg.interval_seconds or 0, 60)
+        overdue = (now - last).total_seconds() - interval
+        if overdue > 0:
+            backlog += 1
+            oldest_overdue_secs = max(oldest_overdue_secs, int(overdue))
+    return {"due_backlog": backlog, "oldest_overdue_secs": oldest_overdue_secs}
 
 
 # ── Periodic stream trim ────────────────────────────────────────────
@@ -259,7 +352,66 @@ async def run_trim_scheduler(shutdown: asyncio.Event) -> None:
                     stream_name, result.trimmed,
                 )
 
+        # Piggyback the purge reconcile on the trim cadence — both are
+        # hourly-scale hygiene passes.
+        try:
+            requeued = await _reconcile_stuck_purges()
+            if requeued:
+                logger.warning(
+                    "purge_reconcile: requeued %d stuck purge job(s)", requeued,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("purge_reconcile failed: %s", exc, exc_info=True)
+
     logger.info("Trim scheduler stopped")
+
+
+# A purge row stuck at pending/running with no update for this long has
+# lost its stream message (Redis flush, DLQ'd without terminal write, or
+# a crashed worker whose claim expired without redelivery). 30 minutes
+# sits far above any legitimate purge checkpoint cadence.
+_PURGE_RECONCILE_STALE_SECS = float(os.getenv("PURGE_RECONCILE_STALE_SECS", "1800"))
+
+
+async def _reconcile_stuck_purges() -> int:
+    """Re-enqueue purge jobs wedged at ``pending``/``running``.
+
+    The durable ``aggregation_jobs`` row is the source of truth — a
+    wiped Redis stream message must not leave the row (and its 409
+    duplicate-purge guard) stuck forever. Idempotent: the purge handler
+    skips terminal rows and its MATCH...DELETE is safe to repeat.
+    """
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    from .enqueue import enqueue_purge_job_force
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=_PURGE_RECONCILE_STALE_SECS)
+    ).isoformat()
+    async with get_readonly_session() as session:
+        rows = (
+            await session.execute(
+                select(
+                    AggregationJobORM.id,
+                    AggregationJobORM.data_source_id,
+                    AggregationJobORM.workspace_id,
+                ).where(
+                    AggregationJobORM.trigger_source == "purge",
+                    AggregationJobORM.status.in_(("pending", "running")),
+                    AggregationJobORM.updated_at < cutoff,
+                )
+            )
+        ).all()
+
+    requeued = 0
+    for job_id, ds_id, ws_id in rows:
+        msg_id = await enqueue_purge_job_force(job_id, ds_id, ws_id or "")
+        if msg_id:
+            requeued += 1
+            logger.warning("purge_reconcile.requeued job_id=%s ds=%s", job_id, ds_id)
+    return requeued
 
 
 # ── Discovery scheduler (background asset cache refresh) ────────────
@@ -330,20 +482,35 @@ _DISCOVERY_BOOTSTRAP_DELAY_SECS = float(
 )
 
 
+# When true (default), the background sweep's per-asset stats refresh
+# is limited to REGISTERED assets (those with a catalog entry) — the
+# ones users actually monitor. Unregistered assets refresh on demand
+# only: their rows serve from cache while stale and self-heal (hot
+# lane) when someone views them past the 7-day absolute expiry. Cuts
+# the sweep's standing provider load from every-cached-asset to
+# what's-actually-in-use.
+_SWEEP_REGISTERED_ONLY = (
+    os.getenv("DISCOVERY_SWEEP_REGISTERED_ONLY", "true").lower()
+    in ("1", "true", "yes", "on")
+)
+
+
 async def _discovery_tick() -> DiscoveryTickSummary:
     """Single discovery scheduler pass.
 
-    Reads active providers + every cached row and enqueues a discovery
-    refresh for each. Dedup is naturally handled by the SET NX claim
-    inside ``enqueue_discovery_job_safe``; if a worker is already
-    mid-job for ``(provider_id, asset_name)`` the call returns ``None``
-    and we count it as ``dedup_skipped``.
+    Enqueues a list-all refresh per active provider, plus per-asset
+    stats refreshes for registered assets (all cached assets when
+    ``DISCOVERY_SWEEP_REGISTERED_ONLY=false``). Dedup is naturally
+    handled by the SET NX claim inside ``enqueue_discovery_job_safe``;
+    if a worker is already mid-job for ``(provider_id, asset_name)``
+    the call returns ``None`` and we count it as ``dedup_skipped``.
     """
     # Lazy import: avoid circular module-graph at process start.
     from .enqueue import enqueue_discovery_job_safe
 
-    factory = get_session_factory(PoolRole.READONLY)
-    async with factory() as session:
+    from backend.app.db.models import CatalogItemORM
+
+    async with get_readonly_session() as session:
         provider_rows = await session.execute(
             select(ProviderORM.id).where(ProviderORM.is_active.is_(True))
         )
@@ -359,6 +526,15 @@ async def _discovery_tick() -> DiscoveryTickSummary:
             (row[0], row[1]) for row in cached_rows.all()
         ]
 
+        registered: set[tuple[str, str]] | None = None
+        if _SWEEP_REGISTERED_ONLY:
+            reg_rows = await session.execute(
+                select(CatalogItemORM.provider_id, CatalogItemORM.source_identifier)
+            )
+            registered = {
+                (row[0], row[1]) for row in reg_rows.all() if row[1]
+            }
+
     list_jobs = asset_jobs = dedup_skipped = 0
 
     # 1. List-all sentinel for every active provider — refreshes the
@@ -370,10 +546,12 @@ async def _discovery_tick() -> DiscoveryTickSummary:
         else:
             dedup_skipped += 1
 
-    # 2. Per-asset stats refresh for every row already in the cache.
-    #    Skip the empty-string sentinel (already enqueued above).
+    # 2. Per-asset stats refresh. Skip the empty-string sentinel
+    #    (already enqueued above) and, by default, unregistered assets.
     for provider_id, asset_name in cached_pairs:
         if not asset_name:
+            continue
+        if registered is not None and (provider_id, asset_name) not in registered:
             continue
         msg_id = await enqueue_discovery_job_safe(provider_id, asset_name)
         if msg_id is not None:

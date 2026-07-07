@@ -88,6 +88,18 @@ try:  # pragma: no cover - redis is always installed in practice
 except Exception:  # pragma: no cover
     _TRANSIENT_REDIS_EXC = ()
 
+# BusyLoadingError (subclass of redis ConnectionError) is raised while
+# FalkorDB replays its RDB snapshot into memory on restart — a transient,
+# self-resolving "warming up" state, NOT a real outage. Matched by identity
+# so it can be split off from the generic transient-connection path (which
+# would retry it for ~1.75s and then trip the breaker on a load that takes
+# many seconds). See _is_loading_error below.
+try:  # pragma: no cover - redis is always installed in practice
+    from redis.exceptions import BusyLoadingError as _RedisBusyLoadingError
+    _LOADING_REDIS_EXC: tuple = (_RedisBusyLoadingError,)
+except Exception:  # pragma: no cover
+    _LOADING_REDIS_EXC = ()
+
 
 def _is_cluster_routing_error(exc: BaseException) -> bool:
     """True when *exc* (or its cause) is a cluster slot-moved/ASK/down error
@@ -120,6 +132,18 @@ def _is_transient_connection_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_null_handle_error(exc: BaseException) -> bool:
+    """True when *exc* is a ``NoneType`` attribute error from dereferencing a
+    graph handle that was nulled mid-flight — e.g. the ProviderManager evicted
+    and ``close()``-d this instance during a ``_run_guarded`` retry backoff.
+    Treated as reconnect-and-retry rather than a hard failure."""
+    return (
+        isinstance(exc, AttributeError)
+        and "NoneType" in str(exc)
+        and ("query" in str(exc) or "ro_query" in str(exc) or "select_graph" in str(exc))
+    )
+
+
 def _is_missing_graph_error(exc: BaseException) -> bool:
     """True when *exc* indicates the FalkorDB graph KEY does not exist yet.
 
@@ -137,6 +161,26 @@ def _is_missing_graph_error(exc: BaseException) -> bool:
             break
         msg = str(seen).lower()
         if "empty key" in msg and "graph" in msg:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def _is_loading_error(exc: BaseException) -> bool:
+    """True when *exc* is FalkorDB reporting it is loading its dataset into
+    memory (RDB replay on restart) — a transient, self-resolving "warming"
+    state, NOT an outage. Matched by isinstance against redis
+    ``BusyLoadingError`` AND by message (``LOADING Redis is loading the
+    dataset in memory``) since the signal can arrive wrapped. Walks the
+    ``__cause__``/``__context__`` chain like the siblings above.
+    """
+    seen = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        if _LOADING_REDIS_EXC and isinstance(seen, _LOADING_REDIS_EXC):
+            return True
+        if "loading the dataset in memory" in str(seen).lower():
             return True
         seen = seen.__cause__ or seen.__context__
     return False
@@ -175,6 +219,24 @@ def _normalize_falkordb_host(host: Optional[str]) -> str:
     ).strip().lower() not in ("1", "true", "yes"):
         return "127.0.0.1"
     return h
+
+
+def resolve_falkordb_target(host: Optional[str], port: Optional[int]) -> Tuple[str, int]:
+    """Single host/port resolution path for a FalkorDB provider.
+
+    Composes ``apply_local_dev_falkordb_override`` (Docker hostname → host,
+    opt-in for host-run dev processes) then ``_normalize_falkordb_host``
+    (env Docker→host rewrite / IPv4 pin), in that exact order — the same
+    composition every call site previously assembled inline (provider
+    creation, projection registry resolve, registry key-list). Consolidating
+    here is what guarantees a given ``(host, port)`` resolves to the SAME
+    target in every process, so the read instance and the projection
+    instance can no longer drift apart.
+    """
+    from .manager import apply_local_dev_falkordb_override
+    host, port = apply_local_dev_falkordb_override(host, port)
+    host = _normalize_falkordb_host(host)
+    return host, port
 
 
 def _redact_redis_url(url: str) -> str:
@@ -257,6 +319,13 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "urn", "entityType", "displayName", "qualifiedName", "description",
     "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
     "level", "levelDigest",
+    # Denormalised internal fields the write paths SET directly on the node
+    # (provider save + FalkorDB projector). They are NOT user properties and
+    # not GraphNode fields, so without reserving them the read-path treats them
+    # as user `properties` — surfacing `entityId` (the raw urn) and
+    # `searchableText` ("<displayName> <qualifiedName> …") in the Properties
+    # panel. This leak hit every node a post-merge full re-seed rewrote.
+    "entityId", "searchableText",
     "properties",      # legacy blob — read path no longer hydrates from it
     "propertiesRaw",   # native escape hatch for non-scalar property values
 })
@@ -314,6 +383,27 @@ def _split_user_properties(
             collided,
         )
     return native, json.dumps(residual)
+
+
+def _sanitize_node_properties(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Drop reserved keys from a node payload's nested ``properties`` dict on the WRITE path.
+
+    The read path mirrors denormalised top-level fields (``childCount``, ``tags``, …) INTO
+    ``properties``, and the canvas round-trips ``properties`` verbatim on save — so without this the
+    stored version-row ``properties`` accumulates reserved keys, which the projector then drops one by
+    one via :func:`_split_user_properties`, logging ``user-property keys collided with reserved node
+    keys`` for every node. Sanitising on write keeps stored payloads to exactly the keys the projector
+    would keep, silencing that flood and closing the pollution channel (same class as the earlier
+    ``{id, confidence}`` corruption). Only the nested ``properties`` is touched — legitimate top-level
+    fields (``urn``/``displayName``/``childCount``/…) are untouched. Returns the original payload
+    unchanged when nothing is reserved (so hashes for already-clean payloads are byte-identical)."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("properties"), dict):
+        return payload
+    props = payload["properties"]
+    clean = {k: v for k, v in props.items() if k not in _RESERVED_NODE_KEYS}
+    if len(clean) == len(props):
+        return payload
+    return {**payload, "properties": clean}
 
 
 def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
@@ -423,6 +513,8 @@ class FalkorDBProvider(GraphDataProvider):
         password: Optional[str] = None,
         connection_config: Optional[dict] = None,
         cache_redis_url: Optional[str] = None,
+        auth_enabled: bool = True,
+        tls_enabled: bool = False,
     ):
         # IPv6 dual-stack guard: "localhost" resolves to BOTH ::1 and
         # 127.0.0.1, and Docker commonly publishes IPv4 only, so the redis
@@ -459,9 +551,28 @@ class FalkorDBProvider(GraphDataProvider):
         # breaker storms. They're now plumbed end-to-end:
         #   __init__ → preflight (RESP AUTH before PING)
         #            → _ensure_connected (driver auth via from_url args)
-        self._username = username
-        self._password = password
+        #
+        # Per-provider auth gate (extra_config.falkordbConnection.authEnabled,
+        # default true). When auth is DISABLED for this provider, null the
+        # FalkorDB graph credentials at this single chokepoint so NOTHING
+        # downstream sends AUTH — the graph pool kwargs, preflight's AUTH-
+        # before-PING, load_connection_config(), and the cache-Redis fallback
+        # (which inherits cfg.username/password) all read these fields. This
+        # prevents credential leakage / NOAUTH storms against an
+        # unauthenticated FalkorDB. A dedicated cache_redis_url keeps its own
+        # embedded auth (separate server) and is intentionally NOT gated.
+        self._auth_enabled = auth_enabled
+        self._username = username if auth_enabled else None
+        self._password = password if auth_enabled else None
+        # Connection-level TLS toggle (the provider record's tls_enabled, plus
+        # the finer falkordbConnection.tls object resolved in _ensure_connected).
+        # Applies to the graph (all topologies), preflight, and the cache.
+        self._tls_enabled = tls_enabled
         self._graph = None
+        # In-flight guarded-op count. The ProviderManager's recovery eviction
+        # defers close() while this is > 0 so it cannot tear the pool out from
+        # under a running aggregation job (the 'NoneType has no query' race).
+        self._inflight = 0
         self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None       # Graph query pool (used by FalkorDB)
         self._redis_pool = None  # Separate pool for Redis data-structure ops (caching, SADD, etc.)
@@ -488,6 +599,30 @@ class FalkorDBProvider(GraphDataProvider):
         # (each ProviderManager cache key is (provider_id, graph_name)).
         self._aggregation_sub_batch_size: int = self._MERGE_SUB_BATCH_SIZE
         self._aggregation_sub_batch_under_target_run: int = 0
+
+        # AGGREGATED edge level-stamping state. Must live on every
+        # instance from construction — ``set_entity_type_levels`` (called
+        # by ContextEngine ontology resolution) reads ``_level_digest``
+        # before ``ensure_indices`` has necessarily run.
+        #
+        # The probe runs lazily — it needs the level map (and its digest)
+        # before it can ask "are stamps fresh?". `set_entity_type_levels`
+        # triggers the probe whenever the digest changes. Until then,
+        # ``_levels_backfilled`` stays None and the trace fast path uses
+        # the label-scan fallback (correct, slower).
+        #
+        # ``_level_digest`` is the SHA-256 of the entity_type→level map
+        # currently injected onto this provider. AGGREGATED edges carry
+        # ``r.levelDigest`` set to whatever digest was current when they
+        # were stamped; a mismatch means the ontology drifted and stamps
+        # need a re-run of backfill_aggregated_levels.py.
+        #
+        # ``_levels_warning_for_digest`` throttles the "edges not stamped"
+        # warning to at most one log line per (provider lifetime, digest)
+        # pair, so per-request probes don't spam.
+        self._levels_backfilled: Optional[bool] = None
+        self._level_digest: Optional[str] = None
+        self._levels_warning_for_digest: Optional[str] = None
 
         # Phase 1.6 — operator dial for the bulk-CREATE UNWIND batch
         # size. Env-var lets operators dial back per-call cost on graphs
@@ -605,6 +740,11 @@ class FalkorDBProvider(GraphDataProvider):
             return self._proj_graph
         return self._graph
 
+    def inflight_ops(self) -> int:
+        """Number of guarded graph ops currently executing. The manager uses
+        this to avoid closing a provider mid-job during recovery eviction."""
+        return self._inflight
+
     async def preflight(self, *, deadline_s: float = 1.5):
         """Fast reachability probe — TCP connect + Redis PING within
         ``deadline_s``. Does NOT touch the production pool, does NOT run
@@ -616,18 +756,61 @@ class FalkorDBProvider(GraphDataProvider):
         host fails fast (≤1.5s) instead of triggering 30-45s of half-
         blocking init in ``_ensure_connected``.
 
-        P1.6 — credential plumbing: when a password is configured,
+        P1.6 — credential plumbing: when a username/password is configured,
         ``redis_ping_preflight`` runs ``AUTH`` before ``PING``. Without
         this, an auth-protected FalkorDB would fail preflight with
         NOAUTH and trigger the same false breaker storm we're trying to
-        prevent for unreachable hosts.
+        prevent for unreachable hosts. When TLS is enabled, the probe
+        completes a real TLS handshake (else a TLS-only server is wrongly
+        marked unreachable). For sentinel/cluster the probe hits the first
+        configured node; connect() remains the authoritative topology check.
         """
         from backend.common.interfaces.preflight import redis_ping_preflight
-        return await redis_ping_preflight(
-            self._host, self._port,
-            deadline_s=deadline_s,
-            password=self._password,
+        from backend.app.providers.falkordb_connection import load_connection_config
+        from backend.common.adapters.redis_tls import build_ssl_context
+
+        # Resolve TLS/topology so preflight matches what connect() will use.
+        cfg = self._conn_cfg or load_connection_config(
+            self._connection_config,
+            host=self._host, port=self._port,
+            username=self._username, password=self._password,
+            tls_enabled=self._tls_enabled,
         )
+        host, port = self._host, self._port
+        if cfg.mode == "sentinel" and cfg.sentinel_nodes:
+            host, port = cfg.sentinel_nodes[0]
+        elif cfg.mode == "cluster" and cfg.cluster_nodes:
+            host, port = cfg.cluster_nodes[0]
+        return await redis_ping_preflight(
+            host, port,
+            deadline_s=deadline_s,
+            username=self._username,
+            password=self._password,
+            ssl_context=build_ssl_context(cfg.tls_settings()),
+        )
+
+    def _build_pool_kwargs(self, socket_timeout: float) -> dict:
+        """Graph connection-pool kwargs (sizing + timeouts + auth). TLS is
+        applied inside the connection factory (raw pools need
+        ``connection_class=SSLConnection``). Shared by the initial connect and
+        the failover rebuild so the two can never drift apart."""
+        graph_pool_size = (
+            (self._conn_cfg.graph_pool_size if self._conn_cfg else None)
+            or int(os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24"))
+        )
+        kw: dict = {
+            "max_connections": graph_pool_size,
+            "socket_connect_timeout": 2.0,
+            "socket_timeout": socket_timeout,
+            "decode_responses": True,
+        }
+        # P1.6 — auth so the pool issues AUTH transparently (else NOAUTH is
+        # mis-classified as a network failure and trips a false breaker).
+        if self._username:
+            kw["username"] = self._username
+        if self._password:
+            kw["password"] = self._password
+        return kw
 
     async def _ensure_connected(self):
         """Lazy connection to FalkorDB.
@@ -651,7 +834,7 @@ class FalkorDBProvider(GraphDataProvider):
             from backend.app.providers.falkordb_connection import (
                 load_connection_config,
                 build_graph_client,
-                build_cache_redis_fallback,
+                build_cache_client,
             )
 
             # Resolve the connection topology (standalone / sentinel /
@@ -660,36 +843,23 @@ class FalkorDBProvider(GraphDataProvider):
             # connection factory's adapter (the FalkorDB client only
             # accepts ``connection_pool=``). A single FalkorDB graph key
             # lives on one node, so cluster mode routes to the owning node.
+            # tls_enabled (+ falkordbConnection.tls) gives TLS/mTLS in every
+            # mode; resolved into self._conn_cfg so preflight/cache reuse it.
             self._conn_cfg = load_connection_config(
                 self._connection_config,
                 host=self._host, port=self._port,
                 username=self._username, password=self._password,
-            )
-            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. The
-            # default 10s is generous for reads but necessary for batch
-            # MERGE in the aggregation worker. Host/port are supplied by
-            # the factory per mode, so they're omitted from pool_kwargs.
-            # Per-provider overrides (from extra_config.falkordbConnection)
-            # take precedence over the process-wide env defaults.
-            graph_pool_size = self._conn_cfg.graph_pool_size or int(
-                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
+                tls_enabled=self._tls_enabled,
             )
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
             )
-            _graph_pool_kwargs: dict = {
-                "max_connections": graph_pool_size,
-                "socket_connect_timeout": 2.0,
-                "socket_timeout": socket_timeout,
-                "decode_responses": True,
-            }
-            # P1.6 — auth credentials propagated to the driver so the pool
-            # issues AUTH transparently (else NOAUTH is mis-classified as a
-            # network failure and trips a false breaker outage).
-            if self._username:
-                _graph_pool_kwargs["username"] = self._username
-            if self._password:
-                _graph_pool_kwargs["password"] = self._password
+            # FALKORDB_SOCKET_TIMEOUT bounds a single Cypher query. Auth + TLS
+            # are applied inside the connection factory (TLS via
+            # connection_class=SSLConnection on the raw pools); pool_kwargs
+            # carries only sizing/timeouts/auth/decode. Built once here and
+            # reused verbatim on failover rebuild.
+            _graph_pool_kwargs = self._build_pool_kwargs(socket_timeout)
             if self._conn_cfg.mode != "standalone":
                 logger.info(
                     "FalkorDB provider connecting graph %r via %s",
@@ -722,32 +892,22 @@ class FalkorDBProvider(GraphDataProvider):
             self._redis_available = True
             try:
                 if cache_redis_url:
-                    # CACHE_REDIS_URL embeds its own auth (e.g.
-                    # redis://:password@host:port/0) so we don't pass our
-                    # FalkorDB password here — the cache Redis is a separate
-                    # instance that may have separate credentials.
+                    # CACHE_REDIS_URL embeds its own auth/scheme — a separate
+                    # instance with possibly separate credentials. A rediss://
+                    # URL also picks up the connection's CA/client-cert (mTLS).
                     logger.info(
                         "FalkorDB provider using dedicated cache Redis %s "
                         "(decoupled from graph host %s:%s).",
                         _redact_redis_url(cache_redis_url), self._host, self._port,
                     )
-                    _raw_redis = Redis.from_url(
-                        cache_redis_url,
-                        max_connections=redis_pool_size,
-                        socket_connect_timeout=2.0,
-                        socket_timeout=socket_timeout,
-                        decode_responses=True,
-                    )
-                    self._redis_pool = None  # managed by from_url
                 else:
-                    # Cache Redis falls back to the FalkorDB instance — same
-                    # topology, same auth (P1.6). Dev-compat only: in
-                    # production CACHE_REDIS_URL MUST be set to a separate
-                    # Redis. Mode-aware via the connection factory:
-                    # standalone/sentinel build a fallback client; cluster
-                    # returns None (cache needs cross-slot SCAN/pipelines a
-                    # single node can't serve), and the provider degrades to
-                    # cache-disabled rather than misbehaving.
+                    # Cache Redis falls back to the FalkorDB topology — same
+                    # nodes, same auth/TLS. Dev-compat only: in production
+                    # CACHE_REDIS_URL SHOULD be set to a separate Redis. Mode-
+                    # aware via the connection factory: standalone/sentinel
+                    # build a single client; cluster builds a dedicated
+                    # RedisCluster cache client (the cache ops are single-key /
+                    # single-hash, so cluster-safe).
                     logger.warning(
                         "CACHE_REDIS_URL is not set; FalkorDB provider's "
                         "ancestor/URN caches will share the FalkorDB instance "
@@ -755,16 +915,18 @@ class FalkorDBProvider(GraphDataProvider):
                         "Set CACHE_REDIS_URL to a dedicated Redis in "
                         "production.", self._conn_cfg.describe(),
                     )
-                    _redis_pool_kwargs: dict = {
-                        "max_connections": redis_pool_size,
-                        "socket_connect_timeout": 2.0,
-                        "socket_timeout": socket_timeout,
-                        "decode_responses": True,
-                    }
-                    _raw_redis = build_cache_redis_fallback(
-                        self._conn_cfg, pool_kwargs=_redis_pool_kwargs,
-                    )
-                    self._redis_pool = None
+                _redis_pool_kwargs: dict = {
+                    "max_connections": redis_pool_size,
+                    "socket_connect_timeout": 2.0,
+                    "socket_timeout": socket_timeout,
+                    "decode_responses": True,
+                }
+                _raw_redis = build_cache_client(
+                    self._conn_cfg,
+                    cache_url=cache_redis_url,
+                    pool_kwargs=_redis_pool_kwargs,
+                )
+                self._redis_pool = None
                 # Wrap in TimeoutRedis — every async call and pipeline.execute()
                 # automatically gets an asyncio.wait_for() deadline. No call-site
                 # wrapping needed. See backend/common/adapters/timeout_redis.py.
@@ -912,19 +1074,9 @@ class FalkorDBProvider(GraphDataProvider):
             socket_timeout = self._conn_cfg.socket_timeout or float(
                 os.getenv("FALKORDB_SOCKET_TIMEOUT", "10")
             )
-            graph_pool_size = self._conn_cfg.graph_pool_size or int(
-                os.getenv("FALKORDB_GRAPH_POOL_SIZE", "24")
-            )
-            pool_kwargs: dict = {
-                "max_connections": graph_pool_size,
-                "socket_connect_timeout": 2.0,
-                "socket_timeout": socket_timeout,
-                "decode_responses": True,
-            }
-            if self._username:
-                pool_kwargs["username"] = self._username
-            if self._password:
-                pool_kwargs["password"] = self._password
+            # Same kwargs as the initial connect (auth; TLS re-applied inside
+            # the factory) so failover never drops credentials or TLS.
+            pool_kwargs = self._build_pool_kwargs(socket_timeout)
 
             old_pool, old_proj_pool = self._pool, self._proj_pool
             self._db, self._pool = await build_graph_client(
@@ -981,43 +1133,76 @@ class FalkorDBProvider(GraphDataProvider):
         """
         attempt = 0
         max_retries = len(_TRANSIENT_RETRY_BACKOFFS)
-        while True:
-            try:
-                return await call()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                cluster = (
-                    self._conn_cfg is not None
-                    and self._conn_cfg.mode == "cluster"
-                )
-                # Cluster slot moved → rebuild the single-node client, retry.
-                if cluster and _is_cluster_routing_error(exc):
-                    if attempt >= max_retries:
-                        raise
-                    gen = self._conn_generation
-                    attempt += 1
-                    logger.warning(
-                        "FalkorDB %s: cluster redirect (%s) — rebuilding "
-                        "client and retrying (%d/%d).",
-                        self._graph_name, type(exc).__name__,
-                        attempt, max_retries,
+        # In-flight op count: the manager's recovery-eviction defers close()
+        # while this is > 0 so it can't tear the pool out from under a job.
+        self._inflight += 1
+        try:
+            while True:
+                try:
+                    return await call()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # FalkorDB is loading its RDB into memory on restart — a
+                    # transient "warming up" state, not an outage. Fast-fail
+                    # with ProviderLoading (a logical/ignored signal, so the
+                    # breaker stays CLOSED and this instance recovers the moment
+                    # its load finishes) instead of retrying for ~1.75s and then
+                    # tripping the breaker on a load that takes many seconds.
+                    # The caller (FE) polls per the Retry-After hint.
+                    if _is_loading_error(exc):
+                        from backend.common.adapters import ProviderLoading
+                        raise ProviderLoading(
+                            provider_name=self._graph_name,
+                            reason="graph is starting up (loading dataset into memory)",
+                            retry_after_seconds=5,
+                        ) from exc
+                    cluster = (
+                        self._conn_cfg is not None
+                        and self._conn_cfg.mode == "cluster"
                     )
-                    await self._rebuild_graph_client_for_failover(gen)
-                    continue
-                # Transient connection drop (any mode) → short backoff + retry.
-                if _is_transient_connection_error(exc) and attempt < max_retries:
-                    backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
-                    attempt += 1
-                    logger.warning(
-                        "FalkorDB %s: transient connection error (%s) — "
-                        "retry %d/%d after %.2fs.",
-                        self._graph_name, type(exc).__name__,
-                        attempt, max_retries, backoff,
-                    )
-                    await asyncio.sleep(backoff)
-                    continue
-                raise
+                    # Cluster slot moved → rebuild the single-node client, retry.
+                    if cluster and _is_cluster_routing_error(exc):
+                        if attempt >= max_retries:
+                            raise
+                        gen = self._conn_generation
+                        attempt += 1
+                        logger.warning(
+                            "FalkorDB %s: cluster redirect (%s) — rebuilding "
+                            "client and retrying (%d/%d).",
+                            self._graph_name, type(exc).__name__,
+                            attempt, max_retries,
+                        )
+                        await self._rebuild_graph_client_for_failover(gen)
+                        continue
+                    # Transient connection drop (any mode) OR a graph handle that
+                    # was nulled mid-flight (evicted/closed by the manager's
+                    # recovery path during this retry) → rebuild the client and
+                    # retry within budget. _ensure_connected is a no-op when the
+                    # handle is still live (redis-py self-heals the pool) and a
+                    # full rebuild when close() nulled it.
+                    handle_lost = _is_null_handle_error(exc)
+                    if (handle_lost or _is_transient_connection_error(exc)) and attempt < max_retries:
+                        backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
+                        attempt += 1
+                        logger.warning(
+                            "FalkorDB %s: %s (%s) — reconnect + retry %d/%d after %.2fs.",
+                            self._graph_name,
+                            "lost graph handle" if handle_lost else "transient connection error",
+                            type(exc).__name__, attempt, max_retries, backoff,
+                        )
+                        try:
+                            await self._ensure_connected()
+                        except Exception as reconnect_exc:
+                            logger.warning(
+                                "FalkorDB %s: reconnect during retry failed (%s); "
+                                "retrying anyway.", self._graph_name, reconnect_exc,
+                            )
+                        await asyncio.sleep(backoff)
+                        continue
+                    raise
+        finally:
+            self._inflight -= 1
 
     async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
         """Timeout-guarded read-only query on the source graph."""
@@ -1253,27 +1438,6 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass  # Older FalkorDB or already exists — ignore
 
-        # AGGREGATED edge level-stamping state.
-        #
-        # The probe runs lazily — it needs the level map (and its digest)
-        # before it can ask "are stamps fresh?". `set_entity_type_levels`
-        # triggers the probe whenever the digest changes. Until then,
-        # ``_levels_backfilled`` stays None and the trace fast path uses
-        # the label-scan fallback (correct, slower).
-        #
-        # ``_level_digest`` is the SHA-256 of the entity_type→level map
-        # currently injected onto this provider. AGGREGATED edges carry
-        # ``r.levelDigest`` set to whatever digest was current when they
-        # were stamped; a mismatch means the ontology drifted and stamps
-        # need a re-run of backfill_aggregated_levels.py.
-        #
-        # ``_levels_warning_for_digest`` throttles the "edges not stamped"
-        # warning to at most one log line per (provider lifetime, digest)
-        # pair, so per-request probes don't spam.
-        self._levels_backfilled: Optional[bool] = None
-        self._level_digest: Optional[str] = None
-        self._levels_warning_for_digest: Optional[str] = None
-
     @property
     def name(self) -> str:
         return "FalkorDBProvider"
@@ -1502,6 +1666,52 @@ class FalkorDBProvider(GraphDataProvider):
         self._resolved_lineage_types: Set[str] = {t.upper() for t in lineage_edge_types}
         self._resolved_edge_metadata_set = True
 
+    def set_source_type_aliases(
+        self,
+        relationship_aliases: Dict[str, List[str]],
+        entity_aliases: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        """Per-source vocabulary alignment (Task E): ``UPPER(declared) → [observed
+        spelling(s)]`` for types the graph spells differently than the ontology
+        declares. Injected by ``ContextEngine._resolve_ontology`` from live
+        introspection. FalkorDB matches relationship types / labels case-SENSITIVELY,
+        so a ``[:HAS]`` pattern misses a ``has`` graph; :meth:`_alias_rel_types`
+        translates declared → observed at the single point a type set becomes Cypher.
+
+        Empty maps (governed/canonical graphs, where observed == declared) make the
+        translation an identity. Always call this on resolution so a stale alias set
+        from a prior ontology can't leak into the next query."""
+        self._source_rel_aliases: Dict[str, List[str]] = {
+            str(k).upper(): [str(s) for s in v] for k, v in (relationship_aliases or {}).items()}
+        self._source_entity_aliases: Dict[str, List[str]] = {
+            str(k).upper(): [str(s) for s in v] for k, v in (entity_aliases or {}).items()}
+
+    def _alias_types(self, types, alias_attr: str):
+        """Translate each declared/canonical type to the source's observed spelling(s)
+        via the injected alias map; identity when there's no alias (governed graphs,
+        or a type the source spells the same). A declared type can expand to MULTIPLE
+        observed spellings (same-source multi-variant), so all are matched at once."""
+        if not types:
+            return types
+        aliases = getattr(self, alias_attr, None)
+        if not aliases:
+            return types
+        out: List[str] = []
+        for t in types:
+            mapped = aliases.get(str(t).upper())
+            if mapped:
+                out.extend(mapped)
+            else:
+                out.append(t)
+        seen = list(dict.fromkeys(out))          # dedupe, preserve order
+        return set(seen) if isinstance(types, (set, frozenset)) else seen
+
+    def _alias_rel_types(self, types):
+        return self._alias_types(types, "_source_rel_aliases")
+
+    def _alias_entity_types(self, types):
+        return self._alias_types(types, "_source_entity_aliases")
+
     def _get_containment_edge_types(self) -> Set[str]:
         """Return the authoritative containment edge type set.
 
@@ -1519,7 +1729,10 @@ class FalkorDBProvider(GraphDataProvider):
         configure containment now do so by editing the ontology.
         """
         if getattr(self, "_resolved_containment_types_set", False):
-            return self._resolved_containment_types
+            # Translate the (uppercased) canonical set to the source's observed
+            # spellings so the case-SENSITIVE Cypher patterns match a differently-
+            # cased graph. Identity for governed/canonical graphs.
+            return self._alias_rel_types(self._resolved_containment_types)
         raise ProviderConfigurationError(
             "Containment edge types are not configured for this provider. "
             "ContextEngine / aggregation must call set_containment_edge_types() "
@@ -1543,7 +1756,11 @@ class FalkorDBProvider(GraphDataProvider):
         gate is that lineage classification is per-data-source.
         """
         if getattr(self, "_resolved_edge_metadata_set", False):
-            return self._resolved_lineage_types
+            # Translate to the source's observed spellings (parity with the containment
+            # accessor) so accessor-driven lineage rendering (e.g. deep-search) matches a
+            # differently-cased graph. Classification reads the raw uppercase set directly,
+            # so it is unaffected.
+            return self._alias_rel_types(self._resolved_lineage_types)
         raise ProviderConfigurationError(
             "Lineage edge types are not configured for this provider. "
             "ContextEngine / aggregation must call set_resolved_edge_metadata() "
@@ -1640,7 +1857,11 @@ class FalkorDBProvider(GraphDataProvider):
         # instead of MATCH (n) WHERE toLower(labels(n)[0]) IN $types which scans all nodes.
         use_label_union = bool(query.entity_types) and not query.urns
         if use_label_union:
-            types = [str(t) for t in query.entity_types]
+            # Align declared entity types to the graph's observed label spelling (Task E):
+            # the label-union MATCH (n:Label) is case-sensitive, so a `Table` filter must
+            # become `TABLE` against a TABLE graph. The non-union path below already compares
+            # case-insensitively (toLower). Identity for governed graphs.
+            types = list(self._alias_entity_types([str(t) for t in query.entity_types]))
             # Build per-label conditions (shared across all UNION branches)
             shared_conditions = []
         else:
@@ -1738,8 +1959,10 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             result = await self._ro_query(cypher, params=params)
         except Exception as e:
+            if _is_missing_graph_error(e):
+                return []  # never-created / empty key = legitimately no data
             logger.warning(f"get_nodes query failed: {e}")
-            return []
+            raise  # connection refused / transient = surface it (breaker -> 503)
 
         nodes = []
         for row in (result.result_set or []):
@@ -1923,7 +2146,7 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> List[GraphNode]:
         await self._ensure_connected()
         # None = caller didn't specify, use ontology/fallback; [] = explicitly no containment
-        target_edge_types = set(edge_types) if edge_types is not None else set(self._get_containment_edge_types())
+        target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
         rel_list = list(target_edge_types)
         if not rel_list:
             # No containment types defined — hierarchy is flat, no children exist
@@ -1975,6 +2198,9 @@ class FalkorDBProvider(GraphDataProvider):
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS)
+        # Align the entity-type post-filter to the graph's observed label spelling (Task E),
+        # so a declared `Table` still matches a TABLE-graph node. Identity for governed graphs.
+        entity_types = self._alias_entity_types(entity_types) if entity_types else entity_types
         nodes = []
         for row in (result.result_set or []):
             # Extract node and childCount
@@ -2010,7 +2236,8 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
 
         # --- Step 1: Fetch children with containment edges (returns edge r) ---
-        target_edge_types = set(edge_types) if edge_types is not None else set(self._get_containment_edge_types())
+        target_edge_types = set(self._alias_rel_types(edge_types)) if edge_types is not None else set(self._get_containment_edge_types())
+        lineage_edge_types = self._alias_rel_types(lineage_edge_types) if lineage_edge_types else lineage_edge_types
         rel_list = list(target_edge_types)
         if not rel_list:
             # No containment types — return empty result
@@ -2149,6 +2376,8 @@ class FalkorDBProvider(GraphDataProvider):
         limit: int = 100,
         cursor: Optional[str] = None,
         include_child_count: bool = True,
+        query_timeout: Optional[float] = None,
+        known_total_count: Optional[int] = None,
     ) -> TopLevelNodesResult:
         """Return structurally top-level nodes (no incoming containment edge).
 
@@ -2159,14 +2388,26 @@ class FalkorDBProvider(GraphDataProvider):
         Pagination is cursor-based on displayName for stability under writes:
         callers pass cursor=None for the first page and the returned
         next_cursor for subsequent pages.
+
+        query_timeout overrides the default per-query timeout for both the
+        page and count queries. known_total_count, when given, skips the
+        count query entirely and uses the value directly (e.g. a caller
+        serving from a materialized cache that already knows the total).
         """
         await self._ensure_connected()
+
+        from ..config.resilience import FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
+        t = query_timeout if query_timeout is not None else FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS
 
         # Raises ProviderConfigurationError if no types resolvable — surfaced
         # as HTTP 400 by the endpoint. An empty set is a valid state meaning
         # "flat graph, every node is top-level".
         containment = self._get_containment_edge_types()
         containment_rel_types = "|".join([_sanitize_label(t) for t in sorted(containment)])
+        # Align entity-type labels/roots to the source's observed spellings (labels are
+        # case-sensitive too), so root classification and the label-union filter match.
+        root_entity_types = self._alias_entity_types(root_entity_types)
+        entity_types = self._alias_entity_types(entity_types)
         root_types_set = {str(t) for t in (root_entity_types or [])}
 
         params: Dict[str, Any] = {"limit": int(limit)}
@@ -2233,7 +2474,14 @@ class FalkorDBProvider(GraphDataProvider):
                 _build_match(page_filters)
                 + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
-                + " RETURN n, count(child) as childCount"
+                # Re-project through a non-aggregating WITH before ORDER BY:
+                # FalkorDB discards an ORDER BY that sits directly on an
+                # aggregating RETURN (and also a trailing RETURN ... ORDER BY),
+                # so the pre-aggregation window order is lost. Materializing the
+                # count into a WITH first, then ordering that WITH, restores the
+                # displayName-ASC output the keyset cursor depends on.
+                + " WITH n, count(child) as childCount ORDER BY toString(n.displayName) ASC"
+                + " RETURN n, childCount"
             )
         else:
             page_cypher = (
@@ -2243,10 +2491,12 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         try:
-            page_result = await self._ro_query(page_cypher, params=params)
+            page_result = await self._ro_query(page_cypher, params=params, timeout=t)
         except Exception as e:
-            logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
-            page_result = None
+            if not _is_missing_graph_error(e):
+                logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
+                raise  # connection refused / transient = surface it (breaker -> 503)
+            page_result = None  # never-created / empty key = legitimately no data
 
         nodes: List[GraphNode] = []
         root_type_count = 0
@@ -2271,36 +2521,50 @@ class FalkorDBProvider(GraphDataProvider):
                     orphan_count += 1
                 nodes.append(node)
 
+        # Defense-in-depth: guarantee displayName-ASC output even if the engine
+        # reorders across the aggregating RETURN, so next_cursor is always the
+        # page maximum and keyset pagination never overlaps/skips. Uses the same
+        # key the cursor compares on. Classification/childCount are already
+        # attached above and are order-independent.
+        nodes.sort(key=lambda node: node.display_name or "")
+
         has_more = len(nodes) >= int(limit)
         next_cursor = nodes[-1].display_name if (has_more and nodes) else None
 
-        # ── Total count query (no cursor filter) ──────────────────────────
-        # We run this separately so the page result reflects the cursor, but
-        # the total accurately shows how many top-level entities exist.
-        count_params: Dict[str, Any] = {}
-        if "search" in params:
-            count_params["search"] = params["search"]
-
-        if use_label_union:
-            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
-            count_branches = [
-                f"MATCH (n:{label}){where_clause} RETURN n"
-                for label in safe_types
-            ]
-            count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+        if known_total_count is not None:
+            # Caller already knows the total (e.g. serving from a materialized
+            # cache) — skip the full-scan count query entirely.
+            total_count = int(known_total_count)
         else:
-            where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
-            count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
+            # ── Total count query (no cursor filter) ──────────────────────────
+            # We run this separately so the page result reflects the cursor, but
+            # the total accurately shows how many top-level entities exist.
+            count_params: Dict[str, Any] = {}
+            if "search" in params:
+                count_params["search"] = params["search"]
 
-        total_count = 0
-        try:
-            count_result = await self._ro_query(count_cypher, params=count_params)
-            if count_result and count_result.result_set:
-                first = count_result.result_set[0]
-                total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
-        except Exception as e:
-            logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
-            total_count = len(nodes)
+            if use_label_union:
+                where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+                count_branches = [
+                    f"MATCH (n:{label}){where_clause} RETURN n"
+                    for label in safe_types
+                ]
+                count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+            else:
+                where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
+                count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"
+
+            total_count = 0
+            try:
+                count_result = await self._ro_query(count_cypher, params=count_params, timeout=t)
+                if count_result and count_result.result_set:
+                    first = count_result.result_set[0]
+                    total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
+            except Exception as e:
+                if not _is_missing_graph_error(e):
+                    logger.warning(f"get_top_level_or_orphan_nodes count query failed: {e}")
+                    raise  # connection refused / transient = surface it (breaker -> 503)
+                total_count = len(nodes)  # never-created / empty key = 0 top-level nodes
 
         return TopLevelNodesResult(
             nodes=nodes,
@@ -2794,8 +3058,10 @@ class FalkorDBProvider(GraphDataProvider):
 
         # Keep parameter lists bounded so a single misconfigured outer
         # batch (e.g. 10k URNs) doesn't generate a single oversized
-        # query plan that itself spikes provider CPU.
-        chunk_size = 500
+        # query plan that itself spikes provider CPU. The default is tuned
+        # to cut per-page round-trips (each page resolves ~2×batch_size URNs);
+        # override via FALKORDB_ANCESTOR_CHUNK_SIZE.
+        chunk_size = int(os.getenv("FALKORDB_ANCESTOR_CHUNK_SIZE", "2000"))
 
         # ``MATCH (child) WHERE child.urn IN $urns`` is one node-scan for
         # the whole chunk; ``UNWIND $urns AS u MATCH (child {urn:u})``
@@ -2978,20 +3244,123 @@ class FalkorDBProvider(GraphDataProvider):
                 "tl": url_levels.get(t),
             })
 
-        # Execute ONE Cypher UNWIND+MERGE per sub-batch.  The Cypher
-        # REDUCE accumulates all edge types into sourceEdgeTypes in a
-        # single pass — no per-edge-type iteration needed.
+        # Execute the MERGE as one or more (cypher, batch) work units. In
+        # dedicated projection mode the units are LABELED node merges grouped
+        # by resolved (srcLabel, tgtLabel) so the per-label URN index serves
+        # the match — removing the dependency on the FalkorDB >=2.10 unlabeled
+        # URN index. in_source mode stays a single unlabeled unit. Each unit
+        # runs through the shared adaptive sub-batch loop.
+        work_units = await self._build_aggregated_merge_units(merge_batch)
 
+        created = 0
+        for unit_cypher, unit_batch in work_units:
+            created += await self._run_aggregated_merge_loop(
+                unit_cypher, unit_batch,
+                baseline_aggregated=baseline_aggregated,
+                running_created=created,
+                intra_batch_callback=intra_batch_callback,
+                should_cancel=should_cancel,
+            )
+
+        return created, 0
+
+    # Shared SET tail for the incremental AGGREGATED MERGE — identical for the
+    # labeled and unlabeled node-match variants. ``coalesce`` never regresses
+    # known level metadata to NULL; REDUCE unions sourceEdgeTypes in one pass.
+    _AGG_MERGE_SET = (
+        "MERGE (s)-[r:AGGREGATED]->(t) "
+        "SET r.weight = item.w, "
+        "    r.latestUpdate = timestamp(), "
+        "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
+        "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+        "    r.sourceEdgeTypes = REDUCE(acc = "
+        "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
+        "           ELSE r.sourceEdgeTypes END, "
+        "      et IN item.et | "
+        "      CASE WHEN et IN acc THEN acc "
+        "           ELSE acc + et END)"
+    )
+    _AGG_MERGE_UNLABELED = (
+        "UNWIND $batch AS item MERGE (s {urn: item.s}) MERGE (t {urn: item.t}) "
+        + _AGG_MERGE_SET
+    )
+
+    async def _build_aggregated_merge_units(
+        self, merge_batch: list[dict[str, Any]],
+    ) -> list[tuple[str, list[dict[str, Any]]]]:
+        """Split an incremental MERGE batch into (cypher, batch) work units.
+
+        ``in_source`` mode → one unlabeled unit (the real entity nodes already
+        carry labels in the source graph). ``dedicated`` mode → one LABELED
+        unit per resolved ``(srcLabel, tgtLabel)`` group plus an unlabeled
+        remainder for pairs whose labels can't be resolved (correctness is
+        preserved — those few fall back rather than being dropped, unlike the
+        bulk-rebuild path). Labeled MERGE lets the per-label URN index serve
+        the node match in the synthetic projection graph, so the write path no
+        longer depends on the FalkorDB >=2.10 unlabeled URN index.
+        """
+        if not merge_batch:
+            return []
+        if self._projection_mode != "dedicated":
+            return [(self._AGG_MERGE_UNLABELED, merge_batch)]
+
+        urns = {it["s"] for it in merge_batch} | {it["t"] for it in merge_batch}
+        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
+
+        labeled: Dict[Tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        unlabeled: list[dict[str, Any]] = []
+        for it in merge_batch:
+            sl = urn_label_map.get(it["s"])
+            tl = urn_label_map.get(it["t"])
+            if sl and tl:
+                labeled[(sl, tl)].append(it)
+            else:
+                unlabeled.append(it)
+
+        labels = {lbl for pair in labeled for lbl in pair}
+        if labels:
+            # Per-label URN indexes on the projection graph make the labeled
+            # MATCH an index seek instead of a scan.
+            await self._ensure_label_urn_indexes(labels)
+
+        units: list[tuple[str, list[dict[str, Any]]]] = []
+        for (sl, tl), items in labeled.items():
+            cypher = (
+                f"UNWIND $batch AS item "
+                f"MERGE (s:{_sanitize_label(sl)} {{urn: item.s}}) "
+                f"MERGE (t:{_sanitize_label(tl)} {{urn: item.t}}) "
+                + self._AGG_MERGE_SET
+            )
+            units.append((cypher, items))
+        if unlabeled:
+            units.append((self._AGG_MERGE_UNLABELED, unlabeled))
+        return units
+
+    async def _run_aggregated_merge_loop(
+        self,
+        merge_cypher: str,
+        merge_batch: list[dict[str, Any]],
+        *,
+        baseline_aggregated: int,
+        running_created: int,
+        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> int:
+        """Run ``merge_cypher`` over ``merge_batch`` in adaptive sub-batches.
+
+        Shared by the labeled and unlabeled incremental MERGE units:
+        cooperative cancel between sub-batches, AIMD sub-batch sizing under
+        provider load, and the intra-batch progress heartbeat. Returns the
+        count created in THIS call; the progress callback reports
+        ``baseline_aggregated + running_created + <created-so-far>`` so a job
+        spanning several units still shows a monotonic running total.
+        """
         created = 0
         chunk_start = 0
         while chunk_start < len(merge_batch):
             # Cooperative cancel between MERGE sub-batches. The previous
-            # sub-batch's MERGE has fully landed in FalkorDB before we
-            # reach this check, so raising here cannot orphan a Cypher
-            # transaction. Without this hook, a single outer batch
-            # (~100+ sub-batches over several minutes) cannot be
-            # cancelled without ``task.cancel()`` interrupting a
-            # mid-flight MERGE.
+            # sub-batch's MERGE has fully landed in FalkorDB before we reach
+            # this check, so raising here cannot orphan a Cypher transaction.
             if should_cancel is not None and should_cancel():
                 from backend.app.services.aggregation.cancel import JobCancelled
                 from datetime import datetime, timezone
@@ -3000,38 +3369,15 @@ class FalkorDBProvider(GraphDataProvider):
                     observed_at=datetime.now(timezone.utc).isoformat(),
                 )
 
-            # Adaptive sub-batch size: starts at the ceiling and shrinks
-            # toward _MERGE_SUB_BATCH_MIN when MERGE latency creeps past
-            # _MERGE_SUB_BATCH_TARGET_HIGH_S. This is the WS1.4 backpressure
-            # mechanism — when FalkorDB CPU spikes, sub-batches slow down,
-            # and shrinking the size both reduces per-call MERGE work and
-            # makes the cooperative-cancel check fire more often.
+            # Adaptive sub-batch size: starts at the ceiling and shrinks toward
+            # _MERGE_SUB_BATCH_MIN when MERGE latency creeps past the high
+            # target — the WS1.4 backpressure mechanism.
             sub_batch_size = self._aggregation_sub_batch_size
             chunk = merge_batch[chunk_start:chunk_start + sub_batch_size]
             chunk_start += len(chunk)
 
             t_merge_start = time.monotonic()
-            await self._proj_query(
-                "UNWIND $batch AS item "
-                "MERGE (s {urn: item.s}) "
-                "MERGE (t {urn: item.t}) "
-                "MERGE (s)-[r:AGGREGATED]->(t) "
-                "SET r.weight = item.w, "
-                "    r.latestUpdate = timestamp(), "
-                # Level-pair fast-path props. ``coalesce`` keeps a previously
-                # backfilled value when the new resolution couldn't find a
-                # label (cold cache / unknown entity type) — never regresses
-                # known level metadata to NULL.
-                "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
-                "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
-                "    r.sourceEdgeTypes = REDUCE(acc = "
-                "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
-                "           ELSE r.sourceEdgeTypes END, "
-                "      et IN item.et | "
-                "      CASE WHEN et IN acc THEN acc "
-                "           ELSE acc + et END)",
-                params={"batch": chunk},
-            )
+            await self._proj_query(merge_cypher, params={"batch": chunk})
             t_merge_elapsed = time.monotonic() - t_merge_start
             created += len(chunk)
 
@@ -3076,34 +3422,21 @@ class FalkorDBProvider(GraphDataProvider):
                 # only triggers after a run of clearly-under-target calls.
                 self._aggregation_sub_batch_under_target_run = 0
 
-            # Intra-batch heartbeat. A single outer batch fans out to
-            # tens of thousands of ancestor pairs and runs ~100+ Cypher
-            # MERGE sub-batches; each sub-batch is ~1–3s, so the outer
-            # batch can take many minutes. Without an intra-batch hook
-            # the worker's checkpoint can't update ``created_edges`` /
-            # ``last_checkpoint_at`` for the duration, leaving the UI
-            # apparently frozen even though aggregation is making
-            # steady progress in FalkorDB.
-            #
-            # The callback receives the running aggregated total
-            # (across all completed outer batches up to and including
-            # this sub-batch). It deliberately doesn't touch the input
-            # cursor — that's the caller's job after the full outer
-            # batch lands, so a mid-batch crash still resumes from the
-            # last fully-committed boundary (writes are idempotent via
-            # MERGE + the SADD idempotency tracker, but we keep the
-            # boundary clean for clarity).
+            # Intra-batch heartbeat so the worker's checkpoint can update
+            # created_edges / last_checkpoint_at during a multi-minute outer
+            # batch instead of the UI appearing frozen.
             if intra_batch_callback is not None:
                 try:
-                    await intra_batch_callback(baseline_aggregated + created)
+                    await intra_batch_callback(
+                        baseline_aggregated + running_created + created
+                    )
                 except Exception as cb_exc:
                     logger.error(
                         "Intra-batch progress callback failed at sub-batch "
                         "ending %d (continuing): %s",
                         chunk_start + len(chunk), cb_exc, exc_info=True,
                     )
-
-        return created, 0
+        return created
 
     # ====================================================================== #
     # Bulk Rebuild Path (Phase 1 of aggregation hardening)                    #
@@ -3666,6 +3999,8 @@ class FalkorDBProvider(GraphDataProvider):
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
         last_cursor: Optional[str],
+        resume_processed: int = 0,
+        resume_created: int = 0,
     ) -> Dict[str, Any]:
         """Bulk-rebuild orchestrator — Phase 1 of aggregation hardening.
 
@@ -3710,16 +4045,19 @@ class FalkorDBProvider(GraphDataProvider):
                 intra_batch_callback=intra_batch_callback,
                 should_cancel=should_cancel,
                 last_cursor=last_cursor,
+                resume_processed=resume_processed,
+                resume_created=resume_created,
             )
 
-        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
+            else list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
 
         # Filter AGGREGATED out of any explicit lineage whitelist —
         # feeding existing AGGREGATED edges back through aggregation
         # produces second-order edges that compound on every re-run.
         if lineage_edge_types:
-            effective_lineage_types = [t for t in lineage_edge_types if t != "AGGREGATED"]
+            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
             if not effective_lineage_types:
                 logger.warning(
                     "bulk_rebuild: lineage_edge_types contained only AGGREGATED "
@@ -4165,15 +4503,32 @@ class FalkorDBProvider(GraphDataProvider):
         just slower.
         """
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
-        try:
-            await asyncio.wait_for(
-                self._proj.query(
-                    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)"
-                ),
-                timeout=_init_timeout,
-            )
-        except Exception:
-            pass  # already exists or unsupported
+        # The aggKey edge index is what keeps MERGE-on-aggKey an index seek
+        # rather than an O(out_degree) scan on high-fan-in hubs — a silently
+        # missing index is the difference between fast and quadratic, so log
+        # the outcome instead of swallowing it.
+        for stmt, what in (
+            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)", "aggKey"),
+            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggEpoch)", "aggEpoch"),
+        ):
+            try:
+                await asyncio.wait_for(
+                    self._proj.query(stmt), timeout=_init_timeout,
+                )
+                logger.info(
+                    "streaming_rebuild on %s: ensured AGGREGATED(%s) edge index.",
+                    self._graph_name, what,
+                )
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already" in msg or "exist" in msg:
+                    continue  # idempotent — fine
+                logger.warning(
+                    "streaming_rebuild on %s: could NOT create AGGREGATED(%s) "
+                    "edge index (%s). MERGE/sweep will be slower (O(out_degree) "
+                    "on hubs); upgrade FalkorDB if this persists.",
+                    self._graph_name, what, exc,
+                )
 
     async def _materialize_aggregated_edges_streaming_rebuild(
         self,
@@ -4185,6 +4540,8 @@ class FalkorDBProvider(GraphDataProvider):
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
         last_cursor: Optional[str],
+        resume_processed: int = 0,
+        resume_created: int = 0,
     ) -> Dict[str, Any]:
         """Constant-memory, crash-resumable bulk rebuild.
 
@@ -4208,9 +4565,10 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.app.services.aggregation.cancel import JobCancelled
         from datetime import datetime, timezone
 
-        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
+            else list(self._get_containment_edge_types())
         if lineage_edge_types:
-            effective = [t for t in lineage_edge_types if t and t != "AGGREGATED"]
+            effective = self._alias_rel_types([t for t in lineage_edge_types if t and t != "AGGREGATED"])
         else:
             effective = await self._derive_lineage_types_from_cache(containment)
         # Stable, sorted, de-duplicated order so the cursor's type_index
@@ -4255,9 +4613,23 @@ class FalkorDBProvider(GraphDataProvider):
 
         max_pairs_per_page = int(os.getenv("AGGREGATION_MAX_PAIRS_PER_PAGE", "200000"))
 
-        processed = 0
-        running_created = 0
-        total = max(total_estimate, 0)
+        # Seed the per-run counters from the resume baseline so a resumed job
+        # reports CUMULATIVE progress instead of resetting the bar to 0%. The
+        # scan never re-walks edges <= rid and the epoch is reused, so
+        # baseline + this-run is the correct total. Fresh runs start at 0.
+        processed = resume_processed if resume is not None else 0
+        running_created = resume_created if resume is not None else 0
+        # Loud signal if a job that HAD progress resumes with an unparseable
+        # cursor — that's a genuine restart (new epoch), not a continuation.
+        if resume is None and resume_processed > 0 and last_cursor:
+            logger.warning(
+                "streaming_rebuild on %s: resume requested with processed=%d but "
+                "cursor %r did not parse — RESTARTING from 0 under a new epoch; "
+                "the prior generation will be swept at end.",
+                self._graph_name, resume_processed, last_cursor,
+            )
+        total = max(total_estimate, processed)
+        scanned = processed  # absolute edges scanned (seeded at the baseline)
 
         if progress_callback is not None:
             try:
@@ -4268,6 +4640,50 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass
 
+        # Cross-page accumulator. High-fan-in hub pairs (a top domain→domain pair
+        # appears under most leaves) are MERGED once per FLUSH WINDOW instead of
+        # once per page — cutting MERGE volume, and the O(out_degree) hub MERGE
+        # cost, by 1–2 orders of magnitude on deep hierarchies. Bounded by
+        # AGGREGATION_MAX_PAIRS_PER_PAGE; the flush boundary is also the
+        # checkpoint boundary so processed + cursor advance together (sound
+        # resume).
+        pending_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        checkpoint_cursor = (
+            last_cursor if resume is not None
+            else self._make_stream_cursor(epoch, start_type_index, start_rid)
+        )
+
+        async def _flush_and_checkpoint(
+            flush_type_index: int, flush_rid: int, phase: str,
+        ) -> None:
+            nonlocal pending_pairs, processed, running_created, checkpoint_cursor
+            if pending_pairs:
+                running_created += await self._flush_streaming_pairs(
+                    page_pairs=pending_pairs, entity_levels=entity_levels,
+                    level_digest=level_digest, epoch=epoch,
+                    running_created=running_created,
+                    intra_batch_callback=intra_batch_callback,
+                    should_cancel=should_cancel,
+                )
+                pending_pairs = {}
+            # Everything scanned so far is now durably MERGED → advance the
+            # persisted cursor + processed together (consistent for resume).
+            processed = scanned
+            checkpoint_cursor = self._make_stream_cursor(
+                epoch, flush_type_index, flush_rid,
+            )
+            if progress_callback is not None:
+                try:
+                    await progress_callback(
+                        processed, max(total, processed), checkpoint_cursor,
+                        running_created, phase,
+                    )
+                except Exception as cb_exc:
+                    logger.error(
+                        "streaming_rebuild checkpoint callback failed "
+                        "(continuing): %s", cb_exc, exc_info=True,
+                    )
+
         for type_index in range(start_type_index, len(effective)):
             etype = effective[type_index]
             safe_type = _sanitize_label(etype)
@@ -4275,8 +4691,10 @@ class FalkorDBProvider(GraphDataProvider):
 
             while True:
                 if should_cancel is not None and should_cancel():
+                    # Resume from the last FLUSHED boundary; the unflushed tail
+                    # re-scans on resume (idempotent via MERGE).
                     raise JobCancelled(
-                        job_id=self._make_stream_cursor(epoch, type_index, rid_cursor),
+                        job_id=checkpoint_cursor,
                         observed_at=datetime.now(timezone.utc).isoformat(),
                     )
 
@@ -4291,6 +4709,8 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 rows = res.result_set or []
                 if not rows:
+                    # End of this type — flush the accumulated tail + checkpoint.
+                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
                     break
 
                 page_urns: Set[str] = set()
@@ -4303,8 +4723,7 @@ class FalkorDBProvider(GraphDataProvider):
                     list(page_urns),
                 )
 
-                # Expand (s_chain × t_chain) for THIS PAGE only.
-                page_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
+                # Expand (s_chain × t_chain) into the CROSS-PAGE accumulator.
                 for _rid, s_urn, t_urn in rows:
                     if not s_urn or not t_urn:
                         continue
@@ -4314,56 +4733,26 @@ class FalkorDBProvider(GraphDataProvider):
                         for ta in t_chain:
                             if sa == ta:
                                 continue
-                            meta = page_pairs.get((sa, ta))
+                            meta = pending_pairs.get((sa, ta))
                             if meta is None:
                                 meta = {"weight": 0, "edge_types": set()}
-                                page_pairs[(sa, ta)] = meta
+                                pending_pairs[(sa, ta)] = meta
                             meta["weight"] += 1
                             meta["edge_types"].add(etype)
-                    # Safety valve: a single high-fan-in hub page must not
-                    # expand without bound. Flush + reset when the budget is
-                    # hit; MERGE accumulates across flushes so correctness
-                    # holds.
-                    if len(page_pairs) >= max_pairs_per_page:
-                        running_created += await self._flush_streaming_pairs(
-                            page_pairs=page_pairs, entity_levels=entity_levels,
-                            level_digest=level_digest, epoch=epoch,
-                            running_created=running_created,
-                            intra_batch_callback=intra_batch_callback,
-                            should_cancel=should_cancel,
-                        )
-                        page_pairs = {}
 
-                if page_pairs:
-                    running_created += await self._flush_streaming_pairs(
-                        page_pairs=page_pairs, entity_levels=entity_levels,
-                        level_digest=level_digest, epoch=epoch,
-                        running_created=running_created,
-                        intra_batch_callback=intra_batch_callback,
-                        should_cancel=should_cancel,
-                    )
-
-                processed += len(rows)
+                scanned += len(rows)
                 rid_cursor = int(rows[-1][0])
-                if total < processed:
-                    total = processed  # keep % monotonic when estimate is low
-                cursor = self._make_stream_cursor(epoch, type_index, rid_cursor)
+                if total < scanned:
+                    total = scanned  # keep % monotonic when estimate is low
 
-                # Checkpoint at the page boundary. The page's edges are fully
-                # MERGE'd at this point, so resume from this cursor is sound.
-                if progress_callback is not None:
-                    try:
-                        await progress_callback(
-                            processed, max(total, processed), cursor,
-                            running_created, "creating",
-                        )
-                    except Exception as cb_exc:
-                        logger.error(
-                            "streaming_rebuild checkpoint callback failed "
-                            "(continuing): %s", cb_exc, exc_info=True,
-                        )
+                # Flush when the accumulator hits its memory budget (this is the
+                # checkpoint boundary). Otherwise keep accumulating across pages.
+                if len(pending_pairs) >= max_pairs_per_page:
+                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
 
                 if len(rows) < batch_size:
+                    # End of this type — flush the accumulated tail + checkpoint.
+                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
                     break
 
         # End-of-run generation swap. Only a fully-scanned run reaches here.
@@ -5006,8 +5395,15 @@ class FalkorDBProvider(GraphDataProvider):
         progress_callback: Optional[Any] = None,
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
+        resume_processed: int = 0,
+        resume_created: int = 0,
     ) -> Dict[str, Any]:
         """Batch materialization using ancestor-chain approach with cursor-based pagination.
+
+        ``resume_processed`` / ``resume_created`` are the job's already-committed
+        progress at resume time; the streaming rebuild seeds its per-run counters
+        from them (when the cursor parses) so a resumed job reports cumulative
+        progress instead of resetting the bar to 0%.
 
         Instead of Cypher variable-length paths with Cartesian products,
         this uses pre-computed ancestor chains stored in Redis Hashes.
@@ -5049,9 +5445,12 @@ class FalkorDBProvider(GraphDataProvider):
                 intra_batch_callback=intra_batch_callback,
                 should_cancel=should_cancel,
                 last_cursor=last_cursor,
+                resume_processed=resume_processed,
+                resume_created=resume_created,
             )
 
-        containment = containment_edge_types or list(self._get_containment_edge_types())
+        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
+            else list(self._get_containment_edge_types())
         exclude_types = list(containment) + ["AGGREGATED"]
 
         # Filter AGGREGATED out of any explicit lineage whitelist. The
@@ -5065,7 +5464,7 @@ class FalkorDBProvider(GraphDataProvider):
         # count whereas the seed-script fallback branch (``NOT IN
         # exclude_types``) already excluded AGGREGATED correctly.
         if lineage_edge_types:
-            effective_lineage_types = [t for t in lineage_edge_types if t != "AGGREGATED"]
+            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
             if not effective_lineage_types:
                 logger.warning(
                     "materialize_aggregated_edges_batch: lineage_edge_types contained "
@@ -5385,8 +5784,10 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
         
-        safe_containment = [_sanitize_label(t) for t in containment_edges]
-        safe_lineage = [_sanitize_label(t) for t in lineage_edges]
+        # Per-source alignment (Task E): render the source's observed spellings so a
+        # case-variant graph isn't missed by the case-sensitive patterns below.
+        safe_containment = [_sanitize_label(t) for t in self._alias_rel_types(containment_edges)]
+        safe_lineage = [_sanitize_label(t) for t in self._alias_rel_types(lineage_edges)]
         
         # If no lineage edges defined, return just the node
         if not safe_lineage:
@@ -5621,6 +6022,11 @@ class FalkorDBProvider(GraphDataProvider):
         # in FalkorDB and what set_containment_edge_types stores internally.
         ctypes = [t.upper() for t in (containment_edge_types or [])]
         ltypes = [t.upper() for t in (lineage_edge_types or [])] if lineage_edge_types else None
+        # Per-source alignment (Task E): translate the uppercased declared types to THIS
+        # graph's observed spellings so the case-sensitive :TYPE / type(r) IN patterns below
+        # match a differently-cased graph. Identity for governed/canonical graphs.
+        ctypes = self._alias_rel_types(ctypes)
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
         # Focus node — needed for the response shape regardless of trace outcome
         focus_node = await self.get_node(urn)
@@ -6018,6 +6424,11 @@ class FalkorDBProvider(GraphDataProvider):
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         ctypes = [t.upper() for t in (containment_edge_types or [])]
         ltypes = [t.upper() for t in (lineage_edge_types or [])] if lineage_edge_types else None
+        # Per-source alignment (Task E): translate the uppercased declared types to THIS
+        # graph's observed spellings so the case-sensitive :TYPE / type(r) IN patterns below
+        # match a differently-cased graph. Identity for governed/canonical graphs.
+        ctypes = self._alias_rel_types(ctypes)
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a
@@ -6940,12 +7351,19 @@ class FalkorDBProvider(GraphDataProvider):
     # matches the stats service poll interval. Set to 0 to disable.
     _SCHEMA_CACHE_TTL = int(os.getenv("FALKORDB_SCHEMA_CACHE_TTL", "300"))
 
-    async def get_stats(self) -> Dict[str, Any]:
+    async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
+        """Node/edge counts + per-type breakdowns (two grouped scans).
+
+        ``bypass_cache=True`` skips the Redis cache READ but still
+        writes-through on success — for refresh paths (the insights
+        counts poll) that must never persist pre-aged cached counts as
+        fresh, while still priming the cache for other callers.
+        """
         await self._ensure_connected()
 
         # Check Redis cache (best-effort; Postgres is the source of truth)
         cache_key = f"{self._graph_name}:stats_cache"
-        if self._SCHEMA_CACHE_TTL > 0:
+        if self._SCHEMA_CACHE_TTL > 0 and not bypass_cache:
             try:
                 cached = await self._redis.get(cache_key)
                 if cached:
@@ -7013,6 +7431,26 @@ class FalkorDBProvider(GraphDataProvider):
 
         return result
 
+    async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:
+        """Write-through prime of the ``{graph}:stats_cache`` Redis key.
+
+        Called by the insights collector after a poll derives fresh
+        counts (from ``get_schema_stats``), so subsequent ``get_stats``
+        callers — per-asset discovery, web-tier data-source stats —
+        serve poll-fresh values instead of re-scanning. Best-effort.
+        """
+        if self._SCHEMA_CACHE_TTL <= 0:
+            return
+        await self._ensure_connected()
+        try:
+            await self._redis.setex(
+                f"{self._graph_name}:stats_cache",
+                self._SCHEMA_CACHE_TTL,
+                json.dumps(stats),
+            )
+        except Exception:
+            pass
+
     async def get_schema_stats(self) -> GraphSchemaStats:
         await self._ensure_connected()
         
@@ -7059,10 +7497,13 @@ class FalkorDBProvider(GraphDataProvider):
                 entityTypeStats=[], edgeTypeStats=[], tagStats=[],
             )
 
-        # Tag stats - kept as is for now, but ensured safe execution
+        # Tag stats — a full node scan like the two above; give it the
+        # same generous stats budget (it previously ran on the default
+        # connection timeout and was the silent killer on large graphs).
         try:
             tag_res = await self._ro_query(
-                "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags"
+                "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags",
+                timeout=_stats_q_timeout,
             )
             tag_counts: Dict[str, int] = {}
             tag_types: Dict[str, Set[str]] = {}

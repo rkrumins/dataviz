@@ -289,7 +289,7 @@ export function DeploymentDashboardPanel({
   // Render
   // ────────────────────────────────────────────────────────────────────
   return (
-    <div className="p-8 animate-in fade-in duration-500">
+    <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
       <style>{STAGGER_STYLE}</style>
 
       {/* ── Hero section ─────────────────────────────────────────── */}

@@ -15,12 +15,19 @@ interface PoolEntry {
 const providerPool = new Map<string, PoolEntry>()
 const POOL_MAX_SIZE = 8
 
-export function poolKey(wsId: string, dsId: string | null): string {
-  return `${wsId}:${dsId ?? 'default'}`
+export function poolKey(wsId: string, dsId: string | null, branchId?: string | null): string {
+  // A draft is a distinct read-context from main — keying on branchId gives it its
+  // own provider instance (and response cache), so switching branches can't serve
+  // stale cross-branch data.
+  return `${wsId}:${dsId ?? 'default'}:${branchId ?? 'main'}`
 }
 
-export function getOrCreateProvider(wsId: string, dsId: string | null): RemoteGraphProvider {
-  const key = poolKey(wsId, dsId)
+export function getOrCreateProvider(
+  wsId: string,
+  dsId: string | null,
+  branchId?: string | null,
+): RemoteGraphProvider {
+  const key = poolKey(wsId, dsId, branchId)
   const existing = providerPool.get(key)
   if (existing) {
     existing.lastUsed = Date.now()
@@ -41,6 +48,7 @@ export function getOrCreateProvider(wsId: string, dsId: string | null): RemoteGr
   const provider = new RemoteGraphProvider({
     workspaceId: wsId,
     dataSourceId: dsId ?? undefined,
+    branchId: branchId ?? undefined,
   })
   providerPool.set(key, { provider, lastUsed: Date.now() })
   return provider

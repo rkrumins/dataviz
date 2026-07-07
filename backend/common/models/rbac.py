@@ -261,8 +261,14 @@ class RoleDefinitionResponse(BaseModel):
     Permission catalogue endpoint.
 
     Phase 3 added scope, ``isSystem``, description, and audit fields
-    so the role-editor UI can render the lifecycle controls (read-only
-    badge for system roles, scope chip, etc).
+    so the role-editor UI can render the lifecycle controls (scope chip,
+    binding count, etc).
+
+    ``isModified`` / ``lockedPermissions`` back the editable-system-role
+    flow: ``isModified`` flags a built-in whose live bundle diverges from
+    its seeded default (enabling "Reset to default"), and
+    ``lockedPermissions`` lists the floor permissions the UI must render
+    checked-and-locked (the same floor the backend enforces).
     """
     model_config = ConfigDict(populate_by_name=True)
     name: str
@@ -278,6 +284,14 @@ class RoleDefinitionResponse(BaseModel):
     # admin UI can warn before delete and disable the Delete button on
     # roles that are still in use.
     binding_count: int = Field(default=0, alias="bindingCount")
+    # True when a system role's live bundle/description differs from its
+    # seeded default. Always False for custom roles.
+    is_modified: bool = Field(default=False, alias="isModified")
+    # Permissions that cannot be removed from this role (the floor that
+    # gates platform administration). Empty for most roles.
+    locked_permissions: list[str] = Field(
+        default_factory=list, alias="lockedPermissions",
+    )
 
 
 class RoleCreateRequest(BaseModel):

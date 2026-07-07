@@ -83,6 +83,11 @@ class LayerAssignmentRequest(BaseModel):
     scope_filter: Optional[ScopeFilterConfig] = Field(None, alias="scopeFilter")
     layers: List[ViewLayerConfig]
     include_edges: bool = Field(True, alias="includeEdges")
+    # Flattened view-config assignments map (urn -> placement) — the canonical
+    # source of instance assignments, alongside (and overriding, on collision)
+    # the legacy per-layer `entity_assignments`. See layout_config.py.
+    assignments: Dict[str, EntityAssignmentConfig] = Field(default_factory=dict)
+    entity_scope: Optional[str] = Field(None, alias="entityScope")  # 'all' | 'curated'
 
     class Config:
         populate_by_name = True

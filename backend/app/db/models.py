@@ -249,6 +249,7 @@ class ProviderORM(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
     extra_config = Column(Text, nullable=True)        # JSON blob
+    falkor_max_resident = Column(Integer, nullable=True)  # per-provider FalkorDB cache-eviction budget (max resident graphs); NULL ⇒ unset
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -496,6 +497,12 @@ class WorkspaceDataSourceORM(Base):
     dedicated_graph_name = Column(Text, nullable=True)  # graph name when projection_mode == "dedicated"
     access_level = Column(Text, nullable=True, default="read")  # read | write | admin
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
+    # ── Versioning source model ───────────────────────────────
+    # None = derive from provider capability (managed if writable & not external).
+    source_mode = Column(Text, nullable=True)              # "managed" | "federated"
+    # Federated only: push our overlay edits back to the external system (opt-in, and only
+    # when the provider is write-capable). Ignored for managed sources.
+    write_back_enabled = Column(Boolean, nullable=False, default=False)
     # ── Aggregation state ─────────────────────────────────────
     aggregation_status = Column(Text, nullable=False, default="none")  # none|pending|running|ready|failed|skipped
     last_aggregated_at = Column(Text, nullable=True)  # ISO timestamp of last successful aggregation
@@ -540,6 +547,10 @@ class WorkspaceDataSourceORM(Base):
         CheckConstraint(
             "projection_mode IS NULL OR projection_mode IN ('in_source', 'dedicated')",
             name="ck_ds_projection_mode",
+        ),
+        CheckConstraint(
+            "source_mode IS NULL OR source_mode IN ('managed', 'federated')",
+            name="ck_ds_source_mode",
         ),
     )
 
@@ -634,6 +645,16 @@ class ViewORM(Base):
     # for view-ontology compatibility checks once real breakage workflows appear.
     visibility = Column(Text, nullable=False, default="private")
     created_by = Column(Text, nullable=True)
+    # Principal id of whoever last edited the view (same convention as
+    # created_by). NULL on legacy rows and until the first edit after the
+    # updated_by migration; the API resolves it to a display name.
+    updated_by = Column(Text, nullable=True)
+    # When/who last changed the view's UNDERLYING DATA (publish / PR merge /
+    # revert on its data source's versioned graph) — separate from
+    # updated_at/updated_by so data freshness never clobbers settings-edit
+    # attribution. Stamped by the versioning endpoints' view fan-out.
+    data_updated_at = Column(Text, nullable=True)
+    data_updated_by = Column(Text, nullable=True)
     tags = Column(Text, nullable=True)                        # JSON array
     is_pinned = Column(Boolean, nullable=False, default=False)
     created_at = Column(Text, nullable=False, default=_now)
@@ -662,6 +683,47 @@ class ViewORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# view_layout_overlays (Branch-Scoped Layout)                          #
+# ------------------------------------------------------------------ #
+class ViewLayoutOverlayORM(Base):
+    """Per-(view, branch) draft overlay of a Context View's layout.
+
+    Branch-scoped layout: a draft branch's layer edits live here instead of on
+    the published ``views.config``, so they don't leak to Published until the
+    draft is merged/published (promote). One row per (view_id, branch_id).
+
+    ``reference_layout`` / ``entity_scope`` hold the draft's CURRENT effective
+    bare referenceLayout + scope; ``fork_base_*`` snapshot the published base at
+    draft-open time so the 3-way promote merge (``layout_promote``) can tell
+    what the draft actually changed. ``branch_id`` is a plain-text logical ref
+    to a graphver draft branch — no cross-schema FK (mirrors versioning's
+    ``originating_view_id``)."""
+    __tablename__ = "view_layout_overlays"
+
+    view_id = Column(
+        Text,
+        ForeignKey("views.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    branch_id = Column(Text, primary_key=True)
+    # JSON: draft's effective bare referenceLayout {layers, assignments}.
+    reference_layout = Column(Text, nullable=False, default="{}")
+    entity_scope = Column(Text, nullable=True)                 # 'all'|'curated'|NULL
+    # JSON: base bare referenceLayout snapshot captured at draft open.
+    fork_base_layout = Column(Text, nullable=False, default="{}")
+    fork_base_entity_scope = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_vlo_branch", "branch_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewLayoutOverlay view_id={self.view_id!r} branch_id={self.branch_id!r}>"
+
+
+# ------------------------------------------------------------------ #
 # data_source_stats (Graph Statistics Cache)                           #
 # ------------------------------------------------------------------ #
 
@@ -681,6 +743,14 @@ class DataSourceStatsORM(Base):
     ontology_metadata = Column(Text, nullable=False, default="{}")   # JSON
     graph_schema = Column(Text, nullable=False, default="{}")        # JSON
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # Deep-facet freshness marker (schema_stats / ontology_metadata /
+    # graph_schema columns). ``updated_at`` tracks the cheap counts facet
+    # and keeps driving the read path's fresh/stale classification; this
+    # drives the scheduler's deep-poll due-ness. NULL until the first
+    # deep poll lands.
+    schema_updated_at = Column(Text, nullable=True)
+    top_level_nodes = Column(Text, nullable=True)        # JSON payload, NULL = never materialized
+    top_level_updated_at = Column(Text, nullable=True)   # ISO timestamp, freshness marker
 
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")

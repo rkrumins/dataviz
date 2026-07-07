@@ -95,28 +95,31 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
       let views: View[] = []
 
       await Promise.all([
-        ...((ws.dataSources || []).map(async (ds) => {
-          // ``fetchEnveloped`` unwraps the {data, meta} envelope and feeds
-          // the per-(ws, ds) circuit breaker — same one RemoteGraphProvider
-          // uses, so a backend outage trips both at once.
-          const [cachedData, ready] = await Promise.all([
-            fetchEnveloped<{
-              nodeCount?: number
-              edgeCount?: number
-              entityTypeCounts?: Record<string, number>
-            }>(
-              `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`,
-              { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } },
-            ),
-            aggregationService.getReadiness(ds.id).catch(() => null),
-          ])
-          if (cachedData) {
-            stats[ds.id] = {
-              nodeCount: cachedData.nodeCount ?? 0,
-              edgeCount: cachedData.edgeCount ?? 0,
-              entityTypes: Object.keys(cachedData.entityTypeCounts ?? {}),
+        // One bulk request (scoped to this workspace) replaces the former
+        // per-datasource cached-stats fan-out. Entries are keyed
+        // "<wsId>/<dsId>"; status==='computing' rows are cold-cache
+        // placeholders (refresh already enqueued server-side) — skip them,
+        // matching the old null-on-computing behavior.
+        fetchEnveloped<Record<string, {
+          status?: string
+          nodeCount?: number
+          edgeCount?: number
+          entityTypeCounts?: Record<string, number>
+        }>>(
+          `/api/v1/admin/workspaces/datasources/cached-stats?workspace_id=${encodeURIComponent(ws.id)}`,
+        ).then(bulk => {
+          for (const [key, entry] of Object.entries(bulk ?? {})) {
+            if (entry.status === 'computing') continue
+            const dsId = key.slice(key.indexOf('/') + 1)
+            stats[dsId] = {
+              nodeCount: entry.nodeCount ?? 0,
+              edgeCount: entry.edgeCount ?? 0,
+              entityTypes: Object.keys(entry.entityTypeCounts ?? {}),
             }
           }
+        }).catch(() => {}),
+        ...((ws.dataSources || []).map(async (ds) => {
+          const ready = await aggregationService.getReadiness(ds.id).catch(() => null)
           if (ready) readiness[ds.id] = ready
         })),
         listViews({ workspaceId: wsId }).then(v => { views = v.items }).catch(() => {}),

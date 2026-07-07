@@ -7,15 +7,19 @@ Two flavors keyed off ``DiscoveryJobEnvelope.asset_name``:
 * other   — fetch stats for that single asset; persists a node/edge-count
   payload under the (provider_id, asset_name) cache row.
 
-The handler runs inside the worker's per-job DB session. It instantiates
-a provider via the static ``ProviderManager._create_provider_instance``
-helper — same path as the legacy ``providers.py`` short-session
-endpoints so adapter behaviour stays identical. The web tier never hits
-this code path; web reads go straight to ``asset_discovery_cache``.
+The handler owns its DB sessions: one short JOBS session reads the
+provider row + credentials, closes, then the live provider IO runs with
+no session held, and a second short session upserts the cache row. It
+instantiates a provider via the static
+``ProviderManager._create_provider_instance`` helper — same path as the
+legacy ``providers.py`` short-session endpoints so adapter behaviour
+stays identical. The web tier never hits this code path; web reads go
+straight to ``asset_discovery_cache``.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -25,6 +29,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import resilience
+from backend.app.db.engine import get_jobs_session
 from backend.app.db.models import AssetDiscoveryCacheORM
 from backend.app.db.repositories.provider_repo import get_credentials, get_provider_orm
 from backend.app.providers.manager import provider_manager
@@ -35,15 +40,11 @@ from .schemas import DiscoveryJobEnvelope
 logger = logging.getLogger(__name__)
 
 
-# Outer budget for a live discovery call. Must sit ABOVE the provider's
-# stats-query timeout (FALKORDB_STATS_QUERY_TIMEOUT_SECS, default 30s) so the
-# wrapper doesn't kill a large-graph count scan before it can finish and warm
-# the stats cache. Discovery fans out concurrently, so a higher per-asset
-# budget doesn't serialize the UI. A scan that still exceeds this is handled
-# as asset-level staleness (the provider stays reachable), not an outage.
-_DISCOVERY_LIVE_TIMEOUT_SECS = float(
-    __import__("os").getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "35")
-)
+# Inner budget for a live discovery call — owned by resilience.py (the
+# worker's OUTER per-job timeout derives from the same constant, so the
+# two can never diverge again). A scan that exceeds this is handled as
+# asset-level staleness (the provider stays reachable), not an outage.
+_DISCOVERY_LIVE_TIMEOUT_SECS = float(resilience.DISCOVERY_LIVE_TIMEOUT_SECS)
 
 
 def _absolute_expiry() -> datetime:
@@ -52,27 +53,31 @@ def _absolute_expiry() -> datetime:
     )
 
 
-async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None:
-    """Run one discovery cycle. Commits on success or partial-failure;
-    raises on hard failure so the worker can route to retry / DLQ."""
+async def collect(envelope: DiscoveryJobEnvelope) -> None:
+    """Run one discovery cycle. Raises on hard failure so the worker
+    can route to retry / DLQ."""
     provider_id = envelope.provider_id
     asset_name = envelope.asset_name
     is_list_all = asset_name == ""
 
-    prov_row = await get_provider_orm(session, provider_id)
-    if prov_row is None:
-        # Provider deleted between enqueue and dispatch — drop the cache
-        # row if any, ack quietly. No retry will help.
-        await _delete_cache(session, provider_id, asset_name)
-        logger.info(
-            "discovery.provider_missing provider=%s asset=%s — dropped",
-            provider_id, asset_name or "<list-all>",
-        )
-        return
+    async with get_jobs_session() as session:
+        prov_row = await get_provider_orm(session, provider_id)
+        if prov_row is None:
+            # Provider deleted between enqueue and dispatch — drop the cache
+            # row if any, ack quietly. No retry will help.
+            await _delete_cache(session, provider_id, asset_name)
+            logger.info(
+                "discovery.provider_missing provider=%s asset=%s — dropped",
+                provider_id, asset_name or "<list-all>",
+            )
+            return
 
-    creds = await get_credentials(session, provider_id)
+        creds = await get_credentials(session, provider_id)
 
-    # Build a transient provider instance. For per-asset stats we pass
+    # Build a transient provider instance — AFTER the session closed, so
+    # no JOBS-pool connection is held across the live provider IO below.
+    # (``prov_row`` attribute reads are safe post-close: the session
+    # factory sets expire_on_commit=False.) For per-asset stats we pass
     # ``asset_name`` as the graph_name; for list-all we pass None (the
     # FalkorDB driver uses the default DB to enumerate keyspaces).
     instance = provider_manager._create_provider_instance(
@@ -117,7 +122,7 @@ async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None
                 # config. Returning normally lets the worker ACK so we
                 # don't waste 5 retries on a clearly-broken config; the
                 # UI surfaces ``last_error`` so the user knows what to fix.
-                await record_failure(session, provider_id, asset_name, error_msg)
+                await record_failure(provider_id, asset_name, error_msg)
                 return
 
             if is_list_all:
@@ -153,7 +158,7 @@ async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None
                         if is_to
                         else f"Stats refresh failed (provider reachable): {stats_exc}"
                     )
-                    await record_failure(session, provider_id, asset_name, note)
+                    await record_failure(provider_id, asset_name, note)
                     return
                 payload = {
                     "nodeCount": raw.get("node_count", raw.get("nodeCount", 0)),
@@ -181,15 +186,25 @@ async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None
             duration, exc, exc_info=True,
         )
         raise
+    finally:
+        # Close the transient instance — it owns a lazily-built connection
+        # pool (up to FALKORDB_GRAPH_POOL_SIZE sockets) that would
+        # otherwise leak until GC, one pool per discovery job. getattr
+        # guard: non-FalkorDB provider types flow through this path too.
+        close = getattr(instance, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
 
-    await _upsert_cache(
-        session,
-        provider_id=provider_id,
-        asset_name=asset_name,
-        payload=payload,
-        status="fresh",
-        last_error=None,
-    )
+    async with get_jobs_session() as session:
+        await _upsert_cache(
+            session,
+            provider_id=provider_id,
+            asset_name=asset_name,
+            payload=payload,
+            status="fresh",
+            last_error=None,
+        )
 
     duration = asyncio.get_event_loop().time() - start_ts
     logger.info(
@@ -200,35 +215,36 @@ async def collect(session: AsyncSession, envelope: DiscoveryJobEnvelope) -> None
 
 
 async def record_failure(
-    session: AsyncSession,
     provider_id: str,
     asset_name: str,
     error: str,
 ) -> None:
     """Stamp ``last_error`` on the existing row (if any) without changing
-    its payload. Worker calls this on a failed-but-retriable poll so the
+    its payload. Called mid-IO by this handler and by
+    ``worker._handle_failure`` on a failed-but-retriable poll so the
     UI can surface a user-visible reason while the cache still serves
-    last-known-good data."""
-    existing = await session.get(
-        AssetDiscoveryCacheORM, (provider_id, asset_name)
-    )
-    if existing is None:
-        # No prior row — write a stub so the UI can show "unavailable"
-        # instead of "computing forever". Empty payload, status=stale.
-        now = datetime.now(timezone.utc)
-        session.add(
-            AssetDiscoveryCacheORM(
-                provider_id=provider_id,
-                asset_name=asset_name,
-                payload="{}",
-                status="stale",
-                computed_at=now.isoformat(),
-                expires_at=_absolute_expiry().isoformat(),
-                last_error=error[:2000],
-            )
+    last-known-good data. Opens its own short JOBS session."""
+    async with get_jobs_session() as session:
+        existing = await session.get(
+            AssetDiscoveryCacheORM, (provider_id, asset_name)
         )
-        return
-    existing.last_error = error[:2000]
+        if existing is None:
+            # No prior row — write a stub so the UI can show "unavailable"
+            # instead of "computing forever". Empty payload, status=stale.
+            now = datetime.now(timezone.utc)
+            session.add(
+                AssetDiscoveryCacheORM(
+                    provider_id=provider_id,
+                    asset_name=asset_name,
+                    payload="{}",
+                    status="stale",
+                    computed_at=now.isoformat(),
+                    expires_at=_absolute_expiry().isoformat(),
+                    last_error=error[:2000],
+                )
+            )
+            return
+        existing.last_error = error[:2000]
 
 
 # ── Internal: cache upsert helpers ───────────────────────────────────

@@ -8,11 +8,14 @@ import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
 import { faqEntries } from './docsConfig'
 import { markdownComponents } from './MarkdownComponents'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function DocsFAQ() {
   const brand = useBrand()
   const interp = (t: string) => interpolateBrand(t, brand)
   const [openIndex, setOpenIndex] = useState<number | null>(null)
+
+  useDocumentTitle('FAQ · Docs')
 
   // Group entries by category
   const categories = Array.from(new Set(faqEntries.map((e) => e.category)))

@@ -34,7 +34,7 @@ import {
     X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -53,8 +53,17 @@ export interface DropPayload {
     entityIds?: string[]
 }
 
+/** Entity placement derived from the canonical `assignments` map for a single
+ *  layer — just the identity + optional logical-node scoping the list/badge
+ *  rendering needs. */
+type LayerEntityRef = Pick<EntityAssignmentConfig, 'entityId' | 'logicalNodeId'>
+
 interface LayerHierarchyPanelProps {
     layers: ViewLayerConfig[]
+    /** Canonical urn-keyed assignment map (formData.assignments) — source of truth
+     *  for per-layer/per-node entity lists and count badges; layer.entityAssignments
+     *  is deprecated and no longer written. */
+    assignments: Record<string, LayerAssignmentEntry>
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     /** Called when user clicks OR drags onto a layer/node — becomes the active target */
@@ -253,7 +262,7 @@ interface LogicalNodeItemProps {
     depth: number
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
-    entityAssignments: EntityAssignmentConfig[]
+    entityAssignments: LayerEntityRef[]
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
@@ -500,6 +509,7 @@ function LogicalNodeItem({
 
 interface LayerRowProps {
     layer: ViewLayerConfig
+    assignments: Record<string, LayerAssignmentEntry>
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     onSetActiveTarget: (target: ActiveTarget) => void
@@ -507,7 +517,7 @@ interface LayerRowProps {
     onUnassign: (entityId: string) => void
 }
 
-function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop, onUnassign }: LayerRowProps) {
+function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveTarget, onDrop, onUnassign }: LayerRowProps) {
     const [isExpanded, setIsExpanded] = useState(true)
     const [showAddRoot, setShowAddRoot] = useState(false)
     const [isDragOver, setIsDragOver] = useState(false)
@@ -515,8 +525,16 @@ function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop
 
     const isLayerActive = activeTarget?.layerId === layer.id && !activeTarget?.nodeId
     const nodes = logicalNodes.nodesForLayer(layer.id)
-    const unassignedEntities = (layer.entityAssignments ?? []).filter(a => !a.logicalNodeId).map(a => a.entityId)
-    const totalAssigned = (layer.entityAssignments ?? []).length
+    // Derived from the canonical urn-keyed assignments map — layer.entityAssignments
+    // is legacy and no longer written by the wizard's assignment path.
+    const layerEntityAssignments: LayerEntityRef[] = useMemo(
+        () => Object.entries(assignments)
+            .filter(([, entry]) => entry.layerId === layer.id)
+            .map(([urn, entry]) => ({ entityId: urn, logicalNodeId: entry.logicalNodeId })),
+        [assignments, layer.id]
+    )
+    const unassignedEntities = layerEntityAssignments.filter(a => !a.logicalNodeId).map(a => a.entityId)
+    const totalAssigned = layerEntityAssignments.length
     const color = layer.color || '#3b82f6'
 
     // ── Layer-level drop zone (layer root, no node) ───────────────────────────
@@ -640,7 +658,7 @@ function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop
                                         depth={0}
                                         activeTarget={activeTarget}
                                         logicalNodes={logicalNodes}
-                                        entityAssignments={layer.entityAssignments ?? []}
+                                        entityAssignments={layerEntityAssignments}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -713,6 +731,7 @@ function LayerRow({ layer, activeTarget, logicalNodes, onSetActiveTarget, onDrop
 
 export function LayerHierarchyPanel({
     layers,
+    assignments,
     activeTarget,
     logicalNodes,
     onSetActiveTarget,
@@ -776,6 +795,7 @@ export function LayerHierarchyPanel({
                             <LayerRow
                                 key={layer.id}
                                 layer={layer}
+                                assignments={assignments}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
                                 onSetActiveTarget={onSetActiveTarget}

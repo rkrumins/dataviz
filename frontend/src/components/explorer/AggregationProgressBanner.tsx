@@ -14,25 +14,35 @@ export function AggregationProgressBanner({
   const [readiness, setReadiness] = useState<DataSourceReadinessResponse | null>(null);
   const [isSkipping, setIsSkipping] = useState(false);
   const [showSkipDialog, setShowSkipDialog] = useState(false);
+  // Bumped by the Re-aggregate button to restart polling for the new job.
+  const [pollEpoch, setPollEpoch] = useState(0);
 
   useEffect(() => {
     if (!dataSourceId) return;
 
     let mounted = true;
-    let pollInterval: ReturnType<typeof setTimeout>;
+    let pollInterval: ReturnType<typeof setInterval>;
+    let consecutiveErrors = 0;
 
     const checkStatus = async () => {
       try {
         const res = await aggregationService.getReadiness(dataSourceId);
+        consecutiveErrors = 0;
         if (mounted) {
           setReadiness(res);
           onStatusChange(res.isReady);
-          if (res.isReady && !res.driftDetected) {
+          // Terminal states — polling can't change them: ready (drift
+          // included; it's steady-state until the user re-aggregates)
+          // and failed (stays failed until the user acts).
+          if (res.isReady || res.aggregationStatus === 'failed') {
             clearInterval(pollInterval);
           }
         }
       } catch (err) {
         console.error('Failed to check aggregation readiness', err);
+        // Backend unreachable — stop hammering it; a remount or the
+        // Re-aggregate button (pollEpoch bump) resumes polling.
+        if (++consecutiveErrors >= 3) clearInterval(pollInterval);
       }
     };
 
@@ -43,7 +53,7 @@ export function AggregationProgressBanner({
       mounted = false;
       clearInterval(pollInterval);
     };
-  }, [dataSourceId, onStatusChange]);
+  }, [dataSourceId, onStatusChange, pollEpoch]);
 
   if (!readiness || readiness.isReady) {
     if (readiness?.driftDetected) {
@@ -64,6 +74,7 @@ export function AggregationProgressBanner({
               if (dataSourceId) {
                 aggregationService.triggerAggregation(dataSourceId, { projectionMode: 'in_source', batchSize: 500 }, 'manual');
                 setReadiness(prev => prev ? { ...prev, driftDetected: false, aggregationStatus: 'pending' } : null);
+                setPollEpoch(e => e + 1);
               }
             }}
           >

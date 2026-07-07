@@ -119,6 +119,53 @@ async def test_delete_workspace_not_found(test_client: AsyncClient):
     assert resp.status_code == 404
 
 
+# ── GET /admin/workspaces/datasources/cached-stats (bulk) ────────────
+
+async def test_bulk_cached_stats_no_datasources(test_client: AsyncClient):
+    """With no data sources anywhere the bulk map is empty — 200, never 404."""
+    resp = await test_client.get("/api/v1/admin/workspaces/datasources/cached-stats")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["data"] == {}
+    assert body["meta"]["status"] == "fresh"
+
+
+async def test_bulk_cached_stats_cold_cache_and_workspace_filter(test_client: AsyncClient):
+    """A data source with no stats row reports status=computing with zero
+    counts (keyed "<wsId>/<dsId>"), and ``?workspace_id=`` scopes the map."""
+    r1 = await test_client.post(
+        "/api/v1/admin/workspaces",
+        json={"name": "Bulk WS 1", "dataSources": [{"providerId": "prov_bulk", "graphName": "g1"}]},
+    )
+    assert r1.status_code == 201
+    ws1 = r1.json()["id"]
+    ds1 = r1.json()["dataSources"][0]["id"]
+
+    r2 = await test_client.post(
+        "/api/v1/admin/workspaces",
+        json={"name": "Bulk WS 2", "dataSources": [{"providerId": "prov_bulk", "graphName": "g2"}]},
+    )
+    assert r2.status_code == 201
+    ws2 = r2.json()["id"]
+
+    resp = await test_client.get("/api/v1/admin/workspaces/datasources/cached-stats")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    key = f"{ws1}/{ds1}"
+    assert key in data
+    assert data[key]["status"] == "computing"
+    assert data[key]["nodeCount"] == 0
+    assert data[key]["entityTypeCounts"] == {}
+
+    resp = await test_client.get(
+        f"/api/v1/admin/workspaces/datasources/cached-stats?workspace_id={ws2}"
+    )
+    assert resp.status_code == 200
+    scoped = resp.json()["data"]
+    assert len(scoped) == 1
+    assert all(k.startswith(f"{ws2}/") for k in scoped)
+
+
 # ── Lifecycle round-trip ──────────────────────────────────────────────
 
 async def test_workspace_crud_roundtrip(test_client: AsyncClient):

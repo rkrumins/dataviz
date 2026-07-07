@@ -20,6 +20,8 @@ import type { View } from '@/services/viewApiService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
+import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
+import { VocabAlignmentWarning } from './VocabAlignmentWarning'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
 // ─────────────────────────────────────────────────────────────────────
@@ -168,7 +170,7 @@ export function DataSourceDetailPanel({
     onSaveAggregationConfig,
     onClose,
 }: DataSourceDetailPanelProps) {
-    const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views'>('insights')
+    const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
     // Aggregation mutations (config save / re-trigger / purge) require
@@ -336,11 +338,16 @@ export function DataSourceDetailPanel({
                             </div>
                         </div>
 
+                        {/* Per-source vocabulary-alignment drift (Task E) — own component,
+                            no overlap with the header chips. */}
+                        <VocabAlignmentWarning wsId={wsId} dataSourceId={ds.id} />
+
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Insights" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
+                            <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
                         </div>
 
                         {/* ── Tab Content (scrollable) ───────────────────── */}
@@ -607,6 +614,11 @@ export function DataSourceDetailPanel({
                                         </div>
                                     )}
                                 </div>
+                            )}
+
+                            {/* ─── Versioning Tab ───────────────────────── */}
+                            {activeTab === 'versioning' && (
+                                <DataSourceVersioningTab wsId={wsId} dataSourceId={ds.id} />
                             )}
                         </div>
 

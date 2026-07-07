@@ -230,6 +230,33 @@ def _validate_falkordb_connection(extra_config: Optional[Dict[str, Any]]) -> Non
                 raise ValueError
         except (TypeError, ValueError):
             raise ValueError(f"falkordbConnection.{key} must be {label}.")
+    # Per-provider auth gate. Optional; when present must be a bool. False
+    # disables FalkorDB graph AUTH for this provider (anonymous connect).
+    if "authEnabled" in fc and not isinstance(fc.get("authEnabled"), bool):
+        raise ValueError("falkordbConnection.authEnabled must be a boolean.")
+    # Per-provider TLS / mutual-TLS. Optional object; cert inputs are file
+    # PATHS (non-secret). Applies to the graph (all topologies), preflight,
+    # and the cache.
+    tls = fc.get("tls")
+    if tls is not None:
+        if not isinstance(tls, dict):
+            raise ValueError("falkordbConnection.tls must be an object.")
+        if "enabled" in tls and not isinstance(tls.get("enabled"), bool):
+            raise ValueError("falkordbConnection.tls.enabled must be a boolean.")
+        if "checkHostname" in tls and not isinstance(tls.get("checkHostname"), bool):
+            raise ValueError("falkordbConnection.tls.checkHostname must be a boolean.")
+        verify = tls.get("verifyMode")
+        if verify is not None and str(verify).strip().lower() not in (
+            "required", "optional", "none",
+        ):
+            raise ValueError(
+                "falkordbConnection.tls.verifyMode must be one of "
+                "'required', 'optional', 'none'."
+            )
+        for path_key in ("caCertPath", "certPath", "keyPath"):
+            val = tls.get(path_key)
+            if val is not None and not isinstance(val, str):
+                raise ValueError(f"falkordbConnection.tls.{path_key} must be a string path.")
 
 
 class ProviderCreateRequest(BaseModel):
@@ -240,6 +267,7 @@ class ProviderCreateRequest(BaseModel):
     credentials: Optional[ConnectionCredentials] = None
     tls_enabled: bool = Field(False, alias="tlsEnabled")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
 
     class Config:
         populate_by_name = True
@@ -296,6 +324,7 @@ class ProviderUpdateRequest(BaseModel):
     tls_enabled: Optional[bool] = Field(None, alias="tlsEnabled")
     is_active: Optional[bool] = Field(None, alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
 
     class Config:
         populate_by_name = True
@@ -315,6 +344,7 @@ class ProviderResponse(BaseModel):
     tls_enabled: bool = Field(alias="tlsEnabled")
     is_active: bool = Field(alias="isActive")
     extra_config: Optional[Dict[str, Any]] = Field(None, alias="extraConfig")
+    falkor_max_resident: Optional[int] = Field(None, alias="falkorMaxResident")
     permitted_workspaces: List[str] = Field(default_factory=lambda: ["*"], alias="permittedWorkspaces")
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
@@ -545,9 +575,19 @@ class OntologyMatchResult(BaseModel):
         populate_by_name = True
 
 
+class MergedTypeVariant(BaseModel):
+    spelling: str
+    count: int = 0
+
+
 class OntologySuggestResponse(BaseModel):
     suggested: OntologyCreateRequest
     matching_ontologies: List[OntologyMatchResult] = Field(default_factory=list, alias="matchingOntologies")
+    # Canonical suggested type id → the source spellings merged into it (Task E §1c).
+    # Present only for types the source spelled >1 way; the suggest-review UI shows these
+    # inline with a "split" affordance so a same-source multi-variant is a visible decision.
+    merged_variants: Dict[str, List[MergedTypeVariant]] = Field(
+        default_factory=dict, alias="mergedVariants")
 
     class Config:
         populate_by_name = True
@@ -767,6 +807,35 @@ class ViewUpdateRequest(BaseModel):
         populate_by_name = True
 
 
+class ViewLayoutUpdateRequest(BaseModel):
+    """Body for ``PUT /views/{id}/layout`` — a layout-only update (layer
+    definitions + the flattened urn->assignment map), decoupled from the
+    rest of the view's config (name/description/content/filters/...). See
+    ``backend.app.services.layout_config.parse_reference_layout`` for the
+    canonical shape ``reference_layout`` must match.
+    """
+    reference_layout: Dict[str, Any] = Field(alias="referenceLayout")
+    entity_scope: Optional[str] = Field(None, alias="entityScope")
+    display_rules: Optional[List[Dict[str, Any]]] = Field(None, alias="displayRules")
+
+    class Config:
+        populate_by_name = True
+
+    @model_validator(mode="after")
+    def _validate_reference_layout_shape(self) -> "ViewLayoutUpdateRequest":
+        if not isinstance(self.reference_layout.get("layers"), list):
+            raise ValueError("referenceLayout.layers must be a list")
+        if not isinstance(self.reference_layout.get("assignments"), dict):
+            raise ValueError("referenceLayout.assignments must be a dict")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_entity_scope(self) -> "ViewLayoutUpdateRequest":
+        if self.entity_scope is not None and self.entity_scope not in ("all", "curated"):
+            raise ValueError("entityScope must be 'all' or 'curated'")
+        return self
+
+
 class ViewResponse(BaseModel):
     id: str
     name: str
@@ -791,6 +860,20 @@ class ViewResponse(BaseModel):
     # deleted — callers fall back to ``created_by`` in that case.
     created_by_name: Optional[str] = Field(None, alias="createdByName")
     created_by_email: Optional[str] = Field(None, alias="createdByEmail")
+    # Who last edited the view. NULL until the first edit after the
+    # updated_by migration; names NULL whenever the user can't be resolved
+    # (deleted record / anonymous), resolved server-side like created_by.
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+    updated_by_name: Optional[str] = Field(None, alias="updatedByName")
+    updated_by_email: Optional[str] = Field(None, alias="updatedByEmail")
+    # When/who last changed the view's UNDERLYING DATA (a publish / PR merge /
+    # revert on its data source) — separate from updated_* (settings edits) so
+    # both stories stay truthful. NULL until the first post-migration publish;
+    # the name resolves in the same batched user lookup as created_by.
+    data_updated_at: Optional[str] = Field(None, alias="dataUpdatedAt")
+    data_updated_by: Optional[str] = Field(None, alias="dataUpdatedBy")
+    data_updated_by_name: Optional[str] = Field(None, alias="dataUpdatedByName")
+    data_updated_by_email: Optional[str] = Field(None, alias="dataUpdatedByEmail")
     tags: Optional[List[str]] = None
     is_pinned: bool = Field(False, alias="isPinned")
     favourite_count: int = Field(0, alias="favouriteCount")

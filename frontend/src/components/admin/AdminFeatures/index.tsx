@@ -96,7 +96,7 @@ export function AdminFeatures() {
   const isUsingDefaults = !data?.updatedAt && !defaultsHintDismissed
 
   return (
-    <div className="max-w-6xl mx-auto p-8 animate-in fade-in duration-500">
+    <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
       {/* Early access / experimental notice — backend-driven; Disable = turn off (persisted); Enable = turn back on */}
       <AnimatePresence>
         {(experimentalNotice?.title || editNoticeOpen) && (

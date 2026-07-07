@@ -21,7 +21,7 @@ import { cn } from '@/lib/utils'
 import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 
 interface CreatorHoverCardProps {
-  /** The raw user id recorded on the view — used as a tertiary fallback. */
+  /** The raw user id recorded on the view — shown only as secondary/mono detail, never as the primary label. */
   userId?: string | null
   /** Server-resolved display name (preferred primary label). */
   displayName?: string | null
@@ -52,7 +52,7 @@ export function CreatorHoverCard({
   const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const name = displayName?.trim() || userId || 'Unknown'
+  const name = displayName?.trim() || 'Unknown'
   const hasIdentity = !!(displayName || email || userId)
 
   // Compute card placement relative to the trigger.

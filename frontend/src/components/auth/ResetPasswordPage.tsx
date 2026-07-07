@@ -12,6 +12,7 @@ import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // Lazy-load zxcvbn for password strength
 let zxcvbnModule: typeof import('@zxcvbn-ts/core') | null = null
@@ -54,6 +55,8 @@ export function ResetPasswordPage() {
     useEffect(() => {
         if (isAuthenticated) navigate('/', { replace: true })
     }, [isAuthenticated, navigate])
+
+    useDocumentTitle('Reset password')
 
     // Debounced password strength check
     useEffect(() => {

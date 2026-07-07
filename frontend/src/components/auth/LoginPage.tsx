@@ -6,6 +6,7 @@ import { useAuthStore } from '@/store/auth'
 import { authService, type SsoProviderSummary } from '@/services/authService'
 import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 
 // SSO is initiated by a top-level GET so the IdP redirect flow works
@@ -156,6 +157,8 @@ export function LoginPage() {
     useEffect(() => {
         clearError()
     }, [clearError])
+
+    useDocumentTitle('Sign in')
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()

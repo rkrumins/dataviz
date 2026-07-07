@@ -12,7 +12,8 @@ import { useSearchParams, Link } from 'react-router-dom'
 import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
-    AlertTriangle, Zap, X, ChevronRight, Plus, WifiOff
+    AlertTriangle, Zap, X, Check, ChevronDown, ChevronLeft, ChevronRight,
+    Plus, WifiOff, ArrowUpDown,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -23,6 +24,7 @@ import {
 } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
+import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { aggregationService } from '@/services/aggregationService'
 import { useToast } from '@/components/ui/toast'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
@@ -36,6 +38,21 @@ import { StatusChip } from '@/components/insights/StatusChip'
 import { RefreshControl } from '@/components/insights/RefreshControl'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
 import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
+
+// Plain-language sort options — field + direction folded into one
+// control so the toolbar reads like a sentence, not a query builder.
+const SORT_OPTIONS: Array<{
+    label: string
+    by: 'name' | 'size' | 'refreshed'
+    dir: 'asc' | 'desc'
+}> = [
+    { label: 'Name A→Z', by: 'name', dir: 'asc' },
+    { label: 'Name Z→A', by: 'name', dir: 'desc' },
+    { label: 'Largest first', by: 'size', dir: 'desc' },
+    { label: 'Smallest first', by: 'size', dir: 'asc' },
+    { label: 'Recently refreshed', by: 'refreshed', dir: 'desc' },
+    { label: 'Longest since refresh', by: 'refreshed', dir: 'asc' },
+]
 import { useAssetStats, ASSET_STATS_QUERY_KEY_PREFIX } from '@/hooks/useAssetStats'
 
 // ─── Provider type helpers ────────────────────────────────────────────────────
@@ -46,6 +63,53 @@ const PROVIDER_TYPES = [
 ]
 function getProviderConfig(type: string) {
     return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
+}
+
+/** One provider row in the left rail. Renders the SAME live health dot (from the
+ *  shared `providerHealthModel`) as the Providers tab and the view wizard, so a
+ *  provider that's down looks down everywhere — not silently blank here. */
+function ProviderRailItem({
+    provider, counts, isActive, onSelect,
+}: {
+    provider: ProviderResponse
+    counts?: { total: number; registered: number }
+    isActive: boolean
+    onSelect: () => void
+}) {
+    const config = getProviderConfig(provider.providerType)
+    const health = useProviderHealth(provider.id)
+    const healthMeta = PROVIDER_HEALTH_META[health.state]
+    return (
+        <button
+            onClick={onSelect}
+            className={cn(
+                'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-colors duration-150',
+                isActive
+                    ? 'bg-indigo-500/8 border-indigo-500/30 shadow-sm'
+                    : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
+            )}
+        >
+            <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', config.color)}>
+                <config.Logo className="w-4 h-4" />
+            </div>
+            <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                    <p className="text-sm font-semibold text-ink truncate">{provider.name}</p>
+                    <span
+                        className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
+                        title={health.error ?? healthMeta.label}
+                    />
+                </div>
+                <p className="text-[11px] text-ink-muted">{config.label}</p>
+            </div>
+            {counts && (
+                <div className="text-right shrink-0">
+                    <p className="text-xs font-bold text-emerald-500">{counts.registered}</p>
+                    <p className="text-[10px] text-ink-muted">/{counts.total}</p>
+                </div>
+            )}
+        </button>
+    )
 }
 
 // Stable palette of subtle indicator colours cycling for type chips
@@ -654,6 +718,26 @@ export function RegistryAssets() {
     const [searchQuery, setSearchQuery] = useState('')
     const [statusFilter, setStatusFilter] = useState<'all' | 'selected' | 'registered' | 'unregistered'>('all')
 
+    // Sort + pagination. Sort keys come from the bulk ``assetsDetail``
+    // summaries on the list envelope (one query server-side) — no
+    // per-row stats fetches are needed to order the whole list.
+    const [sortBy, setSortBy] = useState<'name' | 'size' | 'refreshed'>('name')
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+    const [pageSize, setPageSize] = useState<10 | 25 | 50>(25)
+    const [page, setPage] = useState(0)
+    // Sort menu (house dropdown pattern — click-outside to dismiss,
+    // same as RefreshControl's overflow menu in this toolbar).
+    const [sortMenuOpen, setSortMenuOpen] = useState(false)
+    const sortMenuRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+        if (!sortMenuOpen) return
+        const onClick = (e: MouseEvent) => {
+            if (!sortMenuRef.current?.contains(e.target as Node)) setSortMenuOpen(false)
+        }
+        document.addEventListener('mousedown', onClick)
+        return () => document.removeEventListener('mousedown', onClick)
+    }, [sortMenuOpen])
+
     // Actions
     const [showOnboarding, setShowOnboarding] = useState(false)
     const [onboardingCatalogs, setOnboardingCatalogs] = useState<any[]>([])
@@ -699,13 +783,17 @@ export function RegistryAssets() {
     useEffect(() => {
         if (!selectedProviderId) return
         let mounted = true
+        // Abort the previous provider's in-flight list fetch on switch —
+        // without this, rapidly flicking through providers piles up
+        // superseded requests that all run to completion server-side.
+        const abort = new AbortController()
         setAssetsLoading(true)
         setAssetsError('')
         setSearchQuery('')
         setStatusFilter('all')
 
         Promise.all([
-            providerService.listAssets(selectedProviderId),
+            providerService.listAssets(selectedProviderId, abort.signal),
             catalogService.list(selectedProviderId),
         ]).then(([res, existing]) => {
             if (!mounted) return
@@ -733,11 +821,13 @@ export function RegistryAssets() {
                 }
             }))
         }).catch(err => {
-            if (mounted) setAssetsError(err.message || 'Failed to load assets.')
+            if (mounted && err?.name !== 'AbortError') {
+                setAssetsError(err.message || 'Failed to load assets.')
+            }
         }).finally(() => {
             if (mounted) setAssetsLoading(false)
         })
-        return () => { mounted = false }
+        return () => { mounted = false; abort.abort() }
     }, [selectedProviderId])
 
     // Select provider + update URL
@@ -970,24 +1060,64 @@ export function RegistryAssets() {
         return true
     })
 
+    // Sort using the bulk per-asset summaries from the list envelope —
+    // assets without a cached summary sort to the end of size/refreshed
+    // orders (they've never been scanned).
+    const detailByName = new Map(
+        (assetsEnvelope?.data?.assetsDetail ?? []).map(d => [d.name, d]),
+    )
+    const sortedAssets = [...filteredAssets].sort((a, b) => {
+        const dir = sortDir === 'asc' ? 1 : -1
+        if (sortBy === 'name') return a.localeCompare(b) * dir
+        const da = detailByName.get(a)
+        const db = detailByName.get(b)
+        if (sortBy === 'size') {
+            const na = da?.nodeCount ?? -1
+            const nb = db?.nodeCount ?? -1
+            if (na !== nb) return (na - nb) * dir
+        } else {
+            const ta = da?.updatedAt ?? ''
+            const tb = db?.updatedAt ?? ''
+            if (ta !== tb) return ta.localeCompare(tb) * dir
+        }
+        return a.localeCompare(b)
+    })
+
+    const pageCount = Math.max(1, Math.ceil(sortedAssets.length / pageSize))
+    const clampedPage = Math.min(page, pageCount - 1)
+    const pagedAssets = sortedAssets.slice(
+        clampedPage * pageSize, (clampedPage + 1) * pageSize,
+    )
+
+    // Back to page one whenever the visible set changes shape.
+    useEffect(() => {
+        setPage(0)
+    }, [selectedProviderId, searchQuery, statusFilter, sortBy, sortDir, pageSize])
+
     const selectedProvider = providers.find(p => p.id === selectedProviderId)
 
-    // Force-refresh every cached asset for the selected provider, then
-    // reload the asset list. Used by the panel-level RefreshControl.
-    // Best-effort on the enqueue: if Redis is unreachable, we still
-    // re-list the assets so the user isn't left with a stale view.
+    // Refresh the asset list + the assets on the CURRENT PAGE. Used by
+    // the panel-level RefreshControl. Deliberately NOT refresh-
+    // everything: a provider with 200 cached assets used to grind for
+    // minutes through the worker on every click; individual rows keep
+    // their own ⟳ button. The list stays rendered throughout, and the
+    // promise resolves only when every queued asset's job has finished
+    // (its envelope stops reporting ``refreshing``) — RefreshControl
+    // awaits this, so the button spins until the new figures are live.
     const handleRefreshSelectedProvider = useCallback(async () => {
         if (!selectedProviderId) return
-        setAssetsLoading(true)
+        const targets = pagedAssets
         try {
-            const result = await providerService.refreshAllAssets(selectedProviderId)
+            const result = await providerService.refreshAllAssets(
+                selectedProviderId, targets,
+            )
             const noun = result.jobs_queued === 1 ? 'asset' : 'assets'
-            const truncatedHint = result.truncated
-                ? ' (capped — re-click to catch any remaining assets)'
+            const scopeHint = sortedAssets.length > targets.length
+                ? ` (this page — ${targets.length} of ${sortedAssets.length})`
                 : ''
             showToast(
                 'success',
-                `Refresh queued for ${result.jobs_queued} ${noun}${truncatedHint} — chips will update as workers complete.`,
+                `Refresh queued for ${result.jobs_queued} ${noun}${scopeHint}.`,
             )
         } catch (err: any) {
             showToast(
@@ -996,12 +1126,45 @@ export function RegistryAssets() {
             )
         }
         // Invalidate every per-row asset-stats query under this
-        // provider so polling picks up the now-pending refreshes.
+        // provider so mounted rows re-read (and show the refreshing
+        // spinner from the claim-backed ``meta.refreshing`` signal).
         queryClient.invalidateQueries({
             predicate: (q) =>
                 q.queryKey[0] === ASSET_STATS_QUERY_KEY_PREFIX
                 && q.queryKey[1] === selectedProviderId,
         })
+
+        // Wait for the queued jobs to actually finish: poll each
+        // target's stats endpoint until ``refreshing`` clears (the
+        // worker releases the claim on success AND failure, so this
+        // terminates promptly either way; 90s safety cap). fetchQuery
+        // writes into the same query keys the rows render from, so the
+        // figures update in place as each job lands.
+        const providerId = selectedProviderId
+        const deadline = Date.now() + 90_000
+        const pending = new Set(targets)
+        while (pending.size > 0 && Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 2500))
+            const checks = await Promise.allSettled(
+                Array.from(pending).map(async name => {
+                    const env = await queryClient.fetchQuery({
+                        queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, name],
+                        queryFn: () => providerService.getAssetStats(providerId, name),
+                        staleTime: 0,
+                    })
+                    return { name, refreshing: !!(env as any)?.meta?.refreshing }
+                }),
+            )
+            for (const c of checks) {
+                if (c.status === 'fulfilled' && !c.value.refreshing) {
+                    pending.delete(c.value.name)
+                }
+            }
+        }
+
+        // Final re-list so the bulk summaries (sort keys, counts,
+        // updatedAt) reflect the completed jobs. No spinner — the
+        // current list stays useful throughout.
         try {
             const [res, existing] = await Promise.all([
                 providerService.listAssets(selectedProviderId),
@@ -1010,10 +1173,8 @@ export function RegistryAssets() {
             setAssetsEnvelope(res)
             setAssets(res.data?.assets ?? [])
             setExistingCatalogs(existing)
-        } finally {
-            setAssetsLoading(false)
-        }
-    }, [selectedProviderId, queryClient, showToast])
+        } catch { /* keep current list on re-list failure */ }
+    }, [selectedProviderId, pagedAssets, sortedAssets.length, queryClient, showToast])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (
@@ -1041,37 +1202,15 @@ export function RegistryAssets() {
                         </Link>
                     </div>
                 ) : (
-                    providers.map(p => {
-                        const config = getProviderConfig(p.providerType)
-                        const counts = providerAssetCounts[p.id]
-                        const isActive = selectedProviderId === p.id
-                        return (
-                            <button
-                                key={p.id}
-                                onClick={() => handleSelectProvider(p.id)}
-                                className={cn(
-                                    'w-full flex items-center gap-3 p-3 rounded-xl border text-left transition-colors duration-150 duration-150',
-                                    isActive
-                                        ? 'bg-indigo-500/8 border-indigo-500/30 shadow-sm'
-                                        : 'bg-canvas-elevated border-glass-border hover:border-indigo-400/30 hover:bg-indigo-500/5'
-                                )}
-                            >
-                                <div className={cn('w-8 h-8 rounded-lg border flex items-center justify-center shrink-0', config.color)}>
-                                    <config.Logo className="w-4 h-4" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <p className="text-sm font-semibold text-ink truncate">{p.name}</p>
-                                    <p className="text-[11px] text-ink-muted">{config.label}</p>
-                                </div>
-                                {counts && (
-                                    <div className="text-right shrink-0">
-                                        <p className="text-xs font-bold text-emerald-500">{counts.registered}</p>
-                                        <p className="text-[10px] text-ink-muted">/{counts.total}</p>
-                                    </div>
-                                )}
-                            </button>
-                        )
-                    })
+                    providers.map(p => (
+                        <ProviderRailItem
+                            key={p.id}
+                            provider={p}
+                            counts={providerAssetCounts[p.id]}
+                            isActive={selectedProviderId === p.id}
+                            onSelect={() => handleSelectProvider(p.id)}
+                        />
+                    ))
                 )}
 
                 {/* Global stats pill */}
@@ -1185,8 +1324,57 @@ export function RegistryAssets() {
                                     ))}
                                 </div>
 
-                                {/* Bulk actions */}
+                                {/* Sort + bulk actions */}
                                 <div className="flex items-center gap-1.5">
+                                    <div className="relative" ref={sortMenuRef}>
+                                        <button
+                                            onClick={() => setSortMenuOpen(o => !o)}
+                                            aria-haspopup="menu"
+                                            aria-expanded={sortMenuOpen}
+                                            aria-label="Sort assets"
+                                            className={cn(
+                                                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-glass-border bg-canvas-elevated transition-colors',
+                                                'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                                sortMenuOpen && 'text-ink bg-black/5 dark:bg-white/5',
+                                            )}
+                                        >
+                                            <ArrowUpDown className="w-3.5 h-3.5" />
+                                            {SORT_OPTIONS.find(o => o.by === sortBy && o.dir === sortDir)?.label ?? 'Sort'}
+                                            <ChevronDown className={cn('w-3 h-3 transition-transform duration-150', sortMenuOpen && 'rotate-180')} />
+                                        </button>
+                                        {sortMenuOpen && (
+                                            <div
+                                                role="menu"
+                                                className="absolute right-0 top-full mt-1.5 z-20 w-52 p-1 rounded-xl border border-glass-border bg-canvas-elevated shadow-xl animate-in fade-in slide-in-from-top-1 duration-100"
+                                            >
+                                                {SORT_OPTIONS.map(opt => {
+                                                    const active = sortBy === opt.by && sortDir === opt.dir
+                                                    return (
+                                                        <button
+                                                            key={opt.label}
+                                                            role="menuitemradio"
+                                                            aria-checked={active}
+                                                            onClick={() => {
+                                                                setSortBy(opt.by)
+                                                                setSortDir(opt.dir)
+                                                                setSortMenuOpen(false)
+                                                            }}
+                                                            className={cn(
+                                                                'w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors',
+                                                                active
+                                                                    ? 'font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                                                    : 'text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                            )}
+                                                        >
+                                                            {opt.label}
+                                                            {active && <Check className="w-3.5 h-3.5 shrink-0" />}
+                                                        </button>
+                                                    )
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
                                     <button
                                         onClick={() => setSelected(new Set(assets.filter(a => !registeredSourceIds.has(a))))}
                                         className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-600 bg-indigo-500/10 hover:bg-indigo-500/20 transition-colors"
@@ -1261,9 +1449,13 @@ export function RegistryAssets() {
                                     </button>
                                 </div>
                             ) : (
-                                filteredAssets.map(assetName => (
+                                pagedAssets.map(assetName => (
                                     <AssetRow
-                                        key={assetName}
+                                        // Keyed by provider TOO: a bare assetName key reuses the
+                                        // row instance across providers that share asset names,
+                                        // and the reused row's already-true visibility gate then
+                                        // fires the new provider's stats fetch instantly.
+                                        key={`${selectedProviderId}:${assetName}`}
                                         providerId={selectedProviderId!}
                                         assetName={assetName}
                                         isRegistered={registeredSourceIds.has(assetName)}
@@ -1276,6 +1468,58 @@ export function RegistryAssets() {
                                 ))
                             )}
                         </div>
+
+                        {/* Pager — matches the Job History pager conventions */}
+                        {!assetsLoading && sortedAssets.length > 0 && (
+                            <div className="shrink-0 mt-3 flex items-center justify-between gap-4 text-xs text-ink-muted">
+                                <div className="flex items-center gap-2">
+                                    <span>Show</span>
+                                    <div className="flex gap-0.5 p-0.5 bg-black/5 dark:bg-white/5 rounded-lg border border-glass-border">
+                                        {([10, 25, 50] as const).map(size => (
+                                            <button
+                                                key={size}
+                                                onClick={() => setPageSize(size)}
+                                                aria-label={`Show ${size} per page`}
+                                                aria-pressed={pageSize === size}
+                                                className={cn(
+                                                    'px-2 py-1 text-xs font-semibold rounded-md transition-colors tabular-nums',
+                                                    pageSize === size
+                                                        ? 'bg-canvas shadow text-ink'
+                                                        : 'text-ink-muted hover:text-ink',
+                                                )}
+                                            >
+                                                {size}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <span>per page</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span className="tabular-nums">
+                                        {clampedPage * pageSize + 1}–{Math.min((clampedPage + 1) * pageSize, sortedAssets.length)} of {sortedAssets.length}
+                                    </span>
+                                    <button
+                                        onClick={() => setPage(p => Math.max(0, p - 1))}
+                                        disabled={clampedPage === 0}
+                                        aria-label="Previous page"
+                                        className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-muted bg-black/5 dark:bg-white/5 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                                    >
+                                        <ChevronLeft className="w-3.5 h-3.5" />
+                                    </button>
+                                    <span className="tabular-nums font-semibold text-ink">
+                                        {clampedPage + 1} / {pageCount}
+                                    </span>
+                                    <button
+                                        onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+                                        disabled={clampedPage >= pageCount - 1}
+                                        aria-label="Next page"
+                                        className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-muted bg-black/5 dark:bg-white/5 hover:text-ink hover:bg-black/10 dark:hover:bg-white/10 transition-colors disabled:opacity-30 disabled:pointer-events-none"
+                                    >
+                                        <ChevronRight className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
 
                         {/* Footer action bar */}
                         <div className="shrink-0 mt-4 pt-4 border-t border-glass-border flex items-center justify-between gap-4">

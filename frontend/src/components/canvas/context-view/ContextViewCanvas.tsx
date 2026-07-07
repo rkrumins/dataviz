@@ -16,7 +16,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
-import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import {
   useSchemaStore,
   normalizeEdgeType,
@@ -33,6 +32,12 @@ import { useCanvasStore, useCanvasVersion, type LineageEdge } from '@/store/canv
 import { useInstanceAssignments, useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
+import { useQueryClient } from '@tanstack/react-query'
+import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
+import { usePermission, useAuthStore } from '@/store/auth'
+import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
+import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
+import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -42,7 +47,10 @@ import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
-import { EntityCreationPanel } from '../../panels/EntityCreationPanel'
+import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
+import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
+import { BuildPanel } from '../create/buildmode/BuildPanel'
+import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { EdgeLegend } from '../EdgeLegend'
 
 import { useUnifiedTrace } from '@/hooks/useUnifiedTrace'
@@ -52,35 +60,52 @@ import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 // UX-first interaction components
 import { CanvasContextMenu } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
-import { QuickCreateNode } from '../QuickCreateNode'
 import { CommandPalette } from '../CommandPalette'
+import { useEdgeConnect } from '../edge-create/useEdgeConnect'
+import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
+import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
+import { CreateLinkPopover } from '../edge-create/CreateLinkPopover'
+import { useCreateLinkStore } from '../edge-create/createLinkStore'
+import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
+import { BlankCanvasEmptyState } from './BlankCanvasEmptyState'
+import { FirstStepsChecklist } from './FirstStepsChecklist'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
+import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
-// Editor components (shared across canvases)
-import { EditorToolbar } from '../EditorToolbar'
-import { NodePalette } from '../NodePalette'
-
-import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
+import type { ViewLayerConfig, DisplayRuleConfig } from '@/types/schema'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
+import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
 import { computeTraceMergeSpine } from '@/hooks/lib/traceMergeSpine'
 import { LayerColumn } from './LayerColumn'
+import { StartEditingDialog } from './StartEditingDialog'
+import { AddLayerColumn } from './AddLayerColumn'
+import * as layerOps from './layerMutations'
+import * as assignmentOps from './assignmentMutations'
+import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
+import { EditViewDetailsDialog } from './EditViewDetailsDialog'
+import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
+import { ImportDialog } from '@/features/import-export/ImportDialog'
+import { ExportDialog } from '@/features/import-export/ExportDialog'
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
 
 // Re-export for backward compatibility
@@ -90,6 +115,34 @@ export interface ContextViewCanvasProps {
   className?: string
   layers?: ViewLayerConfig[]
   showLineageFlow?: boolean
+}
+
+/**
+ * Containment descendants of `rootId` (via `parentMap`) that carry their OWN explicit assignment entry.
+ * Assigning a parent clears these so they inherit the parent's new layer (the hard-inherit rule).
+ */
+function explicitDescendants(
+  rootId: string,
+  parentMap: Map<string, string>,
+  assignments: NormalizedReferenceLayout['assignments'],
+): string[] {
+  const childMap = new Map<string, string[]>()
+  parentMap.forEach((parent, child) => {
+    const list = childMap.get(parent) ?? []
+    list.push(child)
+    childMap.set(parent, list)
+  })
+  const out: string[] = []
+  const queue = [...(childMap.get(rootId) ?? [])]
+  const seen = new Set<string>()
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    if (seen.has(id)) continue
+    seen.add(id)
+    if (assignments[id]) out.push(id)
+    queue.push(...(childMap.get(id) ?? []))
+  }
+  return out
 }
 
 export function ContextViewCanvas({
@@ -104,6 +157,7 @@ export function ContextViewCanvas({
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const removeEdgesByNodeIds = useCanvasStore((s) => s.removeEdgesByNodeIds)
   const removeStoreEdges = useCanvasStore((s) => s.removeEdges)
+  const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
@@ -331,9 +385,73 @@ export function ContextViewCanvas({
   }, [trace, removeStoreEdges])
 
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
+  // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
+  // before useEdgeConnect exists) can arm connect-mode on the selected node.
+  const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+
+  // Forward-ref for the duplicate-subtree layer wiring. onNodeCopied /
+  // onNodeDuplicated fire from useDuplicateSubtree / useCanvasInteractions,
+  // both wired BEFORE nodeLayerMap / sortedLayers / assignEntityToLayer /
+  // parentMap exist in render order (mirrors startTraceRef). Keep a ref whose
+  // .current is refreshed once those are computed (below) and read it lazily
+  // inside the callbacks so they always see live layer state.
+  const duplicateWiringRef = useRef<{
+    nodeLayerMap: Map<string, string>
+    sortedLayers: ViewLayerConfig[]
+    assignEntityToLayer: (entityId: string, layerId: string) => { success: boolean }
+    parentMap: Map<string, string>
+    setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
+    currentLayout: () => NormalizedReferenceLayout
+    persistReferenceLayout: (next: NormalizedReferenceLayout) => void
+  } | null>(null)
+
+  // Duplicate a node's whole subtree as freshly-staged copies. onNodeCopied
+  // assigns EACH copy (root + every descendant) to its ORIGINAL's layer —
+  // ContextView only renders nodes that resolve to a layer, so without
+  // per-node assignment the descendant copies would vanish (don't rely on
+  // containment inheritance; assign explicitly). Reuses the same layer
+  // resolution the create flow's onEntityStaged uses. Writes BOTH the
+  // canonical view-config entry (keyed by the copy's temp urn, remapped to
+  // its real urn on save — same as a create) and the optimistic session
+  // assignment (immediate render feedback before the canonical write's
+  // debounce/re-render lands).
+  const { duplicateSubtree } = useDuplicateSubtree({
+    onNodeCopied: (originalId, _originalUrn, copyUrn) => {
+      const wiring = duplicateWiringRef.current
+      if (!wiring) return
+      const layer = wiring.nodeLayerMap.get(originalId) ?? wiring.sortedLayers[0]?.id
+      if (layer) {
+        wiring.assignEntityToLayer(copyUrn, layer)
+        wiring.persistReferenceLayout(assignmentOps.assignEntities(wiring.currentLayout(), [copyUrn], layer))
+      }
+    },
+  })
+
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
+    duplicateSubtree,
+    onNodeDuplicated: (originalId, rootCopyUrn) => {
+      // Reveal the copy: expand the original's parent (shows the new sibling)
+      // and the root copy itself (shows its just-staged children). Mirrors
+      // GraphCanvas's onNodeDuplicated, using this file's parentMap /
+      // setExpandedNodes (via the forward-ref).
+      const wiring = duplicateWiringRef.current
+      if (!wiring) return
+      const parentId = wiring.parentMap.get(originalId)
+      wiring.setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(rootCopyUrn)
+        return next
+      })
+    },
+    onConnectMode: (nodeId) => {
+      // Draft-gated on the SCOPED isDraft: on Published (or a draft open on a different data
+      // source) the connect shortcut is inert — managers enter edit via the header's Edit button.
+      if (!isDraft) return
+      edgeConnectRef.current?.armConnect(nodeId)
+    },
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
       // Implementation handled by the existing moveToLayer function
@@ -352,11 +470,13 @@ export function ContextViewCanvas({
     onExitTrace: exitTrace,
   })
 
-  // Keyboard shortcuts
-  useCanvasKeyboard({
-    enabled: true,
-    handlers: interactions.keyboardHandlers,
+  // Edge authoring: drag-handle + connect-mode → ontology-filtered picker →
+  // stage a RAW create_edge. Only offered in draft (authoring) mode.
+  const edgeConnect = useEdgeConnect({
+    onConnect: (sourceUrn, targetUrn, edgeType) =>
+      interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
   })
+  edgeConnectRef.current = edgeConnect
 
   // Aggregated lineage for progressive edge disclosure
   const {
@@ -375,13 +495,150 @@ export function ContextViewCanvas({
   const effectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
   const computeAssignments = useReferenceModelStore(s => s.computeAssignments)
   const assignmentStatus = useReferenceModelStore(s => s.assignmentStatus)
+  const resetAssignmentStatus = useReferenceModelStore(s => s.resetAssignmentStatus)
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
-  const syncStatus = useReferenceModelStore(s => s.syncStatus)
-  const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
-  const saveToBackend = useReferenceModelStore(s => s.saveToBackend)
+  // Display rules are session state on the store, edited via the Property Manager. The canvas
+  // owns their persistence: seed from the view on open (hydrate effect) + write them into the
+  // debounced updateViewLayout payload on change (persist effect) — see below.
+  const displayRules = useReferenceModelStore(s => s.displayRules)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
+  const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
+
+  // View/Edit mode gates — Published is strictly read-only for everyone;
+  // "edit mode" IS having a draft open (no separate flag). `isDraft` is
+  // scoped to the active view's data source (unlike the unscoped store
+  // `isDraftMode()`) so the header never claims Edit for a draft that
+  // belongs to a different data source.
+  const dataSourceId = activeView?.dataSourceId ?? null
+  // The canvas-versioning scope is the VIEW's own workspace — the same source
+  // CanvasVersioningBar / branchStore.setResolved use. The global workspaces-store
+  // selection can lag or diverge (deep links, workspace switching), and when it does
+  // the strict scope guard in useEffectiveBranchId returned null → isDraft false →
+  // the whole Edit cluster went invisible. See canvasScopeWorkspaceId.
+  const scopeWsId = canvasScopeWorkspaceId(activeView?.workspaceId, activeWorkspaceId)
+  // Branch-per-view: also scope by the active view's id, so `isDraft` never reflects a
+  // draft belonging to a DIFFERENT view on the same data source (branchStore is a single
+  // global store — without this, a view switch could keep reading the prior view's gate).
+  const effectiveBranchId = useEffectiveBranchId(scopeWsId ?? '', dataSourceId, activeView?.id ?? null)
+  const isDraft = !!effectiveBranchId
+  // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
+  // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
+  useDeletionGhosts(isDraft)
+  const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
+  const graphId = useGraphId()
+  const canEnterEdit = !!graphId
+  // Blank (hand-built) models drive the guided empty state + first-steps
+  // companion; react-query dedupes this against CanvasVersioningBar's resolve.
+  const resolveQ = useResolveGraph(scopeWsId ?? undefined, dataSourceId)
+  const isBlankModel = resolveQ.data?.kind === 'blank'
+  const mainHeadSeq = resolveQ.data?.mainHeadCommitSeq ?? 0
+
+  // View-level rights for the title menu — deliberately independent of the
+  // canvas Edit cluster (view metadata is not graph data). Scoped to the
+  // canvas workspace (scopeWsId) so they line up with the rest of the view
+  // state. Both mirror the backend enforcers (see the header design spec):
+  //   • edit details  = workspace:view:edit OR creator
+  //   • manage sharing = workspace:admin (system:admin folds in) OR creator
+  //     (view_grants.py::can_manage_view_grants)
+  const currentUserId = useAuthStore(s => s.user?.id) ?? null
+  const isViewCreator = !!activeView?.createdBy && activeView.createdBy === currentUserId
+  const canEditView = usePermission('workspace:view:edit', scopeWsId ?? undefined) || isViewCreator
+  const canShareView = usePermission('workspace:admin', scopeWsId ?? undefined) || isViewCreator
+
+  // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
+  // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
+  // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
+  // (The context-menu mutation entry points are draft-gated separately.)
+  useCanvasKeyboard({
+    enabled: true,
+    handlers: isDraft
+      ? interactions.keyboardHandlers
+      : { ...interactions.keyboardHandlers, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+  })
+
+  // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
+  // Every layer/assignment gesture writes ONE store: the active view's `referenceLayout`.
+  // persistReferenceLayout updates the schema-store view SYNCHRONOUSLY (immediate canvas re-render —
+  // useLayerAssignment reads the canonical `assignments`) and arms a debounced durable
+  // PUT /views/{id}/layout. Reads go through the LIVE view (getActiveView) + normalizeReferenceLayout so
+  // rapid successive writes (e.g. a build batch's per-row assigns) accumulate instead of clobbering, and
+  // every saved config is canonical-clean (entityAssignments stripped, exact-urn rules converted).
+  // This REPLACES the prior syncStatus→saveToBackend blueprint-autosync effect (the reference-model
+  // store no longer persists layers/assignments — Task 5 demotes it to a render cache).
+  const layoutSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingLayoutSave = useRef<
+    { viewId: string; referenceLayout: NormalizedReferenceLayout; entityScope: 'all' | 'curated' } | null
+  >(null)
+  // Sync indicator DERIVED from the canvas debounce (replaces the deleted store syncStatus): 'saving'
+  // from the moment a save is armed until the durable PUT settles, else 'idle'. The header subline
+  // shows a small spinner while 'saving'.
+  const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving'>('idle')
+
+  const doLayoutSave = useCallback(async () => {
+    if (layoutSaveTimer.current) { clearTimeout(layoutSaveTimer.current); layoutSaveTimer.current = null }
+    const pending = pendingLayoutSave.current
+    if (!pending) { setLayoutSyncStatus('idle'); return }
+    pendingLayoutSave.current = null
+    try {
+      await updateViewLayout(pending.viewId, {
+        referenceLayout: pending.referenceLayout,
+        entityScope: pending.entityScope,
+        // Always send the live display rules so a layer-only save never wipes them (the endpoint
+        // replaces referenceLayout wholesale, then re-nests displayRules only when supplied).
+        displayRules: useReferenceModelStore.getState().displayRules,
+      })
+    } catch (err) {
+      // Swallow to avoid unhandled-rejection noise; the next edit re-arms the save.
+      console.error('[ContextViewCanvas] layout save failed', err)
+    } finally {
+      setLayoutSyncStatus('idle')
+    }
+  }, [])
+
+  /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator. */
+  const armLayoutSave = useCallback(() => {
+    setLayoutSyncStatus('saving')
+    if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
+    layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
+  }, [doLayoutSave])
+
+  /** Flush any pending debounced layout save NOW (no-op if none pending). Used by the Save button. */
+  const flushLayoutSave = useCallback(async () => { await doLayoutSave() }, [doLayoutSave])
+
+  // Clear the pending debounce on unmount (matches the prior blueprint-autosync effect's cleanup).
+  useEffect(() => () => { if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current) }, [])
+
+  /** The active view's CURRENT canonical layout, read LIVE so successive writes accumulate. Falls back
+   *  to the default columns when the view has none, matching the prior `currentLayers()` behaviour. */
+  const currentLayout = useCallback((): NormalizedReferenceLayout => {
+    const view = useSchemaStore.getState().getActiveView()
+    const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
+    return { layers: norm.layers.length > 0 ? norm.layers : defaultReferenceModelLayers, assignments: norm.assignments }
+  }, [])
+
+  const persistReferenceLayout = useCallback((next: NormalizedReferenceLayout) => {
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    // Pin the scope from the PRE-gesture state so a canvas gesture NEVER flips a view's scope
+    // implicitly: an open view stays 'all' (assigns render via the canonical map, not the scope),
+    // a curated view stays 'curated'. `view` here is pre-write, so its layout is the pre-gesture one.
+    const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
+    // Canonical-clean: only layers + assignments (currentLayout already stripped legacy shapes). Mirror
+    // the pinned scope into content.entityScope locally so it's explicit for the NEXT gesture (the
+    // durable updateViewLayout writes it too).
+    const referenceLayout = { layers: next.layers, assignments: next.assignments }
+    useSchemaStore.getState().updateView(view.id, {
+      layout: { ...(view.layout ?? {}), referenceLayout },
+      content: { ...view.content, entityScope },
+    })
+    // Arm the debounced durable save — managers only (viewers' edits stay session-local, matching the
+    // prior blueprint-autosync gate).
+    if (!canManage) return
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope }
+    armLayoutSave()
+  }, [canManage, armLayoutSave])
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -405,14 +662,53 @@ export function ContextViewCanvas({
     }
   }, [activeView?.id, activeView?.layout?.referenceLayout?.layers, setLayers, storeLayers])
 
+  // Step 1b — HYDRATE display rules from the view on open. Display rules are view-scoped session
+  // state on the store, edited via the Property Manager; seeding them here (they no longer arrive via
+  // a context-model load) is what makes a view's saved tags appear, and re-seeding on every view
+  // switch prevents one view's rules leaking into another. Defined BEFORE the persist effect so on a
+  // switch the store is updated first and the persist effect's stale-guard catches the transition.
+  useEffect(() => {
+    const view = useSchemaStore.getState().getActiveView()
+    const raw = view?.layout?.referenceLayout?.displayRules
+    useReferenceModelStore.getState().setDisplayRules(Array.isArray(raw) ? (raw as DisplayRuleConfig[]) : [])
+  }, [activeView?.id])
+
+  // Step 1c — PERSIST display-rule edits. When the store's rules diverge from the active view's saved
+  // rules, fold them into the LOCAL view (so an in-session view switch re-hydrates them) and arm the
+  // debounced durable save — which always sends the live displayRules (see doLayoutSave), so a
+  // layer-only save never wipes them. Guards: ignore a stale render whose captured rules the store
+  // has already moved past (e.g. a switch just re-hydrated), and skip when the view already carries
+  // these rules (the hydration seed / no net change). Managers only.
+  useEffect(() => {
+    if (useReferenceModelStore.getState().displayRules !== displayRules) return
+    if (!canManage) return
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    const savedRaw = view.layout?.referenceLayout?.displayRules
+    const saved = Array.isArray(savedRaw) ? savedRaw : []
+    if (JSON.stringify(saved) === JSON.stringify(displayRules)) return
+    const norm = normalizeReferenceLayout(view.layout?.referenceLayout)
+    const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
+    useSchemaStore.getState().updateView(view.id, {
+      layout: {
+        ...(view.layout ?? {}),
+        referenceLayout: { layers: norm.layers, assignments: norm.assignments, displayRules },
+      },
+    })
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout: norm, entityScope }
+    armLayoutSave()
+  }, [displayRules, canManage, armLayoutSave])
+
   // Step 2: Load assignments from backend when layers are synced and nodes are available
   // Uses a ref to track what we've computed for, preventing cascading re-fetches.
   const assignmentComputedRef = useRef<string | null>(null)
 
   // Reset the assignment guard when the active view changes so recomputation
   // always happens for the new view (even if layer IDs happen to match).
+  const assignmentRetriesRef = useRef(0)
   useEffect(() => {
     assignmentComputedRef.current = null
+    assignmentRetriesRef.current = 0
   }, [activeView?.id])
 
   useEffect(() => {
@@ -427,61 +723,102 @@ export function ContextViewCanvas({
     if (assignmentComputedRef.current === layerFingerprint) return
     assignmentComputedRef.current = layerFingerprint
 
-    computeAssignments(provider)
+    // Thread the active view's canonical placements + scope into the compute request (read LIVE,
+    // same as persistReferenceLayout). The store no longer owns these; the adapter in
+    // buildAssignmentRequest fills the backend EntityAssignmentConfig fields.
+    const view = useSchemaStore.getState().getActiveView()
+    const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
+    computeAssignments(provider, {
+      assignments: norm.assignments,
+      entityScope: deriveEntityScope(view?.content, norm),
+    })
   }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
+
+  // Bounded recovery: the 'error' state is otherwise terminal (the compute
+  // effect above only fires from 'idle', and the fingerprint ref stays
+  // latched), so a transient failure — a backend blip, a request that timed
+  // out and then recovered — left the canvas unable to place entities until
+  // a full view switch. Retry with backoff a few times, then stop: a
+  // genuinely-down backend must not be hammered forever. On success the
+  // counter resets so a later, unrelated failure gets its own budget.
+  useEffect(() => {
+    if (assignmentStatus === 'success') { assignmentRetriesRef.current = 0; return }
+    if (assignmentStatus !== 'error') return
+    if (assignmentRetriesRef.current >= 3) return
+    const attempt = assignmentRetriesRef.current + 1
+    const delay = Math.min(1000 * 2 ** attempt, 8000) // 2s, 4s, 8s
+    const t = setTimeout(() => {
+      assignmentRetriesRef.current = attempt
+      assignmentComputedRef.current = null   // clear the fingerprint latch
+      resetAssignmentStatus()                // 'error' -> 'idle' re-arms the compute effect
+    }, delay)
+    return () => clearTimeout(t)
+  }, [assignmentStatus, resetAssignmentStatus])
 
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Entity creation state
-  const [isCreatingEntity, setIsCreatingEntity] = useState(false)
-  const [creationParentId, setCreationParentId] = useState<string | null>(null)
-  const [creationLayerId, setCreationLayerId] = useState<string | null>(null)
+  // Entity creation. Every entry point (layer "add" buttons, per-row
+  // add-child, right-click create, palette, 'N' key) opens the shared
+  // Hierarchy Builder; its store centralizes scope + the ensureDraftOpen
+  // guard. Subscribed via selectors so unrelated store writes don't re-render.
+  // `surface` distinguishes the 400px rail from the wider Build Mode panel —
+  // only one of the two (never both) mounts at a time.
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
+  const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
+  const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
 
   // Assignment warning state (shown when user tries to assign child to different layer)
   const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
   const assignmentWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleAssignToLayer = useCallback((entityId: string, layerId: string) => {
-    // Capture the previous layer for diff display before mutation.
-    const prevAssignment = useReferenceModelStore.getState().effectiveAssignments.get(entityId)
-    const prevLayerId = prevAssignment?.layerId
-    const prevLayer = storeLayers.find(l => l.id === prevLayerId)
-    const targetLayer = storeLayers.find(l => l.id === layerId)
-    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
-    const entityName = (entity?.data?.label as string) ?? entityId
+    const before = currentLayout()
+    // Live containment map (from useContainmentHierarchy, exposed via the forward-ref set during render).
+    const parentMap = duplicateWiringRef.current?.parentMap ?? new Map<string, string>()
 
-    const result = assignEntityToLayer(entityId, layerId)
-    if (!result.success && result.conflict?.type === 'containment_locked') {
-      setAssignmentWarning(result.conflict.message)
-      // Auto-dismiss after 5 seconds
+    // Containment hard rule: a child cannot be placed in a different layer than its parent subtree.
+    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entityId, layerId)
+    if (conflict?.type === 'containment_locked') {
+      setAssignmentWarning(conflict.message)
       if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
       assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
       return
     }
 
-    // Surface the assignment in the staged-changes review panel.
-    // Apply is a no-op because saveToBackend (referenceModelStore) is what
-    // actually flushes layer assignments — calling it here would double-write.
-    const stagedChanges = useStagedChangesStore.getState()
-    stagedChanges.stageOrReplace(
+    const entity = nodes.find(n => n.id === entityId || (n.data?.urn as string) === entityId)
+    const entityName = (entity?.data?.label as string) ?? entityId
+    const prevLayerId = before.assignments[entityId]?.layerId
+    const prevLayer = before.layers.find(l => l.id === prevLayerId)
+    const targetLayer = before.layers.find(l => l.id === layerId)
+
+    // Descendants with their own explicit entries are cleared so they inherit the parent's new layer.
+    const clearDescendants = explicitDescendants(entityId, parentMap, before.assignments)
+    const after = assignmentOps.assignEntities(before, [entityId], layerId, { clearDescendants })
+    persistReferenceLayout(after)
+    // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
+    // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
+    // canonical move until reload. Clear it so the canonical value renders immediately (on discard the
+    // move's staged `discard` hook restores the pre-move canonical layout via persistReferenceLayout —
+    // there is no node-property fallback anymore, that was removed in Phase 3b).
+    useReferenceModelStore.getState().removeEntityAssignment(entityId)
+
+    // Surface it in Review & Save as a VIEW-LAYOUT change: no graph op, undoable via discard/reapply.
+    useStagedChangesStore.getState().stageOrReplace(
       (c) => c.type === 'assign_layer' && c.targetId === entityId,
       {
         type: 'assign_layer',
         targetId: entityId,
+        targetUrn: (entity?.data?.urn as string) ?? entityId,
         before: { layerId: prevLayerId, layerName: prevLayer?.name },
         after: { layerId, layerName: targetLayer?.name },
         summary: `Move '${entityName}' → ${targetLayer?.name ?? 'layer'}`,
-        discard: () => {
-          if (prevLayerId) {
-            useReferenceModelStore.getState().assignEntityToLayer(entityId, prevLayerId)
-          } else {
-            useReferenceModelStore.getState().removeEntityAssignment(entityId)
-          }
-        },
+        discard: () => persistReferenceLayout(before),
+        reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [assignEntityToLayer, storeLayers, nodes])
+  }, [currentLayout, persistReferenceLayout, nodes])
 
   // Expanded nodes state (for hierarchy expansion, not trace)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
@@ -508,9 +845,6 @@ export function ContextViewCanvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView?.id])
 
-  // Edit Mode State (shared across canvases)
-  const [isPaletteOpen, setPaletteOpen] = useState(false)
-  const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   const relationshipTypes = useViewRelationshipTypes()
 
   // Advanced Search — production panel for template-driven exploration,
@@ -522,6 +856,17 @@ export function ContextViewCanvas({
   // rule matches and publishes them so FlatTreeItem can render chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   useDisplayRuleEngine(activeView?.id ?? null)
+
+  // View-metadata dialogs (title menu). EditViewDetailsDialog is prop-driven
+  // (open flag); Share mirrors ExplorerPage — mounted while shareSeed is set,
+  // seeded from a fresh getView. viewVisibility feeds the menu's read-only
+  // row and is only ever populated from that fetch (undefined until first
+  // Share open — the menu hides the row while unknown).
+  const [viewDetailsOpen, setViewDetailsOpen] = useState(false)
+  const [shareSeed, setShareSeed] = useState<
+    { id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null
+  >(null)
+  const [viewVisibility, setViewVisibility] = useState<'private' | 'workspace' | 'enterprise' | undefined>(undefined)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -546,22 +891,6 @@ export function ContextViewCanvas({
       setLineageGranularity(coarsest.id)
     }
   }, [lineageGranularity, granularityOptions, setLineageGranularity])
-
-  // Handle save graph
-  const handleSave = useCallback(async () => {
-    try {
-      const response = await fetchWithTimeout('/api/v1/graph/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
-      })
-      if (!response.ok) throw new Error('Failed to save graph')
-      alert('Graph saved successfully!')
-    } catch (error) {
-      console.error('Error saving graph:', error)
-      alert('Failed to save graph')
-    }
-  }, [nodes, edges])
 
   // Handle right click - now uses unified CanvasContextMenu
   const handleContextMenu = useCallback((e: React.MouseEvent, nodeId: string) => {
@@ -732,12 +1061,43 @@ export function ContextViewCanvas({
   const isStagedPanelOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [showExportDialog, setShowExportDialog] = useState(false)
+  const [showStartEditing, setShowStartEditing] = useState(false)
+  // An import commits to the draft server-side; we refresh only when the user LEAVES the import
+  // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
+  const importedRef = useRef(false)
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
+  const queryClient = useQueryClient()
+  // Refresh the canvas + versioning surfaces after an import — but only on dialog exit, and only if
+  // an import happened (re-hydrating while the dialog is open unmounts its preview).
+  const refreshAfterImport = useCallback(() => {
+    if (!importedRef.current) return
+    importedRef.current = false
+    queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+    invalidateAggregatedEdges()
+    useBranchStore.getState().bumpMainEpoch()
+  }, [queryClient])
+  // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
+  // Properties panel read) catches up ASYNCHRONOUSLY. The immediate post-merge re-hydration reads
+  // the still-stale projection, so merged properties don't appear until a later refresh. Watch the
+  // projection watermark: when it finishes (fresh false→true), re-hydrate so the canvas reflects the
+  // freshly-projected state with no manual refresh.
+  const projFresh = useProjectionWatermark(scopeWsId ?? undefined, graphId).data?.fresh
+  const prevProjFreshRef = useRef<boolean | undefined>(undefined)
+  useEffect(() => {
+    if (prevProjFreshRef.current === false && projFresh === true) {
+      useBranchStore.getState().bumpMainEpoch()
+    }
+    prevProjFreshRef.current = projFresh
+  }, [projFresh])
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
 
-  // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas.
+  // Keyboard shortcuts for Undo/Redo — works anywhere on the canvas, but only in draft (edit)
+  // mode: Published is read-only, so there are no staged changes to undo/redo.
   useEffect(() => {
+    if (!isDraft) return
     const onKey = (e: KeyboardEvent) => {
       // Ignore when the user is typing in an input/textarea
       const t = e.target as HTMLElement | null
@@ -755,16 +1115,7 @@ export function ContextViewCanvas({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [undoStagedChange, redoStagedChange])
-
-  // Save Blueprint button now OPENS the review modal first — the user
-  // confirms inside the modal which then performs the actual apply + save.
-  // This makes the save flow self-documenting: every save shows what's about
-  // to happen, and the modal doubles as a "view pending changes" panel.
-  const handleSaveAll = useCallback(() => {
-    if (!activeWorkspaceId) return
-    openStagedChangesPanel()
-  }, [activeWorkspaceId, openStagedChangesPanel])
+  }, [isDraft, undoStagedChange, redoStagedChange])
 
   // Ref to trigger edge redraw from child components
   const triggerEdgeRedrawRef = useRef<(() => void) | null>(null)
@@ -946,12 +1297,33 @@ export function ContextViewCanvas({
 
   // === Extracted Hooks ===
 
+  // Canonical reference layout (assignments + scope) for THIS view — the authoritative render source
+  // (replaces the reference-model store's per-layer entityAssignments). Memoized on the raw config so
+  // the assignment resolver only recomputes on a real layout change.
+  const activeReferenceLayout = useMemo(
+    () => normalizeReferenceLayout(activeView?.layout?.referenceLayout),
+    [activeView?.layout?.referenceLayout],
+  )
+  const activeEntityScope = useMemo(
+    () => deriveEntityScope(activeView?.content, activeReferenceLayout),
+    [activeView?.content, activeReferenceLayout],
+  )
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
     instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
+    assignments: activeReferenceLayout.assignments,
+    entityScope: activeEntityScope,
   })
+
+  // Refresh the duplicate-subtree wiring ref now that its deps exist (see the
+  // ref declaration near the interactions call). Read lazily by onNodeCopied /
+  // onNodeDuplicated so each duplicate action sees live layer state.
+  duplicateWiringRef.current = {
+    nodeLayerMap, sortedLayers, assignEntityToLayer, parentMap, setExpandedNodes, currentLayout, persistReferenceLayout,
+  }
 
   // Trace filter — when a trace is active, hides everything outside the trace
   // context (traced URNs + drilldown URNs + their containment ancestors).
@@ -1037,90 +1409,137 @@ export function ContextViewCanvas({
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
   // updateView — the actual schema mutation happens during applyAll.
+  // Right-click "move to layer": same canonical write path as handleAssignToLayer (persist the view's
+  // referenceLayout.assignments; NO graph op). Kept as its own `move_to_layer` staged type for the
+  // review panel, with identical persist/discard/reapply semantics.
   const moveToLayer = useCallback((nodeId: string, layerId: string) => {
-    if (!activeView || !activeView.id) return
-
     const entity = displayMap.get(nodeId)
     if (!entity) return
-
     if (entity.isLogical) {
-      console.warn("Moving logical nodes not yet supported via context menu")
+      console.warn('Moving logical nodes not yet supported via context menu')
       return
     }
 
-    const layers = activeView.layout.referenceLayout?.layers || defaultReferenceModelLayers
-    const targetLayer = layers.find(l => l.id === layerId)
-
-    const addRuleToNode = (nodes: LogicalNodeConfig[], targetId: string): LogicalNodeConfig[] => {
-      return nodes.map(node => {
-        if (node.id === targetId) {
-          return {
-            ...node,
-            rules: [
-              ...(node.rules || []),
-              { id: `rule-${Date.now()}`, priority: 100, urnPattern: entity.urn }
-            ]
-          }
-        }
-        if (node.children) {
-          return { ...node, children: addRuleToNode(node.children, targetId) }
-        }
-        return node
-      })
+    const before = currentLayout()
+    const conflict = assignmentOps.checkAssignmentConflict(parentMap, before.assignments, entity.urn, layerId)
+    if (conflict?.type === 'containment_locked') {
+      setAssignmentWarning(conflict.message)
+      if (assignmentWarningTimer.current) clearTimeout(assignmentWarningTimer.current)
+      assignmentWarningTimer.current = setTimeout(() => setAssignmentWarning(null), 5000)
+      interactions.closeContextMenu()
+      return
     }
 
-    const buildUpdatedLayers = () => layers.map(l => {
-      if (l.id === layerId) {
-        return {
-          ...l,
-          rules: [
-            ...(l.rules || []),
-            { id: `rule-${Date.now()}`, priority: 100, urnPattern: entity.urn }
-          ]
-        }
-      }
-      if (l.logicalNodes) {
-        const updatedLogicalNodes = addRuleToNode(l.logicalNodes, layerId)
-        if (updatedLogicalNodes !== l.logicalNodes) {
-          return { ...l, logicalNodes: updatedLogicalNodes }
-        }
-      }
-      return l
-    })
+    const targetLayer = before.layers.find(l => l.id === layerId)
+    const prevLayerId = before.assignments[entity.urn]?.layerId
+    const clearDescendants = explicitDescendants(entity.urn, parentMap, before.assignments)
+    const after = assignmentOps.assignEntities(before, [entity.urn], layerId, { clearDescendants })
+    persistReferenceLayout(after)
+    // Clear any stale store instanceAssignment so the canonical move renders immediately (see handleAssignToLayer).
+    useReferenceModelStore.getState().removeEntityAssignment(entity.urn)
 
-    const previousLayout = activeView.layout
-
-    useStagedChangesStore.getState().stage({
-      type: 'move_to_layer',
-      targetId: nodeId,
-      targetUrn: entity.urn,
-      before: { layout: previousLayout },
-      after: { layerId, layerName: targetLayer?.name },
-      summary: `Move-to-layer rule: '${entity.name}' → ${targetLayer?.name ?? layerId}`,
-      apply: async () => {
-        const updatedLayers = buildUpdatedLayers()
-        useSchemaStore.getState().updateView(activeView.id, {
-          layout: {
-            ...activeView.layout,
-            referenceLayout: {
-              ...activeView.layout.referenceLayout,
-              layers: updatedLayers
-            }
-          }
-        })
+    useStagedChangesStore.getState().stageOrReplace(
+      (c) => (c.type === 'move_to_layer' || c.type === 'assign_layer') && c.targetId === nodeId,
+      {
+        type: 'move_to_layer',
+        targetId: nodeId,
+        targetUrn: entity.urn,
+        before: { layerId: prevLayerId, layerName: before.layers.find(l => l.id === prevLayerId)?.name },
+        after: { layerId, layerName: targetLayer?.name },
+        summary: `Move '${entity.name}' → ${targetLayer?.name ?? layerId}`,
+        discard: () => persistReferenceLayout(before),
+        reapply: () => persistReferenceLayout(after),
       },
-      discard: () => {
-        // No mutation occurred yet — discard is a no-op.
-      },
-    })
+    )
 
     interactions.closeContextMenu()
-  }, [activeView, displayMap, interactions])
+  }, [displayMap, parentMap, currentLayout, persistReferenceLayout, interactions])
+
+  // Stage a view-layout change so it (a) shows in Review & Save under "View layout", (b) is undoable via
+  // the shared Undo/Redo (undo runs `discard` → persistReferenceLayout(before)), while staying DECOUPLED
+  // from the data source — `layer_config` has no apply hook, so it never becomes a graph op
+  // (stagedChangesToOps ignores it). persistReferenceLayout already ran, so the column is live; discard
+  // reverts the whole layout (layers + assignments, e.g. deleteLayer's remap).
+  const stageLayerChange = useCallback((
+    targetId: string,
+    before: NormalizedReferenceLayout,
+    after: NormalizedReferenceLayout,
+    action: 'add' | 'rename' | 'delete' | 'reorder',
+    summary: string,
+  ) => {
+    useStagedChangesStore.getState().stage({
+      type: 'layer_config',
+      targetId,
+      before: { layers: before.layers },
+      after: { layers: after.layers, action },
+      summary,
+      discard: () => persistReferenceLayout(before),
+      reapply: () => persistReferenceLayout(after),
+    })
+  }, [persistReferenceLayout])
+
+  const addLayer = useCallback((name: string) => {
+    const before = currentLayout()
+    const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
+    const id = `layer-${Date.now()}`
+    const layers = layerOps.appendLayer(before.layers, {
+      id,
+      name,
+      description: '',
+      icon: 'Layers',
+      color: palette[before.layers.length % palette.length],
+      entityTypes: [],
+      order: before.layers.length,
+    })
+    const after = { layers, assignments: before.assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  const renameLayer = useCallback((id: string, name: string) => {
+    const trimmed = name.trim()
+    const before = currentLayout()
+    const old = before.layers.find((l) => l.id === id)
+    if (!trimmed || !old || old.name === trimmed) return
+    const after = { layers: layerOps.renameLayer(before.layers, id, trimmed), assignments: before.assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'rename', `Renamed layer “${old.name}” → “${trimmed}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  const deleteLayer = useCallback((id: string) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === id)
+    if (!target) return
+    const layers = layerOps.removeLayer(before.layers, id)
+    const fallbackId = layers[0]?.id
+    // Remap the deleted layer's assignments to the first remaining layer so their entities don't vanish
+    // in curated scope (mirrors the old validLayerIds fallback). No layers remain ⇒ drop them.
+    const assignments: NormalizedReferenceLayout['assignments'] = {}
+    for (const [urn, entry] of Object.entries(before.assignments)) {
+      if (entry.layerId !== id) assignments[urn] = entry
+      else if (fallbackId) assignments[urn] = { ...entry, layerId: fallbackId }
+    }
+    const after = { layers, assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'delete', `Deleted layer “${target.name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Reorder a layer column (drag). Assignments key off layer id, so nodes and their edges move with the
+  // column for free.
+  const reorderLayer = useCallback((draggedId: string, targetId: string) => {
+    const before = currentLayout()
+    const dragged = before.layers.find((l) => l.id === draggedId)
+    const layers = layerOps.reorderLayer(before.layers, draggedId, targetId)
+    if (!dragged || layers === before.layers) return
+    const after = { layers, assignments: before.assignments }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${draggedId}`, before, after, 'reorder', `Reordered layer “${dragged.name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
-    setCreationParentId(parentId)
-    setIsCreatingEntity(true)
+    // The builder store's open() runs the ensureDraftOpen guard itself.
+    useHierarchyBuilderStore.getState().open({ parentUrn: parentId })
   }, [])
 
   // Toggle node expansion with Lazy Loading
@@ -1255,6 +1674,8 @@ export function ContextViewCanvas({
   //      site below.) The previous `nodes.length === 0` global gate killed
   //      ghosts in empty layers the moment any one layer received a node.
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
+  const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
+  const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'unavailable'
   const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
@@ -1265,8 +1686,8 @@ export function ContextViewCanvas({
   // global one has a single key that recycles between phases, so users with the
   // canvas focused want a sticky in-context indicator that the entities AND
   // edges loads both happened — even if hydration is fast.
-  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded')
-  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded')
+  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
+  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
   useLoadingToast('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
   useLoadingToast('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
   useLoadingToast('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')
@@ -1283,6 +1704,74 @@ export function ContextViewCanvas({
     }
     lastFailedCountRef.current = count
   }, [failedNodes, showToast])
+
+  // View/Edit mode transitions (header Edit / Done). Entering edit =
+  // opening/resuming a draft; the versioning bar tints amber and the header
+  // morphs — that IS the success feedback, so no toast on the happy path.
+  // Entering Edit no longer silently resumes/creates a draft. The user explicitly continues an
+  // existing draft OR names a new branch in StartEditingDialog (which then switchToDrafts). The
+  // shared `ensureDraftOpen` stays the path for the OTHER authoring entry points (create-link,
+  // hierarchy builder, blank-model auto-draft) so this deliberate choice is only for the Edit button.
+  const handleEnterEdit = useCallback(() => setShowStartEditing(true), [])
+
+  // Done: switching branches reloads the canvas, which would silently drop
+  // staged edits — so route the user through the review panel instead.
+  const handleExitEdit = useCallback(() => {
+    if (stagedChangeList.length > 0) {
+      openStagedChangesPanel()
+      showToast('warning', 'Review your pending edits — save or discard them before leaving the draft.')
+      return
+    }
+    useBranchStore.getState().switchToMain()
+  }, [stagedChangeList.length, openStagedChangesPanel, showToast])
+
+  // ── View-metadata actions (title menu) ──────────────────────────────
+  // All read the live view from the store at call time so they carry no
+  // stale-closure risk and keep their dep lists minimal.
+
+  // Inline rename — optimistic: patch the store immediately (header updates
+  // instantly), persist, and on failure revert to the previous name + toast.
+  const handleRenameView = useCallback((name: string) => {
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    const viewId = view.id
+    const previousName = view.name
+    useSchemaStore.getState().updateView(viewId, { name })
+    updateView(viewId, { name }).catch(err => {
+      useSchemaStore.getState().updateView(viewId, { name: previousName })
+      showToast('error', err instanceof Error ? err.message : 'Failed to rename view')
+    })
+  }, [showToast])
+
+  const handleEditViewDetails = useCallback(() => setViewDetailsOpen(true), [])
+
+  // The dialog persists to the backend itself; here we mirror the fields the
+  // store knows (name/description) so the header reflects the edit at once.
+  const handleViewDetailsSaved = useCallback(
+    (updated: { name: string; description?: string; tags?: string[] }) => {
+      const viewId = useSchemaStore.getState().getActiveView()?.id
+      if (!viewId) return
+      useSchemaStore.getState().updateView(viewId, {
+        name: updated.name,
+        description: updated.description,
+      })
+    },
+    [],
+  )
+
+  // Share — the in-store view lacks visibility, so fetch it fresh to seed
+  // both the dialog and the menu's read-only visibility row.
+  const handleShareView = useCallback(async () => {
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    try {
+      const full = await getView(view.id)
+      setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
+      setViewVisibility(full.visibility)
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Failed to open sharing')
+    }
+  }, [showToast])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -1577,10 +2066,80 @@ export function ContextViewCanvas({
           if (!subtreeIds.has(cid)) { subtreeIds.add(cid); stack.push(cid) }
         }
       }
-      removeEdgesByNodeIds(
-        subtreeIds,
-        trace.isTracing ? trace.addedEdgeIds : undefined,
+
+      // Browse-mode collapse must PRUNE the subtree's descendant NODES, not
+      // just their containment edges. Dropping only edges leaves each
+      // descendant in `canvas.nodes` with no incoming containment edge; in a
+      // rule / entity-type-scoped Context View, `useLayerAssignment` then
+      // re-homes that edge-less node to its type column as a VISUAL ROOT
+      // (the root priority chain resolves it by entity type), and
+      // `useContainmentHierarchy` reports it parentless — so children and
+      // grandchildren float up as root-level siblings and the tree scrambles.
+      // Physically removing the descendants keeps collapse a true
+      // subtree-hide; re-expand refetches them via `loadChildren` (the
+      // backend returns each node with a correct `childCount`, including
+      // draft-created intermediates, so deeper drilling still works).
+      //
+      // Falls back to edge-only cleanup when:
+      //   • a trace is active — trace-merged edges have no re-add path and
+      //     `useTraceFilteredHierarchy` already hides non-context orphans, so
+      //     the existing preserve-edges behaviour is retained; or
+      //   • the subtree carries UNSAVED work. Pruning + refetch would make
+      //     in-progress authoring vanish from the canvas. Unsaved work has three
+      //     representations in this app, so the guard checks all three:
+      //       (1) a subtree NODE with an isPending overlay (create/modify/delete);
+      //       (2) a pending containment EDGE incident to the subtree — a
+      //           reparented / "Move to…" node is a SAVED, markerless node whose
+      //           pending marker lives on the NEW edge (useReparentNode.
+      //           restageContainment); pruning the node would drop it from the
+      //           canvas until a manual re-expand; and
+      //       (3) a staged property edit (rename/update) in stagedChangesStore
+      //           targeting a subtree node — these carry NO canvas marker at all.
+      //     `removeEdgesByNodeIds` already preserves unsaved edges in that fallback.
+      const { nodes: storeNodes, edges: storeEdges } = useCanvasStore.getState()
+      const subtreeNodeUrns = new Set<string>()
+      let pendingNodeInSubtree = false
+      for (const n of storeNodes) {
+        if (!subtreeIds.has(n.id)) continue
+        subtreeNodeUrns.add((n.data?.urn as string | undefined) ?? n.id)
+        if (n.data?.isPending) pendingNodeInSubtree = true
+      }
+      const pendingEdgeInSubtree = storeEdges.some(
+        (e) => !!e.data?.isPending && (subtreeIds.has(e.source) || subtreeIds.has(e.target)),
       )
+      const stagedEditInSubtree = useStagedChangesStore.getState().changes.some(
+        (c) => subtreeIds.has(c.targetId) || (c.targetUrn ? subtreeNodeUrns.has(c.targetUrn) : false),
+      )
+      const subtreeHasUnsavedWork = pendingNodeInSubtree || pendingEdgeInSubtree || stagedEditInSubtree
+      const canPrune = !trace.isTracing && !subtreeHasUnsavedWork
+
+      if (canPrune && subtreeIds.size > 0) {
+        // Atomic node + incident-edge removal.
+        removeStoreNodes([...subtreeIds])
+        // Drop the pruned descendants from `expandedNodes` so a re-expand
+        // starts from a clean single level instead of resurrecting stale
+        // expansion state that points at nodes no longer in the store.
+        setExpandedNodes((prev) => {
+          const next = new Set(prev)
+          for (const id of subtreeIds) next.delete(id)
+          return next
+        })
+      } else if (trace.isTracing) {
+        // Trace mode: keep the merged lineage/containment edges (addedEdgeIds);
+        // useTraceFilteredHierarchy hides non-context nodes.
+        removeEdgesByNodeIds(subtreeIds, trace.addedEdgeIds)
+      }
+      // else — the subtree carries UNSAVED work: leave it FULLY intact in the
+      // store (no node or edge removal). The visual collapse is driven by
+      // `expandedNodes` alone, so the rows are hidden regardless; keeping every
+      // containment edge means no SAVED descendant is orphaned. Dropping the
+      // saved edges here (the old `removeEdgesByNodeIds` fallback) is exactly
+      // what re-homed those descendants as root-level siblings — the
+      // expand/collapse "scramble" that recurs whenever the subtree mixes saved
+      // nodes with new/renamed (pending) ones. Re-expand re-renders straight from
+      // the intact store (loadChildren short-circuits on the already-satisfied
+      // childCount, nothing duplicates), and every in-progress create / rename /
+      // reparent survives.
 
       // Synchronous companion: drop matching entries in the aggregated-edge
       // map too. Otherwise stale child-level aggregated edges linger for up
@@ -1594,7 +2153,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
+  }, [displayMap, loadChildren, cancelChildLoad, childMap, removeEdgesByNodeIds, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, trace.isTracing, trace.addedEdgeIds, autoDrillOnExpand])
 
 
 
@@ -1844,21 +2403,26 @@ export function ContextViewCanvas({
     clearSelection()
   }, [clearSelection])
 
+  // Build Mode's target layer for this session — same 3-tier resolution as
+  // the rail's onEntityStaged: the creation layer → else the root parent's
+  // layer → else the first layer. Fixed for the whole batch (Build's
+  // parentUrn/layerId don't change mid-Apply, unlike the rail's per-row live
+  // retarget). Passed to BuildPanel's placement hint and used by onRowStaged
+  // below to write both the canonical view-config entry and the optimistic
+  // session assignEntityToLayer.
+  const buildLayerId = builderLayerId
+    ?? (builderParentUrn ? nodeLayerMap.get(builderParentUrn) : undefined)
+    ?? sortedLayers[0]?.id
+  // Auto-by-type placement: each Build row lands in the column configured for
+  // ITS type (falling back to buildLayerId). Derived from the view's own layer
+  // config — ontology-agnostic.
+  const buildTypeLayerMapMemo = useMemo(() => buildTypeLayerMap(sortedLayers), [sortedLayers])
+
   return (
     <div
       data-trace-active={trace.isTracing ? 'true' : 'false'}
       className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}
     >
-      {/* Node Palette - Drag and drop entity creation */}
-      <AnimatePresence>
-        {isPaletteOpen && (
-          <NodePalette
-            isOpen={isPaletteOpen}
-            onClose={() => setPaletteOpen(false)}
-          />
-        )}
-      </AnimatePresence>
-
       {/* Row layout: [left rail SearchMapPanel] + canvas column + [right-rail panels].
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -1869,30 +2433,18 @@ export function ContextViewCanvas({
           inspecting a hit in the entity drawer).
           Right rail: mutually exclusive — selection > edge-panel > creation. */}
       <div className="flex-1 flex flex-row min-h-0 overflow-hidden">
-      <AnimatePresence>
-        {advancedSearchOpen && (
-          <SearchMapPanel
-            key="search-map-panel"
-            open={advancedSearchOpen}
-            onClose={() => setAdvancedSearchOpen(false)}
-            viewId={activeView?.id ?? ''}
-            onRevealNode={revealSearchHit}
-            onFrameMatches={handleFrameMatches}
-          />
-        )}
-      </AnimatePresence>
+      {/* SearchMapPanel is internally AnimatePresence-gated on `open` —
+          wrapping it in another AnimatePresence + conditional double-gates
+          the exit (the unmount races the inner exit animation and can
+          strand it). Render persistently; it owns its own presence. */}
+      <SearchMapPanel
+        open={advancedSearchOpen}
+        onClose={() => setAdvancedSearchOpen(false)}
+        viewId={activeView?.id ?? ''}
+        onRevealNode={revealSearchHit}
+        onFrameMatches={handleFrameMatches}
+      />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
-      {/* Editor Toolbar - Unified with LineageCanvas */}
-      <div className="absolute top-4 left-4 z-30">
-        <EditorToolbar
-          onAddNode={() => setPaletteOpen(true)}
-          onSave={handleSave}
-          edgeTypes={relationshipTypes}
-          activeEdgeType={activeEdgeType}
-          onSelectEdgeType={setActiveEdgeType}
-        />
-      </div>
-
       <ContextViewHeader
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
@@ -1920,7 +2472,6 @@ export function ContextViewCanvas({
           trace.setConfig(dir === 'upstream' ? { upstreamDepth: value } : { downstreamDepth: value })
           if (trace.isTracing) void trace.retrace()
         }}
-        onAddEntity={() => { setIsCreatingEntity(true); setCreationParentId(null); setCreationLayerId(null) }}
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
@@ -1942,17 +2493,28 @@ export function ContextViewCanvas({
           // the right.
           setAdvancedSearchOpen((open) => !open)
         }}
-        advancedSearchOpen={advancedSearchOpen}
         onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
         propertyManagerOpen={propertyManagerOpen}
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
-        activeWorkspaceId={activeWorkspaceId}
-        activeContextModelName={activeContextModelName}
-        syncStatus={syncStatus}
-        onSave={handleSaveAll}
+        activeContextModelName={null}
+        canEditView={canEditView}
+        canShareView={canShareView}
+        viewVisibility={viewVisibility}
+        onRenameView={handleRenameView}
+        onEditViewDetails={handleEditViewDetails}
+        onShareView={() => void handleShareView()}
+        syncStatus={layoutSyncStatus}
+        onRetrySync={() => { void flushLayoutSave() }}
+        isDraft={isDraft}
+        canManage={canManage}
+        canEnterEdit={canEnterEdit}
+        onEnterEdit={handleEnterEdit}
+        onExitEdit={handleExitEdit}
         pendingChangeCount={stagedChangeList.length}
         onOpenStagedChanges={openStagedChangesPanel}
+        onImport={() => setShowImportDialog(true)}
+        onExport={() => setShowExportDialog(true)}
         canUndo={stagedChangeList.length > 0}
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
@@ -2023,16 +2585,101 @@ export function ContextViewCanvas({
             </button>
           </div>
         )}
+        {/* Bulk import — uploads a file onto the current draft (server-side), then
+             hands off to the Changes tab where the added/updated/deleted entities are
+             reviewed and published just like manual edits. */}
+        {showImportDialog && graphId && scopeWsId && (
+          <ImportDialog
+            wsId={scopeWsId}
+            graphId={graphId}
+            branchId={useBranchStore.getState().currentBranchId ?? undefined}
+            viewId={activeView?.id}
+            onClose={() => { setShowImportDialog(false); refreshAfterImport() }}
+            onReviewChanges={() => {
+              setShowImportDialog(false)
+              useVersioningPanelStore.getState().openPanel('changes')
+              refreshAfterImport()
+            }}
+            onImported={() => {
+              // The import committed to the draft server-side. DON'T refresh the canvas now — that
+              // would re-hydrate behind the open dialog and unmount its preview. Just remember an
+              // import happened; refreshAfterImport() runs when the user closes / reviews.
+              importedRef.current = true
+            }}
+          />
+        )}
+        {showExportDialog && graphId && scopeWsId && (
+          <ExportDialog
+            wsId={scopeWsId}
+            graphId={graphId}
+            viewId={activeView?.id}
+            branchId={useBranchStore.getState().isDraftMode()
+              ? (useBranchStore.getState().currentBranchId ?? undefined) : undefined}
+            onClose={() => setShowExportDialog(false)}
+          />
+        )}
+        {/* Start editing — the deliberate branch chooser that replaces the silent draft resume/create. */}
+        {showStartEditing && graphId && scopeWsId && (
+          <StartEditingDialog
+            wsId={scopeWsId}
+            graphId={graphId}
+            viewId={activeView?.id ?? null}
+            onClose={() => setShowStartEditing(false)}
+          />
+        )}
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
              or the pending-changes badge. Single source of truth for reviewing
              and confirming a batch of staged edits before they hit the backend. */}
         <StagedChangesPanel onConfirm={async () => {
-          if (!activeWorkspaceId) return
+          if (!scopeWsId) return
+          // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
+          // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
+          // Review & Save is exactly one commit (the backend mints urns + resolves temp refs).
+          const bs = useBranchStore.getState()
+          if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
+            try {
+              await saveStagedChangesToDraft(stagedChangeList, {
+                wsId: bs.workspaceId ?? scopeWsId,
+                dataSourceId: bs.dataSourceId,
+                branchId: bs.currentBranchId,
+                provider,
+                // Re-key each new entity's layer assignment temp→real as its create resolves,
+                // so a node created in a layer keeps its layer column after Save — and survives
+                // any later create/commit failure without flashing out of the view. Re-keys BOTH
+                // the canonical view-config entry (assignEntities/onEntityStaged wrote it at
+                // create time, keyed by the temp urn) and the session store mirror.
+                remapEntityId: (oldId, newId) => {
+                  remapEntityId(oldId, newId)
+                  persistReferenceLayout(assignmentOps.remapAssignmentUrn(currentLayout(), oldId, newId))
+                },
+                // After the remaps, drop any placement still keyed by a temp urn — a create that was
+                // staged (writing its placement) then discarded before this Save (see assignmentMutations).
+                pruneTempAssignments: () => {
+                  persistReferenceLayout(assignmentOps.pruneTempAssignments(currentLayout()))
+                },
+                message: `Canvas edits (${stagedChangeList.length})`,
+              })
+              // Clear staged changes WITHOUT running discard hooks (keep the optimistic canvas).
+              useStagedChangesStore.setState({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
+              // A save creates a new draft commit that every versioning surface must reflect — the
+              // cumulative branch diff (Changes tab), the commit log (Commits tab), and per-entity
+              // history. Invalidate the whole versioning namespace so saved changes appear at once
+              // (a save is user-initiated and infrequent, so the broad refetch is fine).
+              queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
+              await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
+              closeStagedChangesPanel()
+              showToast('success', 'Saved to draft.')
+            } catch (e) {
+              showToast('error', (e as Error).message)
+            }
+            return
+          }
+          // Main mode: legacy per-change apply.
           const result = stagedChangeList.length > 0
-            ? await applyStagedChanges(provider, activeWorkspaceId)
+            ? await applyStagedChanges(provider, scopeWsId)
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
-            await saveToBackend(activeWorkspaceId)
+            await flushLayoutSave()
             closeStagedChangesPanel()
           }
         }} />
@@ -2050,6 +2697,28 @@ export function ContextViewCanvas({
         >
           <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
         </div>
+
+        {/* Blank (hand-built) model guidance — the full-canvas hero on a truly
+            empty model, and the first-steps companion while building. Both are
+            scoped to kind === 'blank' so every other view is untouched.
+            Gated on hydrationStatus === 'ready': the "Start building" hero shows
+            ONLY after a load actually SUCCEEDED and returned zero nodes — never
+            while loading, warming, or unavailable (those show the overlay), so a
+            failed/slow load can't masquerade as an empty model. */}
+        {isBlankModel && hydrationStatus === 'ready' && nodes.length === 0 && (
+          <BlankCanvasEmptyState
+            modelName={activeView?.name ?? null}
+            isDraft={isDraft}
+            canManage={canManage}
+            onAddEntity={() => {
+              useHierarchyBuilderStore.getState().open({ layerId: sortedLayers[0]?.id })
+            }}
+            onStartBuilding={() => { void ensureDraftOpen() }}
+          />
+        )}
+        {isBlankModel && isDraft && graphId && (
+          <FirstStepsChecklist graphId={graphId} mainHeadSeq={mainHeadSeq} />
+        )}
 
 
         {/* Layer Columns. */}
@@ -2085,6 +2754,13 @@ export function ContextViewCanvas({
               expandingEdgeIds={expandingEdgeIds}
             />
           )}
+
+          {/* In-progress edge while dragging a connection (shares the overlay
+              coordinate space — absolute sibling inside the scroll container). */}
+          <ConnectionDragLayer
+            sourceId={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceId : null}
+            pointer={edgeConnect.state.pointer}
+          />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
               cards in adjacent layers during initial hydration. Anchored
@@ -2155,12 +2831,21 @@ export function ContextViewCanvas({
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
                 onDoubleClick={handleDoubleClick}
-                onAddChild={handleAddChildEntity}
-                onAddToLayer={(layerId) => {
-                  setCreationLayerId(layerId)
-                  setCreationParentId(null)
-                  setIsCreatingEntity(true)
-                }}
+                // Create affordances render only in draft (edit) mode —
+                // Published shows zero mutation entry points for anyone.
+                onAddChild={isDraft ? handleAddChildEntity : undefined}
+                onAddToLayer={isDraft ? (layerId) => {
+                  useHierarchyBuilderStore.getState().open({ layerId })
+                } : undefined}
+                onBuildToLayer={isDraft ? (layerId) => {
+                  useHierarchyBuilderStore.getState().openBuild({ layerId })
+                } : undefined}
+                onBeginConnect={isDraft ? edgeConnect.beginDrag : undefined}
+                onLayerContextMenu={(e, layerId) => interactions.openContextMenu(e, {
+                  type: 'canvas',
+                  position: { x: e.clientX, y: e.clientY },
+                  layerId,
+                })}
                 traceFocusId={trace.focusId}
                 traceNodes={trace.visibleTraceNodes}
                 traceContextSet={traceContextSet}
@@ -2176,10 +2861,16 @@ export function ContextViewCanvas({
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
                 onAssignToLayer={(entityId) => handleAssignToLayer(entityId, layer.id)}
+                // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
+                onRenameLayer={isDraft ? renameLayer : undefined}
+                onDeleteLayer={isDraft ? deleteLayer : undefined}
+                onReorderLayer={isDraft ? reorderLayer : undefined}
                 isHydratingInitial={isHydratingInitial}
                 revealTarget={revealTarget}
               />
             ))}
+            {/* Draft-only: create your own layers (columns) to organise nodes into. */}
+            {isDraft && <AddLayerColumn onAdd={addLayer} />}
           </div>
 
 
@@ -2195,7 +2886,52 @@ export function ContextViewCanvas({
           a node and opens the entity drawer without losing the
           results list. */}
       <AnimatePresence>
-        {drawerNodeId && (
+        {/* Creation takes the rail when active (it's an explicit action), so it
+            is never hidden behind a drawer the user happened to leave open. */}
+        {builderOpen && (
+          <HierarchyBuilderPanel
+            key="hierarchy-builder-panel"
+            onClose={() => useHierarchyBuilderStore.getState().close()}
+            onEntityStaged={(tempUrn, parentUrn) => {
+              // The layered view only renders nodes that resolve to a layer, so
+              // a freshly-staged node is invisible until assigned. Assign it to
+              // the creation layer → else the parent's layer → else the first
+              // layer. Writes the canonical view-config entry (keyed by the temp
+              // urn, remapped to the real urn on save) plus the optimistic
+              // session assignment (an instanceAssignment wins even in
+              // closed-scope views, before the canonical write's render lands).
+              const layer = builderLayerId
+                ?? (parentUrn ? nodeLayerMap.get(parentUrn) : undefined)
+                ?? sortedLayers[0]?.id
+              if (layer) {
+                assignEntityToLayer(tempUrn, layer)
+                persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [tempUrn], layer))
+              }
+              if (parentUrn) {
+                setExpandedNodes(prev => new Set([...prev, parentUrn]))
+              }
+            }}
+          />
+        )}
+        {buildOpen && (
+          <BuildPanel
+            key="build-panel"
+            onClose={() => useHierarchyBuilderStore.getState().close()}
+            layerId={buildLayerId}
+            typeLayerMap={buildTypeLayerMapMemo}
+            onRowStaged={(row, urn) => {
+              // Auto-by-type per row: writes the canonical view-config entry
+              // (keyed by the row's temp urn, remapped to its real urn on save)
+              // plus the optimistic session assignment for immediate display.
+              const layer = resolveRowLayer(row, { typeLayerMap: buildTypeLayerMapMemo, fallbackLayerId: buildLayerId })
+              if (layer) {
+                assignEntityToLayer(urn, layer)
+                persistReferenceLayout(assignmentOps.assignEntities(currentLayout(), [urn], layer))
+              }
+            }}
+          />
+        )}
+        {!builderOpen && !buildOpen && drawerNodeId && (
           <EntityDrawer
             key="entity-drawer"
             onTraceUp={(nodeId) => traceUpstreamWithSmartLevel(nodeId)}
@@ -2205,7 +2941,7 @@ export function ContextViewCanvas({
             onLocateMany={locateManyOnCanvas}
           />
         )}
-        {!drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}
@@ -2214,64 +2950,62 @@ export function ContextViewCanvas({
             onToggleFilter={toggleEdgeFilter}
           />
         )}
-        {!drawerNodeId && !isEdgePanelOpen && isCreatingEntity && (
-          <EntityCreationPanel
-            key="entity-creation-panel"
-            isOpen={isCreatingEntity}
-            onClose={() => {
-              setIsCreatingEntity(false)
-              setCreationParentId(null)
-              setCreationLayerId(null)
-            }}
-            parentId={creationParentId}
-            layerId={creationLayerId}
-            onEntityCreated={(_nodeId, parentUrn) => {
-              if (parentUrn) {
-                setExpandedNodes(prev => new Set([...prev, parentUrn]))
-              }
-            }}
-          />
-        )}
-        {/* Property Manager — independent right-rail panel. Unlike the
-            selection-driven panels above it isn't mutually exclusive: it
-            sits to the right of whichever inspector is open so the user
-            can author display rules while a node is selected. */}
-        <PropertyManagerDrawer
-          key="property-manager-drawer"
-          viewId={activeView?.id ?? ''}
-          open={propertyManagerOpen}
-          onClose={() => setPropertyManagerOpen(false)}
-          knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
-          knownLayers={storeLayers.map((l) => l.name)}
-          onSearchPredicate={(p) => {
-            useSearchStore.getState().requestSearchRun(p)
-            setAdvancedSearchOpen(true)
-          }}
-        />
       </AnimatePresence>
+      {/* Property Manager — independent right-rail panel. Unlike the
+          selection-driven panels above it isn't mutually exclusive: it
+          sits to the right of whichever inspector is open so the user
+          can author display rules while a node is selected. It is
+          persistently mounted and internally AnimatePresence-gated on
+          `open`, so it lives OUTSIDE the exit-managed block above —
+          nesting a second presence context there can strand its exit. */}
+      <PropertyManagerDrawer
+        viewId={activeView?.id ?? ''}
+        open={propertyManagerOpen}
+        onClose={() => setPropertyManagerOpen(false)}
+        knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
+        knownLayers={storeLayers.map((l) => l.name)}
+        onSearchPredicate={(p) => {
+          useSearchStore.getState().requestSearchRun(p)
+          setAdvancedSearchOpen(true)
+        }}
+      />
       </div>{/* end flex-row wrapper */}
 
       {/* === UX-FIRST INTERACTION COMPONENTS === */}
 
-      {/* Modern Context Menu - Full CRUD operations */}
+      {/* Modern Context Menu - Full CRUD operations. Every mutation affordance is draft-gated:
+          Published is strictly read-only, so on it the menu offers only the read affordances
+          (trace, copy URN, select all). */}
       <CanvasContextMenu
         isOpen={interactions.state.contextMenu.isOpen}
         position={interactions.state.contextMenu.position}
         target={interactions.state.contextMenu.target}
         onClose={interactions.closeContextMenu}
-        onEditNode={interactions.editNode}
-        onDuplicateNode={interactions.duplicateNode}
-        onDeleteNode={interactions.deleteNode}
-        onCreateChild={interactions.createChild}
+        onEditNode={isDraft ? interactions.editNode : undefined}
+        onDuplicateNode={isDraft ? interactions.duplicateNode : undefined}
+        onDeleteNode={isDraft ? interactions.deleteNode : undefined}
+        onCreateChild={isDraft ? interactions.createChild : undefined}
+        onConnect={isDraft ? (id) => edgeConnect.armConnect(id) : undefined}
+        onLinkNode={isDraft ? (id) => {
+          const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
+          useCreateLinkStore.getState().open({
+            sourceUrn: (node?.data?.urn as string) || id,
+            anchor: interactions.state.contextMenu.position,
+          })
+        } : undefined}
         onTraceNode={(id) => startTraceWithSmartLevel(id)}
         onCopyUrn={interactions.copyUrn}
-        onEditEdge={interactions.editEdge}
-        onDeleteEdge={interactions.deleteEdge}
-        onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onEditEdge={isDraft ? interactions.editEdge : undefined}
+        onDeleteEdge={isDraft ? interactions.deleteEdge : undefined}
+        onReverseEdge={isDraft ? interactions.reverseEdge : undefined}
+        onCreateNode={isDraft ? (_pos, layerId) => {
+          // Right-clicked an empty layer column → scope the new node to that
+          // layer so it lands there (and is assigned on stage, see onEntityStaged).
+          useHierarchyBuilderStore.getState().open({ layerId })
+        } : undefined}
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
-        onMoveToLayer={(nodeId, layerId) => moveToLayer(nodeId, layerId)}
+        onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
@@ -2283,26 +3017,61 @@ export function ContextViewCanvas({
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Quick Create - Press 'N' or use context menu */}
-      <QuickCreateNode
-        isOpen={interactions.state.quickCreate.isOpen}
-        position={interactions.state.quickCreate.position}
-        parentUrn={interactions.state.quickCreate.parentUrn}
-        onClose={interactions.closeQuickCreate}
-        onCreated={(nodeId) => selectNode(nodeId)}
-        variant="centered"
-      />
+      {/* Quick create now lives in the Hierarchy Builder right rail
+          (opened via useHierarchyBuilderStore). */}
 
       {/* Command Palette - Press Cmd+K */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={(_typeId) => {
+        onCreateEntity={isDraft ? (typeId) => {
           interactions.closeCommandPalette()
-          interactions.openQuickCreate({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
-        }}
+          useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
+        } : undefined}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
+
+      {/* Edge-type picker — appears at the drop point once a connection
+          resolves a (source, target). Offers only ontology-allowed raw
+          lineage types (never AGGREGATED). */}
+      {edgeConnect.state.mode === 'picking'
+        && edgeConnect.state.sourceId
+        && edgeConnect.state.targetId
+        && edgeConnect.state.pickerPos && (
+        <EdgeTypePickerPopover
+          sourceId={edgeConnect.state.sourceId}
+          targetId={edgeConnect.state.targetId}
+          position={edgeConnect.state.pickerPos}
+          onPick={edgeConnect.confirm}
+          onCancel={edgeConnect.cancel}
+        />
+      )}
+
+      {/* Click-based "Link to…" flow — the discoverable sibling of the drag
+          connect above. Mounted once, outside the mutually-exclusive right-rail
+          block so it floats over whatever panel is open. */}
+      <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
+
+      {/* View-metadata dialogs (title menu). EditViewDetailsDialog is
+          prop-driven; Share is reused unchanged from the Explorer, mounted
+          while shareSeed holds its fetched identity + visibility. */}
+      {activeView?.id && (
+        <EditViewDetailsDialog
+          open={viewDetailsOpen}
+          viewId={activeView.id}
+          onClose={() => setViewDetailsOpen(false)}
+          onSaved={handleViewDetailsSaved}
+        />
+      )}
+      {shareSeed && (
+        <ShareViewDialog
+          viewId={shareSeed.id}
+          viewName={shareSeed.name}
+          currentVisibility={shareSeed.visibility}
+          isOpen={true}
+          onClose={() => setShareSeed(null)}
+        />
+      )}
     </div>
   )
 }

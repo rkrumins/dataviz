@@ -14,9 +14,9 @@
  * - Lazy loading support
  */
 
-import { create, type StateCreator } from 'zustand'
+import { create } from 'zustand'
 import { generateId } from '@/lib/utils'
-import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, AssignmentConflict, ScopeEdgeConfig, DisplayRuleConfig } from '@/types/schema'
+import type { ViewLayerConfig, ScopeFilterConfig, EntityAssignmentConfig, AssignmentConflict, ScopeEdgeConfig, DisplayRuleConfig, LayerAssignmentEntry } from '@/types/schema'
 import type {
     GraphEdge,
     EntityAssignment,
@@ -24,8 +24,6 @@ import type {
     LayerAssignmentRequest,
     GraphDataProvider
 } from '@/providers/GraphDataProvider'
-import type { ContextModel } from '@/services/contextModelService'
-import * as contextModelService from '@/services/contextModelService'
 
 // ============================================
 // Types
@@ -46,8 +44,15 @@ type UnsubscribeFn = () => void
 /** Pending assignment request (for async backend calls) */
 type AssignmentStatus = 'idle' | 'loading' | 'success' | 'error'
 
-/** Backend persistence state machine */
-type SyncStatus = 'synced' | 'dirty' | 'saving' | 'error'
+/**
+ * Canonical assignment inputs the CALLER threads into the compute request — the
+ * active view's flattened placement map + its scope. The store no longer owns
+ * these (they live on the view config); the canvas passes them explicitly.
+ */
+export interface ComputeAssignmentsParams {
+    assignments: Record<string, LayerAssignmentEntry>
+    entityScope: 'all' | 'curated'
+}
 
 // ============================================
 // Store State
@@ -98,11 +103,6 @@ interface ReferenceModelState {
     /** Current scope edge configuration */
     scopeEdgeConfig: ScopeEdgeConfig | null
 
-    // ===== Backend Sync =====
-    activeContextModelId: string | null
-    activeContextModelName: string | null
-    syncStatus: SyncStatus
-
     // ===== Subscription Management =====
     _subscribers: Set<LayerChangeCallback>
 
@@ -129,8 +129,13 @@ interface ReferenceModelState {
     /** Mark assignment computation as error */
     setAssignmentError: (error: string) => void
 
-    /** Trigger backend assignment computation */
-    computeAssignments: (provider: GraphDataProvider) => Promise<void>
+    /** Return assignment status to 'idle' so the canvas's compute effect
+     *  re-fires — used for bounded recovery after a transient failure
+     *  (the 'error' state is otherwise terminal until a view switch). */
+    resetAssignmentStatus: () => void
+
+    /** Trigger backend assignment computation with the caller's canonical inputs */
+    computeAssignments: (provider: GraphDataProvider, params: ComputeAssignmentsParams) => Promise<void>
 
     // ===== Lazy Loading =====
     toggleNodeExpanded: (nodeId: string) => void
@@ -165,7 +170,7 @@ interface ReferenceModelState {
     calculateLayerX: (layerId: string, config?: { margin?: number; width?: number; gap?: number }) => number
 
     // ===== Build Assignment Request =====
-    buildAssignmentRequest: () => LayerAssignmentRequest
+    buildAssignmentRequest: (params: ComputeAssignmentsParams) => LayerAssignmentRequest
 
     // ===== Instance Assignment Actions (NEW) =====
     /** Assign a specific entity to a layer (with conflict detection) */
@@ -176,6 +181,10 @@ interface ReferenceModelState {
 
     /** Remove an instance assignment */
     removeEntityAssignment: (entityId: string) => void
+
+    /** Re-key an entity's layer assignment from one id to another (e.g. a staged temp
+     *  urn → its real urn after Save), so the assignment survives the id swap. */
+    remapEntityId: (oldId: string, newId: string) => void
 
     /** Check if assigning an entity would cause a conflict */
     checkAssignmentConflict: (entityId: string, layerId: string) => AssignmentConflict | null
@@ -201,54 +210,7 @@ interface ReferenceModelState {
 
     /** Remove elements from the store completely (used for searching/refreshing) */
     removeElements: (nodeIds: string[], edgeIds: string[]) => void
-
-    // ===== Backend Sync Actions =====
-    /** Save current state to backend (Save Blueprint button) */
-    saveToBackend: (wsId: string) => Promise<void>
-    /** Load a context model from backend */
-    loadFromBackend: (wsId: string, contextModelId: string) => Promise<void>
-    /** Instantiate a Quick Start Template */
-    loadTemplate: (wsId: string, templateId: string, name: string) => Promise<void>
-    /** List available context models for a workspace */
-    listAvailable: (wsId: string) => Promise<ContextModel[]>
-    /** List Quick Start Templates */
-    listTemplates: () => Promise<ContextModel[]>
 }
-
-// ============================================
-// Auto-dirty middleware
-// ============================================
-// Wraps set() to detect blueprint-relevant mutations and automatically
-// transition syncStatus → 'dirty'. Actions that explicitly set syncStatus
-// (save, load, loadTemplate) are left alone.
-
-const BLUEPRINT_KEYS: ReadonlySet<string> = new Set([
-    'layers', 'layerSequence', 'scopeFilter', 'scopeEdgeConfig', 'instanceAssignments',
-    'displayRules',
-])
-
-const autoDirty: (
-    config: StateCreator<ReferenceModelState, [], []>,
-) => StateCreator<ReferenceModelState, [], []> =
-    (config) => (rawSet, get, api) => {
-        const wrappedSet: typeof rawSet = (partial, replace) => {
-            const update: Record<string, unknown> =
-                typeof partial === 'function' ? partial(get()) : partial
-
-            // If this set() explicitly sets syncStatus, the caller owns the transition
-            if ('syncStatus' in update) {
-                return rawSet(partial, replace)
-            }
-
-            const touchesBlueprint = Object.keys(update).some(k => BLUEPRINT_KEYS.has(k))
-            if (touchesBlueprint && get().syncStatus !== 'saving') {
-                return rawSet({ ...update, syncStatus: 'dirty' } as Partial<ReferenceModelState>, replace as false)
-            }
-
-            return rawSet(partial, replace)
-        }
-        return config(wrappedSet, get, api)
-    }
 
 // ============================================
 // Store Implementation
@@ -261,8 +223,7 @@ const DEFAULT_LAYOUT = {
 }
 
 export const useReferenceModelStore = create<ReferenceModelState>()(
-    autoDirty(
-        (set, get) => ({
+    (set, get) => ({
             // ===== Initial State =====
             layers: [],
             layerSequence: [],
@@ -279,9 +240,6 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
             instanceAssignments: new Map(),
             assignmentConflicts: [],
             scopeEdgeConfig: null,
-            activeContextModelId: null,
-            activeContextModelName: null,
-            syncStatus: 'synced' as SyncStatus,
             _subscribers: new Set(),
 
             setLayers: (layers) => {
@@ -301,6 +259,9 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     [...newLayerIds].some(id => !prevLayerIds.has(id))
 
                 if (isViewSwitch) {
+                    // Display rules are view-scoped, but they're no longer cleared here — the
+                    // canvas's view→store hydrate effect re-seeds them from the new view's config
+                    // on every view switch (see ContextViewCanvas), so there's no cross-view leak.
                     set({
                         layers,
                         layerSequence: sequence,
@@ -308,10 +269,6 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         effectiveAssignments: new Map(),
                         assignmentConflicts: [],
                         assignmentStatus: 'idle',
-                        // Display rules are view-scoped; drop them on a view
-                        // switch so one view's tags don't leak into another.
-                        // The new view's rules hydrate via loadFromBackend.
-                        displayRules: [],
                     })
                 } else {
                     set({
@@ -516,12 +473,16 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 set({ assignmentStatus: 'error', lastError: error })
             },
 
-            computeAssignments: async (provider) => {
+            resetAssignmentStatus: () => {
+                set({ assignmentStatus: 'idle', lastError: null })
+            },
+
+            computeAssignments: async (provider, params) => {
                 const state = get()
                 set({ assignmentStatus: 'loading', lastError: null })
 
                 try {
-                    const request = state.buildAssignmentRequest()
+                    const request = state.buildAssignmentRequest(params)
                     const result = await provider.computeLayerAssignments(request)
 
                     state.setAssignmentResult(result) // Using existing setter to update state
@@ -622,8 +583,31 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 
             // ===== Build Assignment Request =====
 
-            buildAssignmentRequest: () => {
+            buildAssignmentRequest: (params) => {
                 const state = get()
+                const now = new Date().toISOString()
+
+                // Adapt the caller's canonical placement map (LayerAssignmentEntry, keyed by urn)
+                // to the backend's EntityAssignmentConfig shape at this service boundary — filling
+                // the fields the shared pydantic model requires (entityId/priority/assignedBy/
+                // assignedAt) WITHOUT relaxing that model. These flow as the request's top-level
+                // `assignments` (which the backend treats as canonical, overriding legacy per-layer
+                // entityAssignments on collision — see layout_config.py).
+                const assignments: Record<string, EntityAssignmentConfig> = {}
+                for (const [urn, entry] of Object.entries(params.assignments)) {
+                    assignments[urn] = {
+                        entityId: urn,
+                        layerId: entry.layerId,
+                        logicalNodeId: entry.logicalNodeId,
+                        inheritsChildren: entry.inheritsChildren ?? true,
+                        priority: 1000,
+                        // Collapse provenance to the EntityAssignmentConfig enum — 'import' and
+                        // absent both read as an explicit 'user' placement for compute (priority
+                        // is fixed at 1000 regardless); only 'rule' is distinguished.
+                        assignedBy: entry.assignedBy === 'rule' ? 'rule' : 'user',
+                        assignedAt: entry.assignedAt ?? now,
+                    }
+                }
 
                 return {
                     scopeFilter: state.scopeFilter ?? undefined,
@@ -638,153 +622,49 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                         logicalNodes: layer.logicalNodes,
                         entityAssignments: layer.entityAssignments ?? []
                     })),
-                    includeEdges: true
+                    includeEdges: true,
+                    assignments,
+                    entityScope: params.entityScope,
                 }
             },
 
             // ===== Instance Assignment Actions =====
 
             assignEntityToLayer: (entityId, layerId, options = {}) => {
+                // OPTIMISTIC session feedback ONLY. Canonical placement (with the containment
+                // conflict rules + descendant handling) lives in the view config via
+                // assignmentMutations/persistReferenceLayout; this just seeds instance +
+                // effective assignments so a freshly created/duplicated node renders in its
+                // layer immediately, before the canonical write's debounce/re-render lands. The
+                // store's `layers` are a read-only mirror now, so this no longer rewrites them.
                 const state = get()
                 const { logicalNodeId, inheritsChildren = true } = options
 
-                // HARD RULE: Containment children cannot be assigned to a different
-                // layer than their parent. They always inherit. Block the operation.
-                const parentId = state.parentMap.get(entityId)
-                if (parentId) {
-                    const parentAssignment = state.effectiveAssignments.get(parentId)
-                    if (parentAssignment && parentAssignment.layerId !== layerId) {
-                        const conflict: AssignmentConflict = {
-                            entityId,
-                            conflictingEntityId: parentId,
-                            type: 'containment_locked',
-                            message: `Cannot assign child to a different layer than its parent. Children always inherit their parent's layer assignment.`,
-                            conflictingLayerId: parentAssignment.layerId
-                        }
-                        set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
-                        return { success: false, conflict }
-                    }
-                }
-
-                // HARD RULE (DOWN): If this entity has containment children already
-                // assigned to a different layer, those children must follow the parent.
-                // Build childMap from parentMap for descendant lookup.
-                const childMap = new Map<string, string[]>()
-                state.parentMap.forEach((pId, cId) => {
-                    const list = childMap.get(pId) ?? []
-                    list.push(cId)
-                    childMap.set(pId, list)
-                })
-
-                // BFS to collect all containment descendants
-                const descendantsToReassign: string[] = []
-                const queue = [...(childMap.get(entityId) ?? [])]
-                const visited = new Set<string>()
-                while (queue.length > 0) {
-                    const cId = queue.shift()!
-                    if (visited.has(cId)) continue
-                    visited.add(cId)
-                    const childAssignment = state.effectiveAssignments.get(cId)
-                    if (childAssignment && childAssignment.layerId !== layerId) {
-                        descendantsToReassign.push(cId)
-                    }
-                    queue.push(...(childMap.get(cId) ?? []))
-                }
-
-                // Report conflict if children will be moved (informational, not blocking)
-                let conflict: AssignmentConflict | null = null
-                if (descendantsToReassign.length > 0) {
-                    conflict = {
-                        entityId,
-                        conflictingEntityId: descendantsToReassign[0],
-                        type: 'child_assigned',
-                        message: `${descendantsToReassign.length} child(ren) reassigned to follow parent's layer.`,
-                        conflictingLayerId: layerId
-                    }
-                    set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
-                }
-
-                // Also check for other non-containment conflicts
-                if (!conflict) {
-                    conflict = state.checkAssignmentConflict(entityId, layerId)
-                    if (conflict) {
-                        set({ assignmentConflicts: [...state.assignmentConflicts, conflict] })
-                    }
-                }
-
-                // Create the assignment config
                 const assignment: EntityAssignmentConfig = {
                     entityId,
                     layerId,
                     logicalNodeId,
                     inheritsChildren,
-                    priority: 1000, // User assignments get highest priority
+                    priority: 1000,
                     assignedBy: 'user',
-                    assignedAt: new Date().toISOString()
+                    assignedAt: new Date().toISOString(),
                 }
 
-                // Update instance assignments (parent + all descendants that need to follow)
-                const newAssignments = new Map(state.instanceAssignments)
-                newAssignments.set(entityId, assignment)
+                const newInstance = new Map(state.instanceAssignments)
+                newInstance.set(entityId, assignment)
 
-                // Reassign descendants to same layer (children inherit parent)
-                const descendantAssignments: EntityAssignmentConfig[] = descendantsToReassign.map(dId => ({
-                    entityId: dId,
-                    layerId,
-                    inheritsChildren: true,
-                    priority: 999, // Slightly lower than direct assignment
-                    assignedBy: 'rule' as const,
-                    assignedAt: new Date().toISOString()
-                }))
-                descendantAssignments.forEach(da => newAssignments.set(da.entityId, da))
-
-                // Collect all entity IDs being moved (parent + descendants)
-                const movedEntityIds = new Set([entityId, ...descendantsToReassign])
-
-                // Also update the layer's entityAssignments array for persistence
-                const updatedLayers = state.layers.map(layer => {
-                    // Remove moved entities from all layers first
-                    const filtered = (layer.entityAssignments ?? [])
-                        .filter(a => !movedEntityIds.has(a.entityId))
-                    if (layer.id === layerId) {
-                        return {
-                            ...layer,
-                            entityAssignments: [...filtered, assignment, ...descendantAssignments]
-                        }
-                    }
-                    if (filtered.length !== (layer.entityAssignments ?? []).length) {
-                        return { ...layer, entityAssignments: filtered }
-                    }
-                    return layer
-                })
-
-                // Update effective assignments for immediate UI feedback
                 const newEffective = new Map(state.effectiveAssignments)
                 newEffective.set(entityId, {
                     entityId,
                     layerId,
                     logicalNodeId,
                     isInherited: false,
-                    confidence: 1.0
-                })
-                // Also update descendants in effective assignments
-                descendantsToReassign.forEach(dId => {
-                    newEffective.set(dId, {
-                        entityId: dId,
-                        layerId,
-                        isInherited: true,
-                        confidence: 1.0
-                    })
+                    confidence: 1.0,
                 })
 
-                set({
-                    instanceAssignments: newAssignments,
-                    layers: updatedLayers,
-                    effectiveAssignments: newEffective,
+                set({ instanceAssignments: newInstance, effectiveAssignments: newEffective })
 
-                })
-
-                return { success: true, conflict: conflict ?? undefined }
+                return { success: true }
             },
 
             removeEntityAssignment: (entityId) => {
@@ -821,6 +701,36 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                     effectiveAssignments: newEffective,
 
                 })
+            },
+
+            remapEntityId: (oldId, newId) => {
+                if (!oldId || !newId || oldId === newId) return
+                const state = get()
+                const cfg = state.instanceAssignments.get(oldId)
+                const effective = state.effectiveAssignments.get(oldId)
+                const inLayers = state.layers.some(l => l.entityAssignments?.some(a => a.entityId === oldId))
+                if (!cfg && !effective && !inLayers) return   // nothing assigned under the old id
+
+                const newAssignments = new Map(state.instanceAssignments)
+                if (cfg) {
+                    newAssignments.delete(oldId)
+                    newAssignments.set(newId, { ...cfg, entityId: newId })
+                }
+                const newEffective = new Map(state.effectiveAssignments)
+                if (effective) {
+                    newEffective.delete(oldId)
+                    newEffective.set(newId, { ...effective, entityId: newId })
+                }
+                const updatedLayers = state.layers.map(layer => {
+                    if (!layer.entityAssignments?.some(a => a.entityId === oldId)) return layer
+                    return {
+                        ...layer,
+                        entityAssignments: layer.entityAssignments.map(a =>
+                            a.entityId === oldId ? { ...a, entityId: newId } : a,
+                        ),
+                    }
+                })
+                set({ instanceAssignments: newAssignments, effectiveAssignments: newEffective, layers: updatedLayers })
             },
 
             removeElements: (nodeIds, edgeIds) => {
@@ -1042,133 +952,7 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 })
             },
 
-            // ===== Backend Sync Actions =====
-
-            saveToBackend: async (wsId: string) => {
-                const state = get()
-                if (state.syncStatus === 'saving') return
-
-                set({ syncStatus: 'saving' })
-                try {
-                    // Serialize layers and assignments for the API
-                    const layersConfig = state.layers.map(l => ({ ...l }))
-                    const instanceAssignments: Record<string, EntityAssignmentConfig> = {}
-                    state.instanceAssignments.forEach((val, key) => {
-                        instanceAssignments[key] = val
-                    })
-
-                    if (state.activeContextModelId) {
-                        // Update existing
-                        const updated = await contextModelService.updateContextModel(
-                            wsId,
-                            state.activeContextModelId,
-                            {
-                                name: state.activeContextModelName ?? undefined,
-                                layersConfig,
-                                scopeFilter: state.scopeFilter,
-                                instanceAssignments,
-                                scopeEdgeConfig: state.scopeEdgeConfig,
-                                displayRulesConfig: state.displayRules,
-                            }
-                        )
-                        set({
-                            syncStatus: 'synced',
-                            activeContextModelName: updated.name,
-                        })
-                    } else {
-                        // Create new
-                        const created = await contextModelService.createContextModel(wsId, {
-                            name: state.activeContextModelName ?? 'Untitled Context Model',
-                            layersConfig,
-                            scopeFilter: state.scopeFilter,
-                            instanceAssignments,
-                            scopeEdgeConfig: state.scopeEdgeConfig,
-                            displayRulesConfig: state.displayRules,
-                        })
-                        set({
-                            activeContextModelId: created.id,
-                            activeContextModelName: created.name,
-                            syncStatus: 'synced',
-                        })
-                    }
-                } catch (err) {
-                    console.error('[ReferenceModelStore] saveToBackend failed:', err)
-                    set({ syncStatus: 'error' })
-                    throw err
-                }
-            },
-
-            loadFromBackend: async (wsId: string, contextModelId: string) => {
-                try {
-                    const model = await contextModelService.getContextModel(wsId, contextModelId)
-
-                    // Rebuild instanceAssignments Map from the API response
-                    const instanceMap = new Map<string, EntityAssignmentConfig>()
-                    if (model.instanceAssignments) {
-                        Object.entries(model.instanceAssignments).forEach(([key, val]) => {
-                            instanceMap.set(key, val as EntityAssignmentConfig)
-                        })
-                    }
-
-                    const layers = (model.layersConfig ?? []) as ViewLayerConfig[]
-                    const sequence = layers
-                        .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
-                        .map(l => l.id)
-
-                    set({
-                        activeContextModelId: model.id,
-                        activeContextModelName: model.name,
-                        layers,
-                        layerSequence: sequence,
-                        instanceAssignments: instanceMap,
-                        scopeFilter: (model.scopeFilter as ScopeFilterConfig) ?? null,
-                        scopeEdgeConfig: (model.scopeEdgeConfig as ScopeEdgeConfig) ?? null,
-                        displayRules: (model.displayRulesConfig as DisplayRuleConfig[]) ?? [],
-                        syncStatus: 'synced' as SyncStatus,
-                        assignmentConflicts: [],
-                    })
-                } catch (err) {
-                    console.error('[ReferenceModelStore] loadFromBackend failed:', err)
-                    throw err
-                }
-            },
-
-            loadTemplate: async (wsId: string, templateId: string, name: string) => {
-                try {
-                    const model = await contextModelService.instantiateTemplate(wsId, templateId, name)
-
-                    const layers = (model.layersConfig ?? []) as ViewLayerConfig[]
-                    const sequence = layers
-                        .sort((a, b) => (a.sequence ?? a.order) - (b.sequence ?? b.order))
-                        .map(l => l.id)
-
-                    set({
-                        activeContextModelId: model.id,
-                        activeContextModelName: model.name,
-                        layers,
-                        layerSequence: sequence,
-                        instanceAssignments: new Map(),
-                        scopeFilter: (model.scopeFilter as ScopeFilterConfig) ?? null,
-                        scopeEdgeConfig: (model.scopeEdgeConfig as ScopeEdgeConfig) ?? null,
-                        displayRules: (model.displayRulesConfig as DisplayRuleConfig[]) ?? [],
-                        syncStatus: 'synced' as SyncStatus,
-                        assignmentConflicts: [],
-                    })
-                } catch (err) {
-                    console.error('[ReferenceModelStore] loadTemplate failed:', err)
-                    throw err
-                }
-            },
-
-            listAvailable: async (wsId: string) => {
-                return contextModelService.listContextModels(wsId)
-            },
-
-            listTemplates: async () => {
-                return contextModelService.listTemplates()
-            },
-        })
-    )
+    })
 )
 
 // ============================================

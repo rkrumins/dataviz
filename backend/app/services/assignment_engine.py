@@ -56,7 +56,7 @@ class AssignmentEngine:
         logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
 
         # 2. Build Indices
-        rule_index = self._build_rule_index(request.layers)
+        rule_index = self._build_rule_index(request.layers, request.assignments)
         # Pass the resolved set directly — an empty set is valid (flat graph, no hierarchy).
         # Do NOT convert empty set to None, as that triggers hardcoded fallbacks.
         parent_cache = self._build_parent_cache(all_edges, containment_edge_types=containment_edge_types)
@@ -74,7 +74,8 @@ class AssignmentEngine:
             parent_assignment = assignments.get(parent_id) if parent_id else None
 
             result = self._resolve_assignment(
-                node, parent_id, parent_assignment, rule_index, request.layers, layer_sequence_map
+                node, parent_id, parent_assignment, rule_index, request.layers, layer_sequence_map,
+                entity_scope=request.entity_scope,
             )
 
             if result:
@@ -101,14 +102,18 @@ class AssignmentEngine:
     # Index Builders
     # ==========================================
 
-    def _build_rule_index(self, layers: List[ViewLayerConfig]) -> Dict[str, Any]:
+    def _build_rule_index(
+        self,
+        layers: List[ViewLayerConfig],
+        request_assignments: Optional[Dict[str, EntityAssignmentConfig]] = None,
+    ) -> Dict[str, Any]:
         by_type: Dict[str, List[Tuple[str, LayerAssignmentRuleConfig]]] = {}
         by_tag: Dict[str, List[Tuple[str, LayerAssignmentRuleConfig]]] = {}
         patterns: List[Tuple[str, LayerAssignmentRuleConfig, Any]] = [] # (layerId, rule, regex)
         instances: Dict[str, Tuple[str, EntityAssignmentConfig]] = {}
 
         for layer in layers:
-            # Index instance assignments
+            # Index legacy per-layer instance assignments (existing behavior).
             if layer.entity_assignments:
                 for config in layer.entity_assignments:
                     instances[config.entity_id] = (layer.id, config)
@@ -150,11 +155,23 @@ class AssignmentEngine:
                     )
                     by_type[type_].append((layer.id, synth_rule))
 
+        # Request-level flattened `assignments` map (canonical view-config
+        # placements) — unioned with the legacy entries above, winning on
+        # collision. Indexed by both the dict key (urn) and the entry's own
+        # entity_id, in case they differ.
+        for urn, config in (request_assignments or {}).items():
+            instances[urn] = (config.layer_id, config)
+            if config.entity_id and config.entity_id != urn:
+                instances[config.entity_id] = (config.layer_id, config)
+
         return {
             "by_type": by_type,
             "by_tag": by_tag,
             "patterns": patterns,
-            "instances": instances
+            "instances": instances,
+            # Valid layer ids — a node's persisted `layerAssignment` is only honoured
+            # when it still names a layer that exists in this view.
+            "valid_layer_ids": {layer.id for layer in layers},
         }
 
     def _build_parent_cache(
@@ -224,14 +241,32 @@ class AssignmentEngine:
         parent_assignment: Optional[EntityAssignment],
         index: Dict[str, Any],
         layers: List[ViewLayerConfig],
-        layer_sequence_map: Dict[str, int]
+        layer_sequence_map: Dict[str, int],
+        entity_scope: Optional[str] = None,
     ) -> Optional[EntityAssignment]:
-        
+        """Precedence (curated scope = explicit assignment + containment
+        inheritance ONLY; tiers 3-5 are open-scope-only and gated below):
+
+        1. Explicit assignment (instances index: request-level `assignments`
+           map, unioned with legacy per-layer `entity_assignments`) — all scopes.
+        2. Containment inheritance from the parent's resolved layer — all
+           scopes, UNLESS the parent's own winning entry was itself an explicit
+           assignment with `inheritsChildren == False`, in which case this
+           entity falls through to 3-5 instead of inheriting.
+        3. The node's own persisted `layerAssignment` property hint — open
+           scope only (skipped entirely in curated scope).
+        4. Generic rules (type/tag/pattern) — open scope only.
+        5. Default `layers[0]` — open scope only.
+
+        In curated scope, anything that falls through tiers 1-2 gets no
+        assignment (`None`) — the caller already treats a `None` result as
+        "unassigned" (see `unassignedEntityIds` in `compute_assignments`).
+        """
         entity_id = node.urn
         entity_type = node.entity_type
         entity_tags = node.tags or []
 
-        # 1. Instance Assignment (Highest Priority)
+        # 1. Explicit assignment (highest priority, all scopes).
         instance_match = index["instances"].get(entity_id)
         if instance_match:
             layer_id, config = instance_match
@@ -243,38 +278,64 @@ class AssignmentEngine:
                 isInherited=False
             )
 
-        # 2. Inheritance
-        if parent_assignment and parent_assignment.layer_id != "unassigned": # Check validity
-            # Check if parent assignment allows inheritance (check origin rule?)
-            # For simplicity, if parent is assigned, we try to inherit.
-            # We assume "inheritsChildren" is true by default or checked when parent was assigned
-            
-            # Note: We need to know if the parent matched via a rule that implies inheritance.
-            # The simplified logic: If parent is assigned, child belongs to same layer unless overridden.
+        # 2. Containment inheritance from parent, unless the parent's own
+        # winning entry was an explicit assignment with inheritsChildren=False.
+        if parent_assignment and parent_assignment.layer_id != "unassigned":
+            parent_instance = index["instances"].get(parent_id)
+            parent_inherits_children = parent_instance[1].inherits_children if parent_instance else True
+            if parent_inherits_children:
+                return EntityAssignment(
+                    entityId=entity_id,
+                    layerId=parent_assignment.layer_id,
+                    logicalNodeId=parent_assignment.logical_node_id,
+                    isInherited=True,
+                    inheritedFromId=parent_id,
+                    confidence=parent_assignment.confidence
+                )
+
+        # Curated scope: explicit assignment + containment inheritance only.
+        # Node hints, generic rules, and the layers[0] default do not place
+        # entities in curated scope — unassigned entities drop out.
+        if entity_scope == "curated":
+            return None
+
+        # 3. Node's own persisted layer assignment (EXPLICIT, per-entity).
+        #
+        # `layerAssignment` is stamped on the node itself and kept current by every
+        # explicit user action: create (creation layer) AND move (a layer move
+        # persists an isolated node update rewriting this field — see
+        # saveStagedChangesToDraft Phase 3). It is the single field reload
+        # placement reads. It MUST outrank the GENERIC rule matching below: a rule
+        # keyed on entity TYPE / tag / pattern is a broad default, so letting it
+        # override an explicit per-entity assignment made a saved move "disappear"
+        # on reload (the entity snapped back to its type-rule layer). Explicit
+        # instance assignments (tier 1) and containment inheritance (tier 2) still
+        # outrank it; and because a move rewrites the field it is never stale.
+        # Open scope only — curated scope already returned above.
+        node_layer = node.layer_assignment or (node.properties or {}).get("layerAssignment")
+        if node_layer and node_layer in index["valid_layer_ids"]:
             return EntityAssignment(
                 entityId=entity_id,
-                layerId=parent_assignment.layer_id,
-                logicalNodeId=parent_assignment.logical_node_id, # Inherit logical node too? Maybe.
-                isInherited=True,
-                inheritedFromId=parent_id, # or parent_assignment.entity_id
-                confidence=parent_assignment.confidence
+                layerId=node_layer,
+                confidence=1.0,
+                isInherited=False,
             )
 
-        # 3. Rule Matching
+        # 4. Rule Matching (open scope only)
         candidates = []
 
-        # 3a. Type Rules
+        # 4a. Type Rules
         if entity_type in index["by_type"]:
             for layer_id, rule in index["by_type"][entity_type]:
                 candidates.append((layer_id, rule, rule.priority))
 
-        # 3b. Tag Rules
+        # 4b. Tag Rules
         for tag in entity_tags:
             if tag in index["by_tag"]:
                 for layer_id, rule in index["by_tag"][tag]:
                     candidates.append((layer_id, rule, rule.priority))
 
-        # 3c. Pattern Rules
+        # 4c. Pattern Rules
         for layer_id, rule, regex in index["patterns"]:
             if regex.match(entity_id):
                  candidates.append((layer_id, rule, rule.priority))
@@ -284,7 +345,7 @@ class AssignmentEngine:
             # Sort by priority desc
             candidates.sort(key=lambda x: x[2], reverse=True)
             winner_layer_id, winner_rule, _ = candidates[0]
-            
+
             return EntityAssignment(
                 entityId=entity_id,
                 layerId=winner_layer_id,
@@ -292,7 +353,7 @@ class AssignmentEngine:
                 confidence=1.0
             )
 
-        # 4. Default
+        # 5. Default (open scope only)
         if layers:
             return EntityAssignment(
                 entityId=entity_id,

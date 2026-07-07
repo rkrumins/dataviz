@@ -35,7 +35,14 @@ HEALTHCHECK --interval=15s --timeout=5s --retries=5 \
 # Worker count is env-driven so it can be tuned per-deployment without
 # rebuilding the image (e.g., set GUNICORN_WORKERS=4 in Helm values).
 # Tune based on available CPU cores (2 * CPU + 1 is a common formula).
-ENV GUNICORN_WORKERS=2 \
+# Default 4 (not 2): response serialization (Pydantic → JSON → gzip) is
+# CPU-bound ON the event loop, so with 2 workers two concurrent large
+# graph responses wedged every loop — including /health, which is what
+# tripped the frontend's "backend unreachable" banner. The in-process
+# projector is single-flight per graph via a Postgres advisory lock
+# (services/versioning/projection.py:project_graph), so extra workers
+# don't duplicate background projection work.
+ENV GUNICORN_WORKERS=4 \
     GUNICORN_TIMEOUT=120 \
     GUNICORN_GRACEFUL_TIMEOUT=30
 

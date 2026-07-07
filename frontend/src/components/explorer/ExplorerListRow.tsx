@@ -221,10 +221,10 @@ export function ExplorerListRow({
         <VisIcon className="h-3.5 w-3.5 text-ink-muted" />
 
         {/* ── Owner ──
-             Prefer the server-resolved display name; fall back to the raw
-             user id (legacy rows). The CreatorHoverCard shows full name +
-             email on hover so power users can disambiguate without taking
-             a round-trip to the view detail drawer. */}
+             Prefer the server-resolved display name; fall back to "Unknown"
+             when unresolvable — never the raw user id. The CreatorHoverCard
+             shows full name + email on hover so power users can disambiguate
+             without taking a round-trip to the view detail drawer. */}
         {(view.createdByName || view.createdBy) ? (
           <CreatorHoverCard
             userId={view.createdBy ?? null}
@@ -232,7 +232,7 @@ export function ExplorerListRow({
             email={view.createdByEmail ?? null}
           >
             <span className="truncate text-xs text-ink-muted cursor-default" tabIndex={0}>
-              {view.createdByName ?? view.createdBy}
+              {view.createdByName ?? 'Unknown'}
             </span>
           </CreatorHoverCard>
         ) : (
@@ -245,10 +245,20 @@ export function ExplorerListRow({
           {view.favouriteCount}
         </span>
 
-        {/* ── Updated ── */}
-        <span className="text-xs text-ink-muted">
-          {timeAgo(view.updatedAt)}
-        </span>
+        {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both ── */}
+        {(() => {
+          const dataAt = view.dataUpdatedAt ?? null
+          const freshest = dataAt && dataAt > view.updatedAt ? dataAt : view.updatedAt
+          const title = [
+            dataAt && `Data updated ${timeAgo(dataAt)}${view.dataUpdatedByName ? ` by ${view.dataUpdatedByName}` : ''}`,
+            `Settings edited ${timeAgo(view.updatedAt)}${view.updatedByName ? ` by ${view.updatedByName}` : ''}`,
+          ].filter(Boolean).join('\n')
+          return (
+            <span className="text-xs text-ink-muted" title={title}>
+              {timeAgo(freshest)}
+            </span>
+          )
+        })()}
 
         {/* ── Actions ── */}
         <div className="flex items-center justify-end gap-0.5">

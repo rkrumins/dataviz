@@ -4,7 +4,7 @@
  * Clean, focused input with smart defaults and suggestions
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import {
     Layout,
@@ -22,10 +22,14 @@ import {
     X,
     Plus,
     AlertTriangle,
+    Check,
+    Loader2,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { checkBlankGraphName } from '@/services/versioningApiService'
+import { GRAPH_NAME_RE, slugifyGraphName } from '../blankModel'
 import type { WizardFormData, ScopeContext } from '../ViewWizard'
 
 // ============================================
@@ -40,6 +44,8 @@ interface BasicsStepProps {
     scopeContext?: ScopeContext
     /** Callback to go back to ScopeStep (create mode only). */
     onChangeScope?: () => void
+    /** Blank models only: scope for the physical graph-name picker + live check. */
+    blankNaming?: { workspaceId: string; providerId: string }
 }
 
 const ICON_OPTIONS = [
@@ -87,7 +93,7 @@ const VISIBILITY_OPTIONS = [
     },
 ]
 
-export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope }: BasicsStepProps) {
+export function BasicsStep({ formData, updateFormData, mode, scopeContext, onChangeScope, blankNaming }: BasicsStepProps) {
     const [showSuggestions, setShowSuggestions] = useState(false)
     const [tagInput, setTagInput] = useState('')
     const navigate = useNavigate()
@@ -109,6 +115,49 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
     const handleRemoveTag = useCallback((tag: string) => {
         updateFormData({ tags: formData.tags.filter(t => t !== tag) })
     }, [formData.tags, updateFormData])
+
+    // ── Physical graph name (blank models) ──────────────────────────────────
+    // Auto-derived from the model name until the user edits it; every change is
+    // debounce-checked against the backend's authoritative availability rules
+    // (slug shape, reserved prefixes, per-provider uniqueness, live key check).
+    const effectiveGraphName = formData.graphName ?? slugifyGraphName(formData.name)
+    const graphNameEdited = formData.graphName !== undefined
+    const [nameCheck, setNameCheck] = useState<
+        { state: 'idle' | 'checking' | 'available' } | { state: 'unavailable'; reason: string }
+    >({ state: 'idle' })
+    const checkSeq = useRef(0)
+    useEffect(() => {
+        if (!blankNaming) return
+        const name = effectiveGraphName
+        if (!name || !GRAPH_NAME_RE.test(name)) {
+            setNameCheck(name
+                ? { state: 'unavailable', reason: "Use 3–64 characters: lowercase letters, numbers, '-' or '_'." }
+                : { state: 'idle' })
+            updateFormData({ graphNameAvailable: name ? false : undefined })
+            return
+        }
+        const seq = ++checkSeq.current
+        setNameCheck({ state: 'checking' })
+        const t = setTimeout(() => {
+            checkBlankGraphName(blankNaming.workspaceId, blankNaming.providerId, name)
+                .then((res) => {
+                    if (checkSeq.current !== seq) return
+                    setNameCheck(res.available
+                        ? { state: 'available' }
+                        : { state: 'unavailable', reason: res.reason ?? 'This name is taken.' })
+                    updateFormData({ graphNameAvailable: res.available })
+                })
+                .catch(() => {
+                    // Check unavailable (offline, transient) — don't block; the
+                    // provisioning endpoint re-validates authoritatively.
+                    if (checkSeq.current !== seq) return
+                    setNameCheck({ state: 'idle' })
+                    updateFormData({ graphNameAvailable: undefined })
+                })
+        }, 400)
+        return () => clearTimeout(t)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [blankNaming?.workspaceId, blankNaming?.providerId, effectiveGraphName])
 
     return (
         <div className="max-w-xl mx-auto space-y-8">
@@ -256,6 +305,70 @@ export function BasicsStep({ formData, updateFormData, mode, scopeContext, onCha
                     className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10 transition-colors duration-150 outline-none resize-none"
                 />
             </motion.div>
+
+            {/* Storage — blank models pick the PHYSICAL graph name their model lives
+                under on the chosen connection. Auto-derived from the model name,
+                editable, live-checked for availability. */}
+            {blankNaming && (
+                <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.12, ease: 'easeOut' }}
+                    className="space-y-2"
+                >
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300">
+                        Graph name
+                        {scopeContext?.providerName && (
+                            <span className="ml-2 text-xs font-normal text-slate-400">
+                                on {scopeContext.providerName}
+                            </span>
+                        )}
+                    </label>
+                    <div className={cn(
+                        'flex items-center rounded-xl border-2 bg-white dark:bg-slate-800 transition-colors duration-150 overflow-hidden',
+                        nameCheck.state === 'unavailable'
+                            ? 'border-rose-400 dark:border-rose-500/70'
+                            : nameCheck.state === 'available'
+                                ? 'border-emerald-400 dark:border-emerald-500/60'
+                                : 'border-slate-200 dark:border-slate-700 focus-within:border-blue-500',
+                    )}>
+                        <Database className="w-4 h-4 ml-4 shrink-0 text-slate-400" />
+                        <input
+                            type="text"
+                            value={effectiveGraphName}
+                            onChange={(e) => updateFormData({
+                                graphName: e.target.value.toLowerCase(),
+                                graphNameAvailable: undefined,
+                            })}
+                            spellCheck={false}
+                            className="flex-1 px-3 py-3 bg-transparent font-mono text-sm outline-none"
+                            placeholder="my_lineage_model"
+                        />
+                        <span className="mr-3 shrink-0">
+                            {nameCheck.state === 'checking' && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
+                            {nameCheck.state === 'available' && <Check className="w-4 h-4 text-emerald-500" />}
+                            {nameCheck.state === 'unavailable' && <AlertTriangle className="w-4 h-4 text-rose-500" />}
+                        </span>
+                    </div>
+                    {nameCheck.state === 'unavailable' ? (
+                        <p className="text-xs text-rose-500">{nameCheck.reason}</p>
+                    ) : (
+                        <p className="text-xs text-slate-400 dark:text-slate-500">
+                            The graph key your model is stored under — used by anything that
+                            queries the graph directly. Pick it once; it can&apos;t be renamed later.
+                            {graphNameEdited && (
+                                <button
+                                    type="button"
+                                    onClick={() => updateFormData({ graphName: undefined, graphNameAvailable: undefined })}
+                                    className="ml-1.5 text-blue-500 hover:underline"
+                                >
+                                    Reset to suggestion
+                                </button>
+                            )}
+                        </p>
+                    )}
+                </motion.div>
+            )}
 
             {/* Icon Selection */}
             <motion.div

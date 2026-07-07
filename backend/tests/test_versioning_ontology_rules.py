@@ -1,0 +1,180 @@
+"""validate_entities_rich(): the rich commit-boundary ontology gate.
+
+Pure-function tests pinning the contract shared with ``mutation_validator``:
+entity types must be defined (case-insensitive), edge source/target entity-type
+compatibility, containment ``can_contain`` (empty = unrestricted), CREATES only
+(updates/deletes always pass), and the ``{entity_id, kind, reason, rule}``
+violation shape (a superset of the legacy shape).
+"""
+from backend.app.services.versioning.ontology import (
+    EdgeRule, EntityRule, OntologyRules, canonicalize_payload_types,
+    validate_entities_rich,
+)
+
+RULES = OntologyRules(
+    entity_types={
+        "System": EntityRule(can_contain=frozenset({"Dataset"})),
+        "Dataset": EntityRule(can_contain=frozenset({"Column"})),
+        "Column": EntityRule(),                       # empty can_contain = unrestricted
+    },
+    edge_types={
+        "CONTAINS": EdgeRule(is_containment=True),    # endpoint types via can_contain
+        "FLOWS_TO": EdgeRule(source_types=frozenset({"Dataset"}),
+                             target_types=frozenset({"Dataset"})),
+        "TAGS": EdgeRule(),                           # unrestricted endpoints
+    },
+    containment_edge_types=frozenset({"CONTAINS"}),
+)
+
+TYPES = {"sys1": "System", "ds1": "Dataset", "ds2": "Dataset", "col1": "Column"}
+
+
+def _edge(eid, src, tgt, etype):
+    return (eid, "edge", {"edgeType": etype, "sourceEntityId": src, "targetEntityId": tgt},
+            "create")
+
+
+def test_no_rules_or_no_creates_passes():
+    assert validate_entities_rich([_edge("e", "ds1", "ds2", "FLOWS_TO")], {}, None) == []
+    assert validate_entities_rich(
+        [("n", "node", {"entityType": "Nope"}, "update"),
+         ("n2", "node", None, "delete")], {}, RULES) == []
+
+
+def test_unknown_entity_type_rejected_and_case_insensitive_accepted():
+    viol = validate_entities_rich(
+        [("n1", "node", {"entityType": "Widget"}, "create")], {}, RULES)
+    assert len(viol) == 1
+    assert viol[0]["rule"] == "unknown_entity_type"
+    assert viol[0]["entity_id"] == "n1" and viol[0]["kind"] == "node" and viol[0]["reason"]
+    assert validate_entities_rich(
+        [("n2", "node", {"entityType": "DATASET"}, "create")], {}, RULES) == []
+
+
+def test_unknown_edge_type_rejected():
+    viol = validate_entities_rich([_edge("e1", "ds1", "ds2", "MYSTERY")], TYPES, RULES)
+    assert [v["rule"] for v in viol] == ["unknown_edge_type"]
+
+
+def test_missing_edge_type_rejected_under_strict():
+    # A create edge with no/empty edgeType can't be typed against a declared schema → rejected
+    # with a clear, distinct reason. Normalization can't help (there is nothing to canonicalize).
+    for payload in ({"sourceEntityId": "ds1", "targetEntityId": "ds2"},
+                    {"edgeType": "", "sourceEntityId": "ds1", "targetEntityId": "ds2"},
+                    {"edgeType": "   ", "sourceEntityId": "ds1", "targetEntityId": "ds2"}):
+        viol = validate_entities_rich([("e", "edge", payload, "create")], TYPES, RULES)
+        assert [v["rule"] for v in viol] == ["missing_edge_type"], payload
+        assert "missing edgeType" in viol[0]["reason"]
+    # An unconstrained schema (no declared edge types) leaves a missing edgeType open.
+    open_rules = OntologyRules(entity_types={"Dataset": EntityRule()})
+    assert validate_entities_rich(
+        [("e", "edge", {"sourceEntityId": "ds1", "targetEntityId": "ds2"}, "create")],
+        TYPES, open_rules) == []
+
+
+def test_edge_source_and_target_compatibility():
+    assert validate_entities_rich([_edge("ok", "ds1", "ds2", "FLOWS_TO")], TYPES, RULES) == []
+    viol = validate_entities_rich([_edge("bad", "sys1", "col1", "FLOWS_TO")], TYPES, RULES)
+    assert sorted(v["rule"] for v in viol) == ["invalid_source", "invalid_target"]
+
+
+def test_containment_can_contain_enforced_and_empty_is_unrestricted():
+    assert validate_entities_rich([_edge("ok", "ds1", "col1", "CONTAINS")], TYPES, RULES) == []
+    viol = validate_entities_rich([_edge("bad", "sys1", "col1", "CONTAINS")], TYPES, RULES)
+    assert [v["rule"] for v in viol] == ["containment_not_allowed"]
+    # Column has empty can_contain → may contain anything known.
+    assert validate_entities_rich([_edge("ok2", "col1", "ds1", "CONTAINS")], TYPES, RULES) == []
+
+
+def test_unresolvable_endpoint_skips_that_check():
+    # Target type unknown to the caller → only the source side is judged.
+    assert validate_entities_rich(
+        [_edge("e", "ds1", "ghost", "FLOWS_TO")], {"ds1": "Dataset"}, RULES) == []
+    viol = validate_entities_rich(
+        [_edge("e2", "ghost", "col1", "FLOWS_TO")], {"col1": "Column"}, RULES)
+    assert [v["rule"] for v in viol] == ["invalid_target"]
+
+
+def test_unrestricted_edge_type_allows_any_endpoints():
+    assert validate_entities_rich([_edge("e", "sys1", "col1", "TAGS")], TYPES, RULES) == []
+
+
+def test_edge_updates_and_deletes_never_gated():
+    assert validate_entities_rich(
+        [("e1", "edge", {"edgeType": "MYSTERY", "sourceEntityId": "sys1",
+                         "targetEntityId": "col1"}, "update"),
+         ("e2", "edge", None, "delete")], TYPES, RULES) == []
+
+
+# --------------------------------------------------------------------------- #
+# canonicalize_payload_types(): case-insensitive normalization to declared casing.
+# USER MANDATE 2026-07-06 — a case variant of a declared type must NEVER fail; it is
+# rewritten to the ontology's exact declared spelling at the commit boundary.
+# --------------------------------------------------------------------------- #
+
+# Declared-casing map (as resolved_ontology_to_rules builds it): UPPER → declared.
+# edge-type keys are UPPER(declared id); edge_type_canonical maps UPPER → declared
+# (exactly as resolved_ontology_to_rules builds it — "FlowsTo".upper() == "FLOWSTO").
+MIXED = OntologyRules(
+    entity_types={"System": EntityRule(), "Dataset": EntityRule()},
+    edge_types={"HAS": EdgeRule(is_containment=True), "FLOWSTO": EdgeRule()},
+    containment_edge_types=frozenset({"HAS"}),
+    edge_type_canonical={"HAS": "Has", "FLOWSTO": "FlowsTo"},
+)
+
+
+def test_canonicalize_edge_type_to_declared_casing():
+    for variant in ("has", "HAS", "Has", "hAs"):
+        p = {"edgeType": variant, "sourceEntityId": "a", "targetEntityId": "b"}
+        canonicalize_payload_types(p, MIXED)
+        assert p["edgeType"] == "Has", variant
+
+
+def test_canonicalize_entity_type_to_declared_casing():
+    for variant in ("dataset", "DATASET", "DataSet"):
+        p = {"entityType": variant}
+        canonicalize_payload_types(p, MIXED)
+        assert p["entityType"] == "Dataset", variant
+
+
+def test_canonicalize_uppercase_fallback_when_no_declared_map():
+    # RULES has edge_types keyed UPPERCASE and no edge_type_canonical → normalize to UPPER.
+    p = {"edgeType": "contains", "sourceEntityId": "a", "targetEntityId": "b"}
+    canonicalize_payload_types(p, RULES)
+    assert p["edgeType"] == "CONTAINS"
+
+
+def test_canonicalize_declared_casing_preserved_verbatim():
+    p = {"edgeType": "Has", "entityType": None}
+    canonicalize_payload_types(p, MIXED)
+    assert p["edgeType"] == "Has"
+
+
+def test_canonicalize_leaves_unknown_and_missing_untouched():
+    p = {"edgeType": "mystery", "sourceEntityId": "a", "targetEntityId": "b"}
+    canonicalize_payload_types(p, MIXED)
+    assert p["edgeType"] == "mystery"                 # unknown → left for the gate
+    node = {"entityType": "Widget"}
+    canonicalize_payload_types(node, MIXED)
+    assert node["entityType"] == "Widget"
+    empty = {"sourceEntityId": "a", "targetEntityId": "b"}   # no type fields
+    canonicalize_payload_types(empty, MIXED)
+    assert empty == {"sourceEntityId": "a", "targetEntityId": "b"}
+
+
+def test_canonicalize_is_idempotent_and_noop_without_rules():
+    p = {"edgeType": "has", "sourceEntityId": "a", "targetEntityId": "b"}
+    canonicalize_payload_types(p, MIXED)
+    once = dict(p)
+    canonicalize_payload_types(p, MIXED)
+    assert p == once and p["edgeType"] == "Has"
+    q = {"edgeType": "has"}
+    canonicalize_payload_types(q, None)              # no rules → untouched
+    canonicalize_payload_types(None, MIXED)          # tombstone payload → no crash
+    assert q["edgeType"] == "has"
+
+
+def test_canonical_edge_type_matches_containment_and_lineage_lists():
+    assert MIXED.canonical_edge_type("HAS") == "Has"
+    assert MIXED.canonical_edge_type("flowsto") == "FlowsTo"
+    assert MIXED.canonical_edge_type("nope") is None

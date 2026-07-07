@@ -160,3 +160,70 @@ async def test_upsert_does_not_create_duplicate(db_session: AsyncSession):
     fetched = await stats_repo.get_data_source_stats(db_session, ds_id)
     assert fetched is not None
     assert fetched.node_count == 2
+
+
+# ── set_top_level_nodes ───────────────────────────────────────────────
+
+async def test_set_top_level_nodes_round_trip(db_session: AsyncSession):
+    ds_id = await _seed_data_source(db_session)
+
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session,
+        ds_id=ds_id,
+        node_count=5,
+        edge_count=5,
+        entity_type_counts='{}',
+        edge_type_counts='{}',
+    )
+    await db_session.flush()
+
+    payload = '{"v": 1, "nodes": []}'
+    await stats_repo.set_top_level_nodes(db_session, ds_id, payload)
+
+    fetched = await stats_repo.get_data_source_stats(db_session, ds_id)
+    assert fetched is not None
+    assert fetched.top_level_nodes == payload
+    assert fetched.top_level_updated_at is not None
+
+
+async def test_set_top_level_nodes_noop_when_row_missing(db_session: AsyncSession):
+    # No seeded row for this ds_id — should no-op, not raise or create.
+    await stats_repo.set_top_level_nodes(db_session, "ds_nonexistent", '{"v": 1}')
+
+    fetched = await stats_repo.get_data_source_stats(db_session, "ds_nonexistent")
+    assert fetched is None
+
+
+# ── touch_top_level_freshness ─────────────────────────────────────────
+
+async def test_touch_top_level_freshness_advances_timestamp_preserves_payload(
+    db_session: AsyncSession,
+):
+    ds_id = await _seed_data_source(db_session)
+    await stats_repo.upsert_data_source_stats_counts(
+        db_session,
+        ds_id=ds_id,
+        node_count=5,
+        edge_count=5,
+        entity_type_counts='{}',
+        edge_type_counts='{}',
+    )
+    payload = '{"v": 1, "nodes": [1, 2, 3]}'
+    await stats_repo.set_top_level_nodes(db_session, ds_id, payload)
+    first_ts = (await stats_repo.get_data_source_stats(db_session, ds_id)).top_level_updated_at
+
+    await stats_repo.touch_top_level_freshness(db_session, ds_id)
+
+    fetched = await stats_repo.get_data_source_stats(db_session, ds_id)
+    # Freshness marker advanced; the payload bytes are NOT rewritten.
+    assert fetched.top_level_nodes == payload
+    assert fetched.top_level_updated_at is not None
+    assert fetched.top_level_updated_at >= first_ts
+
+
+async def test_touch_top_level_freshness_noop_when_row_missing(db_session: AsyncSession):
+    # No seeded row for this ds_id — should no-op, not raise or create.
+    await stats_repo.touch_top_level_freshness(db_session, "ds_nonexistent")
+
+    fetched = await stats_repo.get_data_source_stats(db_session, "ds_nonexistent")
+    assert fetched is None

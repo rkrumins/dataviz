@@ -68,6 +68,8 @@ class ContextEngine:
         registry: Any,  # ProviderRegistry — avoid circular import
         session: "AsyncSession",
         data_source_id: Optional[str] = None,
+        actor: Optional[str] = None,
+        branch_id: Optional[str] = None,
     ) -> "ContextEngine":
         """
         Create a ContextEngine scoped to a workspace data source.
@@ -103,8 +105,94 @@ class ContextEngine:
                 provider_name=f"ws:{workspace_id}",
                 reason=f"Provider instantiation failed: {exc}",
             ) from exc
+
         repo = SQLAlchemyOntologyRepository(session)
         ontology_service = LocalOntologyService(repo)
+
+        # Branch-aware reads. A resolved draft swaps in the read-only Postgres reader. For main
+        # (named, opaque id, or omitted) we honour read-your-writes: when the FalkorDB projection
+        # lags the committed head (e.g. right after a merge, which commits to Postgres + nudges an
+        # async projection but does not write through to FalkorDB), serve main from the Postgres
+        # reader so the change shows immediately; once the projection catches up, use the live
+        # FalkorDB provider (hot path). A non-versioned data source ignores branch_id (live provider).
+        norm = (branch_id or "").strip()
+        if data_source_id:
+            from .versioning.service import GraphVersioningService
+            svc = GraphVersioningService()
+            graph = await svc.get_graph_by_data_source(data_source_id)
+            if graph is not None:
+                gid = graph["graph_id"]
+                main_id = await svc.main_branch_id(gid)
+                is_draft = norm not in ("", "main", main_id)
+                main_fresh = (await svc.projection_watermark(gid))["fresh"]
+                read_provider = None
+                read_branch: Optional[str] = None
+                if is_draft:
+                    async with svc._session() as gv_s:
+                        try:
+                            await svc._get_branch(gv_s, gid, norm)
+                        except ValueError as exc:
+                            raise KeyError(f"branch_not_found: {norm}") from exc
+                    # Draft = main ⊕ sparse delta: overlay the draft's bounded patch set on WHATEVER
+                    # serves main — the live FalkorDB provider when fresh (so the materialized
+                    # aggregated lineage is reused, not re-derived), else the Postgres main reader.
+                    # A no-change draft has an empty delta → pure pass-through → identical to main.
+                    from ..providers.versioned_branch_provider import VersionedBranchProvider
+                    from ..providers.draft_overlay_provider import DraftOverlayProvider
+                    base = provider if main_fresh else VersionedBranchProvider(
+                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_provider = DraftOverlayProvider(
+                        base, svc=svc, graph_id=gid, branch_id=norm, actor=actor)
+                    read_branch = norm
+                elif not main_fresh:
+                    # Stale main (e.g. right after a merge): serve from Postgres so the change shows
+                    # immediately; once the projection catches up, the fresh-FalkorDB hot path is used.
+                    from ..providers.versioned_branch_provider import VersionedBranchProvider
+                    read_provider = VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_branch = main_id
+                if read_provider is not None:
+                    engine = cls(provider=read_provider, ontology_service=ontology_service)
+                    engine._workspace_id = workspace_id
+                    engine._data_source_id = data_source_id
+                    engine._db_session = session
+                    engine._branch_id = read_branch
+                    try:
+                        await engine._resolve_ontology()
+                    except Exception as exc:
+                        logger.warning(
+                            "Eager ontology resolution failed for ws=%s ds=%s branch=%s: %s",
+                            workspace_id, data_source_id, read_branch, exc,
+                        )
+                    return engine
+            # graph is None → not versioned: ignore branch_id, serve the live provider.
+
+        # Out-of-the-box write-through versioning: wrap the provider so every write also
+        # lands as an audited commit on the data source's versioned graph (the audit trail
+        # + branch/version history). Reads delegate unchanged. Opt out with
+        # GRAPHVER_VERSIONED_WRITES=0.
+        from .versioning import config as vconfig
+        if vconfig.VERSIONED_WRITES_ENABLED and data_source_id:
+            from ..providers.versioned_write_provider import VersionedWriteProvider
+            # Resolve the data source's real FalkorDB graph so a lazily-created versioned graph
+            # projects merged main state into the SAME graph the canvas reads (not an orphan gv_<id>).
+            # The graphver store may be a separate DB, so this app-layer lookup is the only place
+            # that knows the name. (projection_mode/_proj is the provider's aggregated-edge graph, a
+            # separate concern — base node/edge reads always hit ds.graph_name.)
+            from ..db.repositories import data_source_repo
+            falkor_graph_name: Optional[str] = None
+            try:
+                ds_row = await data_source_repo.get_data_source_orm(session, data_source_id)
+                if ds_row is not None and ds_row.graph_name:
+                    falkor_graph_name = ds_row.graph_name
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve graph_name for ds=%s (versioned graph will use the "
+                    "synthetic fallback until repaired): %s", data_source_id, exc)
+            provider = VersionedWriteProvider(
+                provider, workspace_id=workspace_id, data_source_id=data_source_id,
+                actor=actor or "system", falkor_graph_name=falkor_graph_name,
+            )
+
         engine = cls(provider=provider, ontology_service=ontology_service)
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
@@ -207,6 +295,11 @@ class ContextEngine:
         self._resolved_ontology_cache = None
         self._resolved_ontology_cache_ts = 0.0
 
+    async def get_resolved_ontology(self):
+        """Public access to the resolved ontology (containment + root types) for
+        callers outside the engine (top-level cache serve/compute paths)."""
+        return await self._resolve_ontology()
+
     async def _resolve_ontology(self):
         """
         Single ontology resolution entry point with TTL caching.
@@ -281,6 +374,16 @@ class ContextEngine:
                             resolved.containment_edge_types,
                             from_ontology=has_real_ontology,
                         )
+                    if hasattr(self.provider, 'set_ontology_rules'):
+                        # Rich commit-boundary rules for the versioned write-through —
+                        # only when an EXPLICITLY ASSIGNED ontology contributed (the
+                        # system-default/introspection layers must not gate legacy data).
+                        from backend.app.ontology.rules import resolved_ontology_to_rules
+                        has_assigned = any(
+                            s == "assigned"
+                            for s in (resolved.resolution_sources or {}).values())
+                        self.provider.set_ontology_rules(
+                            resolved_ontology_to_rules(resolved) if has_assigned else None)
                     if hasattr(self.provider, 'set_resolved_edge_metadata'):
                         self.provider.set_resolved_edge_metadata(
                             resolved.edge_type_metadata,
@@ -303,6 +406,15 @@ class ContextEngine:
                             await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
                         except Exception:
                             pass  # best-effort, don't block resolution
+                    # Per-source vocabulary alignment (Task E): reconcile the ontology's
+                    # declared type spellings with what THIS source graph actually uses so a
+                    # case-variant third-party graph (has/to vs HAS/TO) reads correctly, and
+                    # surface the mismatch as drift. Never blocks resolution.
+                    try:
+                        await self._apply_source_alignment(
+                            resolved, introspected_entity_ids, introspected_rel_ids)
+                    except Exception as exc:
+                        logger.warning("source vocabulary alignment failed (non-fatal): %s", exc)
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -322,6 +434,78 @@ class ContextEngine:
             self._resolved_ontology_cache = fallback
             self._resolved_ontology_cache_ts = time.monotonic()
             return fallback
+
+    async def _apply_source_alignment(self, resolved, observed_entity_ids, observed_rel_ids):
+        """Derive the per-source vocabulary alignment (declared spelling → this graph's
+        observed spelling), inject it into the provider as an alias map, and persist the
+        drift summary. Best-effort DB work: aliases are injected even when the DB is
+        unavailable, so reads stay correct regardless.
+
+        Governed/versioned graphs are canonicalized at the commit boundary (Task C), so
+        their observed spellings already equal the declared ones — the alignment is an
+        identity and the alias map is empty (cheap short-circuit)."""
+        from backend.app.ontology.source_alignment import (
+            derive_alignment, MISSING_OBSERVED)
+
+        # Defensively clear any prior ontology's aliases up front. The caller wraps this
+        # method in a swallow-all try/except, so a failure below must not leave stale
+        # cross-ontology aliases on the provider (honours the setter's "always reset"
+        # contract). The success path resets them to the computed map at the end.
+        if hasattr(self.provider, "set_source_type_aliases"):
+            self.provider.set_source_type_aliases({}, {})
+
+        declared_rel = (set(resolved.containment_edge_types or [])
+                        | set(resolved.lineage_edge_types or [])
+                        | set((resolved.relationship_type_definitions or {}).keys()))
+        declared_ent = set((resolved.entity_type_definitions or {}).keys())
+        observed_rel = list(observed_rel_ids or [])
+        observed_ent = list(observed_entity_ids or [])
+
+        def _build(explicit_rel=None, explicit_ent=None):
+            a = derive_alignment(
+                declared_relationship_types=declared_rel,
+                declared_entity_types=declared_ent,
+                observed_relationship_types=observed_rel,
+                observed_entity_types=observed_ent,
+                explicit_relationship_mappings=explicit_rel,
+                explicit_entity_mappings=explicit_ent,
+            )
+            # Entity types are introspected only via containment participation, so a
+            # declared type absent from that (incomplete) view isn't reliably "missing".
+            # Keep entity ALIASES (case variants), drop noisy entity missing-drift.
+            a.entity_entries = {k: v for k, v in a.entity_entries.items()
+                                if v.kind != MISSING_OBSERVED}
+            return a
+
+        alignment = _build()
+        ds_id = getattr(self, "_data_source_id", None)
+        if ds_id:
+            try:
+                from backend.app.db.engine import get_session_factory
+                from backend.app.db.repositories.data_source_repo import get_data_source_orm
+                from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+                async with get_session_factory()() as s:
+                    ds = await get_data_source_orm(s, ds_id)
+                    ont_id = getattr(ds, "ontology_id", None) if ds else None
+                    ex_rel, ex_ent = await osm_repo.load_explicit_mappings(s, ds_id, ont_id)
+                    if ex_rel or ex_ent:
+                        alignment = _build(ex_rel, ex_ent)
+                    await osm_repo.persist_alignment(
+                        s, data_source_id=ds_id, ontology_id=ont_id, alignment=alignment)
+                    await s.commit()
+            except Exception as exc:
+                logger.debug("source alignment DB step skipped (non-fatal): %s", exc)
+
+        self._source_alignment = alignment
+        if hasattr(self.provider, "set_source_type_aliases"):
+            self.provider.set_source_type_aliases(
+                alignment.rel_alias_map(), alignment.entity_alias_map())
+
+    async def get_source_alignment(self):
+        """Public accessor for the per-source vocabulary alignment (drift surface).
+        Resolves the ontology first so the alignment reflects the live schema."""
+        await self._resolve_ontology()
+        return getattr(self, "_source_alignment", None)
 
     async def _get_resolved_ontology(self):
         """Return the cached ResolvedOntology, refreshing via _resolve_ontology() if needed."""
@@ -396,6 +580,8 @@ class ContextEngine:
         limit: int = 100,
         cursor: Optional[str] = None,
         include_child_count: bool = True,
+        query_timeout: Optional[float] = None,
+        known_total_count: Optional[int] = None,
     ) -> TopLevelNodesResult:
         """Return instances with no incoming containment edge, scoped to the
         active workspace/data-source ontology.
@@ -414,14 +600,37 @@ class ContextEngine:
         if resolved and getattr(resolved, "root_entity_types", None):
             root_types = list(resolved.root_entity_types)
 
-        return await self.provider.get_top_level_or_orphan_nodes(
-            root_entity_types=root_types,
-            entity_types=entity_types,
-            search_query=search_query,
-            limit=limit,
-            cursor=cursor,
-            include_child_count=include_child_count,
-        )
+        # query_timeout / known_total_count are newer keyword-only params some
+        # providers (DraftOverlayProvider, VersionedBranchProvider) don't yet
+        # accept — only pass the ones actually given, and retry once without
+        # them on TypeError. Mirrors the fallback in insights_service/collector.py.
+        extra: Dict[str, Any] = {}
+        if query_timeout is not None:
+            extra["query_timeout"] = query_timeout
+        if known_total_count is not None:
+            extra["known_total_count"] = known_total_count
+
+        try:
+            return await self.provider.get_top_level_or_orphan_nodes(
+                root_entity_types=root_types,
+                entity_types=entity_types,
+                search_query=search_query,
+                limit=limit,
+                cursor=cursor,
+                include_child_count=include_child_count,
+                **extra,
+            )
+        except TypeError:
+            if not extra:
+                raise
+            return await self.provider.get_top_level_or_orphan_nodes(
+                root_entity_types=root_types,
+                entity_types=entity_types,
+                search_query=search_query,
+                limit=limit,
+                cursor=cursor,
+                include_child_count=include_child_count,
+            )
 
     async def get_edges(self, query: EdgeQuery = None) -> List[GraphEdge]:
         if query is None: query = EdgeQuery()
@@ -1143,16 +1352,33 @@ class ContextEngine:
                     levels.append(lvl)
         return max(levels) if levels else None
 
-    # Per-instance semaphore — cap concurrent trace queries per engine
-    # (i.e. per workspace, since for_workspace returns a per-workspace engine).
-    # Lazily initialised on first call. Override limit via TRACE_CONCURRENCY.
+    # PROCESS-WIDE trace semaphores, keyed by the provider's manager
+    # identity (fallback: (workspace, data_source)). Engines are
+    # constructed per request, so a per-instance semaphore capped
+    # nothing — 100 concurrent trace requests each got their own
+    # fresh Semaphore(4). Module-level registry gives a real per-
+    # (provider, graph) × per-process cap, backstopped by the
+    # provider's own _query_semaphore. FIFO-bounded like the worker's
+    # ds-meta cache so deleted graphs don't accumulate entries.
+    _TRACE_SEMAPHORES: Dict[Any, asyncio.Semaphore] = {}
+    _TRACE_SEMAPHORES_MAX = 256
+
     def _trace_semaphore(self) -> asyncio.Semaphore:
-        sem = getattr(self, "_trace_sem", None)
+        key = getattr(getattr(self, "provider", None), "manager_cache_key", None)
+        if key is None:
+            key = (
+                getattr(self, "_workspace_id", None),
+                getattr(self, "_data_source_id", None),
+            )
+        sem = self._TRACE_SEMAPHORES.get(key)
         if sem is None:
             import os
             limit = int(os.getenv("TRACE_CONCURRENCY", "4"))
+            if len(self._TRACE_SEMAPHORES) >= self._TRACE_SEMAPHORES_MAX:
+                oldest = next(iter(self._TRACE_SEMAPHORES))
+                self._TRACE_SEMAPHORES.pop(oldest, None)
             sem = asyncio.Semaphore(limit)
-            self._trace_sem = sem
+            self._TRACE_SEMAPHORES[key] = sem
         return sem
 
     # Hard caps for trace v2. TRACE_MAX_NODES still env-var driven here
@@ -1183,15 +1409,28 @@ class ContextEngine:
     async def get_nodes_by_layer(self, layer_id: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         return await self.provider.get_nodes_by_layer(layer_id, limit=limit, offset=offset)
 
-    async def get_graph_schema(self) -> GraphSchema:
+    async def get_graph_schema(
+        self,
+        stats: Optional[GraphSchemaStats] = None,
+        ontology: Optional[OntologyMetadata] = None,
+    ) -> GraphSchema:
         """
         Build a complete graph schema from resolved ontology definitions and introspection stats.
         Uses the rich entity/relationship definitions from the OntologyService when available;
         falls back to generating definitions from introspection stats + minimal defaults.
+
+        ``stats`` / ``ontology`` may be passed pre-fetched so a caller
+        that already ran ``get_schema_stats()`` / ``get_ontology_metadata()``
+        (the insights collector) doesn't trigger the full-graph scans a
+        second time. When passing ``ontology``, call
+        ``get_ontology_metadata()`` on THIS engine first — the rich path
+        below reads ``_resolved_ontology_cache``, which that call populates.
         """
-        stats = await self.provider.get_schema_stats()
-        # Calling get_ontology_metadata() will also populate _resolved_ontology_cache
-        ontology = await self.get_ontology_metadata()
+        if stats is None:
+            stats = await self.provider.get_schema_stats()
+        if ontology is None:
+            # Calling get_ontology_metadata() will also populate _resolved_ontology_cache
+            ontology = await self.get_ontology_metadata()
 
         resolved = self._resolved_ontology_cache
         entity_types: List[EntityTypeDefinition] = []
@@ -1571,19 +1810,62 @@ class ContextEngine:
 
         if request.parent_urn and parent_entity_type:
 
-            # Derive containment edge type from ontology (fallback to CONTAINS)
-            containment_type = "CONTAINS"
-            if resolved and resolved.containment_edge_types:
-                containment_type = resolved.containment_edge_types[0]
-
-            containment_edge = GraphEdge(
-                id=f"contains-{request.parent_urn}-{urn}",
-                sourceUrn=request.parent_urn,
-                targetUrn=urn,
-                edgeType=containment_type,
-                confidence=1.0,
-                properties={}
+            # Ontology-authoritative: default to the ontology's first containment relationship, or
+            # None when the ontology declares none — never a fabricated 'CONTAINS'. A client-chosen
+            # type (validated below) overrides this.
+            containment_type = (
+                resolved.containment_edge_types[0]
+                if (resolved and resolved.containment_edge_types) else None
             )
+
+            # Honour a client-chosen containment relationship, validated against the
+            # resolved ontology: it must be a real containment type, and (when the
+            # relationship declares endpoint constraints) compatible with the parent/
+            # child entity types in the FORWARD orientation. The edge is always stored
+            # parent→child (source=parent), so the parent must be an allowed source and
+            # the child an allowed target — a predicate authored child→parent would be
+            # persisted against its own constraints. Reject an invalid choice rather
+            # than silently substituting.
+            requested = request.containment_edge_type
+            if requested:
+                ct_by_upper = {t.upper(): t for t in (resolved.containment_edge_types if resolved else [])}
+                canonical = ct_by_upper.get(requested.upper())
+                if not canonical:
+                    return CreateNodeResult(
+                        node=None, containmentEdge=None, success=False,
+                        error=f"'{requested}' is not a containment relationship type",
+                    )
+                rel_def = (resolved.relationship_type_definitions.get(canonical) if resolved else None)
+                if rel_def is not None:
+                    src = list(getattr(rel_def, "source_types", None) or [])
+                    tgt = list(getattr(rel_def, "target_types", None) or [])
+
+                    def _ok(entity: str, allowed: List[str]) -> bool:
+                        # Case-insensitive membership: a discovered graph's entity type
+                        # may be cased differently than the ontology's canonical id.
+                        return (not allowed) or ("*" in allowed) or (entity.upper() in {a.upper() for a in allowed})
+
+                    if not (_ok(parent_entity_type, src) and _ok(str(request.entity_type), tgt)):
+                        return CreateNodeResult(
+                            node=None, containmentEdge=None, success=False,
+                            error=(
+                                f"'{canonical}' can't nest a '{request.entity_type}' under a "
+                                f"'{parent_entity_type}'"
+                            ),
+                        )
+                containment_type = canonical
+
+            # No ontology containment relationship (and no client choice) ⇒ create the node at the
+            # root instead of under a synthesized edge the ontology never declared.
+            if containment_type:
+                containment_edge = GraphEdge(
+                    id=f"contains-{request.parent_urn}-{urn}",
+                    sourceUrn=request.parent_urn,
+                    targetUrn=urn,
+                    edgeType=containment_type,
+                    confidence=1.0,
+                    properties={}
+                )
         
         # Create the node
         new_node = GraphNode(
@@ -1679,6 +1961,10 @@ class ContextEngine:
         except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
         except Exception as exc:
+            from backend.app.services.versioning.service import OntologyViolation
+            if isinstance(exc, OntologyViolation):       # surface the per-edge reasons, not the count
+                reasons = "; ".join(v.get("reason", "") for v in exc.violations) or str(exc)
+                return EdgeMutationResult(success=False, error=reasons, warnings=val.warnings or [])
             return EdgeMutationResult(success=False, error=str(exc))
 
         return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])

@@ -554,17 +554,18 @@ export function ExplorerPreviewDrawer({
                   )}
 
                   {/* Created by — prefer the server-resolved display name;
-                      fall back to the raw id for legacy rows. Email renders
-                      as a subtle secondary line so operators can reach out
-                      without leaving the drawer. */}
+                      fall back to "Unknown" when unresolvable — never the
+                      raw id (kept in a title attr for debugging). Email
+                      renders as a subtle secondary line so operators can
+                      reach out without leaving the drawer. */}
                   {(view.createdByName || view.createdBy) && (
                     <DetailRow
                       icon={User}
                       label="Created By"
                       value={
                         <span className="flex flex-col min-w-0">
-                          <span className="font-medium text-ink truncate">
-                            {view.createdByName ?? view.createdBy}
+                          <span className="font-medium text-ink truncate" title={view.createdBy}>
+                            {view.createdByName ?? 'Unknown'}
                           </span>
                           {view.createdByEmail && (
                             <a
@@ -591,27 +592,44 @@ export function ExplorerPreviewDrawer({
                     }
                   />
 
-                  {/* Updated at */}
+                  {/* Updated — the view's own settings/details edits (rename, layout,
+                      description, tags). Distinct from "Data Updated" below. */}
                   <DetailRow
                     icon={Calendar}
                     label="Updated"
                     value={
-                      <span>
-                        {formatDate(view.updatedAt)}
-                        <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
+                      <span className="flex flex-col min-w-0">
+                        <span>
+                          {formatDate(view.updatedAt)}
+                          <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
+                        </span>
+                        {view.updatedByName && (
+                          <span className="text-[11px] text-ink-muted truncate">by {view.updatedByName}</span>
+                        )}
                       </span>
                     }
                   />
 
-                  {/* Last synced (placeholder — using updatedAt for now) */}
+                  {/* Data Updated — when the underlying lineage data last changed
+                      (a publish or merged change on this view's data source). This is the
+                      value that reflects "I just merged changes to this view". */}
                   <DetailRow
                     icon={RefreshCw}
-                    label="Last Synced"
+                    label="Data Updated"
                     value={
-                      <span>
-                        {formatDate(view.updatedAt)}
-                        <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
-                      </span>
+                      view.dataUpdatedAt ? (
+                        <span className="flex flex-col min-w-0">
+                          <span>
+                            {formatDate(view.dataUpdatedAt)}
+                            <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.dataUpdatedAt)})</span>
+                          </span>
+                          {view.dataUpdatedByName && (
+                            <span className="text-[11px] text-ink-muted truncate">by {view.dataUpdatedByName}</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-ink-muted">No published changes yet</span>
+                      )
                     }
                   />
                 </div>

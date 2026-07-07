@@ -67,6 +67,7 @@ def _perms_under(prefixes: tuple[str, ...]) -> set[str]:
 # under these prefixes.
 _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
     "overview":      ("/admin/stats-polling",),
+    "infrastructure": ("/admin/system/status",),
     "branding":      ("/admin/branding",),
     "features":      ("/admin/features",),
     "announcements": ("/admin/announcements",),

@@ -2,8 +2,12 @@ import { Outlet, Link } from 'react-router-dom'
 import { Sparkles, ArrowLeft, Sun, Moon, BookOpen } from 'lucide-react'
 import { GuideSidebar } from '@/components/guide/GuideSidebar'
 import { usePreferencesStore } from '@/store/preferences'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { useBrand } from '@/store/branding'
 
 export function GuidePage() {
+  const { appName } = useBrand()
+  useDocumentTitle('User Guide')
   const { setTheme } = usePreferencesStore()
   const isDark = document.documentElement.classList.contains('dark')
 
@@ -18,7 +22,7 @@ export function GuidePage() {
             <Sparkles className="w-3.5 h-3.5 text-white" />
           </div>
           <span className="text-sm font-bold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors">
-            Synodic User Guide
+            {appName} User Guide
           </span>
         </Link>
         <div className="flex items-center gap-1.5">

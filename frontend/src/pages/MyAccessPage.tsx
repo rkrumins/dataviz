@@ -35,9 +35,11 @@ import {
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { useToast } from '@/components/ui/toast'
 import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 
 export function MyAccessPage() {
+    useDocumentTitle('My Access')
     const [access, setAccess] = useState<UserAccessResponse | null>(null)
     const [permissions, setPermissions] = useState<PermissionResponse[] | null>(null)
     const [requests, setRequests] = useState<AccessRequestResponse[] | null>(null)
@@ -88,7 +90,7 @@ export function MyAccessPage() {
 
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-            <div className="max-w-5xl mx-auto p-6 space-y-6">
+            <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-6 space-y-6">
                 {/* Hero */}
                 <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3 min-w-0">

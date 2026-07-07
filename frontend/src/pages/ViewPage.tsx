@@ -10,14 +10,27 @@ import { useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { Loader2, AlertTriangle } from 'lucide-react'
 import { CanvasRouter } from '@/components/canvas/CanvasRouter'
+import { UnsavedWorkGuard } from '@/components/canvas/UnsavedWorkGuard'
 import { useViewNavigation } from '@/hooks/useViewNavigation'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { ViewExecutionProvider } from '@/providers/ViewExecutionContext'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
   const { status, view, layoutType, error, viewWorkspaceId, viewDataSourceId } = useViewNavigation(viewId)
   const workspaces = useWorkspacesStore(s => s.workspaces)
+
+  // Tab title: "{View} · {Workspace} · {Brand}". workspaceName is enriched from
+  // the API but absent for locally-created views, so fall back to the store.
+  // Only title with the view once it's the active/ready one (during resolve,
+  // `view` may still be the previously-open view), else a neutral "View".
+  const wsName = view?.workspaceName ?? workspaces.find(w => w.id === view?.workspaceId)?.name
+  useDocumentTitle(
+    status === 'ready' && view
+      ? (wsName ? `${view.name} · ${wsName}` : view.name)
+      : 'View',
+  )
 
   // Lightweight health check for the active view
   const healthWarning = useMemo(() => {
@@ -91,8 +104,10 @@ export function ViewPage() {
         <ViewExecutionProvider
           workspaceId={viewWorkspaceId}
           dataSourceId={viewDataSourceId}
+          viewId={view?.id ?? null}
         >
           <CanvasRouter layoutType={layoutType} />
+          <UnsavedWorkGuard />
         </ViewExecutionProvider>
       )}
 

@@ -35,11 +35,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class StreamConfig:
-    """Identity of one Redis Stream + its consumer group + dedup namespace."""
-    kind: str            # 'stats_poll' | 'discovery' | 'purge'
+    """Identity of one Redis Stream + its consumer group + dedup namespace.
+
+    ``lane`` groups streams into worker concurrency budgets: ``fast``
+    (cheap counts polls + discovery), ``heavy`` (full schema-stats scan
+    sets), ``purge`` (long-running deletes). One slow heavy job can then
+    never occupy the slots that keep counts fresh — see worker.run.
+    """
+    kind: str            # 'stats_poll' | 'stats_deep' | 'discovery' | 'purge'
     stream: str          # Redis stream key
     group: str           # XREADGROUP consumer group
     dedup_prefix: str    # SET NX key prefix for the producer-side claim
+    lane: str = "fast"   # worker concurrency lane: 'fast' | 'heavy' | 'purge'
 
 
 # All streams use one consumer group so a single XREADGROUP call can
@@ -54,9 +61,34 @@ STATS_STREAM = StreamConfig(
     dedup_prefix="insights:stats",
 )
 
+# Deep stats facet — full schema-stats scan set + ontology + graph
+# schema. Separate stream + heavy lane so a 600s large-graph scan never
+# blocks the cheap counts polls. Dedup prefix is distinct from the
+# counts claim so a deep job in flight doesn't block a counts refresh.
+STATS_DEEP_STREAM = StreamConfig(
+    kind="stats_deep",
+    stream="insights.jobs.stats.deep",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:stats:deep",
+    lane="heavy",
+)
+
+# Background-sweep discovery (scheduler-enqueued). Own lane so the
+# twice-hourly ~200-job sweep can never queue ahead of user actions.
 DISCOVERY_STREAM = StreamConfig(
     kind="discovery",
     stream="insights.jobs.discovery",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:discovery",
+    lane="sweep",
+)
+
+# User-initiated discovery (refresh clicks, first-view self-heals).
+# Rides the fast lane; SHARES the sweep stream's dedup prefix so a
+# job for one scope is never queued twice across the two streams.
+DISCOVERY_HOT_STREAM = StreamConfig(
+    kind="discovery",
+    stream="insights.jobs.discovery.hot",
     group=SHARED_GROUP,
     dedup_prefix="insights:discovery",
 )
@@ -69,11 +101,21 @@ PURGE_STREAM = StreamConfig(
     stream="insights.jobs.purge",
     group=SHARED_GROUP,
     dedup_prefix="insights:purge",
+    lane="purge",
 )
 
-ALL_STREAMS: tuple[StreamConfig, ...] = (STATS_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
+ALL_STREAMS: tuple[StreamConfig, ...] = (
+    STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, DISCOVERY_HOT_STREAM,
+    PURGE_STREAM,
+)
 
-_BY_KIND: dict[str, StreamConfig] = {s.kind: s for s in ALL_STREAMS}
+# Kind → default producer stream. ``discovery`` deliberately maps to the
+# background sweep stream; user-facing enqueues pass
+# ``stream=DISCOVERY_HOT_STREAM`` explicitly (see enqueue.py).
+_BY_KIND: dict[str, StreamConfig] = {
+    s.kind: s
+    for s in (STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
+}
 
 DLQ_STREAM = "insights.dlq"
 
@@ -143,6 +185,14 @@ async def try_claim(scope_key: str, ttl_secs: int, *, stream: StreamConfig = STA
     """Atomic set-if-not-exists with TTL. True → caller owns the slot."""
     redis = get_redis()
     return bool(await redis.set(_dedup_key(stream, scope_key), "1", nx=True, ex=ttl_secs))
+
+
+async def claim_exists(scope_key: str, *, stream: StreamConfig = STATS_STREAM) -> bool:
+    """True while a job for this scope is pending/running (its dedup
+    claim is held). Read-only — the honest "refreshing" signal for read
+    paths that must not enqueue as a side effect."""
+    redis = get_redis()
+    return bool(await redis.exists(_dedup_key(stream, scope_key)))
 
 
 async def release_claim(scope_key: str, *, stream: StreamConfig = STATS_STREAM) -> None:
@@ -410,6 +460,8 @@ async def snapshot_stream_depths() -> StreamDepthsSnapshot:
 
     streams: dict[str, StreamDepth] = {}
     for cfg in ALL_STREAMS:
+        # Two discovery streams share a kind — key the hot one distinctly.
+        metrics_key = cfg.kind if cfg.kind not in streams else f"{cfg.kind}.hot"
         try:
             length = int(await redis.xlen(cfg.stream))
         except Exception:
@@ -432,7 +484,7 @@ async def snapshot_stream_depths() -> StreamDepthsSnapshot:
         except Exception:
             pending_count = None
 
-        streams[cfg.kind] = StreamDepth(
+        streams[metrics_key] = StreamDepth(
             length=length,
             pending=pending_count,
             oldest_pending_age_ms=oldest_pending_age_ms,

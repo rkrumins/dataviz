@@ -1,15 +1,9 @@
 """Cache pre-warmer for top-level + 1-level-down navigation entry points.
 
-POST-COMMIT TRIGGER (P2.1.4):
-The collector and worker cooperate via the ``defer_warm`` / ``fire_deferred_warm``
-pair to avoid the race documented in the review: the collector cannot
-fire ``schedule_warm`` directly because the worker hasn't committed the
-DB session yet, and the warmer opens its own readonly session which
-would race the commit (worse against a read replica). Instead the
-collector calls ``defer_warm`` to stash the warm request on a
-``contextvars.ContextVar``, and the worker calls ``fire_deferred_warm``
-*after* ``session.commit()`` succeeds. The ContextVar makes this
-safe under asyncio task switching (per-task state, not module-global).
+POST-COMMIT TRIGGER: the stats collector owns its DB sessions and calls
+``schedule_warm`` directly after its upsert session commits, so the warm
+(which opens its own readonly session) always sees the freshly-written
+``data_source_stats`` row.
 
 Fired post-stats-poll for each data source. Fills the GraphCache for the
 three endpoints a user hits the moment they open a data source:
@@ -37,15 +31,14 @@ Bounds:
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.engine import PoolRole, get_session_factory
+from backend.app.db.engine import get_readonly_session
 from backend.app.models.graph import AggregatedEdgeRequest, ChildrenWithEdgesResult, TopLevelNodesResult
 from backend.app.models.graph import AggregatedEdgeResult
 from backend.app.registry.provider_registry import provider_registry
@@ -265,8 +258,7 @@ async def _warm_data_source_locked(
             )
         else:
             # Fire-and-forget path: open our own readonly session.
-            factory = get_session_factory(PoolRole.READONLY)
-            async with factory() as own_session:
+            async with get_readonly_session() as own_session:
                 await asyncio.wait_for(
                     _warm_steps(ws_id=ws_id, ds_id=ds_id, session=own_session, result=result),
                     timeout=DS_TIMEOUT_SECS,
@@ -432,48 +424,15 @@ async def _warm_steps(
             result.errors.append(f"one_down:{urn}:{type(exc).__name__}:{exc}")
 
 
-# ── post-commit defer/fire pair (P2.1.4) ──────────────────────────────
-#
-# Collector handlers run inside the worker's session, BEFORE the worker
-# commits. The warmer needs to read post-commit state (and would
-# otherwise race the commit against a readonly replica). To bridge this
-# without changing the dispatcher signature, the collector calls
-# ``defer_warm(...)`` which stashes the request on a per-task
-# ``ContextVar``. After ``session.commit()`` succeeds, the worker calls
-# ``fire_deferred_warm()`` which reads-and-clears the ContextVar and
-# schedules the warm via the existing ``schedule_warm`` path.
-
-_deferred_warm: contextvars.ContextVar[Optional[Tuple[str, str, int]]] = (
-    contextvars.ContextVar("_deferred_warm", default=None)
-)
-
-
-def defer_warm(ws_id: str, ds_id: str, node_count: int = 0) -> None:
-    """Stash a warm request to be fired by ``fire_deferred_warm`` after
-    the enclosing DB session commits. Per-task via ContextVar so two
-    concurrent jobs cannot stomp each other's requests."""
-    _deferred_warm.set((ws_id, ds_id, node_count))
-
-
-def fire_deferred_warm() -> Optional[asyncio.Task]:
-    """Read-and-clear the deferred warm slot for this task and schedule
-    the warmer if one was set. Called from worker.py immediately AFTER
-    ``await session.commit()``. Returns the scheduled task (or None) for
-    test observability."""
-    pending = _deferred_warm.get()
-    if pending is None:
-        return None
-    _deferred_warm.set(None)
-    ws_id, ds_id, node_count = pending
-    return schedule_warm(ws_id=ws_id, ds_id=ds_id, node_count=node_count)
-
-
 # ── fire-and-forget scheduling ────────────────────────────────────────
 
 # Held strong references to in-flight warm tasks so the event loop's
 # garbage collector doesn't drop them mid-run. The set is module-level
 # (one per process); each task removes itself on completion.
 _active_warm_tasks: set[asyncio.Task] = set()
+
+# Set by ``shutdown()``; refuses new warms while the process tears down.
+_shutting_down: bool = False
 
 
 def schedule_warm(ws_id: str, ds_id: str, node_count: int = 0) -> Optional[asyncio.Task]:
@@ -493,7 +452,7 @@ def schedule_warm(ws_id: str, ds_id: str, node_count: int = 0) -> Optional[async
     Returns ``None`` when the feature flag is off — collector code can
     call this unconditionally without branching.
     """
-    if not CACHE_PREWARM_ENABLED:
+    if not CACHE_PREWARM_ENABLED or _shutting_down:
         return None
     try:
         loop = asyncio.get_running_loop()
@@ -522,6 +481,23 @@ def _on_warm_done(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc is not None:  # pragma: no cover — warm_data_source catches its own
         logger.warning("cache_warmer: task crashed with %s", exc)
+
+
+async def shutdown(timeout: float = 5.0) -> None:
+    """Cancel in-flight warm tasks and refuse new ones.
+
+    Called from the service shutdown path before the DB engines are
+    disposed — warm tasks borrow READONLY-pool sessions and must not
+    outlive the pools they check connections out of. Warms are
+    best-effort cache priming, so cancel-and-wait is sufficient.
+    """
+    global _shutting_down
+    _shutting_down = True
+    tasks = [t for t in _active_warm_tasks if not t.done()]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
 
 
 def _default_children_params(urn: str) -> dict:

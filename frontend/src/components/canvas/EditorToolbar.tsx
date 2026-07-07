@@ -1,10 +1,12 @@
-import { Plus, Trash2, Save, X, ChevronDown, Check } from 'lucide-react'
+import { Plus, Trash2, Save, X, ChevronDown, Check, LayoutGrid } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { cn } from '@/lib/utils'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 
 export interface EditorToolbarProps {
     onAddNode: () => void
+    /** "Build a lot at once" — opens the wider Build Mode surface. Optional: omitted where not wired. */
+    onOpenBuild?: () => void
     onSave?: () => void
     onDelete?: () => void
     edgeTypes: any[] // RelationshipTypeSchema[]
@@ -14,6 +16,7 @@ export interface EditorToolbarProps {
 
 export function EditorToolbar({
     onAddNode,
+    onOpenBuild,
     onSave,
     edgeTypes = [],
     activeEdgeType,
@@ -81,6 +84,14 @@ export function EditorToolbar({
                     label="Add Node"
                     onClick={onAddNode}
                 />
+
+                {onOpenBuild && (
+                    <ToolbarButton
+                        icon={<LayoutGrid className="w-4 h-4" />}
+                        label="Build"
+                        onClick={onOpenBuild}
+                    />
+                )}
 
                 <ToolbarButton
                     icon={<Trash2 className="w-4 h-4" />}

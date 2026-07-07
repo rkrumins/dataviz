@@ -78,3 +78,10 @@ def configure_json_logging(level: int = logging.INFO) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # Pin the chatty redis connection loggers to INFO so a global
+    # LOG_LEVEL=DEBUG (used to debug our own code) does not flood the output
+    # with per-command/connection redis DEBUG noise. INFO floor only — set
+    # independently of the root level.
+    for noisy in ("redis", "redis.connection"):
+        logging.getLogger(noisy).setLevel(logging.INFO)

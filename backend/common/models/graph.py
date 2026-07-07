@@ -34,6 +34,7 @@ class GraphNode(BaseModel):
     child_count: Optional[int] = Field(None, alias="childCount")
     source_system: Optional[str] = Field(None, alias="sourceSystem")
     last_synced_at: Optional[str] = Field(None, alias="lastSyncedAt")
+    version: Optional[str] = None  # OCC token (content hash) — echo as baseVersion on an edit
 
     class Config:
         populate_by_name = True
@@ -45,6 +46,7 @@ class GraphEdge(BaseModel):
     edge_type: str = Field(alias="edgeType")  # open string; validated against the active ontology
     confidence: Optional[float] = None
     properties: Dict[str, Any] = Field(default_factory=dict)
+    version: Optional[str] = None  # OCC token (content hash) — echo as baseVersion on an edit
 
     class Config:
         populate_by_name = True
@@ -567,6 +569,10 @@ class CreateNodeRequest(BaseModel):
     entity_type: str = Field(alias="entityType")  # open string
     display_name: str = Field(alias="displayName")
     parent_urn: Optional[str] = Field(None, alias="parentUrn")
+    # Ontology containment relationship for the auto-created parent→child edge
+    # (e.g. CONTAINS / partOf / belongsTo). Validated server-side against the
+    # resolved ontology. None → the server picks the default containment type.
+    containment_edge_type: Optional[str] = Field(None, alias="containmentEdgeType")
     properties: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
 

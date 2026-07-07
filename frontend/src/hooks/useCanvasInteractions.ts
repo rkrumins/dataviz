@@ -5,10 +5,17 @@
  * into a single cohesive hook for consistent UX across all canvas views.
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
+import { useSchemaStore } from '@/store/schema'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useBranchStore } from '@/store/branchStore'
+import { useToast } from '@/components/ui/toast'
+import { getDeleteImpact } from '@/services/versioningApiService'
+import { validateDrawnEdge } from '@/services/ontologyPreflightService'
+import { generateId } from '@/lib/utils'
+import { useHierarchyBuilderStore } from '@/components/canvas/create/hierarchyBuilderStore'
 import type { ContextMenuTarget } from '@/components/canvas/CanvasContextMenu'
 
 // ============================================
@@ -28,12 +35,6 @@ export interface CanvasInteractionState {
         value: string
         position: { x: number; y: number }
     }
-    // Quick Create
-    quickCreate: {
-        isOpen: boolean
-        position: { x: number; y: number }
-        parentUrn?: string
-    }
     // Command Palette
     commandPalette: {
         isOpen: boolean
@@ -52,6 +53,9 @@ export interface UseCanvasInteractionsOptions {
     onNodeDeleted?: (nodeId: string) => void
     /** Callback when a node is duplicated */
     onNodeDuplicated?: (originalId: string, newId: string) => void
+    /** Recreate a node's entire subtree as freshly-staged copies (see useDuplicateSubtree).
+     *  Injected by the canvas, which owns stageEntity/loadChildren/childMap access. */
+    duplicateSubtree?: (nodeId: string) => Promise<string | null>
     /** Callback when an edge is deleted */
     onEdgeDeleted?: (edgeId: string) => void
     /** Callback when inline edit is saved */
@@ -68,6 +72,8 @@ export interface UseCanvasInteractionsOptions {
     onCloseEntityDrawer?: () => boolean
     /** Callback to exit an active trace (ESC cascade). Should return true if it handled the exit. */
     onExitTrace?: () => boolean
+    /** Arm edge connect-mode from the currently selected node (e.g. 'C' key). */
+    onConnectMode?: (sourceNodeId: string) => void
 }
 
 export interface UseCanvasInteractionsResult {
@@ -82,10 +88,6 @@ export interface UseCanvasInteractionsResult {
     startInlineEdit: (nodeId: string, value: string, position: { x: number; y: number }) => void
     saveInlineEdit: (nodeId: string, newValue: string) => void
     cancelInlineEdit: () => void
-    
-    // Quick Create Actions
-    openQuickCreate: (position: { x: number; y: number }, parentUrn?: string) => void
-    closeQuickCreate: () => void
     
     // Command Palette Actions
     openCommandPalette: () => void
@@ -102,6 +104,9 @@ export interface UseCanvasInteractionsResult {
     editEdge: (edgeId: string) => void
     deleteEdge: (edgeId: string) => void
     reverseEdge: (edgeId: string) => void
+    /** Stage a new RAW edge between two nodes (optimistic + create_edge change). Returns the temp
+     *  edge id, or `null` when the ontology gate rejects it (invalid type/endpoints or duplicate). */
+    stageEdgeCreate: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
     
     // Canvas Actions
     selectAll: () => void
@@ -119,6 +124,7 @@ export interface UseCanvasInteractionsResult {
         onCancel: () => void
         onTrace: () => void
         onCreate: () => void
+        onConnectMode: () => void
         onCommandPalette: () => void
     }
 }
@@ -134,22 +140,24 @@ export function useCanvasInteractions(
         onNodeCreated,
         onNodeDeleted,
         onNodeDuplicated,
+        duplicateSubtree,
         onInlineEditSave,
         onEdgeDeleted,
         onTraceNode,
         onCloseEdgePanel,
         onCloseEntityDrawer,
         onExitTrace,
+        onConnectMode,
     } = options
     
     const provider = useGraphProvider()
+    const { showToast } = useToast()
     const {
         nodes,
         selectedNodeIds,
         selectedEdgeIds,
         selectNode,
         clearSelection,
-        addNodes,
         updateNode,
     } = useCanvasStore()
     
@@ -166,11 +174,6 @@ export function useCanvasInteractions(
         position: { x: 0, y: 0 },
     })
     
-    const [quickCreate, setQuickCreate] = useState<CanvasInteractionState['quickCreate']>({
-        isOpen: false,
-        position: { x: 0, y: 0 },
-    })
-    
     const [commandPalette, setCommandPalette] = useState<CanvasInteractionState['commandPalette']>({
         isOpen: false,
     })
@@ -179,9 +182,6 @@ export function useCanvasInteractions(
         nodeIds: [],
         hasContent: false,
     })
-    
-    // Refs for position tracking
-    const lastMousePosition = useRef({ x: 0, y: 0 })
     
     // ===================
     // Context Menu
@@ -244,18 +244,6 @@ export function useCanvasInteractions(
     }, [])
     
     // ===================
-    // Quick Create
-    // ===================
-    
-    const openQuickCreate = useCallback((position: { x: number; y: number }, parentUrn?: string) => {
-        setQuickCreate({ isOpen: true, position, parentUrn })
-    }, [])
-    
-    const closeQuickCreate = useCallback(() => {
-        setQuickCreate(prev => ({ ...prev, isOpen: false }))
-    }, [])
-    
-    // ===================
     // Command Palette
     // ===================
     
@@ -279,30 +267,12 @@ export function useCanvasInteractions(
     }, [selectNode, closeContextMenu])
     
     const duplicateNode = useCallback(async (nodeId: string) => {
-        const node = nodes.find(n => n.id === nodeId)
-        if (!node) return
-        
-        const newId = `${nodeId}-copy-${Date.now()}`
-        const newUrn = `${node.data.urn}-copy-${Date.now()}`
-        
-        const newNode = {
-            ...node,
-            id: newId,
-            position: {
-                x: node.position.x + 50,
-                y: node.position.y + 50,
-            },
-            data: {
-                ...node.data,
-                urn: newUrn,
-                label: `${node.data.label} (Copy)`,
-            },
-        }
-        
-        addNodes([newNode])
-        selectNode(newId)
-        onNodeDuplicated?.(nodeId, newId)
-    }, [nodes, addNodes, selectNode, onNodeDuplicated])
+        if (!duplicateSubtree) return
+        const newUrn = await duplicateSubtree(nodeId)
+        if (!newUrn) return
+        selectNode(newUrn)
+        onNodeDuplicated?.(nodeId, newUrn)
+    }, [duplicateSubtree, selectNode, onNodeDuplicated])
     
     const deleteNode = useCallback((nodeId: string) => {
         const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
@@ -321,35 +291,77 @@ export function useCanvasInteractions(
             return
         }
 
+        const urn = (node.data?.urn as string) ?? nodeId
+        const label = (node.data?.label as string) ?? nodeId
         // Mark visually as pending-delete; actual removal happens on Save.
         useCanvasStore.getState().updateNode(nodeId, { isPending: 'delete' })
 
-        stagedChanges.stage({
-            type: 'delete_entity',
-            targetId: nodeId,
-            targetUrn: (node.data?.urn as string) ?? nodeId,
-            before: { node: { ...node } },
-            after: null,
-            summary: `Delete '${node.data?.label ?? nodeId}'`,
-            apply: async () => {
-                useCanvasStore.getState().removeNode(nodeId)
-            },
-            discard: () => {
-                useCanvasStore.getState().updateNode(nodeId, { isPending: undefined })
-            },
-        })
-        onNodeDeleted?.(nodeId)
+        // Stage the (single) root delete. The backend cascades the containment subtree +
+        // all incident edges authoritatively; `cascade` (from the delete-impact preview)
+        // lets the staged-changes panel showcase exactly what will be removed.
+        const stageDelete = (
+            cascade?: { nodes: any[]; edges: any[]; nodeTotal: number; edgeTotal: number; descUrns: string[] },
+        ) => {
+            const more = cascade && (cascade.nodeTotal > 1 || cascade.edgeTotal > 0)
+            const summary = more
+                ? `Delete '${label}' — also removes ${cascade!.nodeTotal - 1} contained `
+                  + `${cascade!.nodeTotal === 2 ? 'entity' : 'entities'}, `
+                  + `${cascade!.edgeTotal} relationship${cascade!.edgeTotal === 1 ? '' : 's'}`
+                : `Delete '${label}'`
+            stagedChanges.stage({
+                type: 'delete_entity',
+                targetId: nodeId,
+                targetUrn: urn,
+                // `cascade` carries the full impact preview so the staged-changes review can
+                // itemise exactly what will be removed (CascadeImpactList).
+                before: {
+                    node: { ...node },
+                    cascade: cascade
+                        ? { nodes: cascade.nodes, edges: cascade.edges, nodeTotal: cascade.nodeTotal, edgeTotal: cascade.edgeTotal }
+                        : undefined,
+                },
+                after: null,
+                summary,
+                apply: async () => {
+                    useCanvasStore.getState().removeNode(nodeId)
+                },
+                discard: () => {
+                    useCanvasStore.getState().updateNode(nodeId, { isPending: undefined })
+                    cascade?.descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: undefined }))
+                },
+            })
+            onNodeDeleted?.(nodeId)
+        }
+
+        // In a draft, fetch the cascade impact on demand (the canvas is lazy-loaded, so only
+        // the backend knows the full subtree). Mark the *loaded* descendants pending-delete so
+        // the user sees the impact immediately; the staged change carries the full itemised
+        // preview for the review panel.
+        const bs = useBranchStore.getState()
+        if (bs.currentBranchId && bs.graphId && bs.dataSourceId && bs.workspaceId) {
+            getDeleteImpact(bs.workspaceId, bs.dataSourceId, bs.currentBranchId, urn)
+                .then(impact => {
+                    const descUrns = impact.nodes
+                        .map(n => String(n.urn ?? n.entityId ?? ''))
+                        .filter(id => id && id !== urn)
+                    descUrns.forEach(id => useCanvasStore.getState().updateNode(id, { isPending: 'delete' }))
+                    stageDelete({
+                        nodes: impact.nodes, edges: impact.edges,
+                        nodeTotal: impact.nodeTotal, edgeTotal: impact.edgeTotal, descUrns,
+                    })
+                })
+                .catch(() => stageDelete())   // preview unavailable — still stage the root delete
+        } else {
+            stageDelete()
+        }
     }, [onNodeDeleted])
     
     const createChild = useCallback((parentId: string) => {
         const parentNode = nodes.find(n => n.id === parentId)
         if (parentNode) {
-            openQuickCreate(
-                { x: parentNode.position.x + 100, y: parentNode.position.y + 100 },
-                parentNode.data.urn
-            )
+            useHierarchyBuilderStore.getState().open({ parentUrn: (parentNode.data.urn as string) ?? parentNode.id })
         }
-    }, [nodes, openQuickCreate])
+    }, [nodes])
     
     const copyUrn = useCallback(async (nodeId: string) => {
         const node = nodes.find(n => n.id === nodeId)
@@ -404,6 +416,16 @@ export function useCanvasInteractions(
         const edge = useCanvasStore.getState().edges.find(e => e.id === edgeId)
         if (!edge) return
 
+        // Containment defines the hierarchy and is always stored parent→child — reversing it would
+        // invert (or duplicate) a parent relationship. Changing an entity's parent goes through
+        // "Move to" (ontology-validated, single-parent), never a raw direction flip.
+        const containmentEdgeTypes = useSchemaStore.getState().schema?.containmentEdgeTypes ?? []
+        const edgeTypeUpper = (edge.data?.edgeType ?? edge.data?.relationship ?? '').toUpperCase()
+        if (containmentEdgeTypes.some(c => c.toUpperCase() === edgeTypeUpper)) {
+            showToast('info', 'Containment can’t be reversed — use “Move to” to change an entity’s parent.')
+            return
+        }
+
         const reversedId = `${edgeId}-reversed`
         const reversed = {
             ...edge,
@@ -425,8 +447,62 @@ export function useCanvasInteractions(
                 useCanvasStore.getState().addEdges([{ ...edge }])
             },
         })
-    }, [])
-    
+    }, [showToast])
+
+    const stageEdgeCreate = useCallback((sourceUrn: string, targetUrn: string, edgeType: string) => {
+        // Ontology gate before we stage anything: lineage-only (no hand-drawn containment), valid
+        // source/target types, and not a duplicate of an edge already between these two entities.
+        const canvas = useCanvasStore.getState()
+        const schema = useSchemaStore.getState().schema
+        const srcNode = canvas.nodes.find(n => n.id === sourceUrn || (n.data?.urn as string) === sourceUrn)
+        const tgtNode = canvas.nodes.find(n => n.id === targetUrn || (n.data?.urn as string) === targetUrn)
+        const verdict = validateDrawnEdge({
+            sourceType: (srcNode?.data?.type as string) ?? null,
+            targetType: (tgtNode?.data?.type as string) ?? null,
+            edgeType,
+            relationshipTypes: schema?.relationshipTypes ?? [],
+            containmentEdgeTypes: schema?.containmentEdgeTypes ?? [],
+            existingEdges: canvas.edges,
+            sourceId: sourceUrn,
+            targetId: targetUrn,
+            entityTypes: schema?.entityTypes ?? [],
+        })
+        if (!verdict.allowed) {
+            showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+            return null
+        }
+
+        const tempId = generateId('staged-edge')
+        const optimistic = {
+            id: tempId,
+            source: sourceUrn,
+            target: targetUrn,
+            type: 'lineage' as const,
+            data: { edgeType, relationship: edgeType.toLowerCase() },
+        }
+        useCanvasStore.getState().addEdges([optimistic])
+        useStagedChangesStore.getState().stage({
+            type: 'create_edge',
+            targetId: tempId,
+            // `source`/`target` are canvas node ids (== urns == backend entity_ids).
+            after: { edgeType, source: sourceUrn, target: targetUrn },
+            summary: `Create ${edgeType} edge ${sourceUrn} → ${targetUrn}`,
+            // Main-mode parity: applyAll runs this to persist the edge via the
+            // provider. In DRAFT mode this hook is never called — saveStagedChangesToDraft
+            // routes create_edge through /graph/changes (stagedChangesToOps). Either way
+            // a temp endpoint (edge between two new nodes) resolves to its real id.
+            apply: async ({ provider, resolveTempId }) => {
+                if (!provider) return // local-only (no backend) — accept optimistically
+                const src = resolveTempId(sourceUrn) ?? sourceUrn
+                const tgt = resolveTempId(targetUrn) ?? targetUrn
+                const res = await provider.createEdge({ sourceUrn: src, targetUrn: tgt, edgeType })
+                if (!res.success) throw new Error(res.error || 'Failed to create edge')
+            },
+            discard: () => useCanvasStore.getState().removeEdge(tempId),
+        })
+        return tempId
+    }, [showToast])
+
     // ===================
     // Canvas Actions
     // ===================
@@ -475,8 +551,8 @@ export function useCanvasInteractions(
         onCancel: () => {
             if (inlineEdit.nodeId) {
                 cancelInlineEdit()
-            } else if (quickCreate.isOpen) {
-                closeQuickCreate()
+            } else if (useHierarchyBuilderStore.getState().isOpen) {
+                useHierarchyBuilderStore.getState().close()
             } else if (commandPalette.isOpen) {
                 closeCommandPalette()
             } else if (contextMenu.isOpen) {
@@ -499,25 +575,18 @@ export function useCanvasInteractions(
             }
         },
         onCreate: () => {
-            openQuickCreate(lastMousePosition.current)
+            useHierarchyBuilderStore.getState().open()
+        },
+        onConnectMode: () => {
+            if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
         },
         onCommandPalette: openCommandPalette,
     }
-    
-    // Track mouse position for 'N' key create
-    useEffect(() => {
-        const handler = (e: MouseEvent) => {
-            lastMousePosition.current = { x: e.clientX, y: e.clientY }
-        }
-        document.addEventListener('mousemove', handler, { passive: true })
-        return () => document.removeEventListener('mousemove', handler)
-    }, [])
-    
+
     return {
         state: {
             contextMenu,
             inlineEdit,
-            quickCreate,
             commandPalette,
             clipboard,
         },
@@ -530,10 +599,6 @@ export function useCanvasInteractions(
         startInlineEdit,
         saveInlineEdit,
         cancelInlineEdit,
-        
-        // Quick Create
-        openQuickCreate,
-        closeQuickCreate,
         
         // Command Palette
         openCommandPalette,
@@ -548,6 +613,7 @@ export function useCanvasInteractions(
         
         // Edge CRUD
         editEdge,
+        stageEdgeCreate,
         deleteEdge,
         reverseEdge,
         

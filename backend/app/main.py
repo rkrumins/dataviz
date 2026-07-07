@@ -869,6 +869,57 @@ async def lifespan(_app: FastAPI):
         name="event-loop-monitor",
     )
 
+    # Versioning projection worker (in-process; dev / single-node). In
+    # production the standalone `python -m backend.app.services.versioning`
+    # runs instead. Gated by GRAPHVER_PROJECTION_INPROCESS; never blocks boot.
+    _app.state._versioning_worker = None
+    _app.state._versioning_worker_task = None
+    try:
+        from .services.versioning import config as _vcfg
+        if _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.projection import FalkorProjector
+            from .providers.falkor_graph_registry import make_registry_graph_factory
+            from .services.versioning.worker import ProjectionWorker
+            from .services.versioning.service import GraphVersioningService
+            from .services.projection_target import (
+                make_rollup_rebuild_hook,
+                nudge_stats_after_projection,
+                repair_projection_target,
+                resolve_aggregation_edge_types,
+            )
+            from .providers.eviction_budget import make_registry_budget_resolver
+            _vw = ProjectionWorker(
+                # Self-heal the projection target on every worker-driven projection, the same way the
+                # interactive project_now path does — else a worker-only graph projects into an orphan
+                # gv_<id> the canvas never reads and merged main never surfaces.
+                # edge_types_resolver + on_rollups_stale keep :AGGREGATED rollups consistent
+                # automatically: incremental per projected window; a scoped rebuild is queued when a
+                # full seed wiped them or a containment move exceeded the bounded-recount cap.
+                # Provider-aware graph routing: each graph projects into its pinned
+                # provider instance (registry host/port/creds) so raw edges land on
+                # the same FalkorDB the per-provider read path + aggregation worker
+                # use; env instance is the default/fallback.
+                FalkorProjector(
+                    make_registry_graph_factory(), target_resolver=repair_projection_target,
+                    edge_types_resolver=resolve_aggregation_edge_types,
+                    on_rollups_stale=make_rollup_rebuild_hook(
+                        lambda: getattr(_app.state, "aggregation_service", None)),
+                    on_projected=nudge_stats_after_projection,
+                ),
+                versioning=GraphVersioningService(),
+                # Per-provider eviction budgets come from the provider registry
+                # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a
+                # provider's falkorMaxResident is set.
+                evict_budget=make_registry_budget_resolver(),
+            )
+            _app.state._versioning_worker = _vw
+            _app.state._versioning_worker_task = asyncio.create_task(
+                _vw.run(), name="versioning-projection-worker",
+            )
+            logger.info("In-process versioning projection worker started")
+    except Exception as exc:
+        logger.warning("Versioning projection worker not started: %s", exc)
+
     # Phase 0 — outbox relay → append-only auth_audit_log. Runs only on
     # the documented owner role (CONTROLPLANE / DEV via runs_scheduler)
     # so multiple WEB replicas don't all drain the same outbox.
@@ -962,6 +1013,21 @@ async def lifespan(_app: FastAPI):
             _reconciler_task.cancel()
             try:
                 await _reconciler_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the in-process versioning projection worker.
+    _vw = getattr(_app.state, "_versioning_worker", None)
+    _vw_task = getattr(_app.state, "_versioning_worker_task", None)
+    if _vw is not None:
+        _vw.stop()
+    if _vw_task is not None and not _vw_task.done():
+        try:
+            await asyncio.wait_for(_vw_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _vw_task.cancel()
+            try:
+                await _vw_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -1102,6 +1168,7 @@ async def _provider_error_handler(request, exc):
 # the breaker is open, this handler fires in <1ms with no network I/O.
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
+    ProviderLoading as _ProviderLoading,
     ProviderUnavailable as _ProviderUnavailable,
 )
 
@@ -1124,6 +1191,32 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
         content={
             "detail": {
                 "code": "PROVIDER_BUSY",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderLoading is a subclass of ProviderUnavailable but semantically a
+# transient "warming up" state (FalkorDB replaying its RDB on restart). Map
+# to 503 + Retry-After with a distinct PROVIDER_LOADING code so the frontend
+# shows a friendly "graph is starting up" state and auto-retries, instead of
+# the generic unavailable/empty state. Registered BEFORE the parent handler
+# so FastAPI's MRO match picks this one for loading instances.
+@app.exception_handler(_ProviderLoading)
+async def _provider_loading_handler(request, exc: _ProviderLoading):
+    logger.info(
+        "Provider loading on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_LOADING",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
@@ -1246,6 +1339,13 @@ class _TimeoutMiddleware:
             ("/api/v1/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
             ("/api/v2/graph/",        float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))),
             ("/api/v1/aggregation/",  float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))),
+            # Versioning carries request-scoped full-graph work (projection
+            # reconcile drift reports, rebuild catch-up) that legitimately
+            # runs past the 30s default on large graphs; the ws-segment
+            # collapse below makes this match /api/v1/{ws}/versioning/...
+            # Keep below nginx's proxy_read_timeout (180s) so the proxy
+            # never wins the race against this tier.
+            ("/api/v1/versioning/",   float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))),
         ]
         self._default_timeout: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
@@ -1414,8 +1514,12 @@ app.add_middleware(
     expose_headers=["X-Provider-Health", "X-Cache-Status"],
 )
 
-# GZip compression for responses > 1 KB
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+# GZip compression for responses > 1 KB. compresslevel=6 (zlib default)
+# instead of Starlette's default 9: level 9 costs roughly double the CPU
+# for a ~1-3% size win, and this compression runs ON the event loop — on
+# multi-MB graph payloads that stall blocks every other request on the
+# worker, including /health.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 # Structured JSON access log + X-Process-Time header
 app.add_middleware(StructuredLoggingMiddleware)

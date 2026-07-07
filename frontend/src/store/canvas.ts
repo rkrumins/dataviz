@@ -1,27 +1,40 @@
 import { create } from 'zustand'
 import type { Node, Edge, Viewport } from '@xyflow/react'
-import type { HydrationPhase } from '@/hooks/useGraphHydration'
+import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
 
 export interface LineageNode extends Node {
   data: {
     label: string
     businessLabel?: string
     technicalLabel?: string
+    /** The entity's description (mapped from GraphNode.description in toCanvasNode). */
+    description?: string
     urn: string
     type: string // Allow any entity type
     lensId?: string
     classifications?: string[]
+    /** The entity's own persisted layer (Context View). Reload placement reads
+     *  this; set on create and on a layer move. See toCanvasNode. */
+    layerAssignment?: string
     confidence?: number
     metadata?: Record<string, unknown>
+    /** Editable property bag (the canvas convention; see toCanvasNode). */
+    properties?: Record<string, unknown>
+    /** OCC token (content hash) the node was read at — echoed as baseVersion on an edit. */
+    version?: string
     // Hierarchy
     childIds?: string[]
     parentId?: string
     isExpanded?: boolean
+    childCount?: number
     // Roll-up data
     _collapsedChildCount?: number
     _rollupData?: Record<string, unknown>
     /** Pending change marker — drives the visual badge on the canvas. */
     isPending?: 'create' | 'delete' | 'modify'
+    /** Reconstructed committed-deletion node (draft-vs-main). Read-only; rendered as a rose ghost
+     *  until the draft is merged or the deletion is restored. See features/versioning/canvas/deletionGhosts. */
+    isGhost?: boolean
   }
 }
 
@@ -36,6 +49,10 @@ export interface LineageEdge extends Edge {
     isAggregated?: boolean
     sourceEdgeCount?: number
     sourceEdges?: string[]
+    /** OCC token (content hash) the edge was read at — echoed as baseVersion on an edit. */
+    version?: string
+    /** Pending change marker — an unsaved (optimistic) edge has no server re-fetch path. */
+    isPending?: 'create' | 'delete' | 'modify'
   }
 }
 
@@ -85,6 +102,11 @@ interface CanvasState {
   selectNode: (id: string, multi?: boolean) => void
   selectEdge: (id: string, multi?: boolean) => void
   clearSelection: () => void
+  /** Last selectNode() call. `drawerNodeId` is sticky, so click observers (the
+   * Hierarchy Builder's canvas navigation) need this monotonic seq to see a
+   * fresh click on the SAME node. Bumped by every selectNode — never by
+   * clearSelection (a background deselect is not a click). */
+  lastNodeClick: { nodeId: string | null; seq: number }
 
   // Sticky entity drawer — which entity the drawer currently shows.
   // Decoupled from selection so background clicks / selection changes
@@ -109,6 +131,11 @@ interface CanvasState {
   // without each owning their own hydration hook.
   hydrationPhase: HydrationPhase
   setHydrationPhase: (phase: HydrationPhase) => void
+  /** Authoritative hydration status, mirrored from CanvasRouter so downstream
+   *  canvas components (empty-state, toasts, ghosts) derive their UI from ONE
+   *  source and never render a failed/loading load as an empty graph. */
+  hydrationStatus: HydrationStatus
+  setHydrationStatus: (status: HydrationStatus) => void
 
   // Active Lens
   activeLensId: string | null
@@ -297,6 +324,9 @@ export const useCanvasStore = create<CanvasState>()(
             ? [] // Toggle off: clicking the already-selected node deselects it
             : [id],
         selectedEdgeIds: multi ? state.selectedEdgeIds : [],
+        // Every selectNode is a click — recorded even when the sticky drawer
+        // id below doesn't change (same-node re-click).
+        lastNodeClick: { nodeId: id, seq: state.lastNodeClick.seq + 1 },
         // Single-select of a real entity opens (or swaps) the sticky drawer.
         // Toggle-off keeps it open — only the X button closes it. Logical
         // groupings and multi-select never touch the drawer.
@@ -314,6 +344,7 @@ export const useCanvasStore = create<CanvasState>()(
         drawerNodeId: null,
       })),
       clearSelection: () => set({ selectedNodeIds: [], selectedEdgeIds: [] }),
+      lastNodeClick: { nodeId: null, seq: 0 },
 
       // Sticky entity drawer
       drawerNodeId: null,
@@ -329,6 +360,8 @@ export const useCanvasStore = create<CanvasState>()(
       loadingRegions: new Set(),
       hydrationPhase: 'idle',
       setHydrationPhase: (hydrationPhase) => set({ hydrationPhase }),
+      hydrationStatus: 'loading',
+      setHydrationStatus: (hydrationStatus) => set({ hydrationStatus }),
       setLoading: (isLoading) => set({ isLoading }),
       addLoadingRegion: (region) => set((state) => {
         const newRegions = new Set(state.loadingRegions)
@@ -423,6 +456,15 @@ export const useCanvasStore = create<CanvasState>()(
       removeEdgesByNodeIds: (nodeIds, preserveEdgeIds) => set((state) => {
         const nodeIdSet = nodeIds instanceof Set ? nodeIds : new Set(nodeIds)
         if (nodeIdSet.size === 0) return state
+        // Unsaved (optimistic) nodes have no server record, so an edge attached to one
+        // has NO re-fetch path. The collapse cleanup drops subtree edges expecting
+        // `loadChildren` to re-fetch them on re-expand — true for saved data, but an
+        // unsaved child's containment edge would be lost forever, flattening the
+        // hierarchy. Collapse is a visibility op; it must never destroy unsaved work.
+        const pendingNodeIds = new Set<string>()
+        for (const n of state.nodes) {
+          if (n.data?.isPending === 'create') pendingNodeIds.add(n.id)
+        }
         const nextEdgeIndex = new Set(state._edgeIndex)
         const remainingEdges: LineageEdge[] = []
         for (const e of state.edges) {
@@ -431,7 +473,13 @@ export const useCanvasStore = create<CanvasState>()(
           // endpoint is inside the subtree — see the type definition
           // for the trace-mode rationale.
           const isPreserved = preserveEdgeIds?.has(e.id) === true
-          if (touchesSubtree && !isPreserved) {
+          // An optimistic edge — itself pending, or touching an unsaved node — can't
+          // be re-fetched, so it is preserved unconditionally.
+          const isUnsaved =
+            e.data?.isPending === 'create' ||
+            pendingNodeIds.has(e.source) ||
+            pendingNodeIds.has(e.target)
+          if (touchesSubtree && !isPreserved && !isUnsaved) {
             nextEdgeIndex.delete(e.id)
           } else {
             remainingEdges.push(e)

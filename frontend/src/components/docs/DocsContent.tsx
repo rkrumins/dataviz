@@ -9,6 +9,7 @@ import { useDocsLoader } from '@/hooks/useDocsLoader'
 import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
 import { ChevronRight, FileText } from 'lucide-react'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function DocsContent() {
   const { slug } = useParams<{ slug: string }>()
@@ -16,6 +17,8 @@ export function DocsContent() {
   const entry = slug ? getEntryBySlug(slug) : undefined
   const section = entry ? getSectionById(entry.section) : undefined
   const { content, isLoading, error } = useDocsLoader(entry)
+
+  useDocumentTitle(entry?.title ? `${entry.title} · Docs` : 'Docs')
 
   if (error || !entry) {
     return (

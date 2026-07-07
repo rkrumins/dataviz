@@ -25,10 +25,13 @@ GraphCache wraps the provider call with two layers of protection:
 
 Cross-process singleflight via Redis lease is a Phase 1 spike and
 NOT included here. The in-process variant covers same-pod fan-out;
-cross-pod fan-out is bounded by the per-(provider, graph) semaphore
-in the ProviderManager (default 8). The combination is sufficient for
-the multi-tenant 100-user target without paying the 1-2 RTT cost of a
-distributed lock on every cache miss.
+cache-miss compute fan-out is additionally bounded per (provider,
+graph) by ``ProviderManager.acquire_provider_slot`` (default 8),
+wired around the ``compute`` callables at the endpoint layer in
+``graph.py::_bounded_compute`` — per pod, not cross-pod. The
+combination is sufficient for the multi-tenant 100-user target
+without paying the 1-2 RTT cost of a distributed lock on every
+cache miss.
 """
 from __future__ import annotations
 
@@ -207,9 +210,12 @@ class CacheScope:
     data_source_id is optional because some workspaces have a default
     data source resolved server-side; we coerce missing to the literal
     empty string so the key is stable across requests that omit it.
+    branch_id scopes the entry to a draft so a draft read can never be
+    served to main (or vice-versa); empty string = main.
     """
     workspace_id: str
     data_source_id: str = ""
+    branch_id: str = ""
 
 
 class GraphCache:
@@ -459,7 +465,7 @@ class GraphCache:
 # ─── Module-level helpers ──────────────────────────────────────────────
 
 def _gen_key(scope: CacheScope) -> str:
-    return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}"
+    return f"{_GEN_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}"
 
 
 def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any]) -> str:
@@ -469,7 +475,7 @@ def _build_key(scope: CacheScope, gen: int, endpoint: str, params: dict[str, Any
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{gen}:{endpoint}:{digest}"
+    return f"{_KEY_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{gen}:{endpoint}:{digest}"
 
 
 def _build_lkg_key(scope: CacheScope, endpoint: str, params: dict[str, Any]) -> str:
@@ -480,7 +486,7 @@ def _build_lkg_key(scope: CacheScope, endpoint: str, params: dict[str, Any]) -> 
     digest = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode("utf-8"),
     ).hexdigest()
-    return f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{endpoint}:{digest}"
+    return f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}:{scope.branch_id}:{endpoint}:{digest}"
 
 
 def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:

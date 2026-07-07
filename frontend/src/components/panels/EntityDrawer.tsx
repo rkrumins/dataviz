@@ -31,13 +31,32 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
-import { useSchemaStore } from '@/store/schema'
+import {
+  useSchemaStore,
+  useActiveView,
+  useEntityTypes,
+  useRootEntityTypes,
+  useEntityTypeHierarchyMap,
+  useRelationshipTypes,
+  useContainmentEdgeTypes,
+  normalizeEdgeType,
+  isContainmentEdgeType,
+} from '@/store/schema'
+import { allowedChildTypeIds, setHasId, deriveContainmentEdges } from '@/services/ontologyPreflightService'
+import { relationshipLabel, parentPlacementPhrase } from '@/lib/relationshipLabel'
+import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { PropertyEditor } from '@/components/panels/PropertyEditor'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { PanelErrorBoundary } from '@/components/panels/PanelErrorBoundary'
 import { LineageNeighbors } from '@/components/panels/LineageNeighbors'
+import { useResolveGraph, useEntityHistory, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { timeAgo, formatUtc } from '@/lib/timeAgo'
+import { useEffectiveBranchId, useBranchStore } from '@/store/branchStore'
+import { EntityHistory } from '@/features/versioning/components/EntityHistory'
+import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { cn } from '@/lib/utils'
 
 // ============================================
@@ -87,6 +106,19 @@ export function EntityDrawer({
   const schema = useSchemaStore((s) => s.schema)
   const mode = usePersonaStore((s) => s.mode)
 
+  // Versioning context for the per-entity History section — resolve the active view's data source
+  // to its graph (cached; the same resolve the canvas versioning bar uses). Null when version
+  // control isn't enabled, in which case the History section hides.
+  const activeView = useActiveView()
+  const resolve = useResolveGraph(activeView?.workspaceId, activeView?.dataSourceId ?? null)
+  const historyWsId = activeView?.workspaceId
+  const historyGraphId = resolve.data?.graphId ?? null
+  const historyMainBranch = resolve.data?.mainBranchId ?? null
+  // The active draft (if any), so the History section also shows this branch's unmerged commits.
+  // Scoped by the active view's id (branch-per-view) so this never shows another view's draft
+  // commits on the same data source.
+  const historyBranchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
+
   // The drawer is sticky: it shows whichever entity it was last opened on
   // (drawerNodeId), independent of canvas highlight selection. It stays open
   // until explicitly closed via the X button.
@@ -98,6 +130,26 @@ export function EntityDrawer({
   )
 
   const isOpen = !!selectedNode
+
+  // Committed-deletion ghost: the drawer is READ-ONLY (no edit/trace) and offers Restore instead.
+  const isGhost = (selectedNode?.data as { isGhost?: boolean } | undefined)?.isGhost === true
+  const restoreGhost = useRestoreGhost()
+
+  // Real "last updated" timestamp — the most recent COMMIT that touched this entity (source of
+  // truth), not the stale `lastSyncedAt` (which is set at sync/creation and doesn't move on edits).
+  // Shared query with the History section (no extra fetch).
+  const entityHistory = useEntityHistory(historyWsId, historyGraphId, selectedNode?.id ?? undefined)
+  const lastUpdatedAt = useMemo(() => {
+    const versions = (entityHistory.data?.versions ?? []) as Array<{ created_at?: string; commit_seq?: number }>
+    if (!versions.length) return undefined
+    return [...versions].sort((a, b) => (b.commit_seq ?? 0) - (a.commit_seq ?? 0))[0]?.created_at
+  }, [entityHistory.data])
+  // "Synced" = when the live read layer (FalkorDB) last caught up — always >= the last update, so it
+  // never conflicts with "Updated". While actively catching up we show a live "Syncing…" state.
+  const watermark = useProjectionWatermark(historyWsId, historyGraphId)
+  const syncing = watermark.data?.fresh === false
+    && (watermark.data?.status === 'projecting' || watermark.data?.status === 'rebuilding')
+  const lastSyncedAt = watermark.data?.lastProjectedAt ?? undefined
 
   // Local state
   const [viewMode, setViewMode] = useState<ViewMode>('view')
@@ -225,6 +277,9 @@ export function EntityDrawer({
     ])
     const changedKeys: string[] = []
     for (const k of allKeys) {
+      // Layer placement is VIEW config now (referenceLayout.assignments, managed on the canvas), not an
+      // editable node property — never stage it as an update_entity field.
+      if (k === 'layerAssignment') continue
       if (JSON.stringify(previousData[k]) !== JSON.stringify(formData[k])) {
         changedKeys.push(k)
       }
@@ -353,8 +408,12 @@ export function EntityDrawer({
   const propertiesBag: Record<string, any> =
     (formData.properties as Record<string, any> | undefined) ?? {}
 
+  // NOTE: no local <AnimatePresence> here. The drawer is conditionally
+  // rendered inside ContextViewCanvas's right-rail AnimatePresence, which
+  // owns the exit animation; a nested AnimatePresence wrapping an
+  // always-rendered child creates its own presence context and can strand
+  // the exiting aside (StrictMode / rapid open-close).
   return (
-    <AnimatePresence>
       <motion.aside
         ref={drawerRef}
         data-panel="entity-drawer"
@@ -427,7 +486,28 @@ export function EntityDrawer({
             {displayLabel}
           </h2>
 
+          {/* Committed-deletion ghost → a Restore banner takes the place of the trace/edit actions. */}
+          {isGhost && (
+            <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30">
+              <div className="flex items-center gap-2 mb-1.5">
+                <LucideIcons.Trash2 className="w-4 h-4 text-rose-500" />
+                <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">Deleted in this draft</span>
+              </div>
+              <p className="text-xs text-ink-muted mb-3">
+                Removed on this branch — it disappears once the draft merges. Restore to bring it back
+                (nested under its parent when that parent still exists).
+              </p>
+              <button
+                onClick={() => restoreGhost(((selectedNode.data as Record<string, unknown>).urn as string) || selectedNode.id)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs font-medium transition-colors"
+              >
+                <LucideIcons.RotateCcw className="w-3.5 h-3.5" /> Restore
+              </button>
+            </div>
+          )}
+
           {/* Prominent Trace Actions - Industry-Standard One-Click Lineage */}
+          {!isGhost && (
           <div className="flex flex-col gap-3 mb-4">
             <div className="grid grid-cols-3 gap-2">
               <motion.button
@@ -470,6 +550,7 @@ export function EntityDrawer({
               </motion.button>
             </div>
           </div>
+          )}
 
           {/* Secondary Quick Actions */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -506,13 +587,15 @@ export function EntityDrawer({
               icon={LucideIcons.Eye}
               label="View"
             />
-            <ModeTab
-              active={viewMode === 'edit'}
-              onClick={() => setViewMode('edit')}
-              icon={LucideIcons.Pencil}
-              label="Edit"
-              badge={hasChanges ? '•' : undefined}
-            />
+            {!isGhost && (
+              <ModeTab
+                active={viewMode === 'edit'}
+                onClick={() => setViewMode('edit')}
+                icon={LucideIcons.Pencil}
+                label="Edit"
+                badge={hasChanges ? '•' : undefined}
+              />
+            )}
             <ModeTab
               active={viewMode === 'json'}
               onClick={openJsonView}
@@ -566,11 +649,16 @@ export function EntityDrawer({
               copiedUrn={copiedUrn}
               onFocusNode={onFocusNode}
               onLocateMany={onLocateMany}
+              wsId={historyWsId}
+              graphId={historyGraphId}
+              mainBranchId={historyMainBranch}
+              branchId={historyBranchId}
             />
           )}
 
           {viewMode === 'edit' && (
             <EditModeContent
+              nodeId={selectedNode.id}
               formData={formData}
               entityType={entityType}
               urn={urn}
@@ -593,19 +681,31 @@ export function EntityDrawer({
         {/* Footer */}
         <div className="flex-shrink-0 p-4 border-t border-glass-border/50 bg-canvas-elevated/50">
           {viewMode === 'view' ? (
-            <div className="flex items-center justify-between text-xs text-ink-muted">
-              <div className="flex items-center gap-1.5">
-                <LucideIcons.Calendar className="w-3.5 h-3.5" />
-                <span>Last synced 5 min ago</span>
-                <ComingSoonChip />
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <TimeStat
+                  icon={<LucideIcons.PencilLine className="w-4 h-4" />}
+                  label="Updated" iso={lastUpdatedAt} tone="indigo"
+                  loading={entityHistory.isLoading} emptyText="No changes yet"
+                />
+                <TimeStat
+                  icon={syncing
+                    ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" />
+                    : <LucideIcons.RefreshCcw className="w-4 h-4" />}
+                  label={syncing ? 'Syncing' : 'Synced'}
+                  iso={syncing ? undefined : lastSyncedAt}
+                  tone={syncing ? 'amber' : 'emerald'}
+                  live={!syncing && watermark.data?.fresh === true}
+                  overrideValue={syncing ? 'In progress…' : undefined}
+                  emptyText="—"
+                />
               </div>
               {externalUrl && (
                 <button
                   onClick={() => window.open(externalUrl, '_blank')}
-                  className="text-accent-lineage hover:underline flex items-center gap-1"
+                  className="w-full flex items-center justify-center gap-1 pt-0.5 text-[11px] text-accent-lineage hover:underline"
                 >
-                  View in DataHub
-                  <LucideIcons.ArrowUpRight className="w-3 h-3" />
+                  View in DataHub <LucideIcons.ArrowUpRight className="w-3 h-3" />
                 </button>
               )}
             </div>
@@ -635,7 +735,6 @@ export function EntityDrawer({
         </div>
         </div>
       </motion.aside>
-    </AnimatePresence>
   )
 }
 
@@ -726,13 +825,52 @@ function Section({ title, icon: Icon, children, action, flush }: SectionProps) {
   )
 }
 
-// Subtle "Coming soon" chip for sections that show placeholder data until
-// the backend lands (activity log, lineage counts, last-synced timestamp).
-function ComingSoonChip() {
+// A rich freshness stat — icon chip + label (with an optional live pulse) + the relative time, and
+// the exact UTC timestamp on hover. Used for "Updated" (last change) and "Synced" (live layer).
+const TIMESTAT_TONES = {
+  indigo: {
+    box: 'bg-indigo-50/70 dark:bg-indigo-950/25 border-indigo-100 dark:border-indigo-900/40',
+    chip: 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-500',
+    label: 'text-indigo-600/70 dark:text-indigo-400/70',
+  },
+  emerald: {
+    box: 'bg-emerald-50/70 dark:bg-emerald-950/25 border-emerald-100 dark:border-emerald-900/40',
+    chip: 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-500',
+    label: 'text-emerald-600/70 dark:text-emerald-400/70',
+  },
+  amber: {
+    box: 'bg-amber-50/70 dark:bg-amber-950/25 border-amber-100 dark:border-amber-900/40',
+    chip: 'bg-amber-100 dark:bg-amber-900/50 text-amber-500',
+    label: 'text-amber-600/70 dark:text-amber-400/70',
+  },
+} as const
+
+function TimeStat({ icon, label, iso, tone, loading, live, overrideValue, emptyText }: {
+  icon: React.ReactNode
+  label: string
+  iso?: string
+  tone: keyof typeof TIMESTAT_TONES
+  loading?: boolean
+  live?: boolean
+  overrideValue?: string
+  emptyText?: string
+}) {
+  const t = TIMESTAT_TONES[tone]
+  const value = loading ? 'Loading…' : (overrideValue ?? (iso ? timeAgo(iso) : (emptyText ?? '—')))
   return (
-    <span className="px-2 py-0.5 rounded-md text-[10px] font-medium uppercase tracking-wider bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-      Coming soon
-    </span>
+    <div
+      className={cn('flex items-center gap-2.5 px-3 py-2 rounded-xl border transition-colors', t.box)}
+      title={iso ? formatUtc(iso) : undefined}
+    >
+      <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0', t.chip)}>{icon}</div>
+      <div className="min-w-0">
+        <div className={cn('text-[10px] font-semibold uppercase tracking-wide flex items-center gap-1', t.label)}>
+          {label}
+          {live && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />}
+        </div>
+        <div className="text-xs font-bold text-ink truncate">{value}</div>
+      </div>
+    </div>
   )
 }
 
@@ -753,9 +891,7 @@ function DetailsList({ formData }: { formData: Record<string, any> }) {
   push('sourceSystem', 'Source system', formData.sourceSystem)
   push('layerAssignment', 'Layer', formData.layerAssignment)
   push('lastSyncedAt', 'Last synced', formData.lastSyncedAt)
-  if (typeof formData.childCount === 'number' && formData.childCount > 0) {
-    rows.push({ key: 'childCount', label: 'Children', value: String(formData.childCount) })
-  }
+  // Child count lives in the Relationship summary ("Contains N items") — not duplicated here.
   if (rows.length === 0) return null
   return (
     <Section title="Details" icon={LucideIcons.Info}>
@@ -768,6 +904,261 @@ function DetailsList({ formData }: { formData: Record<string, any> }) {
         ))}
       </div>
     </Section>
+  )
+}
+
+/**
+ * useContainmentPlacement — derives a node's place in the containment hierarchy from the live canvas
+ * graph: its parent (+ the friendly relationship), the ontology-allowed relationship types for the
+ * current parent→child pair, valid move targets, and its loaded children. Shared by the read-only
+ * view summary and the edit-mode editor so both read the topology identically.
+ */
+function useContainmentPlacement(nodeId: string) {
+  const entityTypes = useEntityTypes()
+  const rootEntityTypes = useRootEntityTypes()
+  const hierarchyMap = useEntityTypeHierarchyMap()
+  const relationshipTypes = useRelationshipTypes()
+  const containmentEdgeTypes = useContainmentEdgeTypes()
+
+  // Subscribe narrowly so this re-derives when the graph topology changes (e.g. after a move
+  // restages edges) but not on unrelated canvas mutations.
+  const nodes = useCanvasStore((s) => s.nodes)
+  const edges = useCanvasStore((s) => s.edges)
+
+  const node = useMemo(() => nodes.find((n) => n.id === nodeId), [nodes, nodeId])
+  const childType = (node?.data.type as string) ?? ''
+
+  const isContainment = useCallback(
+    (e: { data?: { edgeType?: string; relationship?: string } }) =>
+      isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes),
+    [containmentEdgeTypes],
+  )
+
+  // Current containment parent edge (stored parent→child, so target===nodeId).
+  const parentEdge = useMemo(
+    () => edges.find((e) => e.target === nodeId && isContainment(e)),
+    [edges, nodeId, isContainment],
+  )
+  const parentNode = useMemo(
+    () => (parentEdge ? nodes.find((n) => n.id === parentEdge.source) : undefined),
+    [parentEdge, nodes],
+  )
+  const parentType = (parentNode?.data.type as string) ?? ''
+  const parentName = (parentNode?.data.label as string) || parentEdge?.source
+  const currentEdgeType = parentEdge ? normalizeEdgeType(parentEdge) : ''
+
+  // Loaded children (containment edges leaving this node).
+  const childCountLoaded = useMemo(
+    () => edges.filter((e) => e.source === nodeId && isContainment(e)).length,
+    [edges, nodeId, isContainment],
+  )
+
+  // Allowed relationship types for the CURRENT parent→child pair (human labels).
+  const relTypeOptions = useMemo(
+    () =>
+      parentNode
+        ? deriveContainmentEdges(parentType, childType, relationshipTypes, containmentEdgeTypes).filter((o) => o.allowed)
+        : [],
+    [parentNode, parentType, childType, relationshipTypes, containmentEdgeTypes],
+  )
+
+  // Descendants of this node — excluded from the move list (can't move under self/child).
+  const descendants = useMemo(() => {
+    const childrenOf = new Map<string, string[]>()
+    for (const e of edges) {
+      if (!e.source || !e.target || !isContainment(e)) continue
+      const arr = childrenOf.get(e.source)
+      if (arr) arr.push(e.target)
+      else childrenOf.set(e.source, [e.target])
+    }
+    const out = new Set<string>([nodeId])
+    const stack = [nodeId]
+    while (stack.length) {
+      const id = stack.pop()!
+      for (const c of childrenOf.get(id) ?? []) {
+        if (!out.has(c)) { out.add(c); stack.push(c) }
+      }
+    }
+    return out
+  }, [edges, nodeId, isContainment])
+
+  // Candidate parents: canvas nodes whose type can contain this node's type,
+  // excluding self, descendants, and the current parent.
+  const moveTargets = useMemo(() => {
+    if (!node) return []
+    return nodes
+      .filter((n) => {
+        if (descendants.has(n.id)) return false
+        if (n.id === parentNode?.id) return false
+        const candidateType = n.data.type as string
+        return setHasId(allowedChildTypeIds(candidateType, entityTypes, rootEntityTypes, hierarchyMap), childType)
+      })
+      .map((n) => ({
+        id: n.id,
+        label: (n.data.label as string) || n.id,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  }, [node, nodes, descendants, parentNode?.id, entityTypes, rootEntityTypes, hierarchyMap, childType])
+
+  return { node, parentNode, parentName, currentEdgeType, relTypeOptions, moveTargets, childCountLoaded }
+}
+
+/**
+ * RelationshipSummary — the READ-ONLY, plain-language view of where an entity sits in the
+ * hierarchy. No jargon, no controls: "Part of <Parent>" (tap to jump to it) and "Contains N items".
+ * The actual editing (change relationship / move) lives in Edit mode — see {@link RelationshipEditor}.
+ */
+function RelationshipSummary({
+  nodeId,
+  childCount,
+  onFocusNode,
+}: {
+  nodeId: string
+  childCount: number
+  onFocusNode?: (nodeId: string) => void | Promise<void>
+}) {
+  const { node, parentNode, parentName, currentEdgeType, childCountLoaded } = useContainmentPlacement(nodeId)
+  const openNodeDrawer = useCanvasStore((s) => s.openNodeDrawer)
+  const selectNode = useCanvasStore((s) => s.selectNode)
+  if (!node) return null
+
+  const childrenTotal = Math.max(childCount ?? 0, childCountLoaded)
+  const placement = parentPlacementPhrase(currentEdgeType)
+
+  // Mirror LineageNeighbors: swap the drawer + selection to the parent first (instant), then pan.
+  const goToParent = () => {
+    if (!parentNode) return
+    openNodeDrawer(parentNode.id)
+    selectNode(parentNode.id)
+    onFocusNode?.(parentNode.id)
+  }
+
+  return (
+    <Section title="Relationship" icon={LucideIcons.Network}>
+      <div className="space-y-2">
+        {parentNode ? (
+          <button
+            onClick={goToParent}
+            className="group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5 hover:bg-black/[0.07] dark:hover:bg-white/[0.08] transition-colors duration-150 text-left"
+            title={`Go to ${parentName}`}
+          >
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-accent-lineage/10 text-accent-lineage shrink-0">
+              <LucideIcons.CornerLeftUp className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11px] text-ink-muted">{placement}</span>
+              <span className="block text-sm font-medium text-ink truncate">{parentName}</span>
+            </span>
+            <LucideIcons.ArrowUpRight className="w-3.5 h-3.5 text-ink-muted opacity-0 group-hover:opacity-100 transition-opacity duration-150 shrink-0" />
+          </button>
+        ) : (
+          <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-black/5 dark:bg-white/10 text-ink-muted shrink-0">
+              <LucideIcons.Home className="w-4 h-4" />
+            </span>
+            <span className="text-sm text-ink-muted">Top-level item</span>
+          </div>
+        )}
+
+        {childrenTotal > 0 && (
+          <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl bg-black/5 dark:bg-white/5">
+            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-500 shrink-0">
+              <LucideIcons.CornerRightDown className="w-4 h-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11px] text-ink-muted">Contains</span>
+              <span className="block text-sm font-medium text-ink">
+                {childrenTotal} {childrenTotal === 1 ? 'item' : 'items'}
+              </span>
+            </span>
+          </div>
+        )}
+      </div>
+    </Section>
+  )
+}
+
+/**
+ * RelationshipEditor — the EDIT-mode controls for an entity's placement: switch how it relates to
+ * its parent, or move it under a different parent. Both go through useReparentNode (ontology-
+ * validated, staged for review). Containment edits only persist inside a draft, so outside one we
+ * show a clear note instead of dead controls.
+ */
+function RelationshipEditor({ nodeId }: { nodeId: string }) {
+  const { reparent, retypeContainment } = useReparentNode()
+  const { node, parentNode, parentName, currentEdgeType, relTypeOptions, moveTargets } = useContainmentPlacement(nodeId)
+  const inDraft = useBranchStore((s) => !!s.currentBranchId)
+  if (!node) return null
+
+  return (
+    <div className="pt-5 border-t border-glass-border/30">
+      <h4 className="text-xs font-semibold text-ink-muted uppercase tracking-wider mb-4 flex items-center gap-2">
+        <LucideIcons.Network className="w-3.5 h-3.5" />
+        Relationship
+      </h4>
+
+      {!inDraft ? (
+        <div className="px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs flex items-start gap-2">
+          <LucideIcons.Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>Switch to a draft to change where this entity sits or how it relates to its parent.</span>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <span className="text-xs text-ink-muted">Currently</span>
+            <span className="text-xs text-ink text-right font-medium break-words">
+              {parentNode ? `${parentPlacementPhrase(currentEdgeType)} ${parentName}` : 'Top-level item'}
+            </span>
+          </div>
+
+          {parentNode && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-ink-muted">How it relates</label>
+              <select
+                value={currentEdgeType}
+                onChange={(e) => retypeContainment(nodeId, e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
+              >
+                {/* Keep the current type selectable even if no longer ontology-allowed. */}
+                {!relTypeOptions.some((o) => o.edgeType === currentEdgeType) && (
+                  <option value={currentEdgeType}>{relationshipLabel(currentEdgeType)}</option>
+                )}
+                {relTypeOptions.map((o) => (
+                  <option key={o.edgeType} value={o.edgeType}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[11px] text-ink-muted">How this entity belongs to {parentName}.</p>
+            </div>
+          )}
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-ink-muted">Move to a different parent</label>
+            {moveTargets.length > 0 ? (
+              <select
+                value=""
+                onChange={(e) => { if (e.target.value) reparent(nodeId, e.target.value) }}
+                className="w-full px-3 py-2 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm text-ink"
+              >
+                <option value="" disabled>
+                  Choose a new parent…
+                </option>
+                {moveTargets.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-xs text-ink-muted italic">
+                No other entity here can contain this one.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -787,18 +1178,27 @@ interface ViewModeContentProps {
   copiedUrn: boolean
   onFocusNode?: (nodeId: string) => void | Promise<void>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
+  wsId?: string
+  graphId?: string | null
+  mainBranchId?: string | null
+  branchId?: string | null
 }
 
 function ViewModeContent({
   nodeId,
   formData,
   urn,
+  childCount,
   colors,
   propertiesBag,
   onCopyUrn,
   copiedUrn,
   onFocusNode,
   onLocateMany,
+  wsId,
+  graphId,
+  mainBranchId,
+  branchId,
 }: ViewModeContentProps) {
   const hasAdditional = Object.keys(propertiesBag).length > 0
   return (
@@ -826,6 +1226,11 @@ function ViewModeContent({
       {/* Details — first-class descriptive fields carried from the backend
           GraphNode. Only rendered when at least one has a real value. */}
       <DetailsList formData={formData} />
+
+      {/* Relationship — read-only, plain-language summary of where this entity sits in the
+          hierarchy ("Part of <Parent>", "Contains N"). Editing (change relationship / move) lives
+          in Edit mode so the view stays calm and non-technical. */}
+      <RelationshipSummary nodeId={nodeId} childCount={childCount} onFocusNode={onFocusNode} />
 
       {/* Properties — nested-JSON tree rendered read-only via PropertyEditor.
           `readOnly` keeps the recursive UI navigable (expand, search, copy,
@@ -867,14 +1272,12 @@ function ViewModeContent({
         onLocateMany={onLocateMany}
       />
 
-      {/* Recent Activity */}
-      <Section title="Recent Activity" icon={LucideIcons.History} action={<ComingSoonChip />}>
-        <div className="space-y-3">
-          <ActivityRow action="Schema updated" time="2 hours ago" user="system" />
-          <ActivityRow action="Classification added" time="1 day ago" user="jane.doe@company.com" />
-          <ActivityRow action="Created" time="2 weeks ago" user="data-catalog" />
-        </div>
-      </Section>
+      {/* History — real per-entity revision history (main line). Hidden when version control is off. */}
+      {wsId && graphId && (
+        <Section title="History" icon={LucideIcons.History}>
+          <EntityHistory wsId={wsId} graphId={graphId} entityId={nodeId} mainBranchId={mainBranchId} branchId={branchId} />
+        </Section>
+      )}
     </div>
   )
 }
@@ -884,6 +1287,7 @@ function ViewModeContent({
 // ============================================
 
 interface EditModeContentProps {
+  nodeId: string
   formData: Record<string, any>
   entityType: any
   urn: string
@@ -894,6 +1298,7 @@ interface EditModeContentProps {
 }
 
 function EditModeContent({
+  nodeId,
   formData,
   entityType,
   urn,
@@ -902,6 +1307,16 @@ function EditModeContent({
   onPropertiesChange,
   onCopyUrn,
 }: EditModeContentProps) {
+  // Layer placement is VIEW config now (referenceLayout.assignments), managed on the canvas — not an
+  // editable node property. Show the RESOLVED layer name read-only (explicit assignment; inherited
+  // placement resolves live on the canvas). A Context View node's id IS its urn, so the map is keyed here.
+  const activeView = useActiveView()
+  const resolvedLayerName = useMemo(() => {
+    const { layers, assignments } = normalizeReferenceLayout(activeView?.layout?.referenceLayout)
+    const layerId = assignments[urn]?.layerId
+    if (!layerId) return ''
+    return layers.find((l) => l.id === layerId)?.name ?? layerId
+  }, [activeView?.layout?.referenceLayout, urn])
   return (
     <div className="p-5 space-y-5">
       {/* Core Fields */}
@@ -975,6 +1390,10 @@ function EditModeContent({
         </div>
       </div>
 
+      {/* Relationship — where this entity sits in the hierarchy. The editing controls live in
+          Edit mode (not the calm read-only View) and persist inside a draft. */}
+      <RelationshipEditor nodeId={nodeId} />
+
       {/* Metadata — first-class descriptive fields carried from the backend
           GraphNode. lastSyncedAt and childCount are backend-managed and
           rendered read-only; the rest accept user edits. */}
@@ -1014,13 +1433,9 @@ function EditModeContent({
               <LucideIcons.Layers className="w-3.5 h-3.5" />
               Layer
             </label>
-            <input
-              type="text"
-              value={(formData.layerAssignment as string) || ''}
-              onChange={(e) => onChange('layerAssignment', e.target.value)}
-              className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-accent-lineage/50 transition-colors duration-150 outline-none text-sm"
-              placeholder="Layer assignment..."
-            />
+            <div className="w-full px-4 py-3 rounded-xl bg-black/10 dark:bg-white/5 border border-transparent text-ink-muted text-sm">
+              {resolvedLayerName || <span className="italic opacity-60">Placed on the canvas</span>}
+            </div>
           </div>
           {(formData.lastSyncedAt || typeof formData.childCount === 'number') && (
             <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-xl bg-black/5 dark:bg-white/[0.03] text-xs">
@@ -1142,26 +1557,6 @@ function JsonModeContent({ rawJson, jsonError, onChange }: JsonModeContentProps)
 // ============================================
 // Helper Components
 // ============================================
-
-interface ActivityRowProps {
-  action: string
-  time: string
-  user: string
-}
-
-function ActivityRow({ action, time, user }: ActivityRowProps) {
-  return (
-    <div className="flex items-center gap-3">
-      <div className="w-8 h-8 rounded-full bg-black/5 dark:bg-white/5 flex items-center justify-center flex-shrink-0">
-        <LucideIcons.Users className="w-4 h-4 text-ink-muted" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-ink truncate">{action}</p>
-        <p className="text-xs text-ink-muted">{user} • {time}</p>
-      </div>
-    </div>
-  )
-}
 
 export default EntityDrawer
 

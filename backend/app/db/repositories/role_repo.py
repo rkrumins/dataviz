@@ -2,10 +2,15 @@
 
 A role lifecycle:
 
-  * **System roles** (admin / user / viewer) are seeded by the
-    ``20260430_1500_roles_lifecycle`` migration with ``is_system=True``.
-    They cannot be edited or deleted via this repo — guards raise
-    ``RoleImmutableError``.
+  * **System roles** are seeded by the migration chain with
+    ``is_system=True``. Their permission bundle and description *can*
+    be edited by a System Admin (the seeded values live in
+    ``backend.common.role_defaults`` so the role can be reset to its
+    default). They cannot be renamed, re-scoped, or deleted — those
+    guards still raise ``RoleImmutableError``. A small permission floor
+    (``PROTECTED_PERMISSIONS``) can never be stripped, so an edit can't
+    lock the admin out of RBAC administration — that raises
+    ``RoleProtectedPermissionError``.
   * **Custom roles** are admin-created. They have ``is_system=False``,
     a ``scope`` (global or workspace), and their permission bundle
     can be edited or the role deleted (only if no bindings reference
@@ -27,6 +32,10 @@ from backend.app.db.models import (
     RoleBindingORM,
     RoleORM,
     RolePermissionORM,
+)
+from backend.common.role_defaults import (
+    PROTECTED_PERMISSIONS,
+    SYSTEM_ROLE_DEFAULTS,
 )
 
 
@@ -54,7 +63,15 @@ VALID_SCOPE_TYPES = ("global", "workspace")
 # ── Errors ────────────────────────────────────────────────────────────
 
 class RoleImmutableError(Exception):
-    """The target role is system-defined and cannot be changed."""
+    """The target role is system-defined and cannot be deleted / renamed /
+    re-scoped. (System role *permissions* are editable — see
+    ``RoleProtectedPermissionError`` for the one exception.)"""
+
+
+class RoleProtectedPermissionError(Exception):
+    """An edit would strip a protected permission a system role must keep
+    (e.g. ``super_admin`` losing ``system:admin``), which would lock the
+    admin out of RBAC administration."""
 
 
 class RoleNotFoundError(Exception):
@@ -206,18 +223,20 @@ async def update_role(
     description: Optional[str] = None,
     permissions: Optional[list[str]] = None,
 ) -> RoleORM:
-    """Update a custom role's description and / or permission bundle.
+    """Update a role's description and / or permission bundle.
 
-    System roles cannot be modified — raises ``RoleImmutableError``.
-    Scope is *not* editable (changing scope would invalidate every
-    existing binding referencing the role); admins delete + recreate
-    if they want a different scope.
+    Works for both custom and system roles. Scope and name are *not*
+    editable (changing scope would invalidate every existing binding
+    referencing the role); admins delete + recreate a custom role, or
+    reset a system role, if they want different shape.
+
+    For system roles a permission floor (``PROTECTED_PERMISSIONS``) must
+    survive the edit — dropping one raises ``RoleProtectedPermissionError``
+    so the admin can't lock themselves out of RBAC administration.
     """
     role = await get_role(session, name)
     if role is None:
         raise RoleNotFoundError(name)
-    if role.is_system:
-        raise RoleImmutableError(f"'{name}' is a system role")
 
     if description is not None:
         role.description = description.strip() or None
@@ -225,6 +244,14 @@ async def update_role(
 
     if permissions is not None:
         await _validate_permissions_exist(session, permissions)
+        if role.is_system:
+            required = PROTECTED_PERMISSIONS.get(name, frozenset())
+            missing = required - set(permissions)
+            if missing:
+                raise RoleProtectedPermissionError(
+                    f"'{name}' must keep {sorted(missing)} — these gate "
+                    "platform administration and cannot be removed."
+                )
         # Replace the permission set in one round-trip-ish pass.
         await session.execute(
             delete(RolePermissionORM).where(RolePermissionORM.role_name == name)
@@ -234,6 +261,45 @@ async def update_role(
 
     await session.flush()
     return role
+
+
+async def reset_role_to_default(session: AsyncSession, name: str) -> RoleORM:
+    """Restore a system role's seeded default permission bundle + description.
+
+    Raises ``RoleNotFoundError`` if the role doesn't exist, and
+    ``RoleImmutableError`` if it isn't a system role with a known default
+    (custom roles have no default to reset to).
+    """
+    role = await get_role(session, name)
+    if role is None:
+        raise RoleNotFoundError(name)
+    spec = SYSTEM_ROLE_DEFAULTS.get(name)
+    if not role.is_system or spec is None:
+        raise RoleImmutableError(f"'{name}' has no seeded default to reset to")
+
+    role.description = spec.description
+    role.updated_at = _now()
+    await session.execute(
+        delete(RolePermissionORM).where(RolePermissionORM.role_name == name)
+    )
+    for pid in sorted(spec.permissions):
+        session.add(RolePermissionORM(role_name=name, permission_id=pid))
+    await session.flush()
+    return role
+
+
+async def is_role_modified(session: AsyncSession, role: RoleORM) -> bool:
+    """Whether a system role diverges from its seeded default (permissions
+    or description). Always ``False`` for custom roles, which have no
+    default to compare against."""
+    spec = SYSTEM_ROLE_DEFAULTS.get(role.name)
+    if not role.is_system or spec is None:
+        return False
+    bundle = await role_names_with_permissions(session, [role.name])
+    current = set(bundle.get(role.name, []))
+    if current != set(spec.permissions):
+        return True
+    return (role.description or "") != (spec.description or "")
 
 
 async def delete_role(session: AsyncSession, name: str) -> None:

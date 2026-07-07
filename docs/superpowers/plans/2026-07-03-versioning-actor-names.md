@@ -1,0 +1,39 @@
+# Versioning Actor Resolution — Spec + Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Two tasks, backend first.
+
+**Goal:** Every versioning surface (commits, drafts, merge requests, reviews inbox) shows real user display names instead of raw `usr_*` ids, mirroring the just-shipped views-provenance pattern.
+
+**Verified recon (2026-07-03):** The graphver store records actors as raw `user.id` in `CommitORM.actor/contributors`, `BranchORM.owner/created_by`, `MergeRequestORM.reviewers/approved_by/actor/merged_by/closed_by`. NO name resolution exists anywhere in `endpoints/versioning.py` (service dicts pass straight through). The frontend has THREE divergent id→label paths that produce "Usr cd8b62ea79b6": `branchVocab.ownerName/ownerInitials` (:59/:68) and local `who()` helpers in `CommitRow.tsx:17`, `PrDetailDrawer.tsx:32`, `PrMeta.tsx:59`. The management session IS available at the versioning boundary (`get_db_session` already used by 14 sibling endpoints, versioning.py:36). The views reference resolver is `view_repo._resolve_user_ids` (:101). Exactly ONE stored-message case bakes an actor id: `service.py:549` `message or f"checkpoint by {actor}"`. GraphVersioningService must NOT resolve users itself — graphver may be a separate DB in prod; resolution is endpoint-layer only, id-set lookup, never a cross-store join.
+
+## Global Constraints
+
+- **Convention: each actor-carrying response item gains ONE field `userNames: Record<string, string>`** (id → display name; camelCase alias `userNames`) containing every user id that item references (owner, createdBy, actor, contributors, reviewers, approvedBy, mergedBy, closedBy, sourceBranchOwner). For `CommitLogResponse` (which wraps a list) hang ONE map on the wrapper covering all commits. Unresolvable ids simply absent from the map. Rationale: one convention covers scalars AND arrays without parallel-array drift; per-item for wrapper-less `List[BranchResponse]`/`List[PrResponse]`.
+- Resolution: reuse `view_repo._resolve_user_ids` — export it (rename to `resolve_user_ids` keeping a thin private alias, or import the private name; prefer a clean export) and call it ONCE per request with the deduped id-set (batched, no N+1). Display-name formula stays the shared one.
+- Endpoint layer only: add `session: AsyncSession = Depends(get_db_session)` to the ~8 actor-carrying GETs (list_branches :702, get_commit_log :1064, list_pull_requests :1409, get_pull_request :1422, list_merge_requests :1562, list_view_pull_requests :1579, list_data_source_pull_requests :1613, get_merge_request :1632) + a shared helper in versioning.py that collects ids from the payload, resolves, and attaches the map(s). GraphVersioningService untouched except item below.
+- **Stop baking ids into stored messages:** `service.py:549` default becomes `message or "checkpoint"` (legacy stored messages remain — historical record; do NOT rewrite history).
+- Frontend display rule (same as views): primary labels NEVER show a raw `usr_*` id. Label precedence: `userNames[id]` → if the raw value contains `@`, the existing email-munge (`ownerName`) → `'Unknown'`. Initials follow the same source. Raw id may remain in tooltips/title attrs.
+- ONE shared frontend helper module replaces the three divergent paths: extend `branchVocab.ts` (`ownerName(owner, userNames?)`, `ownerInitials(owner, userNames?)` — additive optional param) and delete the local `who()` helpers in CommitRow/PrDetailDrawer/PrMeta in favor of it.
+- CONCURRENT SESSION: stage exact paths; `git diff --cached` hunk-verify every file pre-commit; never `git add -A`. HEAD may move — re-verify, continue. Volume: "working directory was deleted" → re-issue once; gone → BLOCKED.
+- Commit footer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+- Baselines: 2 pre-existing vitest failures (GraphProviderContext, RegistryConnections); 79 tsc errors; backend pydantic warnings. GRAPHVER_E2E tests need `GRAPHVER_E2E=1 MANAGEMENT_DB_URL='postgresql+asyncpg://synodic:synodic@localhost:5432/synodic'` (Postgres is up).
+
+---
+
+### Task V1: Backend — endpoint-layer actor resolution
+
+**Files:**
+- Modify: `backend/app/db/repositories/view_repo.py` (export the resolver), `backend/app/api/v1/endpoints/versioning.py` (models: `BranchResponse` :416, `PrResponse` :629, `CommitLogResponse` :532, optionally `GraphResponse` :403 — each gains `userNames: Dict[str, str] = {}` with alias; the 8 endpoints listed in Global Constraints + a shared `_attach_user_names(session, items, wrapper=None)` helper; `pr_in_workspace`-fed endpoints resolve in the endpoint body, not the dependency), `backend/app/services/versioning/service.py` (:549 default message only)
+- Test: extend `backend/tests/integration/test_versioning_api.py` (its in-process ASGI + claims harness): seed a management-DB user matching the acting claims' id (check how the harness fabricates users — if the management DB has no users table rows for the test actor, create one via the management session fixture), then assert: branches list carries `userNames` mapping the owner id → display name; commit log wrapper carries the map for actors+contributors; MR detail + list carry maps covering actor/reviewers/approvedBy; unresolvable id → absent from map (endpoint still 200). Plus a unit-ish test that the checkpoint default message no longer embeds the actor (service-level: checkpoint with message=None → message == "checkpoint").
+
+**Steps:** TDD (failing API assertions first) → implement → `GRAPHVER_E2E=1 … pytest backend/tests/integration/test_versioning_api.py -q` + quick sanity run of `test_versioning_projection.py` (shared file untouched but cheap) → commit `feat: resolve versioning actor ids to user names at the API boundary`.
+
+**Interfaces (V2 relies on):** every `Branch`, `PullRequest`, `Graph` item and the `CommitLogResponse` wrapper may carry `userNames?: Record<string, string>`; ids absent when unresolvable; commit dicts unchanged otherwise.
+
+### Task V2: Frontend — consume userNames everywhere
+
+**Files:**
+- Modify: `frontend/src/services/versioningApiService.ts` (types: `userNames?: Record<string,string>` on `Branch` :37, `PullRequest` :241, `Graph` :53, `CommitLogResponse` :216), `frontend/src/features/versioning/model/branchVocab.ts` (`ownerName(owner, userNames?)` / `ownerInitials(owner, userNames?)` with the precedence rule; keep existing behavior when map absent AND owner contains `@`; `usr_*`-shaped or unmatched values → 'Unknown'), `CommitRow.tsx` (delete local `who()`, use the shared helper + thread the log-level map from `ViewHistoryTimeline`), `ViewHistoryTimeline.tsx` (pass `userNames` down), `DataSourceVersioningTab.tsx` (:167, :205 — same rule), `PrDetailDrawer.tsx` (delete local `who()`; :173-176, :277, :283, :290-291 all through the helper with `pr.userNames`), `PrMeta.tsx` (`derivePrTitle` uses the helper — this fixes the "Publish draft by usr_…" DISPLAY strings), `BranchStatusBits.tsx` (OwnerAvatar accepts optional `userNames` or a pre-resolved label — pick the lighter refactor), `BranchSwitcher.tsx` / `BranchManager.tsx` (thread `b.userNames`; BranchManager's search at :70 should search the resolved name).
+- Test: extend existing specs where present (`ViewHistoryTimeline.test.tsx`, `BranchManager.test.tsx`, PrDetailDrawer/PrListRow specs if they exist — check) asserting: resolved name renders when map present; 'Unknown' when id unresolved; email-munge still works for legacy email actors. Extend `branchVocab` unit spec if one exists, else add one for the new precedence (pure function — cheap harness is fine here).
+
+**Steps:** TDD on branchVocab precedence + one component spec → implement all surfaces → full `npx vitest run` + `npx tsc --noEmit` vs baselines → commit `feat: show resolved user names across versioning surfaces`.

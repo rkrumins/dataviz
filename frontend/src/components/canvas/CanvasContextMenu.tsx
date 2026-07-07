@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils'
 export type ContextMenuTarget =
     | { type: 'node'; id: string; data?: Record<string, unknown> }
     | { type: 'edge'; id: string; source: string; target: string }
-    | { type: 'canvas'; position: { x: number; y: number } }
+    | { type: 'canvas'; position: { x: number; y: number }; layerId?: string }
 
 export interface ContextMenuAction {
     id: string
@@ -49,12 +49,16 @@ export interface CanvasContextMenuProps {
     onCreateChild?: (parentId: string) => void
     onTraceNode?: (id: string) => void
     onCopyUrn?: (id: string) => void
+    /** Arm edge connect-mode from this node */
+    onConnect?: (sourceId: string) => void
+    /** Open the click-based "Link to…" popover from this node */
+    onLinkNode?: (nodeId: string) => void
     /** Edge actions */
     onEditEdge?: (id: string) => void
     onDeleteEdge?: (id: string) => void
     onReverseEdge?: (id: string) => void
     /** Canvas actions */
-    onCreateNode?: (position: { x: number; y: number }) => void
+    onCreateNode?: (position: { x: number; y: number }, layerId?: string) => void
     onPaste?: (position: { x: number; y: number }) => void
     onSelectAll?: () => void
     /** Additional custom actions */
@@ -79,6 +83,8 @@ export function CanvasContextMenu({
     onCreateChild,
     onTraceNode,
     onCopyUrn,
+    onConnect,
+    onLinkNode,
     onEditEdge,
     onDeleteEdge,
     onReverseEdge,
@@ -173,6 +179,25 @@ export function CanvasContextMenu({
                 })
             }
 
+            if (onConnect) {
+                result.push({
+                    id: 'connect',
+                    label: 'Connect To…',
+                    icon: 'Spline',
+                    shortcut: 'C',
+                    onClick: () => { onConnect(target.id); onClose() }
+                })
+            }
+
+            if (onLinkNode) {
+                result.push({
+                    id: 'link-to',
+                    label: 'Link to…',
+                    icon: 'Link2',
+                    onClick: () => { onLinkNode(target.id); onClose() }
+                })
+            }
+
             if (onDuplicateNode) {
                 result.push({
                     id: 'duplicate',
@@ -241,7 +266,7 @@ export function CanvasContextMenu({
                     label: 'Create Entity Here',
                     icon: 'Plus',
                     shortcut: 'N',
-                    onClick: () => { onCreateNode(target.position); onClose() }
+                    onClick: () => { onCreateNode(target.position, target.layerId); onClose() }
                 })
             }
 
@@ -272,7 +297,7 @@ export function CanvasContextMenu({
 
         return result
     }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode,
-        onCopyUrn, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
+        onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, layers, onMoveToLayer, onClose])
 
     // Get icon component

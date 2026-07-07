@@ -26,6 +26,27 @@ services:
 
   redis:
     container_name: synodic-redis-dev
+    # Dev cache: disable AOF. The continuously-appended AOF incr file gets
+    # truncated (→ crash-loop on startup) whenever the Docker disk fills up.
+    # RDB snapshots stay on (atomic write, restart-safe) so cached data still
+    # survives normal restarts. `command:` replaces the base, so the maxmemory
+    # flags from docker-compose.yml are repeated here.
+    #
+    # entrypoint: RDB snapshots can still land corrupted (zeroed header) if
+    # the disk fills mid-write. redis-dev-entrypoint.sh quarantines a
+    # corrupt dump.rdb before redis-server starts, so the container
+    # self-heals on every restart instead of crash-looping forever.
+    entrypoint: ["/bin/sh", "/docker-entrypoint.d/redis-dev-entrypoint.sh"]
+    volumes:
+      - ./scripts/redis-dev-entrypoint.sh:/docker-entrypoint.d/redis-dev-entrypoint.sh:ro
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-2gb}
+      - --maxmemory-policy
+      - ${REDIS_MAXMEMORY_POLICY:-volatile-lru}
 
   falkordb:
     container_name: synodic-falkordb-dev

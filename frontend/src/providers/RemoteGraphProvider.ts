@@ -29,6 +29,8 @@ import type {
     AggregatedEdgeResult,
     CreateNodeRequest,
     CreateNodeResult,
+    CreateEdgeRequest,
+    EdgeMutationResult,
     TopLevelNodesQuery,
     TopLevelNodesResult,
 } from './GraphDataProvider'
@@ -76,6 +78,11 @@ export interface RemoteGraphProviderOptions {
     workspaceId?: string
     /** Data source ID. When set, appended as ?dataSourceId= to workspace-scoped routes. */
     dataSourceId?: string
+    /**
+     * Draft branch ID. When set, appended as ?branchId= so every read serves the
+     * draft (composed base+overlay) instead of live main. Omit for trunk/main.
+     */
+    branchId?: string
     /** @deprecated Legacy connection ID. Use workspaceId instead. */
     connectionId?: string
 }
@@ -85,6 +92,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
     private readonly workspaceId?: string
     private readonly dataSourceId?: string
+    private readonly branchId?: string
     private readonly connectionId?: string
     private readonly circuitBreaker: CircuitBreaker
 
@@ -99,6 +107,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
     constructor(options?: RemoteGraphProviderOptions) {
         this.workspaceId = options?.workspaceId
         this.dataSourceId = options?.dataSourceId
+        this.branchId = options?.branchId
         this.connectionId = options?.connectionId
         this.circuitBreaker = getCircuitBreaker(this.workspaceId, this.dataSourceId)
     }
@@ -120,7 +129,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
         const seg = pathOnly.replace(/^\/api\/v\d+(\/[^/]+)?\/graph/, '')
         // Hot read paths — 30 s
         if (seg.includes('/children')) return 30_000
-        if (seg.startsWith('/edges/between') || seg.startsWith('/edges/query')) return 30_000
+        // Edge scans get 45 s: the BACKEND budget for these is 40 s
+        // (FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS) — aborting at 30 s made
+        // the client give up and retry while the server was still
+        // scanning, doubling load on large graphs. Client timeout must
+        // sit above the server's so the structured timeout surfaces.
+        if (seg.startsWith('/edges/between') || seg.startsWith('/edges/query')) return 45_000
         if (seg.startsWith('/nodes/top-level')) return 30_000
         if (seg.startsWith('/nodes/query') || seg === '/search') return 30_000
         if (seg.match(/^\/nodes\/[^/]+\/(ancestors|descendants|parent)/)) return 30_000
@@ -150,6 +164,11 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // Data source targeting within a workspace
         if (this.workspaceId && this.dataSourceId) {
             url.searchParams.set('dataSourceId', this.dataSourceId)
+        }
+
+        // Draft targeting: serve the draft branch (base+overlay) instead of live main.
+        if (this.workspaceId && this.branchId) {
+            url.searchParams.set('branchId', this.branchId)
         }
 
         // Legacy fallback: append connectionId as query param
@@ -750,6 +769,13 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<CreateNodeResult>('/nodes/create', {
             method: 'POST',
             body: JSON.stringify(request)
+        })
+    }
+
+    async createEdge(request: CreateEdgeRequest): Promise<EdgeMutationResult> {
+        return await this.fetch<EdgeMutationResult>('/edges', {
+            method: 'POST',
+            body: JSON.stringify(request),
         })
     }
 }

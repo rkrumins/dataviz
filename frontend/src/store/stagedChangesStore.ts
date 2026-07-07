@@ -36,6 +36,11 @@ export type StagedChangeType =
   | 'edit_edge'
   | 'delete_edge'
   | 'reverse_edge'
+  // View-layout change (add/rename/delete/reorder a layer). Decoupled from the data source: it has
+  // NO apply hook, so applyAll drops it (local-only) and saveStagedChangesToDraft/stagedChangesToOps
+  // never turn it into a /graph/changes op. It persists to the VIEW via saveToBackend, and is
+  // reverted by its own `discard`. `after` carries `{ layers, action }`.
+  | 'layer_config'
 
 /** A single user-staged change awaiting Save. */
 export interface StagedChange {
@@ -55,6 +60,9 @@ export interface StagedChange {
   apply?: (ctx: ApplyContext) => Promise<void>
   /** Per-change discard hook — restores `before` state in whatever store owns it. */
   discard?: () => void
+  /** Per-change re-apply hook — re-applies `after` state on REDO (the inverse of `discard`). Optional:
+   *  change types without one just re-add the record on redo (legacy behavior). */
+  reapply?: () => void
   timestamp: number
   /** Set on apply failure so retry can target only failing changes. */
   error?: string
@@ -80,12 +88,33 @@ interface StagedChangesState {
   /** Most-recently-discarded changes (for Undo). Multiple-step undo via stack. */
   redoStack: StagedChange[]
 
+  /** Active scope key = `${wsId}::${dsId}::${branchId|main}`. Staged edits belong to ONE
+   *  branch; switching branches must NOT show another branch's edits (a draft is isolated
+   *  until merged). `changes`/`redoStack` always hold the ACTIVE scope's slice. */
+  _scopeKey: string | null
+  /** Parked per-scope slices, so switching away and back preserves each branch's own edits. */
+  _byScope: Record<string, { changes: StagedChange[]; redoStack: StagedChange[] }>
+  /** Make `key` the active scope: park the current slice and load `key`'s (empty if none).
+   *  Called whenever the active (workspace, data source, branch) changes. */
+  setScope: (key: string | null) => void
+
   stage: (input: Omit<StagedChange, 'id' | 'timestamp'>) => string
+  /** Batch version of `stage` — appends a whole already-built batch of changes
+   *  (e.g. from `planBuildStaging`) in a single state update, instead of one
+   *  `set` call per change. */
+  stageMany: (batch: StagedChange[]) => void
   /** Replace an existing change for the same target — useful when the user renames the same node twice. */
   stageOrReplace: (
     matcher: (c: StagedChange) => boolean,
     input: Omit<StagedChange, 'id' | 'timestamp'>,
   ) => string
+  /**
+   * Patch a staged change's `after` object in place, keeping its reference — so
+   * hooks that closed over `after` (e.g. a `create_entity`'s `apply`) observe the
+   * patch on save. The change entry itself is replaced immutably so subscribers
+   * re-render. No-op if `changeId` isn't in the current scope.
+   */
+  patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
   discardAll: () => void
   applyAll: (provider: GraphDataProvider, wsId: string) => Promise<{ ok: number; failed: number }>
@@ -114,8 +143,62 @@ const APPLY_ORDER_GROUP: Record<StagedChangeType, number> = {
   reverse_edge: 3,
   assign_layer: 3,
   move_to_layer: 3,
+  layer_config: 3,
   create_entity: 4,
   create_edge: 5,
+}
+
+const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
+
+/**
+ * The `root` change plus every staged `create_entity` descendant of it, found by
+ * walking the temp-urn → `after.parentUrn` linkage, plus any staged `create_edge`
+ * changes anchored to one of those entities' temp urns. Returned LEAF-FIRST
+ * (deepest descendants and edges before their ancestors) so discard hooks restore
+ * children before parents, regardless of staging order or same-millisecond
+ * timestamps. Used so discarding a staged parent also discards the children
+ * created under it (no orphans) and any edges staged against them (no phantoms).
+ */
+function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedChange[] {
+  const victims: StagedChange[] = [root]
+  const victimIds = new Set<string>([root.id])
+  const depthById = new Map<string, number>([[root.id, 0]])
+  // temp urn → depth, so a child can resolve its depth from its parentUrn.
+  const urnDepth = new Map<string, number>()
+  if (root.type === 'create_entity' && root.targetUrn) urnDepth.set(root.targetUrn, 0)
+  let grew = urnDepth.size > 0
+  while (grew) {
+    grew = false
+    for (const c of all) {
+      if (c.type !== 'create_entity' || victimIds.has(c.id)) continue
+      const pu = (c.after as { parentUrn?: string } | undefined)?.parentUrn
+      if (pu && urnDepth.has(pu)) {
+        const d = (urnDepth.get(pu) ?? 0) + 1
+        depthById.set(c.id, d)
+        victims.push(c)
+        victimIds.add(c.id)
+        if (c.targetUrn) urnDepth.set(c.targetUrn, d)
+        grew = true
+      }
+    }
+  }
+  // Any staged `create_edge` whose endpoint is one of the victim entities' temp
+  // urns becomes a phantom once that entity is discarded (its optimistic edge
+  // leaves the canvas but the staged change survives, later shipping an
+  // unresolvable urn:staged: endpoint on save). Cascade those too — deepest, so
+  // their discard hooks run before the entities they reference.
+  const maxDepth = Math.max(0, ...depthById.values())
+  for (const c of all) {
+    if (c.type !== 'create_edge' || victimIds.has(c.id)) continue
+    const after = c.after as { source?: string; target?: string } | undefined
+    if (after && (urnDepth.has(after.source ?? '') || urnDepth.has(after.target ?? ''))) {
+      depthById.set(c.id, maxDepth + 1)
+      victims.push(c)
+      victimIds.add(c.id)
+    }
+  }
+  // Deepest first; stable sort keeps siblings in their original (creation) order.
+  return [...victims].sort((a, b) => (depthById.get(b.id) ?? 0) - (depthById.get(a.id) ?? 0))
 }
 
 export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
@@ -124,6 +207,27 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   applyStatus: 'idle',
   lastApplyResult: null,
   redoStack: [],
+  _scopeKey: null,
+  _byScope: {},
+
+  setScope: (key) => {
+    const s = get()
+    if (s._scopeKey === key) return                       // already active — no-op
+    const byScope = { ...s._byScope }
+    // Park the current active slice under its key (so returning to this branch restores it).
+    byScope[s._scopeKey ?? _SCOPE_NULL] = { changes: s.changes, redoStack: s.redoStack }
+    const next = byScope[key ?? _SCOPE_NULL] ?? { changes: [], redoStack: [] }
+    delete byScope[key ?? _SCOPE_NULL]                    // active slice lives in `changes`, not parked
+    set({
+      _scopeKey: key,
+      _byScope: byScope,
+      changes: next.changes,
+      redoStack: next.redoStack,
+      // Transient apply/UI state never carries across a branch switch.
+      applyStatus: 'idle',
+      lastApplyResult: null,
+    })
+  },
 
   stage: (input) => {
     const id = generateId('staged')
@@ -135,6 +239,13 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       redoStack: [],
     }))
     return id
+  },
+
+  stageMany: (batch) => {
+    // Same invariant as stage(): a fresh batch of changes invalidates the redo
+    // stack — a previously-discarded change can't be cleanly redone once the
+    // canvas has moved on (e.g. a bulk create-at-scale apply).
+    set((s) => ({ changes: [...s.changes, ...batch], redoStack: [] }))
   },
 
   stageOrReplace: (matcher, input) => {
@@ -154,17 +265,42 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     return get().stage(input)
   },
 
-  discard: (changeId) => {
+  patchAfter: (changeId, patch, summary) => {
     const change = get().changes.find((c) => c.id === changeId)
     if (!change) return
-    try {
-      change.discard?.()
-    } catch (err) {
-      console.error('[StagedChanges] discard hook failed', err)
-    }
+    // Deliberate in-place mutation: `after` is the same object the change's `apply`
+    // closure reads from, so this patch is visible on save without re-staging.
+    Object.assign(change.after as Record<string, unknown>, patch)
     set((s) => ({
-      changes: s.changes.filter((c) => c.id !== changeId),
-      redoStack: [...s.redoStack, change],
+      changes: s.changes.map((c) => (c.id === changeId ? { ...c, summary: summary ?? c.summary } : c)),
+    }))
+  },
+
+  discard: (changeId) => {
+    const all = get().changes
+    const root = all.find((c) => c.id === changeId)
+    if (!root) return
+    // Cascade: discarding a staged parent entity must also discard its staged
+    // children (and their descendants). Otherwise the child's parent would never
+    // exist on save and it would surface orphaned at the top level. Match by the
+    // temp-urn → after.parentUrn linkage of staged create_entity changes; the
+    // result is leaf-first so each discard hook restores children before parents.
+    const ordered = collectStagedSubtree(all, root)
+    for (const v of ordered) {
+      try {
+        v.discard?.()
+      } catch (err) {
+        console.error('[StagedChanges] discard hook failed', err)
+      }
+    }
+    const victimIds = new Set(ordered.map((v) => v.id))
+    set((s) => ({
+      changes: s.changes.filter((c) => !victimIds.has(c.id)),
+      // `redo` only re-stages the change record; it cannot re-create the optimistic
+      // canvas node/edge a create's discard hook removed. Re-staging a create would
+      // leave a phantom entry pointing at a node that no longer exists, so creates are
+      // not redoable — only non-create changes (delete/rename/edge edits) go on the stack.
+      redoStack: [...s.redoStack, ...ordered.filter((c) => c.type !== 'create_entity')],
     }))
   },
 
@@ -202,12 +338,14 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const { redoStack } = get()
     if (redoStack.length === 0) return false
     const change = redoStack[redoStack.length - 1]
-    // Re-staging requires the apply hook to be intact, which it is — but the
-    // change's "before" state may no longer match the canvas (the user might
-    // have edited around it). We push it back without re-running side effects;
-    // the user is responsible for re-applying any visual mutations through
-    // the same UI path. In practice this is safe for delete/rename which keep
-    // their state in `before` and use it on apply.
+    // If the change carries a `reapply` hook (e.g. layer_config re-applies its `after` layers), run it
+    // so redo restores the visual mutation, not just the panel row. Types without one are re-added
+    // record-only (legacy — the user re-applies via the UI); this stays backward-compatible.
+    try {
+      change.reapply?.()
+    } catch (err) {
+      console.error('[StagedChanges] redo reapply hook failed', err)
+    }
     set((s) => ({
       changes: [...s.changes, change],
       redoStack: s.redoStack.slice(0, -1),
@@ -289,6 +427,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       edit_edge: 0,
       delete_edge: 0,
       reverse_edge: 0,
+      layer_config: 0,
     }
     get().changes.forEach((c) => {
       counts[c.type]++

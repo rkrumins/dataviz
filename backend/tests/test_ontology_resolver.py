@@ -6,6 +6,7 @@ import pytest
 from backend.app.ontology.resolver import (
     _find_containment_cycle,
     _humanize,
+    case_insensitive_type_id_collisions,
     check_coverage,
     derive_flat_lists,
     parse_entity_definitions,
@@ -140,6 +141,47 @@ def test_resolve_ontology_assigned_overrides_system_default():
     assert resolved.resolution_sources.get("domain") == "assigned"
 
 
+def test_resolve_ontology_honors_persisted_containment_list_without_flag():
+    # Regression (FalkorDB wizard flat-tree bug): a custom ontology recorded its
+    # `containment_edge_types` list but the matching rel def did NOT carry
+    # is_containment=True (default False). Re-deriving containment ONLY from the
+    # per-rel flag drops the persisted list → empty containment → the structural
+    # top-level query treats every node as parentless (flat 27-orphan tree),
+    # while the cached-schema/canvas path (which reads the persisted list) nests.
+    # resolve_ontology must UNION the persisted list so both agree.
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={"layer": {"name": "Layer"}, "object": {"name": "Object"}},
+        # rel def present but is_containment left at its False default — the trigger
+        relationship_type_definitions={"CONTAINS": {"name": "Contains"}},
+        containment_edge_types=["CONTAINS"],   # persisted list IS populated
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    assert "CONTAINS" in resolved.containment_edge_types
+
+
+def test_resolve_ontology_honors_persisted_lineage_list_without_flag():
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={},
+        relationship_type_definitions={"FLOWS_TO": {"name": "Flows To"}},
+        lineage_edge_types=["FLOWS_TO"],
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    assert "FLOWS_TO" in resolved.lineage_edge_types
+
+
+def test_resolve_ontology_containment_from_flag_still_works():
+    # The per-rel flag path must remain intact (union is additive, not a swap).
+    assigned = OntologyData(
+        id="a1", name="Custom", version=1,
+        entity_type_definitions={},
+        relationship_type_definitions={"OWNS": {"name": "Owns", "isContainment": True}},
+    )
+    resolved = resolve_ontology(system_default=None, assigned=assigned)
+    assert "OWNS" in resolved.containment_edge_types
+
+
 # ---------------------------------------------------------------------------
 # validate_ontology — SHACL-lite checks
 # ---------------------------------------------------------------------------
@@ -217,3 +259,67 @@ def test_check_coverage_partial():
     assert report.uncovered_entity_types == ["B"]
     assert report.uncovered_relationship_types == ["EDGE"]
     assert 0 < report.coverage_percent < 100
+
+
+def test_case_insensitive_type_id_collisions():
+    # No collision when ids are distinct case-insensitively.
+    assert case_insensitive_type_id_collisions(["System", "Dataset"], ["HAS", "FLOWS_TO"]) == []
+    # Entity ids differing only by case → one message, WITH an explicit remedy.
+    ent = case_insensitive_type_id_collisions(["Dataset", "dataset"], [])
+    assert len(ent) == 1 and "Entity" in ent[0] and "case" in ent[0].lower()
+    assert "rename" in ent[0] and "alias" in ent[0]
+    # Edge ids (incl. containment/lineage lists folded into edge_ids by the caller) collide.
+    edge = case_insensitive_type_id_collisions([], ["HAS", "has"])
+    assert len(edge) == 1 and "Relationship" in edge[0]
+    # Entity vs edge share a namespace boundary — an entity 'Has' and edge 'HAS' do NOT collide.
+    assert case_insensitive_type_id_collisions(["Has"], ["HAS"]) == []
+
+
+# ---------------------------------------------------------------------------
+# suggest_*_from_stats — case-insensitive dedupe (authoring-guard safety)
+# ---------------------------------------------------------------------------
+from types import SimpleNamespace
+from backend.app.ontology.resolver import (
+    suggest_entity_defs_from_stats,
+    suggest_relationship_defs_from_stats,
+)
+
+
+def _stat(sid, count=1, icon=None, color=None):
+    return SimpleNamespace(id=sid, count=count, icon=icon, color=color)
+
+
+def test_suggest_rel_defs_dedupe_prefers_defaults_casing():
+    # graph carries both 'contains' and 'CONTAINS'; SYSTEM defaults declare 'CONTAINS' → ONE def.
+    defs = suggest_relationship_defs_from_stats([_stat("contains", 3), _stat("CONTAINS", 1)])
+    assert list(defs.keys()) == ["CONTAINS"]
+    assert "also seen as: contains" in (defs["CONTAINS"].description or "")
+
+
+def test_suggest_rel_defs_dedupe_by_majority_then_first_seen():
+    # not in defaults → majority count wins…
+    defs = suggest_relationship_defs_from_stats([_stat("knows", 2), _stat("KNOWS", 5)], base_defaults={})
+    assert list(defs.keys()) == ["KNOWS"]
+    assert "also seen as: knows" in defs["KNOWS"].description
+    # …and a count tie falls back to first-seen.
+    tie = suggest_relationship_defs_from_stats([_stat("owns", 1), _stat("OWNS", 1)], base_defaults={})
+    assert list(tie.keys()) == ["owns"]
+
+
+def test_suggest_rel_defs_dedupe_preserves_existing_any_case():
+    existing = {"HAS": RelationshipTypeDefEntry(name="Has")}
+    defs = suggest_relationship_defs_from_stats(
+        [_stat("has", 9)], existing_defs=existing, base_defaults={})
+    assert list(defs.keys()) == ["HAS"]     # existing kept; no lowercase variant added
+
+
+def test_suggest_entity_defs_dedupe_case_insensitive():
+    defs = suggest_entity_defs_from_stats([_stat("Layer", 4), _stat("layer", 1)], base_defaults={})
+    assert list(defs.keys()) == ["Layer"]   # majority
+    assert "also seen as: layer" in defs["Layer"].description
+
+
+def test_suggest_defs_no_dedupe_when_distinct():
+    defs = suggest_relationship_defs_from_stats([_stat("owns", 1), _stat("uses", 1)], base_defaults={})
+    assert set(defs.keys()) == {"owns", "uses"}
+    assert "also seen as" not in (defs["owns"].description or "")

@@ -45,6 +45,16 @@ class StatsJobEnvelope(BaseModel):
         )
 
 
+class StatsDeepJobEnvelope(StatsJobEnvelope):
+    """Deep stats facet: full schema stats (samples + tags scans),
+    ontology metadata, and the built graph schema. Split from the cheap
+    counts poll (``stats_poll``) so one slow large-graph scan set never
+    blocks counts freshness — deep jobs ride the heavy worker lane.
+    Same wire fields as the counts envelope, different ``kind``."""
+
+    kind: Literal["stats_deep"] = "stats_deep"  # type: ignore[assignment]
+
+
 class DiscoveryJobEnvelope(BaseModel):
     """Pre-registration provider asset discovery.
 
@@ -127,11 +137,14 @@ class PurgeJobEnvelope(BaseModel):
         )
 
 
-JobEnvelope = Union[StatsJobEnvelope, DiscoveryJobEnvelope, PurgeJobEnvelope]
+JobEnvelope = Union[
+    StatsJobEnvelope, StatsDeepJobEnvelope, DiscoveryJobEnvelope, PurgeJobEnvelope,
+]
 
 
 _ENVELOPE_BY_KIND: dict[str, type[BaseModel]] = {
     "stats_poll": StatsJobEnvelope,
+    "stats_deep": StatsDeepJobEnvelope,
     "discovery": DiscoveryJobEnvelope,
     "purge": PurgeJobEnvelope,
 }

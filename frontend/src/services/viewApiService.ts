@@ -6,7 +6,7 @@
  *
  * API scope: /api/v1/views (top-level, cross-workspace)
  */
-import type { ViewConfiguration } from '@/types/schema'
+import type { LayerAssignmentEntry, ViewConfiguration, ViewLayerConfig } from '@/types/schema'
 import { authFetch } from './apiClient'
 
 // ============================================
@@ -37,6 +37,19 @@ export interface View {
     createdByName?: string
     /** Creator's email, surfaced for tooltip / hover detail. */
     createdByEmail?: string
+    /** Id of the user who last edited the view. Null until the first post-migration edit. */
+    updatedBy?: string | null
+    /** Human-readable editor name resolved server-side from the users table. */
+    updatedByName?: string | null
+    /** Editor's email, surfaced for tooltip / hover detail. */
+    updatedByEmail?: string | null
+    /** When/who last changed the view's UNDERLYING DATA (publish / PR merge on its
+     *  data source) — separate from updatedAt/updatedBy (settings edits) so both
+     *  stories stay truthful. Null until the first post-migration publish. */
+    dataUpdatedAt?: string | null
+    dataUpdatedBy?: string | null
+    dataUpdatedByName?: string | null
+    dataUpdatedByEmail?: string | null
     tags?: string[]
     isPinned: boolean
     favouriteCount: number
@@ -333,6 +346,25 @@ export async function updateView(viewId: string, data: ViewUpdateRequest): Promi
     })
 }
 
+/**
+ * Update a view's layer layout (layers + assignments) in isolation — does
+ * not touch name/content (other than entityScope)/filters/any other
+ * config key. See backend `view_repo.update_view_layout`.
+ */
+export async function updateViewLayout(
+    viewId: string,
+    body: {
+        referenceLayout: { layers: ViewLayerConfig[]; assignments: Record<string, LayerAssignmentEntry> }
+        entityScope?: 'all' | 'curated'
+        displayRules?: unknown[]
+    },
+): Promise<View> {
+    return apiFetch<View>(`/api/v1/views/${viewId}/layout`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+    })
+}
+
 /** Delete a view. Soft-deletes by default; pass permanent=true to remove from DB. */
 export async function deleteView(viewId: string, permanent = false): Promise<void> {
     const qs = permanent ? '?permanent=true' : ''
@@ -415,7 +447,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         grouping: cfg.grouping,
         isDefault: false,
         isPublic: view.visibility !== 'private',
-        createdBy: view.createdBy ?? 'user',
+        createdBy: view.createdBy ?? '',
         createdAt: view.createdAt,
         updatedAt: view.updatedAt,
     }

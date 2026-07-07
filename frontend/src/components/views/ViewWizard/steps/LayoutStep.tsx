@@ -13,13 +13,19 @@ import {
     Trash2,
     ChevronDown,
     ChevronRight,
-    Wand2
+    Wand2,
+    Sparkles,
+    Repeat
 } from 'lucide-react'
 import { cn, generateId } from '@/lib/utils'
 import type { WizardFormData } from '../ViewWizard'
 import type { ViewLayerConfig } from '@/types/schema'
 import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
+import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
+import { useWorkspacesStore } from '@/store/workspaces'
+import { blankQuickStartTemplates } from '../blankTemplates'
+import { deriveLayersFromOntology } from '../blankModel'
 
 // ============================================
 // Types
@@ -38,6 +44,8 @@ interface LayoutStepProps {
     }[]
     /** Data source whose assigned ontology scopes the entity type picker. */
     dataSourceId?: string
+    /** Blank model: no data source yet — read entity types from the hydrated schema store. */
+    blank?: boolean
 }
 
 interface LayerTemplate {
@@ -58,7 +66,7 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'data-flow',
         name: 'Data Flow',
-        description: 'Source → Staging → Transform → Consumption',
+        description: 'Follow data from its raw sources through staging and transformation to the reports that consume it.',
         category: 'data-engineering',
         layers: [
             { name: 'Source', description: 'Raw data sources', color: '#3b82f6', entityTypes: [] },
@@ -70,7 +78,7 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'medallion',
         name: 'Medallion',
-        description: 'Bronze → Silver → Gold',
+        description: 'The lakehouse refinement pattern: raw data lands in Bronze and is progressively refined to business-ready Gold.',
         category: 'data-engineering',
         layers: [
             { name: 'Bronze', description: 'Raw data', color: '#CD7F32', entityTypes: [] },
@@ -81,7 +89,7 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
     {
         id: 'simple',
         name: 'Simple',
-        description: 'Input → Output',
+        description: 'The minimal two-column map: what feeds in, and what comes out.',
         category: undefined,
         layers: [
             { name: 'Input', description: 'Source systems', color: '#3b82f6', entityTypes: [] },
@@ -93,24 +101,193 @@ const LOCAL_FALLBACK_TEMPLATES: LayerTemplate[] = [
 const LAYER_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#22c55e', '#ef4444', '#06b6d4', '#ec4899', '#6366f1']
 
 // ============================================
+// Blank-model Quick Start template gallery
+// ============================================
+
+/** Mini preview: up to five neutral column bars with truncated names. Deliberately
+ *  monochrome — a grid of tinted cards reads as noise; the layers' real colors show
+ *  on the canvas. Only the SELECTED card's bars take a soft accent. Hovering a bar
+ *  shows the layer's description, so the structure stays scannable but explained. */
+function TemplatePreview({ layers, active }: { layers: ViewLayerConfig[]; active?: boolean }) {
+    if (layers.length === 0) {
+        return (
+            <div className="flex items-center justify-center h-[52px] rounded-lg border border-dashed border-slate-200 dark:border-slate-700 text-[10px] text-slate-400">
+                Empty canvas
+            </div>
+        )
+    }
+    const shown = layers.slice(0, 5)
+    const extra = layers.length - shown.length
+    return (
+        <div className="flex items-end gap-1.5">
+            {shown.map((layer, i) => (
+                <div
+                    key={layer.id ?? i}
+                    className="flex-1 min-w-0"
+                    title={layer.description ? `${layer.name} — ${layer.description}` : layer.name}
+                >
+                    <div className={cn(
+                        'h-8 rounded-md border',
+                        active
+                            ? 'bg-blue-100 border-blue-200 dark:bg-blue-900/40 dark:border-blue-800'
+                            : 'bg-slate-100 border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60',
+                    )} />
+                    <div className="mt-1 text-[9px] text-slate-500 dark:text-slate-400 truncate text-center">
+                        {layer.name}
+                    </div>
+                </div>
+            ))}
+            {extra > 0 && (
+                <div className="flex-none">
+                    <div className="h-8 px-1.5 rounded-md bg-slate-100 border border-slate-200 dark:bg-slate-700/60 dark:border-slate-600/60 flex items-center justify-center text-[9px] font-semibold text-slate-500 dark:text-slate-300">
+                        +{extra}
+                    </div>
+                    <div className="mt-1 text-[9px] text-transparent">.</div>
+                </div>
+            )}
+        </div>
+    )
+}
+
+/** One template offering, whatever its origin (blank Quick Start, backend
+ *  ContextModel, local fallback, or ontology-derived). The gallery renders all
+ *  of them identically so both creation flows share one visual language. */
+interface GalleryTemplate {
+    id: string
+    name: string
+    description: string
+    category?: string
+    recommended?: boolean
+    layers: Array<Partial<ViewLayerConfig> & { name: string }>
+}
+
+/** Gallery of Quick Start templates — one card per template with a mini preview,
+ *  description, category chip, and selected state. Shared by BOTH creation flows. */
+function TemplateGallery({
+    templates,
+    activeId,
+    loading,
+    onApply,
+}: {
+    templates: GalleryTemplate[]
+    activeId?: string
+    loading?: boolean
+    onApply: (template: GalleryTemplate) => void
+}) {
+    if (loading) {
+        return (
+            <div className="grid gap-3 sm:grid-cols-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 p-4 animate-pulse">
+                        <div className="h-3 w-2/3 bg-slate-200 dark:bg-slate-600 rounded mb-2" />
+                        <div className="h-2 w-full bg-slate-100 dark:bg-slate-700 rounded mb-4" />
+                        <div className="flex gap-1.5">
+                            {Array.from({ length: 3 }).map((_, j) => (
+                                <div key={j} className="h-8 flex-1 bg-slate-100 dark:bg-slate-700 rounded-md" />
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        )
+    }
+    return (
+        <div className="grid gap-3 sm:grid-cols-2">
+            {templates.map(template => {
+                const active = template.id === activeId
+                return (
+                    <button
+                        key={template.id}
+                        type="button"
+                        onClick={() => onApply(template)}
+                        className={cn(
+                            'relative text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
+                            active
+                                ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
+                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600',
+                        )}
+                    >
+                        {template.recommended && (
+                            <span className="absolute -top-2 -right-2 inline-flex items-center gap-0.5 px-2 py-0.5 text-[10px] font-semibold bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-full shadow">
+                                <Sparkles className="w-3 h-3" /> Recommended
+                            </span>
+                        )}
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                            <h5 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{template.name}</h5>
+                            <span className="text-[10px] text-slate-400 shrink-0">
+                                {template.layers.length > 0
+                                    ? `${template.layers.length} layer${template.layers.length !== 1 ? 's' : ''}`
+                                    : 'no layers'}
+                            </span>
+                        </div>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 leading-snug mb-3">
+                            {template.description}
+                        </p>
+                        <TemplatePreview layers={template.layers as ViewLayerConfig[]} active={active} />
+                        {template.category && (
+                            <span className="inline-block mt-2.5 px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded capitalize">
+                                {template.category.replace(/-/g, ' ')}
+                            </span>
+                        )}
+                    </button>
+                )
+            })}
+        </div>
+    )
+}
+
+// ============================================
 // Component
 // ============================================
 
-export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId }: LayoutStepProps) {
+export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId, blank }: LayoutStepProps) {
     const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null)
-    const { entityTypes: schemaEntityTypes } = useDataSourceSchema(dataSourceId)
+    // Blank models have no data source to probe; their ontology schema is hydrated
+    // into the schema store, so read entity types from there instead.
+    const { entityTypes: dsEntityTypes } = useDataSourceSchema(dataSourceId)
+    const storeEntityTypes = useSchemaEntityTypes()
+    const schemaEntityTypes = blank ? storeEntityTypes : dsEntityTypes
     const availableEntityTypes = useMemo(
         () => schemaEntityTypes.slice().sort((a, b) => a.name.localeCompare(b.name)),
         [schemaEntityTypes]
     )
 
+    // ── Quick Start templates (both creation flows) ───────────────────────────
+    // Blank models: ontology + generic scaffolds from blankQuickStartTemplates.
+    // Existing sources: an ontology-derived recommended template (their assigned
+    // schema has levels too) ahead of the org's backend/local templates. Both
+    // render through the same TemplateGallery.
+    const blankSchema = useSchemaStore(s => s.schema)
+    const blankTemplates = useMemo(
+        () => (blank && blankSchema ? blankQuickStartTemplates(blankSchema) : []),
+        [blank, blankSchema],
+    )
+    // Gallery stays open until a template is explicitly chosen, and re-opens when
+    // the user switches. `layoutTemplateId` persists the choice across step nav.
+    // Existing-source mode keeps its original semantics: the gallery shows while
+    // there are no layers (no choice is REQUIRED — canProceed is unchanged there).
+    const [galleryOpen, setGalleryOpen] = useState(false)
+    const showGallery = galleryOpen
+        || (blank ? !formData.layoutTemplateId : formData.layers.length === 0)
+
+    const handleSwitchTemplate = useCallback(() => {
+        if (formData.layers.length > 0 && !window.confirm('Switching templates will replace your current layers. Continue?')) {
+            return
+        }
+        setGalleryOpen(true)
+    }, [formData.layers.length])
+
     // ── Backend templates ────────────────────────────────────────────────────
     const [backendTemplates, setBackendTemplates] = useState<LayerTemplate[]>([])
     const [templatesLoading, setTemplatesLoading] = useState(false)
+    // Templates read via the workspace-scoped route (workspace:datasource:read) — any
+    // member can browse them. Without a workspace we fall back to the local templates.
+    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
     useEffect(() => {
+        if (!activeWorkspaceId) return
         setTemplatesLoading(true)
-        fetchBackendTemplates()
+        fetchBackendTemplates(activeWorkspaceId)
             .then(results => {
                 if (results.length > 0) {
                     // Map backend ContextModel → LayerTemplate
@@ -133,10 +310,43 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             })
             .catch(() => { /* silent — fallback to local */ })
             .finally(() => setTemplatesLoading(false))
-    }, [])
+    }, [activeWorkspaceId])
 
     // Use backend templates if available, otherwise local fallbacks
     const activeTemplates = backendTemplates.length > 0 ? backendTemplates : LOCAL_FALLBACK_TEMPLATES
+
+    // The one list the gallery renders, per flow.
+    const galleryTemplates: GalleryTemplate[] = useMemo(() => {
+        if (blank) return blankTemplates
+        const fromSchema: GalleryTemplate | null = schemaEntityTypes.length > 0 ? {
+            id: 'from-schema',
+            name: 'From your schema',
+            description: 'One layer per level of your assigned ontology, with entity types pre-assigned.',
+            category: 'schema',
+            recommended: true,
+            layers: deriveLayersFromOntology({ entityTypes: schemaEntityTypes }),
+        } : null
+        return [...(fromSchema ? [fromSchema] : []), ...activeTemplates]
+    }, [blank, blankTemplates, schemaEntityTypes, activeTemplates])
+
+    // One apply path for every template origin: normalize layers (mint ids/orders,
+    // default colors) and record the choice so the picker can be revisited.
+    // Resets assignments to {} — a template's layers get fresh ids, so any prior
+    // assignments (keyed to the OLD layer ids) would otherwise dangle. Never
+    // copies assignments a template might carry; only layer STRUCTURE is copied.
+    const handleApplyGalleryTemplate = useCallback((template: GalleryTemplate) => {
+        const layers: ViewLayerConfig[] = template.layers.map((l, i) => ({
+            ...l,
+            name: l.name,
+            description: l.description ?? '',
+            color: l.color ?? LAYER_COLORS[i % LAYER_COLORS.length],
+            entityTypes: [...(l.entityTypes ?? [])],
+            id: l.id ?? generateId(),
+            order: i,
+        }))
+        updateFormData({ layers, assignments: {}, layoutTemplateId: template.id })
+        setGalleryOpen(false)
+    }, [updateFormData])
     // ────────────────────────────────────────────────────────────────────────
 
     const handleSelectLayoutType = useCallback((type: 'graph' | 'hierarchy' | 'reference') => {
@@ -146,15 +356,6 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             // Don't auto-add—let user pick template
         }
     }, [updateFormData, formData.layers])
-
-    const handleApplyTemplate = useCallback((template: LayerTemplate) => {
-        const layers: ViewLayerConfig[] = template.layers.map((l, i) => ({
-            ...l,
-            id: generateId(),
-            order: i
-        }))
-        updateFormData({ layers })
-    }, [updateFormData])
 
     const handleAddLayer = useCallback(() => {
         const newLayer: ViewLayerConfig = {
@@ -187,6 +388,13 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             layers: reordered.map((l, i) => ({ ...l, order: i }))
         })
     }, [updateFormData])
+
+    // What the reference-layout section renders:
+    //  - gallery open (either flow) → the shared Quick Start gallery
+    //  - blank + empty template chosen → an add-your-own prompt
+    //  - otherwise (layers exist) → the layer editor
+    const showBlankEmptyState = blank && !showGallery && formData.layers.length === 0
+    const showLayerList = formData.layers.length > 0 && !showGallery
 
     return (
         <div className="space-y-8">
@@ -271,23 +479,41 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                         <div className="flex items-center justify-between">
                             <div>
                                 <h4 className="font-bold text-slate-900 dark:text-white">
-                                    Configure Layers
+                                    {showGallery ? 'Choose a starting template' : 'Configure Layers'}
                                 </h4>
                                 <p className="text-sm text-slate-500">
-                                    Define the horizontal layers for your context view
+                                    {showGallery
+                                        ? 'Pick a starting arrangement — you can refine the layers next'
+                                        : 'Define the horizontal layers for your context view'}
                                 </p>
                             </div>
-                            <button
-                                onClick={handleAddLayer}
-                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
-                            >
-                                <Plus className="w-4 h-4" />
-                                Add Layer
-                            </button>
+                            <div className="flex items-center gap-2">
+                                {!showGallery && (
+                                    <button
+                                        onClick={handleSwitchTemplate}
+                                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                    >
+                                        <Repeat className="w-4 h-4" />
+                                        Switch template
+                                    </button>
+                                )}
+                                {/* Existing-source mode keeps manual building available even
+                                    while the gallery shows (its original behavior); blank mode
+                                    requires an explicit template choice first. */}
+                                {(!showGallery || !blank) && (
+                                    <button
+                                        onClick={handleAddLayer}
+                                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                                    >
+                                        <Plus className="w-4 h-4" />
+                                        Add Layer
+                                    </button>
+                                )}
+                            </div>
                         </div>
 
-                        {/* Templates — shown when no layers yet */}
-                        {formData.layers.length === 0 && (
+                        {/* Quick Start template gallery — shared by both creation flows */}
+                        {showGallery && (
                             <motion.div
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
@@ -296,42 +522,31 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
                                 <div className="flex items-center gap-2 mb-3">
                                     <Wand2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
                                     <span className="font-semibold text-slate-800 dark:text-slate-200">Quick Start Templates</span>
-                                    {templatesLoading && (
+                                    {!blank && templatesLoading && (
                                         <span className="ml-auto text-[10px] text-indigo-500 animate-pulse">Loading from backend…</span>
                                     )}
                                 </div>
-                                <div className="grid grid-cols-3 gap-3">
-                                    {templatesLoading ? (
-                                        // Skeleton cards while fetching
-                                        Array.from({ length: 3 }).map((_, i) => (
-                                            <div key={i} className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 animate-pulse">
-                                                <div className="h-3 w-2/3 bg-slate-200 dark:bg-slate-600 rounded mb-2" />
-                                                <div className="h-2 w-full bg-slate-100 dark:bg-slate-700 rounded" />
-                                            </div>
-                                        ))
-                                    ) : (
-                                        activeTemplates.map(template => (
-                                            <button
-                                                key={template.id}
-                                                onClick={() => handleApplyTemplate(template)}
-                                                className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 hover:border-indigo-300 dark:hover:border-indigo-700 transition-colors text-left"
-                                            >
-                                                <p className="font-medium text-sm text-slate-800 dark:text-slate-200">{template.name}</p>
-                                                <p className="text-xs text-slate-500 leading-snug mt-0.5">{template.description}</p>
-                                                {template.category && (
-                                                    <span className="inline-block mt-1.5 px-1.5 py-0.5 text-[10px] font-medium bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 rounded capitalize">
-                                                        {template.category.replace(/-/g, ' ')}
-                                                    </span>
-                                                )}
-                                            </button>
-                                        ))
-                                    )}
-                                </div>
+                                <TemplateGallery
+                                    templates={galleryTemplates}
+                                    activeId={formData.layoutTemplateId}
+                                    loading={!blank && templatesLoading}
+                                    onApply={handleApplyGalleryTemplate}
+                                />
                             </motion.div>
                         )}
 
+                        {/* Blank models: empty template chosen — prompt to build layers */}
+                        {showBlankEmptyState && (
+                            <div className="flex flex-col items-center justify-center py-10 text-center rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
+                                <p className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1">Starting from an empty canvas</p>
+                                <p className="text-xs text-slate-400 max-w-[280px]">
+                                    Add layers to organize your model, or switch to a template above.
+                                </p>
+                            </div>
+                        )}
+
                         {/* Layer List */}
-                        {formData.layers.length > 0 && (
+                        {showLayerList && (
                             <Reorder.Group
                                 axis="y"
                                 values={formData.layers}

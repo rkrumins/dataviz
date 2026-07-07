@@ -42,7 +42,13 @@ from backend.app.services.stats_cache import (
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.providers.manager import provider_manager
-from backend.insights_service.enqueue import enqueue_stats_job_safe
+from backend.app.auth.dependencies import get_optional_user
+from backend.app.services.top_level_cache import try_serve_top_level
+from backend.insights_service.enqueue import (
+    enqueue_stats_job_force,
+    enqueue_stats_job_safe,
+    mark_stats_changed,
+)
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 router = APIRouter()
@@ -62,7 +68,9 @@ async def get_context_engine(
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
+    branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it."),
     session: AsyncSession = Depends(get_db_session),
+    user=Depends(get_optional_user),
 ) -> ContextEngine:
     """
     FastAPI dependency that resolves the appropriate ContextEngine.
@@ -81,7 +89,8 @@ async def get_context_engine(
     try:
         if ws_id:
             return await ContextEngine.for_workspace(
-                ws_id, provider_manager, session, data_source_id=dataSourceId
+                ws_id, provider_manager, session, data_source_id=dataSourceId,
+                actor=(user.id if user else None), branch_id=branchId,
             )
         if connectionId:
             return await ContextEngine.for_connection(connectionId, provider_manager, session)
@@ -92,6 +101,114 @@ async def get_context_engine(
         status_code=400,
         detail="scope_required: workspace_id or connection_id is required",
     )
+
+
+@router.post("/bootstrap")
+async def bootstrap_versioned_graph_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to seed."),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Seed the data source's versioned graph from the provider's current state so branches
+    and history cover the whole graph. Idempotent — safe to re-run as a backfill.
+
+    ATOMIC: create-graph + seed run in ONE transaction, so a failure never leaves a
+    half-enabled graph (a graph row with no imported data). Provider reads happen first,
+    outside the transaction."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    actor = user.id if user else "system"
+    svc = GraphVersioningService()
+    # Seed-time canonicalization (Task E): if the source has an assigned ontology, pass
+    # its rules so the bootstrap import writes OUR copy in canonical casing. None (no
+    # assigned ontology) leaves source spellings untouched.
+    ontology_rules = await _resolve_ontology_rules(engine)
+    # Single idempotent enablement path: already-enabled → returns the graph untouched;
+    # else create-graph + full provider import in ONE transaction (paging happens outside
+    # it). Never leaves a half-enabled graph that would hijack reads while empty.
+    return await svc.enable_versioning(
+        data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
+        provider=engine.provider, ontology_rules=ontology_rules)
+
+
+@router.post("/resync")
+async def resync_versioned_graph_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
+    strategy: str = Query("merge", description="merge | external_wins"),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
+    any time for any versioned graph. 3-way merge preserves user edits (a field both the
+    source and a user changed conflicts under ``merge``; pass ``external_wins`` to take the
+    source). 404 if the data source isn't versioned yet (enable it first)."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    actor = user.id if user else "system"
+    svc = GraphVersioningService()
+    res = await svc.resolve_graph(
+        data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
+    if res is None:
+        raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
+    return await svc.resync_from_provider(
+        graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy)
+
+
+@router.get("/vocab-alignment")
+async def get_vocab_alignment(
+    ws_id: Optional[str] = None,
+    dataSourceId: Optional[str] = Query(None, description="Target a specific data source."),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Per-source vocabulary-alignment drift for the DS panel warning (Task E). Cheap,
+    DB-only read of the profile the canvas read path maintains — no provider call. When
+    the source spells relationship/entity types differently than the ontology declares
+    (``has`` vs ``HAS``), those are aligned automatically and reported here so the panel
+    can say so in plain language. ``hasDrift=false`` (or a missing profile) → nothing to
+    show."""
+    import json as _json
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+    ds_id = await _resolve_data_source_id(session, ws_id, dataSourceId)
+    if not ds_id:
+        raise HTTPException(status_code=400, detail="dataSourceId is required")
+    ds = await get_data_source_orm(session, ds_id)
+    ont_id = getattr(ds, "ontology_id", None) if ds else None
+    row = await osm_repo.get_mapping(session, ds_id, ont_id)
+    if row is None:
+        return {"hasDrift": False, "driftDetails": [], "lastSeenAt": None}
+    try:
+        details = _json.loads(row.drift_details) if row.drift_details else []
+    except (ValueError, TypeError):
+        details = []
+    return {"hasDrift": bool(row.has_drift), "driftDetails": details,
+            "schemaHash": row.last_seen_schema_hash, "lastSeenAt": row.last_seen_at}
+
+
+@router.post("/vocab-alignment/confirm")
+async def confirm_vocab_variant(
+    ws_id: Optional[str] = None,
+    dataSourceId: str = Query(..., description="Data source whose variant decision to record."),
+    declared: str = Query(..., description="The declared type id the variants merged into."),
+    keepMerged: bool = Query(True, description="Keep the merge (true) or split into distinct types (false)."),
+    dimension: str = Query("relationship", description="relationship | entity"),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Record a user's Keep/Split decision for a same-source multi-variant type (Task E
+    §1b). Reversible and never re-asked: the entry flips to explicit so auto-alignment
+    won't overwrite it. Reads already used the proposed merge, so this only confirms or
+    narrows it."""
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    from backend.app.db.repositories import ontology_source_mapping_repo as osm_repo
+    ds = await get_data_source_orm(session, dataSourceId)
+    ont_id = getattr(ds, "ontology_id", None) if ds else None
+    row = await osm_repo.set_variant_decision(
+        session, data_source_id=dataSourceId, ontology_id=ont_id,
+        declared=declared, keep_merged=keepMerged, dimension=dimension)
+    if row is None:
+        raise HTTPException(status_code=404, detail="no alignment profile for this data source")
+    await session.commit()
+    return {"declared": declared, "keepMerged": keepMerged, "hasDrift": bool(row.has_drift)}
 
 
 # ------------------------------------------------------------------ #
@@ -110,7 +227,8 @@ def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
     if not ws:
         return None
     ds = getattr(engine, "_data_source_id", None) or ""
-    return CacheScope(workspace_id=ws, data_source_id=ds)
+    branch = getattr(engine, "_branch_id", None) or ""
+    return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch)
 
 
 def _provider_health_header(engine: ContextEngine) -> str:
@@ -141,6 +259,41 @@ async def _invalidate_cache(engine: ContextEngine) -> None:
     if scope is None:
         return
     await get_graph_cache().bump_generation(scope)
+    # Graph content changed — nudge the insights counts poll so stats
+    # reflect the write within seconds (cooldown-throttled, never
+    # raises). Draft-branch writes are skipped: they don't touch the
+    # main graph's stats until publish, which the versioning projection
+    # covers with its own mark.
+    if not getattr(scope, "branch_id", ""):
+        await mark_stats_changed(scope.data_source_id, scope.workspace_id)
+
+
+def _bounded_compute(engine: ContextEngine, compute):
+    """Wrap a GraphCache ``compute`` callable in the per-(provider, graph)
+    concurrency slot (``ProviderManager.acquire_provider_slot``, cap
+    ``PROVIDER_MAX_CONCURRENCY``, default 8). Saturation raises
+    ``ProviderBusy`` → 429 + Retry-After via the handler in main.py, so
+    a burst of cache misses sheds load instead of pegging FalkorDB's
+    single Cypher thread.
+
+    Cache hits never touch the semaphore — only singleflight-leader
+    misses do actual provider work. Engines whose provider doesn't
+    expose ``manager_cache_key`` (draft/versioned wrappers that don't
+    delegate attributes) degrade to unbounded — those paths are
+    Postgres-overlay-heavy, not FalkorDB fan-out.
+    """
+    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
+    if key is None:
+        return compute
+
+    async def _run():
+        sem = await provider_manager.acquire_provider_slot(*key)
+        try:
+            return await compute()
+        finally:
+            sem.release()
+
+    return _run
 
 
 async def _enforce_fair_share(engine: ContextEngine, endpoint: str) -> None:
@@ -275,7 +428,7 @@ async def trace_v2(
         # name; the cache layer hashes it with ``sort_keys=True`` so
         # alias order / dict ordering can't shift the key.
         params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -307,7 +460,7 @@ async def trace_expand(
         scope=scope,
         endpoint=ENDPOINT_TRACE_EXPAND,
         params=request.model_dump(mode="json", by_alias=True, exclude_none=True),
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=TraceResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -448,6 +601,7 @@ async def get_top_level_nodes(
     ),
     includeChildCount: bool = Query(True, description="Populate child_count on each node."),
     engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Return instances that have no incoming containment edge.
 
@@ -474,16 +628,34 @@ async def get_top_level_nodes(
     """
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
+    scope = _cache_scope(engine)
+
     async def compute() -> TopLevelNodesResult:
+        known_total = None
+        if (
+            scope is not None
+            and not scope.branch_id            # main-branch physical reads only
+            and scope.data_source_id
+            and not searchQuery
+            and not entityTypes
+            and includeChildCount
+        ):
+            served, known_total = await try_serve_top_level(
+                session, engine,
+                ds_id=scope.data_source_id, ws_id=scope.workspace_id,
+                limit=limit, cursor=cursor,
+            )
+            if served is not None:
+                return served
         return await engine.get_top_level_or_orphan_nodes(
             entity_types=entityTypes,
             search_query=searchQuery,
             limit=limit,
             cursor=cursor,
             include_child_count=includeChildCount,
+            known_total_count=known_total,
         )
 
-    scope = _cache_scope(engine)
     if scope is None:
         try:
             return await compute()
@@ -508,7 +680,7 @@ async def get_top_level_nodes(
                 "cursor": cursor,
                 "includeChildCount": includeChildCount,
             },
-            compute=compute,
+            compute=_bounded_compute(engine, compute),
             model_cls=TopLevelNodesResult,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
         )
@@ -608,7 +780,7 @@ async def get_children_with_edges(
             "cursor": cursor,
             "includeLineageEdges": include_lineage_edges,
         },
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=ChildrenWithEdgesResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -998,13 +1170,21 @@ async def get_edges_between(
     Uses source_urns + target_urns AND-semantics in the Cypher query so only
     edges connecting nodes within the set are returned — no over-fetch or
     Python post-filter needed.
+
+    Slot-bounded: this is the heaviest hydration query (an AND-scan over
+    every edge on large graphs, ~40s budget) and it is not response-
+    cached, so concurrent cold opens must shed with 429 rather than
+    pile onto FalkorDB's single Cypher thread.
     """
-    return await engine.get_edges(EdgeQuery(
-        source_urns=query.urns,
-        target_urns=query.urns,
-        edge_types=query.edge_types,
-        limit=query.limit,
-    ))
+    async def compute() -> List[GraphEdge]:
+        return await engine.get_edges(EdgeQuery(
+            source_urns=query.urns,
+            target_urns=query.urns,
+            edge_types=query.edge_types,
+            limit=query.limit,
+        ))
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.post("/edges/query", response_model=List[GraphEdge], response_model_by_alias=True)
@@ -1021,8 +1201,12 @@ async def query_nodes(
     query: NodeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced node query (bulk fetch, complex filters)."""
-    return await engine.get_nodes_query(query)
+    """Advanced node query (bulk fetch, complex filters). Slot-bounded —
+    fired on every canvas hydration with no response cache."""
+    async def compute() -> List[GraphNode]:
+        return await engine.get_nodes_query(query)
+
+    return await _bounded_compute(engine, compute)()
 
 
 @router.get("/metadata/entity-types", response_model=List[str])
@@ -1299,7 +1483,10 @@ async def refresh_introspection(
     if not ds_id or not ws_id:
         raise HTTPException(status_code=400, detail="ws_id and dataSourceId required")
 
-    msg_id = await enqueue_stats_job_safe(ds_id, ws_id)
+    # Force path: the user explicitly clicked Refresh — a stale dedup
+    # claim from a crashed worker must not turn that into a silent no-op
+    # for up to the claim TTL.
+    msg_id = await enqueue_stats_job_force(ds_id, ws_id)
     logger.info(
         "stats_cache.refresh_trigger ds_id=%s msg_id=%s outcome=%s",
         ds_id, msg_id, "enqueued" if msg_id else "dedup_or_redis_down",
@@ -1427,7 +1614,7 @@ async def get_aggregated_edges(
             "lineageEdgeTypes": sorted(request.lineage_edge_types or []) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types or []) if request.containment_edge_types else None,
         },
-        compute=compute,
+        compute=_bounded_compute(engine, compute),
         model_cls=AggregatedEdgeResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
@@ -1517,6 +1704,240 @@ async def delete_edge(
     if not success:
         raise HTTPException(status_code=404, detail=f"Edge '{edge_id}' not found")
     await _invalidate_cache(engine)
+
+
+# ─── Draft batch write (atomic, server-merged) ──────────────────────────────
+
+async def _resolve_containment_types(engine: ContextEngine) -> List[str]:
+    """The CURRENT ontology's containment edge types (resolved live, 5-min cached on the
+    engine — never a stored snapshot, never hardcoded), driving the delete cascade. Empty
+    on failure → the cascade degrades to the node + its own incident edges (no descendant
+    discovery), which is safe."""
+    try:
+        meta = await engine.get_ontology_metadata()
+        return list(getattr(meta, "containment_edge_types", None) or [])
+    except Exception:
+        return []
+
+
+async def _resolve_ontology_rules(engine: ContextEngine, *, fail_closed: bool = False):
+    """Rich commit-boundary rules (``OntologyRules``) from the engine's cached resolved
+    ontology — only when the data source has an *explicitly assigned* ontology (the
+    system-default/introspection fallback layers must not retroactively gate legacy
+    graphs). Best-effort ``None`` on failure, unless ``fail_closed`` (blank graphs are
+    contractually ontology-governed — a write whose rules can't be resolved must not
+    slip through unvalidated)."""
+    try:
+        from backend.app.db.repositories.data_source_repo import get_data_source_orm
+        from backend.app.ontology.rules import resolved_ontology_to_rules
+        # The engine keeps its scope private; this app-layer helper is the one sanctioned
+        # reader (it built the engine from the same request session).
+        ds_id, session = engine._data_source_id, engine._db_session
+        if not ds_id or session is None:
+            return None
+        ds = await get_data_source_orm(session, ds_id)
+        if ds is None or not ds.ontology_id:
+            if fail_closed:
+                raise HTTPException(status_code=422, detail={
+                    "type": "ontology_required",
+                    "message": "This graph is ontology-governed but its data source has no "
+                               "assigned ontology; assign one to resume editing."})
+            return None
+        resolved = await engine._resolve_ontology()
+        return resolved_ontology_to_rules(resolved)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ontology-rules resolution failed for /graph/changes")
+        if fail_closed:
+            raise HTTPException(status_code=503, detail={
+                "type": "ontology_unavailable",
+                "message": "The ontology for this graph could not be resolved; writes are "
+                           "blocked until it is available again."})
+        return None
+
+
+class GraphChangeOp(BaseModel):
+    """One typed change in a draft save. ``update`` payloads are *partial* — the
+    server merges them onto the entity's current state, so the client never has to
+    reload (and risk clobbering) fields it didn't edit."""
+    op: str = Field(description="create | update | delete")
+    kind: str = Field(description="node | edge")
+    id: Optional[str] = Field(default=None, description="entity id / urn (update/delete, or an explicit create id)")
+    ref: Optional[str] = Field(default=None, description="client temp ref → echoed back in `assigned` for creates")
+    payload: Optional[dict] = None
+    base_version: Optional[str] = Field(
+        default=None, alias="baseVersion",
+        description="optimistic-concurrency token: the `version` (content hash) the client read for "
+        "this entity. When present on an update, the server 3-way merges so a concurrent same-field "
+        "edit raises a conflict instead of silently overwriting. Absent ⇒ plain patch (no OCC).")
+
+    class Config:
+        populate_by_name = True
+
+
+class GraphChangesRequest(BaseModel):
+    ops: List[GraphChangeOp]
+    message: Optional[str] = None
+
+
+class GraphChangesResponse(BaseModel):
+    commit_id: Optional[str] = Field(default=None, alias="commitId")
+    assigned: dict = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+def _resolve_change_ops(request_ops, mint_id, mint_urn):
+    """Translate a batch of canvas edit ops into ONE ``apply_ops`` op list. Two passes so creates AND
+    the edges/updates/layer-moves that reference those fresh nodes (by a temp ``ref``) commit together
+    as a SINGLE atomic commit — instead of one commit per create. Pass 1 assigns a real id to every
+    create (a NODE's id IS its urn — minted via ``mint_urn`` when the collapsed save omits it, exactly
+    like ``/nodes/create``; an edge gets a plain minted id) and builds the ``ref → id`` map; pass 2
+    emits the ops, resolving temp refs in edge endpoints + update/delete target ids and stamping the
+    node urn into its payload. Returns ``(ops, assigned)`` — ``assigned`` (ref/id → real id) is echoed
+    to the client to reconcile its optimistic ids. apply_ops validates same-batch edges against these
+    creates (proved in ``test_versioning_batch_create_edge``)."""
+    endpoint_fields = ("sourceEntityId", "source_entity_id", "targetEntityId", "target_entity_id")
+    assigned: dict = {}
+    create_eid: dict = {}                      # op index → its assigned real id (reused in pass 2)
+    for i, o in enumerate(request_ops):
+        if o.op == "create":
+            if o.kind == "edge":
+                eid = o.id or mint_id("ent")
+            else:                              # a NODE's entity_id IS its urn (versioned-graph model);
+                pl = o.payload or {}           # mint one when the collapsed save omits it.
+                eid = pl.get("urn") or o.id or mint_urn(str(pl.get("entityType") or "entity"))
+            create_eid[i] = eid
+            if o.ref:
+                assigned[o.ref] = eid
+            assigned.setdefault(eid, eid)
+
+    def _ref(x):                               # temp ref → real id; pass real ids / non-strings through
+        return assigned.get(x, x) if isinstance(x, str) else x
+
+    ops: List[dict] = []
+    for i, o in enumerate(request_ops):
+        kind = "edge" if o.kind == "edge" else "node"
+        if o.op == "delete":
+            if not o.id:
+                continue
+            ops.append({"op": "delete", "entity_kind": kind, "entity_id": _ref(o.id), "payload": None})
+        elif o.op == "create":
+            eid = create_eid[i]
+            payload = dict(o.payload or {})
+            if kind == "edge":                 # an edge may point at nodes created in THIS same batch
+                for f in endpoint_fields:
+                    if f in payload:
+                        payload[f] = _ref(payload[f])
+            else:                              # node — stamp the (minted-or-given) urn into the payload
+                payload["urn"] = eid
+            ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload})
+        else:  # update — forward the RAW partial patch + the OCC base_version; the service does the
+               # authoritative field-level merge (patch onto current, or a 3-way conflict check).
+            if not o.id:
+                continue
+            ops.append({"op": "update", "entity_kind": kind, "entity_id": _ref(o.id),
+                        "payload": o.payload or {}, "base_version": o.base_version})
+    return ops, assigned
+
+
+@router.post("/changes", response_model=GraphChangesResponse, response_model_by_alias=True)
+async def apply_graph_changes(
+    ws_id: str,
+    request: GraphChangesRequest = Body(...),
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to edit."),
+    branchId: str = Query(..., description="Draft branch the changes are committed to."),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Apply a batch of canvas edits to a draft as ONE atomic commit — the unified
+    'save' path for draft editing (create/update/delete, nodes and edges, together).
+
+    ``update`` payloads are partial and merged server-side onto the entity's current
+    draft state, so the client sends only what changed. Deleting a node cascades to its
+    containment subtree + all incident edges (ontology-driven, resolved live). Returns the
+    new commit id and a temp-ref→entity-id map for creates so the client can reconcile
+    optimistic ids."""
+    from backend.app.services.versioning.service import (
+        GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
+    from backend.app.services.versioning.ids import prefixed_id
+    actor = user.id if user else "system"
+    svc = GraphVersioningService()
+    g = await svc.get_graph_by_data_source(dataSourceId)
+    if g is None or g.get("workspace_id") != ws_id:
+        raise HTTPException(status_code=404, detail="no versioned graph for this data source")
+    graph_id = g["graph_id"]
+
+    from backend.app.ontology.urn import make_urn
+    ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+
+    if not ops:
+        return {"commitId": None, "assigned": assigned}
+
+    try:
+        commit_id = await svc.apply_ops(
+            graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
+            message=request.message or "Canvas edits",
+            containment_edge_types=await _resolve_containment_types(engine),
+            ontology_rules=await _resolve_ontology_rules(
+                engine, fail_closed=(g.get("kind") == "blank")))
+    except OntologyViolation as exc:
+        raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
+    except MergeConflict as exc:
+        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+    except ConcurrencyError as exc:
+        raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+
+    # Invalidate the draft branch's read cache so the client's NEXT read reflects
+    # this commit immediately. Without this, the cached reads for this branch
+    # (nodes / children / top-level / layer assignments) keep serving the
+    # pre-commit state until their TTL (~30-60s) expires — which is exactly the
+    # "my saved change reverts on refresh, then reappears ~20s later" symptom.
+    # Draft reads key on CacheScope(ws, ds, branch), so we bump that exact scope.
+    # bump_generation swallows Redis errors and never raises, so this can't fail
+    # the user's write.
+    await get_graph_cache().bump_generation(
+        CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
+    )
+    return {"commitId": commit_id, "assigned": assigned}
+
+
+class DeleteImpactResponse(BaseModel):
+    """What deleting a node would remove: its containment subtree (nodes) + every incident
+    edge (any type). Lists are capped for the UI; ``*Total`` give the true counts. Payloads
+    are passed through as-is (camelCase node/edge dicts)."""
+    nodes: List[dict]
+    edges: List[dict]
+    node_total: int = Field(default=0, alias="nodeTotal")
+    edge_total: int = Field(default=0, alias="edgeTotal")
+
+    class Config:
+        populate_by_name = True
+
+
+@router.get("/nodes/{urn}/delete-impact", response_model=DeleteImpactResponse)
+async def delete_impact(
+    urn: str,
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose versioned graph to inspect."),
+    branchId: str = Query(..., description="Draft branch to compute the impact on."),
+    user=Depends(get_optional_user),
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Preview the cascade for deleting ``urn`` on a draft: the containment subtree + all
+    incident edges that would be removed. Read-only, computed on demand (the lazy-loaded
+    canvas needn't hold the subtree) via the SAME helper the commit uses — so the preview
+    matches the result. Ontology containment edge types are resolved live."""
+    from backend.app.services.versioning.service import GraphVersioningService
+    svc = GraphVersioningService()
+    g = await svc.get_graph_by_data_source(dataSourceId)
+    if g is None or g.get("workspace_id") != ws_id:
+        raise HTTPException(status_code=404, detail="no versioned graph for this data source")
+    return await svc.delete_impact(
+        graph_id=g["graph_id"], branch_id=branchId, root_urn=urn,
+        containment_edge_types=await _resolve_containment_types(engine))
 
 
 # ─── Preflight / guided-create APIs ─────────────────────────────────────────
@@ -1634,6 +2055,13 @@ async def batch_commands(
                     error="Skipped: batch aborted due to earlier failure (fail_fast=true)",
                 ))
             break
+
+    # Batch mutations change graph content just like the single-command
+    # endpoints — invalidate the response cache + nudge the counts poll.
+    # (This call was missing entirely: batch writes previously left the
+    # browse caches serving pre-mutation entries until TTL.)
+    if succeeded > 0:
+        await _invalidate_cache(engine)
 
     return BatchResponse(
         results=results,

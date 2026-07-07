@@ -60,6 +60,7 @@ def validate_node_mutation(
     *,
     parent_entity_type: Optional[str] = None,
     existing_entity_type: Optional[str] = None,
+    child_entity_types: Optional[List[str]] = None,
 ) -> MutationResult:
     """
     Validate a node mutation against the resolved ontology.
@@ -69,8 +70,15 @@ def validate_node_mutation(
     op:                  CREATE | UPDATE | DELETE
     entity_type:         The entity type of the node being mutated.
     ontology:            The resolved ontology in scope.
-    parent_entity_type:  For CREATE with a parent — the parent's entity type.
-    existing_entity_type: For UPDATE — the current entity type (type changes disallowed).
+    parent_entity_type:  For CREATE with a parent, or for an UPDATE that changes
+                         entity_type — the node's parent's entity type.
+    existing_entity_type: For UPDATE — the current entity type. If it differs from
+                         entity_type, the new type is validated against
+                         parent_entity_type (can_be_contained_by) and
+                         child_entity_types (can_contain).
+    child_entity_types:  For an UPDATE that changes entity_type — the entity types
+                         of the node's existing children, validated against the
+                         new type's can_contain.
     """
     errors: List[str] = []
     warnings: List[str] = []
@@ -103,17 +111,25 @@ def validate_node_mutation(
                     f"Known types: {sorted(known_types)}"
                 )
         if parent_entity_type is not None and entity_type in known_types:
-            if parent_entity_type not in known_types:
+            # Case-insensitive parent-type lookup (a discovered graph's parent node
+            # type may be cased differently than the ontology's canonical id).
+            parent_canonical = (
+                parent_entity_type
+                if parent_entity_type in known_types
+                else known_types_upper.get(parent_entity_type.upper())
+            )
+            if parent_canonical is None:
                 errors.append(
                     f"Parent entity type '{parent_entity_type}' is not defined in the active ontology."
                 )
             else:
                 # Check containment rule: parent's can_contain must include child type
-                parent_def = ontology.entity_type_definitions.get(parent_entity_type)
+                parent_def = ontology.entity_type_definitions.get(parent_canonical)
                 if parent_def is not None:
                     allowed_children = set(parent_def.hierarchy.can_contain)
+                    allowed_children_upper = {c.upper() for c in allowed_children}
                     # Empty can_contain = unrestricted (allows any child type)
-                    if allowed_children and entity_type not in allowed_children:
+                    if allowed_children_upper and entity_type.upper() not in allowed_children_upper:
                         errors.append(
                             f"Ontology does not allow '{parent_entity_type}' to contain '{entity_type}'. "
                             f"Allowed children: {sorted(allowed_children)}"
@@ -125,11 +141,37 @@ def validate_node_mutation(
                 f"Entity type '{entity_type}' is not in the active ontology. "
                 "The node may have been created with an older ontology version."
             )
-        if existing_entity_type and existing_entity_type != entity_type:
-            errors.append(
-                f"Changing entity type from '{existing_entity_type}' to '{entity_type}' is not allowed. "
-                "Delete and recreate the node instead."
+        if existing_entity_type and existing_entity_type.upper() != entity_type.upper():
+            # Type change: validate the NEW type against its ontology-defined
+            # hierarchy — it must be a valid child of parent_entity_type
+            # (can_be_contained_by) and must be able to contain every type in
+            # child_entity_types (can_contain).
+            new_canonical = (
+                entity_type
+                if entity_type in known_types
+                else known_types_upper.get(entity_type.upper())
             )
+            new_def = ontology.entity_type_definitions.get(new_canonical) if new_canonical else None
+            if new_def is not None:
+                allowed_parents_upper = {p.upper() for p in new_def.hierarchy.can_be_contained_by}
+                # Empty can_be_contained_by = unrestricted (allows any parent)
+                if (
+                    parent_entity_type is not None
+                    and allowed_parents_upper
+                    and parent_entity_type.upper() not in allowed_parents_upper
+                ):
+                    errors.append(
+                        f"A {parent_entity_type} can't contain a {entity_type}."
+                    )
+
+                allowed_children_upper = {c.upper() for c in new_def.hierarchy.can_contain}
+                # Empty can_contain = unrestricted (allows any child type)
+                if allowed_children_upper:
+                    for child_type in (child_entity_types or []):
+                        if child_type.upper() not in allowed_children_upper:
+                            errors.append(
+                                f"A {entity_type} can't contain a {child_type}."
+                            )
 
     elif op == MutationOp.DELETE:
         if entity_type not in known_types:
@@ -197,14 +239,14 @@ def validate_edge_mutation(
         # rel_def is a RelationshipTypeDefEntry; use .source_types / .target_types
         src_types = rel_def.source_types or []
         tgt_types = rel_def.target_types or []
-        # Source type constraint
-        if src_types and source_entity_type not in src_types:
+        # Source/target membership is case-insensitive: a discovered graph's entity
+        # type ids may be cased differently than the ontology's canonical ids.
+        if src_types and source_entity_type.upper() not in {t.upper() for t in src_types}:
             errors.append(
                 f"'{source_entity_type}' is not a valid source for relationship '{edge_type}'. "
                 f"Allowed sources: {sorted(src_types)}"
             )
-        # Target type constraint
-        if tgt_types and target_entity_type not in tgt_types:
+        if tgt_types and target_entity_type.upper() not in {t.upper() for t in tgt_types}:
             errors.append(
                 f"'{target_entity_type}' is not a valid target for relationship '{edge_type}'. "
                 f"Allowed targets: {sorted(tgt_types)}"

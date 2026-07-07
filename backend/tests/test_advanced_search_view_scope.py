@@ -244,6 +244,47 @@ class TestCollectReferenceRoots:
         assert roots == ["urn:a"]
         assert layers == frozenset({"ok"})
 
+    def test_canonical_flattened_assignments_map_collected(self):
+        """Canonical nested `layout.referenceLayout` shape with a top-level
+        `assignments` map (Task 1's shape) — roots come from the assignment
+        keys, not a hand-rolled `entityAssignments` walk."""
+        config = {
+            "layout": {
+                "referenceLayout": {
+                    "layers": [
+                        {"id": "source", "entityTypes": ["Table"]},
+                        {"id": "staging", "entityTypes": ["View"]},
+                    ],
+                    "assignments": {
+                        "urn:domain:Customers": {"layerId": "source"},
+                        "urn:stage:1": {"layerId": "staging"},
+                    },
+                },
+            },
+        }
+        roots, types, layers = _collect_reference_roots(config)
+        assert sorted(roots) == ["urn:domain:Customers", "urn:stage:1"]
+        assert types == frozenset({"Table", "View"})
+        assert layers == frozenset({"source", "staging"})
+
+    def test_nested_location_wins_over_legacy_top_level(self):
+        """When both the canonical nested location and the legacy top-level
+        `referenceLayout` are present, the nested one wins (parser contract)."""
+        config = {
+            "layout": {
+                "referenceLayout": {
+                    "layers": [{"id": "nested"}],
+                    "assignments": {"urn:nested": {"layerId": "nested"}},
+                },
+            },
+            "referenceLayout": {
+                "layers": [{"id": "legacy", "entityAssignments": [{"urn": "urn:legacy"}]}],
+            },
+        }
+        roots, _, layers = _collect_reference_roots(config)
+        assert roots == ["urn:nested"]
+        assert layers == frozenset({"nested"})
+
 
 class TestCollectContentScope:
     def test_empty_content(self):

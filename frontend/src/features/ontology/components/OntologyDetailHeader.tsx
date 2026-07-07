@@ -103,7 +103,7 @@ export function OntologyDetailHeader({
   const hasMultipleVersions = versions && versions.length > 1
 
   return (
-    <div className="flex-shrink-0 px-8 pt-6 pb-0">
+    <div className="flex-shrink-0 max-w-[1440px] mx-auto w-full px-8 pt-6 pb-0">
       {/* Tier 1: Name + version + primary actions */}
       <div className="flex items-start justify-between mb-1">
         <div className="min-w-0 flex-1">

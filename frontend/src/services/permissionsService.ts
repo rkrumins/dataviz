@@ -34,7 +34,8 @@ export interface RoleDefinitionResponse {
      *  only assignable inside the workspace whose id is ``scopeId``. */
     scopeType: 'global' | 'workspace'
     scopeId: string | null
-    /** System roles (admin / user / viewer) are immutable. */
+    /** True for built-in (seeded) roles. These are editable but cannot be
+     *  renamed, re-scoped, or deleted — only reset to default. */
     isSystem: boolean
     permissions: string[]
     createdAt: string | null
@@ -43,6 +44,14 @@ export interface RoleDefinitionResponse {
     /** Number of role_bindings rows referencing this role. The Delete
      *  button is disabled when this is > 0. */
     bindingCount: number
+    /** True when a system role's live bundle/description diverges from its
+     *  seeded default — enables the "Reset to default" action. Always
+     *  false for custom roles. */
+    isModified: boolean
+    /** Permissions that cannot be removed from this role (the floor that
+     *  gates platform administration). Rendered checked-and-locked in the
+     *  editor. Empty for most roles. */
+    lockedPermissions: string[]
 }
 
 export interface RoleCreateRequest {
@@ -177,6 +186,17 @@ export const permissionsService = {
         )
     },
 
+    /**
+     * Reset a system role back to its seeded default permission bundle +
+     * description. Only valid for built-in roles (custom roles 409).
+     */
+    resetRole(name: string): Promise<RoleDefinitionResponse> {
+        return authFetch<RoleDefinitionResponse>(
+            `/api/v1/admin/roles/${encodeURIComponent(name)}/reset`,
+            { method: 'POST', body: JSON.stringify({}) },
+        )
+    },
+
     deleteRole(name: string): Promise<void> {
         return authFetch<void>(
             `/api/v1/admin/roles/${encodeURIComponent(name)}`,
@@ -216,6 +236,17 @@ export const permissionsService = {
     previewRoleDelete(name: string): Promise<ImpactPreviewResponse> {
         return authFetch<ImpactPreviewResponse>(
             `/api/v1/admin/roles/${encodeURIComponent(name)}/preview-delete`,
+            { method: 'POST', body: JSON.stringify({}) },
+        )
+    },
+
+    /**
+     * Impact preview for resetting a system role to its seeded default —
+     * the gained/lost diff vs the role's current bundle.
+     */
+    previewRoleReset(name: string): Promise<ImpactPreviewResponse> {
+        return authFetch<ImpactPreviewResponse>(
+            `/api/v1/admin/roles/${encodeURIComponent(name)}/preview-reset`,
             { method: 'POST', body: JSON.stringify({}) },
         )
     },

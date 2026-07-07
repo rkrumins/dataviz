@@ -25,14 +25,21 @@ export const POLLING_INTERVALS = {
   /**
    * Active announcements (banner). Backend's admin config can
    * override this per-deployment via `/announcements/config`; this is
-   * the fallback used until the config response lands.
+   * the fallback used until the config response lands. 60s (was 15s):
+   * this was the highest-frequency idle poll in the app — at fleet
+   * scale it dominated baseline request volume for a surface where a
+   * minute of announcement latency is invisible. Ops can still dial
+   * it down remotely via the admin config when a faster banner is
+   * genuinely needed.
    */
-  announcements: 15_000,
+  announcements: 60_000,
   /**
    * Provider health/status. Background poll for the connection status
-   * indicator across all configured providers.
+   * indicator across all configured providers. 60s (was 30s): the
+   * indicator is advisory; real outages surface through request
+   * failures and the health banner long before this poll.
    */
-  providerStatus: 30_000,
+  providerStatus: 60_000,
   /**
    * Aggregation job history — only ticks while a job is actually
    * pending/running. Bumped from 3s to 5s because below 5s the UI
@@ -51,7 +58,33 @@ export const POLLING_INTERVALS = {
    * poll is essentially free.
    */
   permissions: 60_000,
+  /**
+   * Canvas auto-retry cadence while the graph provider is warming up
+   * (loading its dataset) or briefly unavailable. Deliberately NOT tight:
+   * a graph that's reloading takes seconds-to-minutes, so hammering every
+   * 2-3s just multiplies load across every affected user with no faster
+   * recovery. A few gentle, JITTERED attempts (see PROVIDER_RETRY_MAX_ATTEMPTS)
+   * catch a quick recovery; after that the canvas stops and offers an
+   * explicit Retry. Jitter avoids a thundering herd when 100s of users hit
+   * the same outage; the retry also pauses entirely while the tab is hidden.
+   * Overridable per-deployment via VITE_PROVIDER_RETRY_INTERVAL_MS.
+   */
+  providerRetry: (() => {
+    const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_INTERVAL_MS)
+    return Number.isFinite(env) && env >= 2_000 ? env : 10_000
+  })(),
 } as const
+
+/**
+ * How many times the canvas auto-retries a warming/unavailable provider
+ * before it stops and shows an explicit "Retry" button. Bounded on purpose:
+ * unbounded background retries across 100s of users is exactly the load
+ * spike we must avoid. Overridable via VITE_PROVIDER_RETRY_MAX_ATTEMPTS.
+ */
+export const PROVIDER_RETRY_MAX_ATTEMPTS = (() => {
+  const env = Number(import.meta.env?.VITE_PROVIDER_RETRY_MAX_ATTEMPTS)
+  return Number.isFinite(env) && env >= 0 ? env : 5
+})()
 
 /**
  * Add bounded jitter to a base interval. Used to prevent lockstep

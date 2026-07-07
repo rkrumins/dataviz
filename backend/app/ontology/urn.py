@@ -46,14 +46,19 @@ def make_urn(
     Parameters
     ----------
     entity_type:   Ontology entity type id (e.g. "domain", "dataset").
-    slug:          Optional stable identifier.  Defaults to a random hex UUID.
+    slug:          Optional stable identifier. When omitted, defaults to a FULL 128-bit random
+                   hex (``uuid4().hex``, 32 chars). Do NOT truncate this tail: a node's urn doubles
+                   as its ``entity_id`` (the identity key), there is no unique constraint on it, and
+                   a collision is silently absorbed as a last-writer-wins overwrite of the existing
+                   entity — so the random tail must stay collision-safe at 1M–10M+ entities per
+                   graph (a 48-bit tail is ~16% likely to collide at 10M; 128-bit is ~1e-25).
     source_system: Origin system ("manual", "falkordb", "datahub", …).
 
     Returns
     -------
-    A string like ``urn:synodic:manual:dataset:a1b2c3d4efgh``.
+    A string like ``urn:synodic:manual:dataset:3f9a1c7b2e4d6a8f0b1c2d3e4f5a6b7c``.
     """
-    s = (slug or uuid.uuid4().hex[:12]).strip()
+    s = (slug or uuid.uuid4().hex).strip()
     return f"{SYNODIC_PREFIX}:{_safe(source_system)}:{_safe(entity_type)}:{s}"
 
 

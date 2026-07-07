@@ -17,17 +17,15 @@ function rule(id: string, over: Partial<DisplayRuleConfig> = {}): DisplayRuleCon
 }
 
 beforeEach(() => {
-    useReferenceModelStore.setState({ displayRules: [], syncStatus: 'synced' })
+    useReferenceModelStore.setState({ displayRules: [] })
 })
 
 
 describe('referenceModelStore — display rules', () => {
-    it('addDisplayRule appends and marks the blueprint dirty', () => {
+    it('addDisplayRule appends the rule', () => {
         useReferenceModelStore.getState().addDisplayRule(rule('a'))
         const s = useReferenceModelStore.getState()
         expect(s.displayRules.map((r) => r.id)).toEqual(['a'])
-        // auto-dirty middleware flips syncStatus on blueprint mutations.
-        expect(s.syncStatus).toBe('dirty')
     })
 
     it('updateDisplayRule patches a single rule by id', () => {
@@ -76,7 +74,7 @@ describe('referenceModelStore — display rules', () => {
         expect(useReferenceModelStore.getState().displayRules.map((r) => r.id)).toEqual(['b', 'a'])
     })
 
-    it('create-from-query: addDisplayRule stores the seed predicate verbatim and dirties', () => {
+    it('create-from-query: addDisplayRule stores the seed predicate verbatim', () => {
         // Mirrors the Advanced-Search "Create rule" flow: a rule built
         // from a live query carries that query's predicate unchanged.
         const queryPredicate = {
@@ -91,6 +89,5 @@ describe('referenceModelStore — display rules', () => {
         const s = useReferenceModelStore.getState()
         const saved = s.displayRules.find((r) => r.id === 'from-query')!
         expect(saved.predicate).toEqual(queryPredicate)
-        expect(s.syncStatus).toBe('dirty')
     })
 })

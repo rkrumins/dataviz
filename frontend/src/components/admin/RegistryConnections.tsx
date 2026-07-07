@@ -5,6 +5,7 @@ import {
     Shield, Globe, ChevronDown, ChevronUp, Loader2, AlertTriangle, Sparkles
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useBrand } from '@/store/branding'
 import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { usePermission } from '@/store/auth'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
@@ -161,6 +162,7 @@ function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete,
 
 export function RegistryConnections() {
     const navigate = useNavigate()
+    const { appName } = useBrand()
     // Phase 18: providers are visible to anyone with workspace:provider:read,
     // but write paths (register / edit / delete / test / discover) stay
     // platform-admin-only because the rows carry credentials.
@@ -332,7 +334,7 @@ export function RegistryConnections() {
                                         </div>
                                         <div>
                                             <p className="text-sm font-semibold text-ink">2. Validate connectivity</p>
-                                            <p className="mt-1 text-sm text-ink-muted">Synodic checks the provider before you continue into asset discovery.</p>
+                                            <p className="mt-1 text-sm text-ink-muted">{appName} checks the provider before you continue into asset discovery.</p>
                                         </div>
                                     </div>
                                     <div className="flex items-start gap-3">

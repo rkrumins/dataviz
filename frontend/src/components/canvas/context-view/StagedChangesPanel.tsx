@@ -19,6 +19,7 @@ import {
   type StagedChange,
   type StagedChangeType,
 } from '@/store/stagedChangesStore'
+import { CascadeImpactList } from '@/features/versioning/components/CascadeImpactList'
 
 // Section labels — slight tone shift from the change type for human readability.
 const TYPE_LABELS: Record<StagedChangeType, string> = {
@@ -32,6 +33,7 @@ const TYPE_LABELS: Record<StagedChangeType, string> = {
   edit_edge: 'Edge edits',
   delete_edge: 'Edge deletions',
   reverse_edge: 'Edge reversals',
+  layer_config: 'Layers',
 }
 
 const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
@@ -45,7 +47,13 @@ const TYPE_ICONS: Record<StagedChangeType, keyof typeof LucideIcons> = {
   edit_edge: 'Cable',
   delete_edge: 'Unlink',
   reverse_edge: 'Repeat',
+  layer_config: 'Layers',
 }
+
+// View-layout changes (layer definitions AND entity placement) are VIEW presentation, not data-source
+// changes — they persist to referenceLayout, produce zero graph ops, and the review groups them under
+// their own "View layout" banner, visually separated from everything that touches the graph.
+const VIEW_LAYOUT_TYPES: ReadonlySet<StagedChangeType> = new Set(['layer_config', 'assign_layer', 'move_to_layer'])
 
 // Color tokens shared between row tints and section headings.
 const TONE = {
@@ -133,18 +141,25 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
       'rename_entity', 'edit_edge', 'reverse_edge',
       'assign_layer', 'move_to_layer',
       'delete_edge', 'delete_entity',
+      'layer_config',
     ]
     return ORDER
       .map(type => [type, groups.get(type) ?? []] as const)
       .filter(([, items]) => items.length > 0)
   }, [changes, filter])
 
+  // Split into data-source changes vs view-layout changes so the review can banner them separately —
+  // layer edits never touch the data source, and the UI should make that obvious.
+  const dataGrouped = useMemo(() => grouped.filter(([type]) => !VIEW_LAYOUT_TYPES.has(type)), [grouped])
+  const layerGrouped = useMemo(() => grouped.filter(([type]) => VIEW_LAYOUT_TYPES.has(type)), [grouped])
+  const layerCount = useMemo(() => changes.filter(c => VIEW_LAYOUT_TYPES.has(c.type)).length, [changes])
+
   const total = changes.length
   const failedCount = changes.filter(c => c.error).length
 
   const summaryStats = useMemo(() => ({
     creates: changes.filter(c => c.type === 'create_entity' || c.type === 'create_edge').length,
-    edits: changes.filter(c => c.type === 'rename_entity' || c.type === 'assign_layer' || c.type === 'move_to_layer' || c.type === 'edit_edge' || c.type === 'reverse_edge').length,
+    edits: changes.filter(c => c.type === 'rename_entity' || c.type === 'edit_edge' || c.type === 'reverse_edge').length,
     deletes: changes.filter(c => c.type === 'delete_entity' || c.type === 'delete_edge').length,
   }), [changes])
 
@@ -284,39 +299,77 @@ export function StagedChangesPanel({ onConfirm }: SaveConfirmationModalProps) {
               {grouped.length === 0 ? (
                 <EmptyState hasFilter={filter.length > 0} onClearFilter={() => setFilter('')} />
               ) : (
-                grouped.map(([type, items]) => {
-                  const IconKey = TYPE_ICONS[type]
-                  const Icon = (LucideIcons[IconKey] as React.ComponentType<{ className?: string; strokeWidth?: number }>) ?? LucideIcons.Circle
-                  const color = stagedChangeColor(type)
-                  return (
-                    <section key={type}>
-                      <div className="flex items-center gap-2 px-2 mb-2">
-                        <div className={cn(
-                          'w-6 h-6 rounded-md flex items-center justify-center border',
-                          TONE[color].bg, TONE[color].border,
-                        )}>
-                          <Icon className={cn('w-3.5 h-3.5', TONE[color].text)} strokeWidth={2.2} />
+                <>
+                  {/* Data-source changes — everything that commits to the graph. */}
+                  {dataGrouped.map(([type, items]) => {
+                    const IconKey = TYPE_ICONS[type]
+                    const Icon = (LucideIcons[IconKey] as React.ComponentType<{ className?: string; strokeWidth?: number }>) ?? LucideIcons.Circle
+                    const color = stagedChangeColor(type)
+                    return (
+                      <section key={type}>
+                        <div className="flex items-center gap-2 px-2 mb-2">
+                          <div className={cn(
+                            'w-6 h-6 rounded-md flex items-center justify-center border',
+                            TONE[color].bg, TONE[color].border,
+                          )}>
+                            <Icon className={cn('w-3.5 h-3.5', TONE[color].text)} strokeWidth={2.2} />
+                          </div>
+                          <h4 className={cn('text-[11px] font-bold uppercase tracking-[0.08em]', TONE[color].text)}>
+                            {TYPE_LABELS[type]}
+                          </h4>
+                          <span className="text-[10px] tabular-nums text-white/40 font-semibold ml-auto">{items.length}</span>
                         </div>
-                        <h4 className={cn('text-[11px] font-bold uppercase tracking-[0.08em]', TONE[color].text)}>
-                          {TYPE_LABELS[type]}
-                        </h4>
-                        <span className="text-[10px] tabular-nums text-white/40 font-semibold ml-auto">{items.length}</span>
+                        <div className="space-y-1.5">
+                          {items.map(change => (
+                            <ChangeRow
+                              key={change.id}
+                              change={change}
+                              colorKey={color}
+                              isExpanded={expandedIds.has(change.id)}
+                              onToggleExpanded={() => toggleExpanded(change.id)}
+                              onDiscard={() => discard(change.id)}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    )
+                  })}
+
+                  {/* View layout — presentation only, DECOUPLED from the data source. Own banner so it's
+                      unmistakably not a data change; on Save it persists to the view, never the graph. */}
+                  {layerGrouped.length > 0 && (
+                    <section>
+                      <div className={cn(
+                        'flex items-center gap-2 px-2 mb-2',
+                        dataGrouped.length > 0 && 'pt-4 border-t border-white/[0.06]',
+                      )}>
+                        <div className="w-6 h-6 rounded-md flex items-center justify-center border bg-indigo-500/[0.08] border-indigo-400/30">
+                          <LucideIcons.Layers className="w-3.5 h-3.5 text-indigo-300" strokeWidth={2.2} />
+                        </div>
+                        <h4 className="text-[11px] font-bold uppercase tracking-[0.08em] text-indigo-200">View layout</h4>
+                        <span className="text-[9.5px] text-white/35 font-medium normal-case tracking-normal hidden sm:inline">this view only · not the data source</span>
+                        <span className="text-[10px] tabular-nums text-white/40 font-semibold ml-auto">{layerCount}</span>
                       </div>
                       <div className="space-y-1.5">
-                        {items.map(change => (
-                          <ChangeRow
-                            key={change.id}
-                            change={change}
-                            colorKey={color}
-                            isExpanded={expandedIds.has(change.id)}
-                            onToggleExpanded={() => toggleExpanded(change.id)}
-                            onDiscard={() => discard(change.id)}
-                          />
-                        ))}
+                        {layerGrouped.flatMap(([, items]) => items).map(change => {
+                          const action = (change.after as { action?: string } | undefined)?.action
+                          const rowColor: 'green' | 'amber' | 'red' =
+                            action === 'add' ? 'green' : action === 'delete' ? 'red' : 'amber'
+                          return (
+                            <ChangeRow
+                              key={change.id}
+                              change={change}
+                              colorKey={rowColor}
+                              isExpanded={expandedIds.has(change.id)}
+                              onToggleExpanded={() => toggleExpanded(change.id)}
+                              onDiscard={() => discard(change.id)}
+                            />
+                          )
+                        })}
                       </div>
                     </section>
-                  )
-                })
+                  )}
+                </>
               )}
             </div>
 
@@ -557,20 +610,29 @@ function ChangeRow({
                 transition={{ duration: 0.18, ease: 'easeOut' }}
                 className="overflow-hidden"
               >
-                <div className="mt-2.5 grid grid-cols-2 gap-2">
-                  <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
-                    <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">Before</p>
-                    <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
-                      {change.before === undefined ? '—' : JSON.stringify(change.before, null, 2)}
-                    </pre>
+                {change.type === 'delete_entity' && (change.before as any)?.cascade ? (
+                  // Itemised cascade impact — the full set of contained entities + edges
+                  // this delete will remove (from the live delete-impact preview).
+                  <CascadeImpactList
+                    impact={(change.before as any).cascade}
+                    rootUrn={change.targetUrn}
+                  />
+                ) : (
+                  <div className="mt-2.5 grid grid-cols-2 gap-2">
+                    <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
+                      <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">Before</p>
+                      <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
+                        {change.before === undefined ? '—' : JSON.stringify(change.before, null, 2)}
+                      </pre>
+                    </div>
+                    <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
+                      <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">After</p>
+                      <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
+                        {change.after === undefined ? '—' : JSON.stringify(change.after, null, 2)}
+                      </pre>
+                    </div>
                   </div>
-                  <div className="rounded-md border border-white/[0.06] bg-black/40 p-2 min-w-0">
-                    <p className="text-[9px] uppercase tracking-[0.08em] text-white/40 mb-1 font-bold">After</p>
-                    <pre className="text-[10.5px] text-white/65 whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono leading-snug">
-                      {change.after === undefined ? '—' : JSON.stringify(change.after, null, 2)}
-                    </pre>
-                  </div>
-                </div>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

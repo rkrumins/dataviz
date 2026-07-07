@@ -29,6 +29,10 @@ FALKORDB_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_QUERY_TIMEOUT", "
 # the generic 5s read default because wide containers with many lineage
 # cross-edges legitimately exceed it; aligns with HTTP_TIMEOUT_GRAPH_SECS.
 FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_CHILDREN_QUERY_TIMEOUT", "15"))
+# get_top_level_or_orphan_nodes per-query timeout. Larger than the generic
+# 5s read default because the structural top-level predicate scans wide
+# adjacency lists on large graphs; aligns with HTTP_TIMEOUT_GRAPH_SECS.
+FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_TOP_LEVEL_QUERY_TIMEOUT", "15"))
 # /edges/between resolves edges among a (potentially large) URN set. The
 # generic 5s read default times out on big graphs; this sits just under
 # the 45s ASGI/client budgets so the DB cancels first with a clean error.
@@ -56,13 +60,22 @@ FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"
 # Health/readiness probes — must respond fast for K8s.
 HTTP_TIMEOUT_HEALTH_SECS: float = float(os.getenv("HTTP_TIMEOUT_HEALTH_SECS", "5"))
 # Read-only graph queries — bounded by per-query timeouts below.
-HTTP_TIMEOUT_GRAPH_SECS: float = float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "15"))
+# Default 60 to match the tier list in main.py (_TimeoutMiddleware reads
+# the env var directly with default "60"); the two defaults MUST agree —
+# a 15 here would kill /edges/between mid-flight (40s query budget) for
+# any deployer who trusts this file. The env var is the single knob.
+HTTP_TIMEOUT_GRAPH_SECS: float = float(os.getenv("HTTP_TIMEOUT_GRAPH_SECS", "60"))
 # Trace routes (/trace/v2, /trace/expand on v1; /trace, /trace/expand on
 # v2). Deep BFS traversals legitimately exceed the 15s graph budget;
 # matches the frontend TRACE_MS default so neither side aborts first.
 HTTP_TIMEOUT_TRACE_SECS: float = float(os.getenv("HTTP_TIMEOUT_TRACE_SECS", "60"))
 # Write-heavy aggregation operations.
 HTTP_TIMEOUT_AGGREGATION_SECS: float = float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "45"))
+# Versioning routes — projection reconcile/rebuild do request-scoped
+# full-graph work that legitimately exceeds the 30s default on large
+# graphs. Mirrors the tier in main.py; keep below nginx proxy_read_timeout
+# (180s) so the proxy never wins the race.
+HTTP_TIMEOUT_VERSIONING_SECS: float = float(os.getenv("HTTP_TIMEOUT_VERSIONING_SECS", "120"))
 # Default for all other endpoints.
 HTTP_TIMEOUT_DEFAULT_SECS: float = float(os.getenv("HTTP_TIMEOUT_DEFAULT_SECS", "30"))
 
@@ -160,6 +173,25 @@ DISCOVERY_REFRESH_INTERVAL_SECS: int = int(os.getenv("DISCOVERY_REFRESH_INTERVAL
 # legitimately slow provider call but recovers fast on stalls.
 DISCOVERY_DEDUP_TTL_SECS: int = int(os.getenv("DISCOVERY_DEDUP_TTL_SECS", "90"))
 
+# Inner budget for one live discovery provider call (list_graphs or a
+# per-asset stats scan). Must sit ABOVE the provider's stats-query
+# timeout (FALKORDB_STATS_QUERY_TIMEOUT_SECS, default 30s) so a
+# large-graph count scan can finish. Single source of truth: the worker
+# derives its OUTER per-job timeout from this (+ headroom) — previously
+# both read the same env var with divergent defaults (35s inner vs 10s
+# outer) and the worker killed discovery jobs before their inner budget.
+DISCOVERY_LIVE_TIMEOUT_SECS: int = int(os.getenv("DISCOVERY_LIVE_TIMEOUT_SECS", "35"))
+
+# Read-path freshness window for asset_discovery_cache rows. Defaults to
+# the background sweep cadence: a row is "fresh" until the next scheduled
+# sweep would have replaced it anyway. The old value (STATS_CACHE_FRESH_
+# SECS=300, 6× shorter than the 1800s sweep) meant every row read as
+# "stale" most of the time — flipping every visible UI row into a 5s
+# polling loop and (worse) re-enqueueing a discovery job on every read.
+DISCOVERY_CACHE_FRESH_SECS: int = int(
+    os.getenv("DISCOVERY_CACHE_FRESH_SECS", str(DISCOVERY_REFRESH_INTERVAL_SECS))
+)
+
 # ── Insights frontend / job-poll knobs (surfaced via /admin/insights/config) ─
 # Frontend reads these once at app mount via ``useInsightsConfig``;
 # all values are env-driven on the backend. Changing requires a
@@ -168,13 +200,13 @@ INSIGHTS_FRONTEND_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_FRONTEND_POLL_
 INSIGHTS_FRONTEND_STALE_TIME_MS: int = int(os.getenv("INSIGHTS_FRONTEND_STALE_TIME_MS", "60000"))
 INSIGHTS_JOB_POLL_INTERVAL_MS: int = int(os.getenv("INSIGHTS_JOB_POLL_INTERVAL_MS", "2000"))
 INSIGHTS_JOB_MAX_RETRIES: int = int(os.getenv("INSIGHTS_JOB_MAX_RETRIES", "4"))
-# UI-only "Stale" presentation threshold. The backend still classifies
-# rows past STATS_CACHE_FRESH_SECS as ``stale`` (it's the read-path
-# enqueue trigger), but the frontend's StatusChip suppresses the amber
-# warning until ``staleness_secs`` exceeds this threshold. Default 24h
-# avoids the "Stale 4m ago" false-alarm UX with the 30-min discovery
-# scheduler cadence; ops can lower it for environments that need tighter
-# freshness signalling.
+# UI-only "Stale" presentation threshold. The backend classifies rows
+# past DISCOVERY_CACHE_FRESH_SECS as ``stale`` (presentation only —
+# reads no longer enqueue refresh work), and the frontend's StatusChip
+# suppresses the amber warning until ``staleness_secs`` exceeds this
+# threshold. Default 24h avoids the "Stale 4m ago" false-alarm UX;
+# ops can lower it for environments that need tighter freshness
+# signalling.
 INSIGHTS_UI_STALE_THRESHOLD_SECS: int = int(os.getenv("INSIGHTS_UI_STALE_THRESHOLD_SECS", "86400"))
 
 # ── Insights worker / DLQ knobs ─────────────────────────────────────

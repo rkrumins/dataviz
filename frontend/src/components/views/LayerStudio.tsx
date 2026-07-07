@@ -13,9 +13,14 @@
  * - Click any layer or group → becomes active drop target
  * - Drag entity from browser → assigned to active target (layer + optional node)
  * - Full logical node CRUD with undo/redo
- * - Autosave to backend (debounced 800ms) with status indicator
  * - "Auto-Organize" heuristic suggestions with review sheet
  * - Live mini canvas preview (toggle-able)
+ *
+ * Assignments write to `formData.assignments` (the canonical flattened
+ * urn -> layer map — same shape the canvas persists via persistReferenceLayout),
+ * NOT into `layers[].entityAssignments` (legacy, deprecated). The wizard no
+ * longer autosaves a draft context model; formData is the sole buffer until
+ * the wizard's own Submit persists it.
  */
 
 import {
@@ -32,9 +37,7 @@ import {
     Sparkles,
     Eye,
     EyeOff,
-    CheckCircle2,
     AlertCircle,
-    Loader2,
     Check,
     X,
     ChevronRight,
@@ -44,10 +47,10 @@ import { LayerHierarchyPanel, type ActiveTarget, type DropPayload } from './Laye
 import { WizardAssignmentTree } from '../views/ViewWizard/WizardAssignmentTree'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
 import { useAutoOrganize, type GroupingSuggestion } from '@/hooks/useAutoOrganize'
-import { makeDraftSave, type ContextModelCreateRequest } from '@/services/contextModelService'
-import type { ViewLayerConfig, EntityAssignmentConfig } from '@/types/schema'
+import { assignEntities, unassignEntities } from '@/components/canvas/context-view/assignmentMutations'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
+import type { ViewLayerConfig, LayerAssignmentEntry } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
-import { useWorkspacesStore } from '@/store/workspaces'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
@@ -58,12 +61,7 @@ import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/C
 interface LayerStudioProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
-    /** Draft context model ID (if editing existing) */
-    linkedContextModelId?: string | null
-    onDraftSaved?: (modelId: string) => void
 }
-
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 // ─── Auto-Organize Review Sheet ────────────────────────────────────────────────
 
@@ -184,10 +182,7 @@ function AutoOrganizeSheet({
 export function LayerStudio({
     formData,
     updateFormData,
-    linkedContextModelId,
-    onDraftSaved,
 }: LayerStudioProps) {
-    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
     const storeParentMap = useReferenceModelStore(s => s.parentMap)
     const storeEffectiveAssignments = useReferenceModelStore(s => s.effectiveAssignments)
 
@@ -214,24 +209,30 @@ export function LayerStudio({
         return storeParentMap
     }, [canvasParentMap, storeParentMap])
 
-    // Build layer assignment lookup from formData.layers (wizard state)
-    // AND store effectiveAssignments (backend state).
-    // Wizard formData.layers entityAssignments are the immediate source of truth
-    // when the user is actively assigning in the wizard.
+    // Build layer assignment lookup from formData.assignments (wizard's canonical
+    // buffer) AND store effectiveAssignments (backend state). formData.assignments
+    // is the immediate source of truth when the user is actively assigning in the
+    // wizard; legacy layers[].entityAssignments (still written by Auto-Organize,
+    // untouched by this refactor) is consulted as a lower-priority fallback so
+    // its in-session suggestions still render as assigned.
     const layerAssignmentMap = useMemo(() => {
         const map = new Map<string, string>() // entityId -> layerId
-        // Start with store assignments (lower priority)
+        // Start with store assignments (lowest priority)
         storeEffectiveAssignments.forEach((a, entityId) => {
             map.set(entityId, a.layerId)
         })
-        // Override with wizard formData.layers assignments (higher priority)
+        // Legacy per-layer entityAssignments (e.g. Auto-Organize suggestions)
         ;(formData.layers ?? []).forEach(layer => {
             layer.entityAssignments?.forEach(a => {
                 map.set(a.entityId, layer.id)
             })
         })
+        // Canonical formData.assignments wins (highest priority)
+        Object.entries(formData.assignments ?? {}).forEach(([urn, entry]) => {
+            map.set(urn, entry.layerId)
+        })
         return map
-    }, [storeEffectiveAssignments, formData.layers])
+    }, [storeEffectiveAssignments, formData.layers, formData.assignments])
 
     // ── Containment inheritance enforcement ──────────────────────────────────────
     const [assignmentWarning, setAssignmentWarning] = useState<string | null>(null)
@@ -298,24 +299,35 @@ export function LayerStudio({
         commit: () => void
     } | null>(null)
 
-    // ── Layer state with undo/redo ───────────────────────────────────────────────
+    // ── Layer + assignment state with undo/redo ──────────────────────────────────
+    // Undo/redo snapshots the FULL {layers, assignments} pair so an assignment
+    // gesture and a layer-structure edit (logical nodes, reorder, auto-organize)
+    // share one history.
     const layers = formData.layers ?? []
+    const assignments = formData.assignments ?? {}
 
-    const undoStackRef = useRef<ViewLayerConfig[][]>([])
-    const redoStackRef = useRef<ViewLayerConfig[][]>([])
+    const undoStackRef = useRef<NormalizedReferenceLayout[]>([])
+    const redoStackRef = useRef<NormalizedReferenceLayout[]>([])
     const isUndoRedoRef = useRef(false)
 
-    const handleUpdateLayers = useCallback(
-        (next: ViewLayerConfig[]) => {
+    const commitLayout = useCallback(
+        (next: NormalizedReferenceLayout) => {
             if (!isUndoRedoRef.current) {
-                undoStackRef.current = [...undoStackRef.current, layers]
+                undoStackRef.current = [...undoStackRef.current, { layers, assignments }]
                 redoStackRef.current = []
                 // Cap stack size
                 if (undoStackRef.current.length > 50) undoStackRef.current.shift()
             }
-            updateFormData({ layers: next })
+            updateFormData({ layers: next.layers, assignments: next.assignments })
         },
-        [updateFormData, layers]
+        [updateFormData, layers, assignments]
+    )
+
+    // Layer-structure-only updates (logical node CRUD, reorder, auto-organize)
+    // leave assignments untouched.
+    const handleUpdateLayers = useCallback(
+        (nextLayers: ViewLayerConfig[]) => commitLayout({ layers: nextLayers, assignments }),
+        [commitLayout, assignments]
     )
 
     const canUndo = undoStackRef.current.length > 0
@@ -325,21 +337,21 @@ export function LayerStudio({
         if (undoStackRef.current.length === 0) return
         const prev = undoStackRef.current[undoStackRef.current.length - 1]
         undoStackRef.current = undoStackRef.current.slice(0, -1)
-        redoStackRef.current = [...redoStackRef.current, layers]
+        redoStackRef.current = [...redoStackRef.current, { layers, assignments }]
         isUndoRedoRef.current = true
-        updateFormData({ layers: prev })
+        updateFormData({ layers: prev.layers, assignments: prev.assignments })
         isUndoRedoRef.current = false
-    }, [updateFormData, layers])
+    }, [updateFormData, layers, assignments])
 
     const handleRedo = useCallback(() => {
         if (redoStackRef.current.length === 0) return
         const next = redoStackRef.current[redoStackRef.current.length - 1]
         redoStackRef.current = redoStackRef.current.slice(0, -1)
-        undoStackRef.current = [...undoStackRef.current, layers]
+        undoStackRef.current = [...undoStackRef.current, { layers, assignments }]
         isUndoRedoRef.current = true
-        updateFormData({ layers: next })
+        updateFormData({ layers: next.layers, assignments: next.assignments })
         isUndoRedoRef.current = false
-    }, [updateFormData, layers])
+    }, [updateFormData, layers, assignments])
 
     // Keyboard shortcuts for undo/redo
     useEffect(() => {
@@ -372,40 +384,6 @@ export function LayerStudio({
         }
     }, [layers.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
-    // ── Autosave ────────────────────────────────────────────────────────────────
-    const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
-    const draftIdRef = useRef<string | null>(linkedContextModelId ?? null)
-
-    const autosave = useMemo(
-        () => (activeWorkspaceId ? makeDraftSave(activeWorkspaceId, 800) : null),
-        [activeWorkspaceId]
-    )
-
-    // Trigger autosave on any layer change
-    useEffect(() => {
-        if (!autosave || !activeWorkspaceId) return
-
-        setSaveStatus('saving')
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const payload: ContextModelCreateRequest = {
-            name: formData.name || 'Draft Context View',
-            description: formData.description,
-            layersConfig: layers as any,
-            instanceAssignments: buildInstanceAssignments(layers) as any,
-        }
-
-        autosave(
-            payload,
-            draftIdRef,
-            model => {
-                setSaveStatus('saved')
-                onDraftSaved?.(model.id)
-                setTimeout(() => setSaveStatus('idle'), 2500)
-            },
-            () => setSaveStatus('error')
-        )
-    }, [layers]) // eslint-disable-line react-hooks/exhaustive-deps
-
     // ── Layer reorder ───────────────────────────────────────────────────────────
     const handleReorderLayers = useCallback(
         (newIds: string[]) => {
@@ -419,43 +397,20 @@ export function LayerStudio({
     )
 
     // ── Shared: commit entity + descendants to a layer ─────────────────────────
+    // Descendants in a different layer are cleared (not re-stamped) so they fall
+    // back to containment inheritance from the newly-assigned parent — mirrors
+    // the canvas's handleAssignToLayer/moveToLayer (assignmentMutations.ts).
     const commitAssignment = useCallback(
         (entityIds: string[], descendantsToMove: string[], layerId: string, logicalNodeId?: string) => {
-            const allMovedIds = new Set([...entityIds, ...descendantsToMove])
-            const next = layers.map(l => {
-                const filtered: EntityAssignmentConfig[] = (l.entityAssignments ?? []).filter(
-                    a => !allMovedIds.has(a.entityId)
-                )
-                if (l.id === layerId) {
-                    return {
-                        ...l,
-                        entityAssignments: [
-                            ...filtered,
-                            ...entityIds.map(id => ({
-                                entityId: id,
-                                layerId,
-                                logicalNodeId,
-                                inheritsChildren: true,
-                                priority: 1000,
-                                assignedBy: 'user' as const,
-                                assignedAt: new Date().toISOString(),
-                            })),
-                            ...descendantsToMove.map(dId => ({
-                                entityId: dId,
-                                layerId,
-                                inheritsChildren: true,
-                                priority: 999,
-                                assignedBy: 'rule' as const,
-                                assignedAt: new Date().toISOString(),
-                            })),
-                        ],
-                    }
-                }
-                return { ...l, entityAssignments: filtered }
-            })
-            handleUpdateLayers(next)
+            const next = assignEntities(
+                { layers, assignments },
+                entityIds,
+                layerId,
+                { logicalNodeId, clearDescendants: descendantsToMove },
+            )
+            commitLayout(next)
         },
-        [layers, handleUpdateLayers]
+        [layers, assignments, commitLayout]
     )
 
     /** Show confirmation dialog if descendants need moving, otherwise commit immediately */
@@ -494,11 +449,7 @@ export function LayerStudio({
         (entityId: string, layerId: string | null) => {
             // Unassign explicitly if layerId is empty or null (e.g. clicking 'X')
             if (!layerId) {
-                const next = layers.map(l => ({
-                    ...l,
-                    entityAssignments: (l.entityAssignments ?? []).filter(a => a.entityId !== entityId)
-                }))
-                handleUpdateLayers(next)
+                commitLayout(unassignEntities({ layers, assignments }, [entityId]))
                 return
             }
 
@@ -514,7 +465,7 @@ export function LayerStudio({
 
             confirmOrCommit([entityId], descendantsToMove, layerId, targetNodeId)
         },
-        [activeTarget, layers, handleUpdateLayers, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
+        [activeTarget, layers, assignments, commitLayout, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
     )
 
     const handleBulkAssignment = useCallback(
@@ -645,47 +596,6 @@ export function LayerStudio({
                 </div>
 
                 <div className="flex items-center gap-3">
-                    {/* Save status indicator */}
-                    <AnimatePresence mode="wait">
-                        {saveStatus === 'saving' && (
-                            <motion.div
-                                key="saving"
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="flex items-center gap-1.5 text-xs text-slate-400"
-                            >
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                Saving…
-                            </motion.div>
-                        )}
-                        {saveStatus === 'saved' && (
-                            <motion.div
-                                key="saved"
-                                initial={{ opacity: 0, scale: 0.9 }}
-                                animate={{ opacity: 1, scale: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="flex items-center gap-1.5 text-xs text-emerald-600"
-                            >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                Draft saved
-                            </motion.div>
-                        )}
-                        {saveStatus === 'error' && (
-                            <motion.div
-                                key="error"
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 1 }}
-                                exit={{ opacity: 0 }}
-                                className="flex items-center gap-1.5 text-xs text-red-500"
-                                title="Autosave failed — your changes are still in local state"
-                            >
-                                <AlertCircle className="w-3.5 h-3.5" />
-                                Save failed
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
                     {/* Preview toggle */}
                     <button
                         onClick={() => setShowPreview(v => !v)}
@@ -717,6 +627,7 @@ export function LayerStudio({
                     {/* Left: Layer hierarchy */}
                     <LayerHierarchyPanel
                         layers={layers}
+                        assignments={assignments}
                         activeTarget={activeTarget}
                         logicalNodes={logicalNodes}
                         onSetActiveTarget={setActiveTarget}
@@ -740,6 +651,7 @@ export function LayerStudio({
                         )}
                         <WizardAssignmentTree
                             layers={layers}
+                            assignments={assignments}
                             activeTarget={activeTarget}
                             onAssignmentChange={handleAssignmentChange}
                             onBulkAssign={handleBulkAssignment}
@@ -766,7 +678,7 @@ export function LayerStudio({
                                 </div>
                                 <div className="flex-1 flex items-center justify-center text-xs text-slate-400 p-4 text-center">
                                     {/* Mini canvas preview — rendered at scale */}
-                                    <ContextModelMiniPreview layers={layers} />
+                                    <ContextModelMiniPreview layers={layers} assignments={assignments} />
                                 </div>
                             </motion.div>
                         )}
@@ -803,7 +715,19 @@ export function LayerStudio({
 
 // ─── Mini preview ─────────────────────────────────────────────────────────────
 
-function ContextModelMiniPreview({ layers }: { layers: ViewLayerConfig[] }) {
+function ContextModelMiniPreview({
+    layers,
+    assignments,
+}: {
+    layers: ViewLayerConfig[]
+    assignments: Record<string, LayerAssignmentEntry>
+}) {
+    const assignedCounts = useMemo(() => {
+        const counts = new Map<string, number>()
+        Object.values(assignments).forEach(a => counts.set(a.layerId, (counts.get(a.layerId) ?? 0) + 1))
+        return counts
+    }, [assignments])
+
     if (layers.length === 0) {
         return <span>No layers to preview</span>
     }
@@ -811,7 +735,7 @@ function ContextModelMiniPreview({ layers }: { layers: ViewLayerConfig[] }) {
     return (
         <div className="w-full space-y-2">
             {layers.map(l => {
-                const assigned = l.entityAssignments?.length ?? 0
+                const assigned = assignedCounts.get(l.id) ?? 0
                 const nodeCount = countNodes(l.logicalNodes ?? [])
                 return (
                     <div key={l.id} className="w-full">
@@ -854,25 +778,4 @@ function ContextModelMiniPreview({ layers }: { layers: ViewLayerConfig[] }) {
 
 function countNodes(nodes: import('@/types/schema').LogicalNodeConfig[]): number {
     return nodes.reduce((acc, n) => acc + 1 + countNodes(n.children ?? []), 0)
-}
-
-/**
- * Build the instanceAssignments payload for the backend.
- * Format: { [entityId]: { layerId, logicalNodeId?, inheritsChildren } }
- */
-function buildInstanceAssignments(
-    layers: ViewLayerConfig[]
-): Record<string, unknown> {
-    const result: Record<string, unknown> = {}
-    for (const l of layers) {
-        for (const a of l.entityAssignments ?? []) {
-            result[a.entityId] = {
-                layerId: a.layerId,
-                logicalNodeId: a.logicalNodeId ?? null,
-                inheritsChildren: a.inheritsChildren,
-                assignedBy: a.assignedBy ?? 'user',
-            }
-        }
-    }
-    return result
 }

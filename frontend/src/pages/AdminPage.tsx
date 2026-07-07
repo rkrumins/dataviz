@@ -8,13 +8,14 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation, Navigate } from 'react-router-dom'
 import {
-    BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
+    Activity, BarChart3, Shield, ChevronDown, ToggleLeft, Users, Megaphone,
     UserCog, Users2, KeyRound, Network, History, Palette,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useNavPermission } from '@/store/auth'
 import { useAdminSectionSpec } from '@/store/navCatalogue'
 import { useBrand } from '@/store/branding'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // Administration sidebar is split into two sections — "System" for
 // platform-wide configuration and "Identity & Access" for the people
@@ -33,6 +34,7 @@ const adminGroups = [
         path: '',
         items: [
             { path: 'overview', label: 'Global Overview', icon: BarChart3, description: 'System health & scale' },
+            { path: 'infrastructure', label: 'Infrastructure', icon: Activity, description: 'Service health & data-plane status' },
             { path: 'branding', label: 'Branding', icon: Palette, description: 'App name, logo & theme' },
             { path: 'features', label: 'Features', icon: ToggleLeft, description: 'Feature flags & behaviour' },
             { path: 'announcements', label: 'Announcements', icon: Megaphone, description: 'Global banner messages' },
@@ -58,12 +60,19 @@ export function AdminPage() {
     const brand = useBrand()
     const isRoot = location.pathname === '/admin' || location.pathname === '/admin/'
 
+    // Tab title for every admin sub-page, derived from the same label map that
+    // drives the sidebar so the two never drift: "{Section} · Admin · {Brand}".
+    const activeSub = location.pathname.replace(/^\/admin\/?/, '').split('/')[0]
+    const activeLabel = adminGroups.flatMap(g => g.items).find(i => i.path === activeSub)?.label
+    useDocumentTitle(activeLabel ? `${activeLabel} · Admin` : 'Admin')
+
     // Permission gate per admin sub-item, driven by the centralised nav
     // catalogue served from the backend (seeded by bundled defaults).
     // Hooks called in fixed order; entries the user lacks perms for
     // drop out of the group. ``useAdminSectionSpec`` resolves the live
     // spec from the store.
-    const overviewVisible      = useNavPermission(useAdminSectionSpec('overview'))
+    const overviewVisible       = useNavPermission(useAdminSectionSpec('overview'))
+    const infrastructureVisible = useNavPermission(useAdminSectionSpec('infrastructure'))
     const brandingVisible      = useNavPermission(useAdminSectionSpec('branding'))
     const featuresVisible      = useNavPermission(useAdminSectionSpec('features'))
     const announcementsVisible = useNavPermission(useAdminSectionSpec('announcements'))
@@ -74,7 +83,8 @@ export function AdminPage() {
     const auditVisible         = useNavPermission(useAdminSectionSpec('audit'))
 
     const itemVisibility: Record<string, boolean> = {
-        overview:      overviewVisible,
+        overview:       overviewVisible,
+        infrastructure: infrastructureVisible,
         branding:      brandingVisible,
         features:      featuresVisible,
         announcements: announcementsVisible,

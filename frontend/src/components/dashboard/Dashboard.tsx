@@ -16,8 +16,10 @@ import { DashboardOnboarding } from './DashboardOnboarding'
 import { motion } from 'framer-motion'
 import { Monitor, LayoutTemplate, BookOpen } from 'lucide-react'
 import { MOTION } from '@/lib/motion'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 export function Dashboard() {
+    useDocumentTitle('Dashboard')
     const {
         stats,
         dataSourceStats,

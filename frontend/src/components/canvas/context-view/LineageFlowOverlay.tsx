@@ -563,8 +563,28 @@ export function LineageFlowOverlay({
     if (!containerRef.current) return
     const container = containerRef.current
 
+    // Drawer open/close width-animates the canvas for ~400ms, which fires
+    // EVERY node's ResizeObserver each animation frame; each fire funnels
+    // into updateFlow's mass getBoundingClientRect (forced reflow), pinning
+    // the main thread on large graphs. Leading+trailing throttle: redraw at
+    // most once per RESIZE_THROTTLE_MS during the animation, with a
+    // guaranteed trailing settle pass so edges land on final anchors.
+    // Scroll/hover keep their per-frame rAF cadence (separate effects).
+    const RESIZE_THROTTLE_MS = 120
+    let lastResizeRun = 0
+    let resizeTrailingTimer: ReturnType<typeof setTimeout> | null = null
     const resizeObserver = new ResizeObserver(() => {
-      scheduleUpdate()
+      const now = Date.now()
+      if (now - lastResizeRun >= RESIZE_THROTTLE_MS) {
+        lastResizeRun = now
+        scheduleUpdate()
+      } else if (resizeTrailingTimer === null) {
+        resizeTrailingTimer = setTimeout(() => {
+          resizeTrailingTimer = null
+          lastResizeRun = Date.now()
+          scheduleUpdate()
+        }, RESIZE_THROTTLE_MS)
+      }
     })
 
     // Fresh IntersectionObserver per effect lifecycle (no stale singleton)
@@ -662,6 +682,10 @@ export function LineageFlowOverlay({
 
     return () => {
       cancelAnimationFrame(scanRaf)
+      if (resizeTrailingTimer !== null) {
+        clearTimeout(resizeTrailingTimer)
+        resizeTrailingTimer = null
+      }
       mutationObserver.disconnect()
       resizeObserver.disconnect()
       visibilityObserver.disconnect()

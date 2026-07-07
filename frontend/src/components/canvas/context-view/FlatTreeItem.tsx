@@ -8,12 +8,15 @@ import type { ViewLayerConfig } from '@/types/schema'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
-import { useStagedChangesStore, stagedChangeColor } from '@/store/stagedChangesStore'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
 import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { NodeConnectionHandle } from './NodeConnectionHandle'
+import { useReparentNode } from './useReparentNode'
 
 interface FlatTreeItemProps {
   node: HierarchyNode
@@ -41,6 +44,20 @@ interface FlatTreeItemProps {
   onFocus: (node: HierarchyNode) => void
   onToggleSearch?: (id: string) => void
   isSearchVisible?: boolean
+  /** When set (draft/authoring mode), show the hover connection handle. */
+  onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
+}
+
+// Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
+// adds a dashed halo = "unsaved"; COMMITTED uses the same colours in a lighter, solid-ring form =
+// "saved to the branch, not merged". Same colour language as the graph canvas.
+const FLAT_ROW_STYLE: Record<string, string> = {
+  'staged-added': 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-green-300/70',
+  'staged-modified': 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-orange-300/70',
+  'staged-removed': 'bg-gradient-to-r from-rose-500/30 via-rose-500/20 to-rose-500/8 ring-2 ring-rose-400/80 shadow-lg shadow-rose-500/25 opacity-90 outline-dashed outline-1 -outline-offset-[3px] outline-rose-300/70',
+  'committed-added': 'bg-green-500/[0.10] ring-1 ring-inset ring-green-500/60',
+  'committed-modified': 'bg-orange-500/[0.10] ring-1 ring-inset ring-orange-500/60',
+  'committed-removed': 'bg-rose-500/[0.12] ring-1 ring-inset ring-rose-500/60 opacity-90',
 }
 
 export const FlatTreeItem = React.memo(function FlatTreeItem({
@@ -69,6 +86,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onFocus,
   onToggleSearch,
   isSearchVisible = false,
+  onBeginConnect,
 }: FlatTreeItemProps) {
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
@@ -100,29 +118,19 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // per-id via the store's setTimeout (~900ms).
   const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(node.id))
 
-  const stagedColor = directChange ? stagedChangeColor(directChange.type) : (hasDescendantChange ? 'cascade' : null)
+  // Direct change decoration — STAGED (your unsaved edit) takes precedence over COMMITTED (saved to
+  // the branch, not merged). Dashed = staged, solid = committed; color = type — the SAME vocabulary
+  // as the graph canvas, so "saved vs not" reads identically everywhere. Cascade (a descendant has a
+  // staged change) keeps its muted left stripe.
+  const directDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  const isPendingDelete = directDeco?.status === 'removed'
   const stagedSummary = directChange?.summary
+    ?? (directDeco?.state === 'committed' ? `${directDeco.status} vs main` : undefined)
+    ?? (directDeco?.state === 'staged' ? `${directDeco.status} · unsaved` : undefined)
     ?? (hasDescendantChange ? 'Contains staged changes' : undefined)
-
-  // Strong, full-width background tint — the user wanted the ENTIRE row to
-  // glow in the change color so the canvas reads as a heatmap of pending edits.
-  // Direct changes get saturated tints; cascade indicates child changes with a
-  // muted left-bar treatment so it's spottable but not overpowering.
-  const stagedRowClass = (() => {
-    switch (stagedColor) {
-      case 'green':
-        return 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20'
-      case 'red':
-        return 'bg-gradient-to-r from-rose-500/30 via-rose-500/20 to-rose-500/8 ring-2 ring-rose-400/80 shadow-lg shadow-rose-500/25 opacity-90'
-      case 'amber':
-        return 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20'
-      case 'cascade':
-        // Indicate that a descendant has a staged change with a soft amber edge stripe.
-        return 'border-l-[3px] border-l-amber-400/50'
-      default:
-        return ''
-    }
-  })()
+  const stagedRowClass = directDeco
+    ? FLAT_ROW_STYLE[`${directDeco.state}-${directDeco.status}`]
+    : (hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50' : '')
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color
@@ -197,7 +205,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // be re-assigned between layers. Children live inside their parent's
   // containment scope; moving a column without its table would break the
   // ontology. Attach native events via ref (avoids type conflict).
-  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical
+  // A row being deleted (committed ghost or staged delete) is read-only — it must not be dragged to
+  // another layer. Restore it first if you want to move it.
+  const isLayerDraggable = depth === 0 && !node.parentId && !isLogical && !isPendingDelete
   useEffect(() => {
     const el = itemRef.current
     if (!el) return
@@ -228,12 +238,33 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     }
   }, [node.id, node.name, isLayerDraggable])
 
+  const { reparent } = useReparentNode()
+  const [dropHover, setDropHover] = useState(false)
+
   return (
     <div
       ref={itemRef}
       id={`layer-node-${node.id}`}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
+      onDragOver={(e) => {
+        // Accept a node drag (reparent). The id can't be read during dragover, so we
+        // can't exclude self here — `reparent` guards self/cycles on drop.
+        if (!e.dataTransfer.types.includes('text/x-entity-id')) return
+        e.preventDefault()
+        e.stopPropagation()
+        e.dataTransfer.dropEffect = 'move'
+        if (!dropHover) setDropHover(true)
+      }}
+      onDragLeave={() => { if (dropHover) setDropHover(false) }}
+      onDrop={(e) => {
+        const draggedId = e.dataTransfer.getData('text/x-entity-id')
+        if (!draggedId) return
+        e.preventDefault()
+        e.stopPropagation()   // take precedence over the layer-column drop (move-to-layer)
+        setDropHover(false)
+        if (draggedId !== node.id) reparent(draggedId, node.id)
+      }}
       className={cn(
         "flex items-center gap-2 mx-1 rounded-xl cursor-pointer transition-all duration-200 group/item relative z-[2]",
         paddingClass,
@@ -281,7 +312,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Dimmed when not in trace path or not connected to highlighted node
         isDimmed && "opacity-40",
         // Jump-to-node arrival pulse — one-shot ring animation
-        isPulsing && "lineage-pulse"
+        isPulsing && "lineage-pulse",
+        // Reparent drop target — a node drag is hovering over this row
+        dropHover && "ring-2 ring-accent-lineage/70 bg-accent-lineage/10 shadow-lg shadow-accent-lineage/20"
       )}
       style={{
         paddingLeft: 12 + indentWidth,
@@ -309,6 +342,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         delete document.documentElement.dataset.hoveredNode
       }}
     >
+      {/* Edge authoring: hover-reveal handle on the card's right edge. */}
+      {onBeginConnect && (
+        <NodeConnectionHandle
+          visible={isHovered}
+          onBeginConnect={(start) => onBeginConnect(node.id, start)}
+        />
+      )}
+
       {/* Modern Tree Lines with gradient effect.
           Subtle mode dims connectors + dot for a calmer look without
           removing them — orientation cues survive at lower contrast. */}
@@ -439,8 +480,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           textClass,
           isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
-          // Strikethrough for pending-delete makes the destruction intent unmissable
-          stagedColor === 'red' && "line-through decoration-rose-300/80 decoration-2",
+          // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
+          isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
           // 3-line cap + word-wrap. ``break-words`` triggers only
           // when a word genuinely cannot fit, so normal labels
           // stay on a single line. The 3-line ceiling handles

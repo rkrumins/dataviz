@@ -76,20 +76,23 @@ def get_redis() -> aioredis.Redis:
     """Return the singleton async Redis client.
 
     Lazily initialized on first call. The client uses a connection pool
-    internally — safe to share across coroutines.
+    internally — safe to share across coroutines. Topology (single node or
+    Sentinel) + auth + TLS are resolved from env by ``build_bus_redis``;
+    Redis Cluster is intentionally unsupported for the bus (it raises a clear
+    error). The aggregation control-plane/worker AND the insights service share
+    this singleton, so both inherit Sentinel/TLS identically.
     """
     global _client
     if _client is None:
-        url = os.getenv("REDIS_URL", "redis://localhost:6380/0")
-        _client = aioredis.from_url(
-            url,
+        from backend.common.adapters.redis_bus import build_bus_redis
+
+        _client = build_bus_redis(
             decode_responses=True,
             max_connections=20,
             socket_connect_timeout=5,
             socket_timeout=10,
-            retry_on_timeout=True,
         )
-        logger.info("Redis client initialized: %s", url)
+        logger.info("Redis client initialized")
     return _client
 
 

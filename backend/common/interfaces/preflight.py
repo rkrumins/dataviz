@@ -95,12 +95,59 @@ async def tcp_preflight(host: str, port: int, *, deadline_s: float) -> Preflight
                 pass
 
 
+def _redis_auth_reason(line: bytes, *, had_password: bool) -> str | None:
+    """Classify a RESP ``-`` error reply into a stable auth reason code.
+
+    Returns ``"auth_required"`` (server requires authentication but none was
+    provided), ``"auth_failed"`` (credentials were rejected), or ``None`` when
+    the error is not an auth problem (the caller may then continue or surface a
+    generic ``redis_error``). These codes flow into the test-result string and
+    the frontend maps them to distinct, user-clear messages.
+    """
+    upper = line.decode(errors="replace").strip().upper()
+    if "NOAUTH" in upper:
+        # NOAUTH with a password sent = the AUTH didn't stick (rejected);
+        # without a password = the server requires auth we never supplied.
+        return "auth_failed" if had_password else "auth_required"
+    if (
+        "WRONGPASS" in upper
+        or "INVALID USERNAME-PASSWORD" in upper
+        or "INVALID PASSWORD" in upper
+    ):
+        return "auth_failed"
+    return None
+
+
+def _resp_auth(username: str | None, password: str) -> bytes:
+    """RESP-encode ``AUTH [username] password``. The two-arg form is required
+    for Redis 6+ ACL named users; the one-arg form targets the default user."""
+    pw = password.encode()
+    if username:
+        u = username.encode()
+        return (
+            b"*3\r\n$4\r\nAUTH\r\n"
+            b"$" + str(len(u)).encode() + b"\r\n" + u + b"\r\n"
+            b"$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+        )
+    return b"*2\r\n$4\r\nAUTH\r\n$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+
+
 async def redis_ping_preflight(
-    host: str, port: int, *, deadline_s: float, password: str | None = None
+    host: str,
+    port: int,
+    *,
+    deadline_s: float,
+    password: str | None = None,
+    username: str | None = None,
+    ssl_context: "ssl.SSLContext | None" = None,
 ) -> PreflightResult:
-    """TCP-connect + send RESP ``PING`` + read the reply within
+    """TCP(/TLS)-connect + send RESP ``PING`` + read the reply within
     ``deadline_s``. Confirms the peer is actually a Redis-protocol server,
     not just a port that happens to accept TCP.
+
+    When ``ssl_context`` is provided the probe completes a real TLS handshake
+    (so a TLS-only server isn't wrongly marked unreachable). When ``username``
+    is provided the two-arg ``AUTH user pass`` is used (Redis 6 ACL users).
 
     Used by FalkorDB (which speaks Redis protocol) and any other
     Redis-compatible backend.
@@ -108,21 +155,32 @@ async def redis_ping_preflight(
     t0 = time.monotonic()
     writer = None
     try:
+        open_kwargs: dict = {}
+        if ssl_context is not None:
+            open_kwargs = {"ssl": ssl_context, "server_hostname": host}
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
+            asyncio.open_connection(host, port, **open_kwargs),
             timeout=deadline_s,
         )
 
-        # AUTH first if a password is configured. We send and discard the
-        # reply — a wrong password surfaces as PING returning -NOAUTH.
+        had_password = bool(password)
+        # AUTH first if a password is configured. Inspect the reply: a
+        # credential-rejection error (-WRONGPASS / invalid username-password)
+        # means the creds are wrong → ``auth_failed``. A non-credential error
+        # (e.g. the server has no auth set and rejects an unexpected AUTH) is
+        # ignored — we fall through to PING, preserving the old behavior.
         if password:
-            pw = password.encode()
-            auth = b"*2\r\n$4\r\nAUTH\r\n$" + str(len(pw)).encode() + b"\r\n" + pw + b"\r\n"
+            auth = _resp_auth(username, password)
             writer.write(auth)
             await writer.drain()
             # Read just enough to clear the reply line. Bound by remaining budget.
             remaining = max(0.05, deadline_s - (time.monotonic() - t0))
-            await asyncio.wait_for(reader.readline(), timeout=remaining)
+            auth_reply = await asyncio.wait_for(reader.readline(), timeout=remaining)
+            if auth_reply and auth_reply.startswith(b"-"):
+                reason = _redis_auth_reason(auth_reply, had_password=True)
+                if reason is not None:
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+                    return PreflightResult.failure(reason=reason, elapsed_ms=elapsed_ms)
 
         writer.write(b"*1\r\n$4\r\nPING\r\n")
         await writer.drain()
@@ -131,22 +189,20 @@ async def redis_ping_preflight(
         line = await asyncio.wait_for(reader.readline(), timeout=remaining)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        # Accept either +PONG (no auth) or +OK / -NOAUTH-style replies as
-        # "the server is alive". Auth failures come back distinguishable;
-        # anything that yields a CRLF-terminated line means the server is
-        # speaking RESP. The `/test` UI surfaces auth issues in a separate
-        # path (after preflight succeeds, the actual connect attempt fails).
+        # Accept +PONG (no auth) or +OK as "the server is alive". An error
+        # reply is classified: NOAUTH without a password = ``auth_required``
+        # (server requires auth, none given); NOAUTH/WRONGPASS with a password
+        # = ``auth_failed`` (rejected); any other error = generic
+        # ``redis_error`` with the raw text for debugging.
         if not line:
             return PreflightResult.failure(
                 reason="empty_reply", elapsed_ms=elapsed_ms,
             )
         if line.startswith(b"-"):
-            # Server returned an error reply (e.g. NOAUTH). Reachable but
-            # configuration mismatch — distinguish from connect failures.
-            return PreflightResult.failure(
-                reason=f"redis_error: {line.decode(errors='replace').strip()}"[:120],
-                elapsed_ms=elapsed_ms,
-            )
+            reason = _redis_auth_reason(line, had_password=had_password)
+            if reason is None:
+                reason = f"redis_error: {line.decode(errors='replace').strip()}"[:120]
+            return PreflightResult.failure(reason=reason, elapsed_ms=elapsed_ms)
         return PreflightResult.success(peer=f"{host}:{port}", elapsed_ms=elapsed_ms)
 
     except asyncio.CancelledError:

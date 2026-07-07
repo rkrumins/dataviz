@@ -56,53 +56,31 @@ export function AdminOverview() {
             const providers = provRes.status === 'fulfilled' ? provRes.value : []
             setProviderCount(providers.length)
 
-            // Parallel fan-out over (workspace, datasource) pairs. The
-            // previous nested ``for ... of`` issued requests one at a
-            // time, so a page with N workspaces × M datasources took
-            // N*M serialised round-trips (and was visibly the worst
-            // offender behind the "lots of cached-stats requests"
-            // symptom). ``fetchEnveloped`` retains its per-(ws, ds)
-            // circuit breaker so a slow datasource still fails-fast
-            // without dragging down the rest.
-            type DsStats = {
-                wsId: string
-                nodes: number
-                edges: number
-                types: string[]
-            }
-            const tasks: Promise<DsStats | null>[] = []
-            for (const ws of workspaces) {
-                for (const ds of ws.dataSources || []) {
-                    tasks.push((async () => {
-                        const data = await fetchEnveloped<{
-                            nodeCount?: number
-                            edgeCount?: number
-                            entityTypeCounts?: Record<string, number>
-                        }>(
-                            `/api/v1/admin/workspaces/${ws.id}/datasources/${ds.id}/cached-stats`,
-                            { circuitScope: { workspaceId: ws.id, dataSourceId: ds.id } },
-                        )
-                        if (!data) return null
-                        return {
-                            wsId: ws.id,
-                            nodes: data.nodeCount ?? 0,
-                            edges: data.edgeCount ?? 0,
-                            types: Object.keys(data.entityTypeCounts ?? {}),
-                        }
-                    })())
-                }
-            }
-            const settled = await Promise.allSettled(tasks)
+            // One bulk request replaces the former (workspace, datasource)
+            // fan-out — historically the worst offender behind the "lots
+            // of cached-stats requests" symptom. Entries are keyed
+            // "<wsId>/<dsId>"; status==='computing' rows are cold-cache
+            // placeholders (refresh already enqueued server-side).
+            const bulk = await withTimeout(
+                fetchEnveloped<Record<string, {
+                    status?: string
+                    nodeCount?: number
+                    edgeCount?: number
+                    entityTypeCounts?: Record<string, number>
+                }>>('/api/v1/admin/workspaces/datasources/cached-stats'),
+                TIMEOUTS.ADMIN_LIST_MS,
+                'admin-overview.cached-stats.bulk',
+            ).catch(() => null)
 
-            // Reduce flat results back into per-workspace aggregates.
+            // Reduce entries into per-workspace aggregates.
             const byWs = new Map<string, { nodes: number; edges: number; types: Set<string> }>()
-            for (const r of settled) {
-                if (r.status !== 'fulfilled' || r.value === null) continue
-                const { wsId, nodes, edges, types } = r.value
+            for (const [key, entry] of Object.entries(bulk ?? {})) {
+                if (entry.status === 'computing') continue
+                const wsId = key.slice(0, key.indexOf('/'))
                 const agg = byWs.get(wsId) ?? { nodes: 0, edges: 0, types: new Set<string>() }
-                agg.nodes += nodes
-                agg.edges += edges
-                for (const t of types) agg.types.add(t)
+                agg.nodes += entry.nodeCount ?? 0
+                agg.edges += entry.edgeCount ?? 0
+                for (const t of Object.keys(entry.entityTypeCounts ?? {})) agg.types.add(t)
                 byWs.set(wsId, agg)
             }
 
@@ -148,7 +126,7 @@ export function AdminOverview() {
     }
 
     return (
-        <div className="max-w-6xl mx-auto p-8 animate-in fade-in duration-500">
+        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
             {/* Header */}
             <div className="flex items-center justify-between mb-10">
                 <div className="flex items-center gap-3">

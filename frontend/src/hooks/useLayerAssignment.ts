@@ -9,7 +9,7 @@
  */
 
 import { useMemo } from 'react'
-import type { ViewLayerConfig, LogicalNodeConfig } from '@/types/schema'
+import type { ViewLayerConfig, LogicalNodeConfig, LayerAssignmentEntry } from '@/types/schema'
 import {
   type GraphNode,
   resolveLayerAssignment,
@@ -17,6 +17,7 @@ import {
   type EntityType,
 } from '@/providers/GraphDataProvider'
 import type { HierarchyNode } from '@/types/hierarchy'
+import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 
 // ============================================
 // Types
@@ -31,6 +32,26 @@ export interface UseLayerAssignmentOptions {
   nodeMap: Map<string, any>
   childMap: Map<string, string[]>
   parentMap: Map<string, string>
+  /**
+   * Canonical urn -> layer assignment map (from normalizeReferenceLayout). A Context View node's id
+   * IS its urn, so these keys are node ids. This is the AUTHORITATIVE explicit-assignment source —
+   * it replaces the legacy per-layer `entityAssignments`. Defaults to empty (open scope).
+   */
+  assignments?: Record<string, LayerAssignmentEntry>
+  /**
+   * View entity scope: 'curated' (closed — only explicitly-assigned roots + the branch-created delta
+   * render) vs 'all' (open — fall back to backend/rules/inheritance). Defaults to curated iff
+   * `assignments` is non-empty, matching deriveEntityScope for legacy data.
+   */
+  entityScope?: 'all' | 'curated'
+  /**
+   * URNs of entities CREATED in the active branch's draft. In a CLOSED-SCOPE
+   * view these — and ONLY these — may be placed by their durable, view-valid
+   * global `layerAssignment` (leak-safe: no arbitrary global-property node is
+   * pulled in). Defaults to the live branch-created delta when omitted; passed
+   * explicitly only in tests.
+   */
+  branchCreatedUrns?: Set<string>
 }
 
 export interface UseLayerAssignmentResult {
@@ -57,7 +78,15 @@ export function useLayerAssignment({
   nodeMap,
   childMap,
   parentMap,
+  assignments = {},
+  entityScope,
+  branchCreatedUrns: branchCreatedUrnsOption,
 }: UseLayerAssignmentOptions): UseLayerAssignmentResult {
+
+  // Branch-created delta: URNs created in the active branch's draft. Read from
+  // the staged-changes store by default; an explicit option overrides it (tests).
+  const liveBranchCreatedUrns = useBranchCreatedDelta()
+  const branchCreatedDelta = branchCreatedUrnsOption ?? liveBranchCreatedUrns
 
   // Build layer assignment rules
   const layerRules = useMemo<LayerAssignmentRule[]>(() => {
@@ -106,14 +135,12 @@ export function useLayerAssignment({
     // Initialize layers
     sortedLayers.forEach(l => grouped.set(l.id, []))
 
-    // 1. Build explicit assignments from view layers (lowest priority, used as fallback)
-    // These come from saved entityAssignments in the view configuration
+    // 1. Build explicit assignments from the view's CANONICAL assignment map (lowest priority,
+    // used as the closed-scope authoritative set). Keyed by urn === node id in a Context View.
     const explicitAssignments = new Map<string, string>() // nodeId -> layerId
-    sortedLayers.forEach(l => {
-      l.entityAssignments?.forEach(a => {
-        explicitAssignments.set(a.entityId, l.id)
-      })
-    })
+    for (const [urn, entry] of Object.entries(assignments)) {
+      if (entry?.layerId) explicitAssignments.set(urn, entry.layerId)
+    }
 
     // 2. Build rule-based assignments (fallback if no explicit assignment)
     const ruleAssignments = new Map<string, string>() // nodeId -> layerId
@@ -144,19 +171,18 @@ export function useLayerAssignment({
     // Use a Set to track processed.
     const processed = new Set<string>()
 
-    // When the view config carries any explicit ``entityAssignments``,
-    // treat them as the CLOSED, AUTHORITATIVE set of root-layer
-    // assignments — backend ``effectiveAssignments`` and rule-based
-    // resolution cannot promote an un-listed root entity into a layer.
-    // Reason: the Layer Studio / Entity Assignment Panel is the user's
-    // source of truth (it shows "Sales is unassigned"); the canvas
-    // must agree. Previously the priority chain consulted
-    // ``effectiveAssignments`` first, so stale backend data or
-    // overly-broad rules could float an unassigned domain (e.g. Sales)
-    // into a layer column, contradicting the wizard. See the
-    // Phase-1 root-cause investigation in
-    // /plans/i-want-you-to-precious-sunset.md.
-    const viewHasExplicitAssignments = explicitAssignments.size > 0
+    // A CURATED (closed-scope) view treats its canonical ``assignments`` as the
+    // AUTHORITATIVE set of root-layer assignments — backend ``effectiveAssignments``
+    // and rule-based resolution cannot promote an un-listed root entity into a layer.
+    // Reason: the wizard / Layer Studio is the user's source of truth (it shows
+    // "Sales is unassigned"); the canvas must agree. Scope is 'curated' either when
+    // the view explicitly declares it or, by default, whenever any assignment exists
+    // (matches deriveEntityScope). Open ('all') views fall back to backend/rules.
+    const viewIsCurated = entityScope ? entityScope === 'curated' : explicitAssignments.size > 0
+
+    // Valid layer ids in this view — a node's persisted `layerAssignment` is only
+    // honoured when it still names a layer that exists here.
+    const validLayerIds = new Set(sortedLayers.map(l => l.id))
 
     // Iterative top-down traversal (prevents stack overflow on deep hierarchies)
     // HARD RULE: Containment children ALWAYS inherit parent's layer (no override).
@@ -176,13 +202,13 @@ export function useLayerAssignment({
 
       let myLayerId: string | undefined
 
-      // HARD RULE: Containment children ALWAYS inherit parent's layer.
-      // No assignment (backend, user drag, explicit, rules) can override this.
-      // Only root-level nodes (no containment parent) use the priority chain.
+      // HARD RULE: containment children ALWAYS inherit the parent's layer, so a
+      // nested subtree renders together under its parent and the containment tree
+      // stays intact. Only root-level nodes (no containment parent) use the
+      // priority chain below.
       const hasContainmentParent = parentMap.has(nodeId)
 
       if (hasContainmentParent && inheritedLayerId) {
-        // Absolute inheritance — child is locked to parent's layer
         myLayerId = inheritedLayerId
       } else {
         // Root-level node priority chain.
@@ -191,23 +217,44 @@ export function useLayerAssignment({
         //    wins. The user just dropped this onto a layer; respect that
         //    immediately regardless of view config or backend state.
         const instanceAssignment = instanceAssignments.get(nodeId)
+        // Explicit, per-entity layer the app stamped on the node itself — on
+        // create (creation layer) and on an explicit move (EntityDrawer "Layer"
+        // field → an `update_entity` that rewrites `layerAssignment`). It is the
+        // ONLY assignment signal that reliably survives a reload (persisted on the
+        // node, rehydrated via toCanvasNode), so we read it HERE in the render
+        // authority rather than depending on the backend assignment engine having
+        // been re-run. Honoured below session drag + explicit view assignments,
+        // but ABOVE generic rules — a broad entity-type rule must not override an
+        // explicit per-entity placement (that made a saved move "disappear" on
+        // reload). Validated so a stale layer id can't strand the node.
+        const rawNodeLayer = nodeMap.get(nodeId)?.data?.layerAssignment as string | undefined
+        const nodeLayerId = rawNodeLayer && validLayerIds.has(rawNodeLayer) ? rawNodeLayer : undefined
         if (instanceAssignment) {
           myLayerId = instanceAssignment.layerId
-        } else if (viewHasExplicitAssignments) {
-          // 2a. Closed-scope mode: view config has explicit assignments.
-          //     Only entities listed in ``explicitAssignments`` get a
-          //     layer; everything else drops out. This is what makes the
-          //     canvas mirror the wizard's "if you didn't drag it, it's
-          //     not in the view" mental model.
+        } else if (explicitAssignments.has(nodeId)) {
+          // 2a. Canonical per-node assignment (referenceLayout.assignments) — AUTHORITATIVE in BOTH
+          //     scopes. A user's explicit placement overrides type rules / backend even in an open
+          //     ('all') view, and is the closed-scope authority. This is what lets a canvas assign
+          //     render WITHOUT flipping the view's scope (scope is pinned per the persist path), and
+          //     it makes the canvas mirror the wizard's "if you didn't place it, it's not here" model.
           myLayerId = explicitAssignments.get(nodeId)
+        } else if (viewIsCurated) {
+          // 2b. Curated (closed-scope): an unlisted root drops out, EXCEPT a branch-created node
+          //     placed by its own durable, view-valid `layerAssignment` (leak-safe delta exception —
+          //     only delta nodes qualify, so no arbitrary global-property node leaks in). We do NOT
+          //     otherwise consult the node's global `layerAssignment` in curated scope.
+          if (nodeLayerId) {
+            const nodeUrn = (nodeMap.get(nodeId)?.data?.urn as string | undefined) ?? nodeId
+            if (branchCreatedDelta.has(nodeUrn)) myLayerId = nodeLayerId
+          }
         } else {
-          // 2b. Open-scope mode: empty / new view with no explicit
-          //     assignments. Fall back to backend → rules → inheritance
-          //     so the user has data to start dragging from in the
-          //     wizard.
+          // 2c. Open-scope ('all'): fall back to backend → node property → rules → inheritance so
+          //     the user has data to start from (canonical assignments already handled above).
           const backendAssignment = effectiveAssignments.get(nodeId)
           if (backendAssignment?.layerId) {
             myLayerId = backendAssignment.layerId
+          } else if (nodeLayerId) {
+            myLayerId = nodeLayerId
           } else if (ruleAssignments.has(nodeId)) {
             myLayerId = ruleAssignments.get(nodeId)
           } else if (inheritedLayerId) {
@@ -220,9 +267,14 @@ export function useLayerAssignment({
 
       if (myLayerId) effectiveLayer.set(nodeId, myLayerId)
 
+      // Honour `inheritsChildren: false` on this node's OWN explicit entry — its children do NOT
+      // inherit its layer; they fall through to the scope's own resolution (their own explicit entry
+      // in curated, backend/rules in open). Matches the backend engine's tier-2 containment gate.
+      const ownEntry = assignments[nodeId]
+      const inheritedForChildren = ownEntry && ownEntry.inheritsChildren === false ? undefined : myLayerId
       const children = childMap.get(nodeId) || []
       for (let i = children.length - 1; i >= 0; i--) {
-        stack.push({ nodeId: children[i], inheritedLayerId: myLayerId })
+        stack.push({ nodeId: children[i], inheritedLayerId: inheritedForChildren })
       }
     }
 
@@ -396,7 +448,7 @@ export function useLayerAssignment({
 
     return grouped
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope])
 
   // Flatten logical/physical nodes for search and lookup
   const { displayFlat, displayMap } = useMemo(() => {

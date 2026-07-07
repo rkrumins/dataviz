@@ -24,6 +24,7 @@ import {
 import { guideMarkdownComponents } from './guideMarkdown'
 import { interpolateBrand } from '@/lib/brandText'
 import { useBrand } from '@/store/branding'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // Strip the inline markdown that doesn't survive into a heading's rendered
 // text, so slug ids match what rehype-slug produces.
@@ -63,6 +64,8 @@ export function GuideContent() {
   const section = entry ? getGuideSection(entry.section) : undefined
   const persona = getPersona(entry?.persona)
   const { content, isLoading, error } = useDocsLoader(entry)
+
+  useDocumentTitle(entry?.title ? `${entry.title} · Guide` : 'User Guide')
 
   const headings = useMemo(
     () => (content ? extractHeadings(content) : []),

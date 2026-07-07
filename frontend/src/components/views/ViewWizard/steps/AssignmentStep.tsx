@@ -14,8 +14,6 @@ import type { WizardFormData } from '../ViewWizard'
 export interface AssignmentStepProps {
     formData: WizardFormData
     updateFormData: (updates: Partial<WizardFormData>) => void
-    linkedContextModelId?: string | null
-    onDraftSaved?: (modelId: string) => void
 }
 
 export function AssignmentStep(props: AssignmentStepProps) {

@@ -13,7 +13,7 @@
 import { Suspense, useMemo, useEffect } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, Loader2, RefreshCw, WifiOff } from 'lucide-react'
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
 import { useSchemaStore } from '@/store/schema'
 import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
@@ -21,6 +21,14 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useLoadingToast } from '@/components/ui/toast'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
+import { useBranchStore } from '@/store/branchStore'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { BranchBehindBanner } from '@/features/versioning/components/BranchBehindBanner'
+import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
+import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
+import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
+import { CanvasProviderStateOverlay } from './CanvasProviderStateOverlay'
+import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
@@ -50,23 +58,30 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
   // without hydration (loadChildren/searchChildren only).
-  const { hydrationError, hydrationPhase, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
+  const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
   useLoadingToast(
     'hydration',
-    isInitialLoad && !hydrationError,
+    isInitialLoad && hydrationStatus === 'loading',
     hydrationPhase === 'roots' ? 'Loading entities' : hydrationPhase === 'edges' ? 'Loading edges' : 'Preparing view',
     'Canvas ready',
+    // Never announce "Canvas ready" when the load ended warming/unavailable.
+    hydrationStatus === 'warming' || hydrationStatus === 'unavailable',
   )
 
-  // Mirror hydration phase into the canvas store so downstream components
-  // (ContextViewCanvas → LayerColumn ghost cards, GhostLineageOverlay) can
-  // drive their ghost-loading UI without each calling useGraphHydration with
-  // their own state.
+  // Mirror hydration phase + status into the canvas store so downstream
+  // components (ContextViewCanvas empty-state/toasts, LayerColumn ghost cards,
+  // GhostLineageOverlay) derive their UI from ONE authoritative source and
+  // never render a failed/loading load as an empty graph.
   const setHydrationPhase = useCanvasStore((s) => s.setHydrationPhase)
   useEffect(() => {
     setHydrationPhase(hydrationPhase)
   }, [hydrationPhase, setHydrationPhase])
+
+  const setHydrationStatus = useCanvasStore((s) => s.setHydrationStatus)
+  useEffect(() => {
+    setHydrationStatus(hydrationStatus)
+  }, [hydrationStatus, setHydrationStatus])
 
   // Clear trace state when the active view changes. The trace store is an
   // app-singleton; without this, a trace started in view A leaks into view
@@ -74,12 +89,44 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // unrelated canvas. Stale trace-added edges in the canvas store are
   // wiped naturally by view B's hydration cycle, so only the trace state
   // needs explicit cleanup here.
+  // Also clears on branch switch: a draft and main are different graph states, so a
+  // trace started on one must not bleed onto the other (the canvas rehydrates from the
+  // branch-scoped provider when currentBranchId changes — see ViewExecutionContext).
   const activeViewId = activeView?.id
+  const currentBranchId = useBranchStore((s) => s.currentBranchId)
   useEffect(() => {
     const { clearTrace, resetAddedEdgeIds } = useTraceStore.getState()
     clearTrace()
     resetAddedEdgeIds()
-  }, [activeViewId])
+  }, [activeViewId, currentBranchId])
+
+  // Scope staged changes to the active (workspace, data source, branch). Staged edits belong to
+  // ONE branch — a draft is isolated until merged — so switching branches must PARK the current
+  // branch's staged edits and load the target branch's slice (empty for a fresh branch). Without
+  // this the staged store is a global singleton, so a delete staged on branch "123" bleeds onto
+  // branch "456"/"789"'s canvas + containment tree (which read the staged store), making it look
+  // like an unmerged change leaked across branches. (Symmetric to the trace clear above; the
+  // canvas itself rehydrates from the branch-scoped provider via ViewExecutionContext.)
+  const scopeWs = useBranchStore((s) => s.workspaceId)
+  const scopeDs = useBranchStore((s) => s.dataSourceId)
+  const stagedScopeKey = `${scopeWs ?? ''}::${scopeDs ?? ''}::${currentBranchId ?? 'main'}`
+  useEffect(() => {
+    useStagedChangesStore.getState().setScope(stagedScopeKey)
+  }, [stagedScopeKey])
+
+  // Persist unsaved staged work to localStorage under the same scope key so a
+  // refresh restores it (with a banner) instead of losing it. Only meaningful
+  // in a draft (staged edits require an open branch); on 'main' the snapshot
+  // stays empty. See features/canvas-drafts/.
+  const { restoredCount, dismissRestored, discardAllStaged } = useStagedDraftPersistence(
+    currentBranchId ? stagedScopeKey : null,
+    currentBranchId,
+    hydrationPhase === 'complete',
+  )
+
+  // A brand-new blank model opens ready to build: auto-open (or resume) the
+  // caller's draft once per graph per session. No-op for every other graph kind.
+  useAutoDraftForBlankModel(activeView?.workspaceId ?? null, activeView?.dataSourceId ?? null, activeView?.id ?? null)
 
   // Memoize canvas selection based on view layout type
   const CanvasComponent = useMemo(() => {
@@ -102,54 +149,62 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
       fallback={(error, reset) => <CanvasError error={error} onRetry={reset} />}
     >
     <ReactFlowProvider>
-    <div className={cn("relative w-full h-full", className)}>
-      <AnimatePresence>
-        <motion.div
-          key={layoutType}
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          className="absolute inset-0"
-        >
-          <Suspense fallback={<CanvasLoader />}>
-            <CanvasComponent />
-          </Suspense>
-        </motion.div>
-      </AnimatePresence>
-
-      {hydrationError && (
-        <ProviderUnavailableOverlay message={hydrationError} />
+    <div className={cn("relative w-full h-full flex flex-col", className)}>
+      {activeView?.workspaceId && (
+        <CanvasVersioningBar
+          workspaceId={activeView.workspaceId}
+          dataSourceId={activeView.dataSourceId ?? null}
+        />
       )}
+      {activeView?.workspaceId && (
+        <BranchBehindBanner
+          wsId={activeView.workspaceId}
+          dataSourceId={activeView.dataSourceId ?? null}
+          viewId={activeView.id ?? null}
+          className="mx-4 mt-2"
+        />
+      )}
+      <RestoredDraftBanner
+        count={restoredCount}
+        onDiscard={discardAllStaged}
+        onDismiss={dismissRestored}
+        className="mx-4 mt-2"
+      />
+      <div className="relative flex-1 min-h-0">
+        <AnimatePresence>
+          <motion.div
+            key={layoutType}
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="absolute inset-0"
+          >
+            <Suspense fallback={<CanvasLoader />}>
+              <CanvasComponent />
+            </Suspense>
+          </motion.div>
+        </AnimatePresence>
 
-      {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
-        <div className="absolute top-4 left-4 z-10 pointer-events-none">
-          <ViewBadge
-            name={activeView.name}
-            layoutType={layoutType}
-            entityCount={activeView.content.visibleEntityTypes.length}
+        {(hydrationStatus === 'warming' || hydrationStatus === 'unavailable') && (
+          <CanvasProviderStateOverlay
+            warming={hydrationStatus === 'warming'}
+            onRetry={retryHydration}
           />
-        </div>
-      )}
+        )}
+
+        {activeView && layoutType !== 'graph' && layoutType !== 'reference' && (
+          <div className="absolute top-4 left-4 z-10 pointer-events-none">
+            <ViewBadge
+              name={activeView.name}
+              layoutType={layoutType}
+              entityCount={activeView.content.visibleEntityTypes.length}
+            />
+          </div>
+        )}
+      </div>
     </div>
     </ReactFlowProvider>
     </ErrorBoundary>
-  )
-}
-
-function ProviderUnavailableOverlay({ message }: { message: string }) {
-  return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center bg-canvas/80 backdrop-blur-sm pointer-events-none">
-      <div className="flex flex-col items-center gap-3 max-w-sm text-center pointer-events-auto">
-        <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-950/40 flex items-center justify-center">
-          <WifiOff className="w-5 h-5 text-amber-500" />
-        </div>
-        <h3 className="text-base font-semibold text-ink">Provider Unavailable</h3>
-        <p className="text-sm text-ink-muted">{message}</p>
-        <p className="text-xs text-ink-muted/70">
-          The canvas will automatically reload when the provider recovers.
-        </p>
-      </div>
-    </div>
   )
 }
 

@@ -5,9 +5,10 @@ from .endpoints import (
     graph, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, stats_admin,
-    insights, me,
+    insights, me, system_status,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search,
+    versioning,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -229,10 +230,25 @@ api_router.include_router(
     insights.router, prefix="/admin/insights", tags=["admin:insights"],
     dependencies=[Depends(requires("system:admin"))],
 )
+# Infrastructure status: /api/v1/admin/system/status — super-admin
+# single-pane snapshot of every backing service + data-plane lag.
+api_router.include_router(
+    system_status.router, prefix="/admin/system", tags=["admin:system-status"],
+    dependencies=[Depends(requires("system:admin"))],
+)
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────
 api_router.include_router(
     views.router, prefix="/views", tags=["views"],
+)
+
+# ── Versioned graph editing (workspace-scoped) ───────────────────────
+# The ONLY path between the frontend and the graphver Postgres store; the
+# browser never touches the DB directly. Authenticated + RBAC-gated on the
+# data-source permissions (a graph is 1:1 with a data source), and every
+# graph id is checked to belong to {ws_id} for tenant isolation.
+api_router.include_router(
+    versioning.router, prefix="/{ws_id}/versioning", tags=["versioning:workspace"],
 )
 
 # ── Workspace-scoped data routers ───────────────────────────────────

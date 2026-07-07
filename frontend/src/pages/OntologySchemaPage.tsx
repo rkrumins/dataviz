@@ -28,6 +28,7 @@ import { useAnyWorkspacePermission, usePermission } from '@/store/auth'
 import { useOntologies, useOntology } from '@/features/ontology/hooks/useOntologies'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { useInvalidateGraphSchema } from '@/hooks/useGraphSchema'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
   entityDefToSchema,
   entitySchemaToBackend,
@@ -195,6 +196,7 @@ export function OntologySchemaPage() {
   // ── React Query data ───────────────────────────────────────────────
   const { data: ontologies = [], isLoading: isLoadingOntologies } = useOntologies()
   const { data: selectedOntology } = useOntology(ontologyId)
+  useDocumentTitle(selectedOntology?.name ? `${selectedOntology.name} · Schema` : 'Schema')
   const mutations = useOntologyMutations()
   // Invalidate the cached graph schema whenever a data-source-to-ontology
   // assignment changes. useOntologyMutations already does this for ontology
@@ -1156,7 +1158,7 @@ export function OntologySchemaPage() {
             <>
               {/* Deleted banner */}
               {isDeleted && (
-                <div className="flex-shrink-0 mx-8 mt-4 mb-0 flex items-center gap-3 px-4 py-3 rounded-xl bg-red-500/8 border border-red-500/20">
+                <div className="flex-shrink-0 mx-auto w-[calc(100%-4rem)] max-w-[1376px] mt-4 mb-0 flex items-center gap-3 px-4 py-3 rounded-xl bg-red-500/8 border border-red-500/20">
                   <Trash2 className="w-5 h-5 text-red-500 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold text-red-600 dark:text-red-400">This semantic layer has been deleted</p>
@@ -1207,7 +1209,8 @@ export function OntologySchemaPage() {
               )}
 
               {/* Tabs — underline style (AdminRegistry pattern) */}
-              <div className="flex items-center gap-1 border-b border-glass-border px-8 shrink-0">
+              <div className="border-b border-glass-border shrink-0">
+                <div className="max-w-[1440px] mx-auto px-8 flex items-center gap-1">
                 {TAB_DEFS.map(t => {
                   const Icon = t.icon
                   const isActive = activeTab === t.id
@@ -1248,6 +1251,7 @@ export function OntologySchemaPage() {
                     </button>
                   )
                 })}
+                </div>
               </div>
 
               {/* Tab content + editor panel */}
@@ -1260,7 +1264,7 @@ export function OntologySchemaPage() {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -6 }}
                       transition={{ duration: 0.15, ease: 'easeOut' }}
-                      className="p-8"
+                      className="max-w-[1440px] mx-auto p-8"
                     >
                       {activeTab === 'overview' && (
                         <OverviewPanel

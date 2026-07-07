@@ -3,6 +3,7 @@ Abstract GraphDataProvider interface — shared kernel.
 Both the visualization service and graph service import from here.
 """
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional, Dict, Any
 
 from ..models.graph import (
@@ -43,6 +44,44 @@ class ProviderInputError(ValueError):
     Consumers: API endpoints should translate to HTTP 400.
     """
     pass
+
+
+@dataclass(frozen=True)
+class ProviderCapability:
+    """What the system may do with a provider's backing store — the shared, enforced
+    capability that drives write routing and the managed-vs-federated source model.
+
+    ``writable``      — writes can be persisted to this store at all.
+    ``full_crud``     — supports edge update/delete (not just create).
+    ``is_external``   — an externally-owned catalog (federated; we are a view) vs a store
+                        we manage end-to-end.
+    ``supports_copy`` — a fast server-side graph copy is available (enables per-branch
+                        projection by cloning ``main`` + applying the overlay delta).
+    """
+    writable: bool
+    full_crud: bool
+    is_external: bool
+    supports_copy: bool
+
+
+# Keyed by provider_type (authoritative + stable). The enforced kernel form of the static
+# ``ProviderCapabilities.supportsWriteBack`` discovery metadata.
+PROVIDER_CAPABILITIES: Dict[str, ProviderCapability] = {
+    "falkordb": ProviderCapability(writable=True,  full_crud=True,  is_external=False, supports_copy=True),
+    "spanner":  ProviderCapability(writable=True,  full_crud=True,  is_external=False, supports_copy=False),
+    "neo4j":    ProviderCapability(writable=True,  full_crud=False, is_external=False, supports_copy=False),
+    "datahub":  ProviderCapability(writable=False, full_crud=False, is_external=True,  supports_copy=False),
+    "mock":     ProviderCapability(writable=True,  full_crud=True,  is_external=False, supports_copy=False),
+}
+
+# Unknown providers default to read-only/external (safe: never write to a store we don't
+# understand; treat it as a federated view).
+_DEFAULT_CAPABILITY = ProviderCapability(writable=False, full_crud=False, is_external=True, supports_copy=False)
+
+
+def capability_for(provider_type: Optional[str]) -> ProviderCapability:
+    """Capability for a ``provider_type`` (e.g. the data source's). Unknown → read-only/external."""
+    return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
 
 
 class GraphDataProvider(ABC):

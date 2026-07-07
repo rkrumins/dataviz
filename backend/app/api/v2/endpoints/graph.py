@@ -51,6 +51,10 @@ async def get_context_engine(
         None,
         description="Target a specific data source within a workspace.",
     ),
+    branchId: Optional[str] = Query(
+        None,
+        description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it.",
+    ),
     session: AsyncSession = Depends(get_db_session),
 ) -> ContextEngine:
     """Resolve the workspace-scoped engine. v2 drops the legacy connectionId
@@ -58,7 +62,8 @@ async def get_context_engine(
     try:
         if ws_id:
             return await ContextEngine.for_workspace(
-                ws_id, provider_manager, session, data_source_id=dataSourceId
+                ws_id, provider_manager, session, data_source_id=dataSourceId,
+                branch_id=branchId,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

@@ -78,6 +78,10 @@ export interface GraphNode {
 
     /** Last sync timestamp */
     lastSyncedAt?: string
+
+    /** Optimistic-concurrency token (content hash) — echoed back as `baseVersion` on an edit so
+     *  the server can detect a concurrent same-field change instead of silently overwriting it. */
+    version?: string
 }
 
 /**
@@ -101,6 +105,9 @@ export interface GraphEdge {
 
     /** Additional edge properties */
     properties?: Record<string, unknown>
+
+    /** Optimistic-concurrency token (content hash) — echoed back as `baseVersion` on an edit. */
+    version?: string
 }
 
 // ============================================
@@ -284,6 +291,13 @@ export interface CreateNodeRequest {
     entityType: EntityType
     displayName: string
     parentUrn?: string
+    /**
+     * Ontology containment relationship for the auto-created parent→child edge
+     * (e.g. CONTAINS / partOf / belongsTo). The server validates it is a containment
+     * type allowed between the parent and child entity types. Omit to let the server
+     * pick the default. Ignored when there is no parentUrn.
+     */
+    containmentEdgeType?: string
     properties: Record<string, unknown>
     tags: string[]
 }
@@ -293,6 +307,34 @@ export interface CreateNodeResult {
     containmentEdge: GraphEdge | null
     success: boolean
     error?: string
+}
+
+export interface CreateEdgeRequest {
+    sourceUrn: string
+    targetUrn: string
+    edgeType: string
+    properties?: Record<string, unknown>
+    /** When set, a matching existing edge is returned unchanged instead of duplicated. */
+    idempotencyKey?: string
+}
+
+export interface EdgeMutationResult {
+    edge: GraphEdge | null
+    success: boolean
+    error?: string
+    warnings?: string[]
+}
+
+export type EdgeDirection = 'outgoing' | 'incoming' | 'both'
+
+/** One ontology relationship type with whether it may originate from a given node. */
+export interface AllowedEdgeOption {
+    edgeType: string
+    label: string
+    description?: string
+    allowed: boolean
+    /** Non-null when allowed=false — explains the source/target rule that blocks it. */
+    reason?: string
 }
 
 export interface GraphSchemaStats {
@@ -832,6 +874,12 @@ export interface GraphDataProvider {
      * Validates against ontology rules before creation
      */
     createNode(request: CreateNodeRequest): Promise<CreateNodeResult>
+
+    /**
+     * Create a directed RAW edge between two existing nodes.
+     * Validates source/target entity types against the active ontology.
+     */
+    createEdge(request: CreateEdgeRequest): Promise<EdgeMutationResult>
 }
 
 // ============================================
@@ -1066,4 +1114,12 @@ export interface LayerAssignmentRequest {
         entityAssignments?: EntityAssignmentConfig[];
     }[];
     includeEdges: boolean;
+    /**
+     * Canonical view-config placements (urn -> config), threaded by the caller from
+     * the active view's referenceLayout. The backend treats these as authoritative,
+     * overriding per-layer entityAssignments on collision (see layout_config.py).
+     */
+    assignments?: Record<string, EntityAssignmentConfig>;
+    /** The active view's scope ('all' | 'curated'). */
+    entityScope?: 'all' | 'curated';
 }

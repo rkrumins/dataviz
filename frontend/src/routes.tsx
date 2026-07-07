@@ -14,6 +14,7 @@ const WorkspaceViewsManager = lazy(() => import('@/pages/WorkspaceViewsManager')
 const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
+const AdminInfrastructure = lazy(() => import('@/components/admin/AdminInfrastructure').then(m => ({ default: m.AdminInfrastructure })))
 const AdminBranding = lazy(() => import('@/components/admin/AdminBranding').then(m => ({ default: m.AdminBranding })))
 const AdminFeatures = lazy(() => import('@/components/admin/AdminFeatures/index').then(m => ({ default: m.AdminFeatures })))
 const AdminUsers = lazy(() => import('@/components/admin/AdminUsers').then(m => ({ default: m.AdminUsers })))
@@ -25,6 +26,7 @@ const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => 
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
+const WorkspaceReviewsPage = lazy(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
 const OntologySchemaPage = lazy(() => import('@/pages/OntologySchemaPage').then(m => ({ default: m.OntologySchemaPage })))
 const MyAccessPage = lazy(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazy(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
@@ -111,6 +113,7 @@ export const router = createBrowserRouter([
       // are view-driven — see /views and /explorer; there is no standalone canvas.
       { path: 'workspaces', element: <Lazy><WorkspacesPage /></Lazy> },
       { path: 'workspaces/:wsId', element: <Lazy><WorkspaceDetailPage /></Lazy> },
+      { path: 'workspaces/:wsId/reviews', element: <Lazy><WorkspaceReviewsPage /></Lazy> },
 
       // Self-service "what can I do?" page — every authenticated user.
       { path: 'my/access', element: <Lazy><MyAccessPage /></Lazy> },
@@ -166,6 +169,14 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="overview">
                 <Lazy><AdminOverview /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'infrastructure',
+            element: (
+              <RequireNav group="admin" sectionKey="infrastructure">
+                <Lazy><AdminInfrastructure /></Lazy>
               </RequireNav>
             ),
           },

@@ -1,0 +1,91 @@
+/**
+ * Unit tests for the PURE `branchCreatedUrns` selector — the branch-created
+ * delta that drives leak-safe closed-scope placement of just-created entities.
+ *
+ * The delta is the set of target URNs of `create_entity` staged changes for the
+ * active scope. It must include ONLY `create_entity` targets — never renames,
+ * updates, edges, or deletes — so that in a closed-scope Context Model view we
+ * honour the node's global `layerAssignment` strictly for entities this branch
+ * actually created (see useLayerAssignment.resolve.test.ts for the leak-safety
+ * constraint this feeds).
+ */
+import { describe, it, expect } from 'vitest'
+import { branchCreatedUrns, committedCreatedUrns } from '../useBranchCreatedDelta'
+import type { StagedChange, StagedChangeType } from '@/store/stagedChangesStore'
+import { buildChangeSet, type GraphChange } from '@/features/versioning/model/changeModel'
+
+const change = (type: StagedChangeType, targetUrn: string | undefined): StagedChange => ({
+  id: `c-${type}-${targetUrn ?? 'none'}`,
+  type,
+  targetId: targetUrn ?? 'no-urn',
+  targetUrn,
+  after: {},
+  summary: '',
+  timestamp: 0,
+})
+
+describe('branchCreatedUrns', () => {
+  it('extracts exactly the create_entity target urns and ignores all other change types', () => {
+    const changes: StagedChange[] = [
+      change('create_entity', 'urn:staged:a'),
+      change('create_entity', 'urn:staged:b'),
+      change('rename_entity', 'urn:existing:c'),
+      change('update_entity', 'urn:existing:d'),
+      change('create_edge', 'urn:edge:e'),
+      change('delete_entity', 'urn:existing:f'),
+      change('assign_layer', 'urn:existing:g'),
+      change('move_to_layer', 'urn:existing:h'),
+    ]
+    const result = branchCreatedUrns(changes)
+    expect([...result].sort()).toEqual(['urn:staged:a', 'urn:staged:b'])
+  })
+
+  it('returns an empty set when there are no create_entity changes', () => {
+    const changes: StagedChange[] = [
+      change('rename_entity', 'x'),
+      change('create_edge', 'y'),
+    ]
+    expect(branchCreatedUrns(changes).size).toBe(0)
+  })
+
+  it('returns an empty set for an empty change list', () => {
+    expect(branchCreatedUrns([]).size).toBe(0)
+  })
+
+  it('ignores create_entity changes that have no targetUrn', () => {
+    const changes: StagedChange[] = [
+      change('create_entity', undefined),
+      change('create_entity', 'urn:staged:z'),
+    ]
+    expect([...branchCreatedUrns(changes)]).toEqual(['urn:staged:z'])
+  })
+})
+
+describe('committedCreatedUrns', () => {
+  const gc = (entityId: string, kind: GraphChange['kind'], status: GraphChange['status']): GraphChange => ({
+    entityId,
+    kind,
+    status,
+    label: entityId,
+    origin: { source: 'branch', branchId: 'b1' },
+  })
+
+  it('extracts only added NODE entityIds — ignores modified/removed, edges, and null changeset', () => {
+    const cs = buildChangeSet([
+      gc('urn:a', 'node', 'added'),
+      gc('urn:b', 'node', 'added'),
+      gc('urn:c', 'node', 'modified'), // existing entity edited, not created
+      gc('urn:d', 'node', 'removed'),  // deleted, not created
+      gc('urn:e', 'edge', 'added'),    // a created edge, not an entity
+    ])
+    expect([...committedCreatedUrns(cs)].sort()).toEqual(['urn:a', 'urn:b'])
+    expect(committedCreatedUrns(null).size).toBe(0)
+  })
+
+  it('is the durable source: survives after the staged store clears on save', () => {
+    // post-save the staged store is empty, but the committed changeset still lists the creates
+    expect(branchCreatedUrns([]).size).toBe(0)
+    const cs = buildChangeSet([gc('urn:synodic:manual:layer:15be1c2b02ba', 'node', 'added')])
+    expect([...committedCreatedUrns(cs)]).toEqual(['urn:synodic:manual:layer:15be1c2b02ba'])
+  })
+})

@@ -18,6 +18,7 @@ import {
     type SsoProviderSummary,
     type UserIdentity,
 } from '@/services/authService'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 interface ErrorState {
     detail: string
@@ -46,6 +47,8 @@ export function MyIdentitiesPage() {
     useEffect(() => {
         void refresh()
     }, [refresh])
+
+    useDocumentTitle('My Identities')
 
     if (data === null && error === null) {
         return (
@@ -91,7 +94,7 @@ export function MyIdentitiesPage() {
 
     return (
         <div className="absolute inset-0 overflow-y-auto bg-canvas">
-        <div className="max-w-2xl mx-auto p-8 space-y-8">
+        <div className="max-w-3xl mx-auto px-6 md:px-10 lg:px-12 py-8 space-y-8">
             <header>
                 <h1 className="text-2xl font-semibold text-ink">Connected identities</h1>
                 <p className="mt-2 text-sm text-ink-secondary">

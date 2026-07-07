@@ -23,7 +23,8 @@ import json
 import logging
 import os
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -260,7 +261,13 @@ class ProviderManager:
                     reason=f"Instantiation failed: {exc}",
                 ) from exc
 
-            # Success: wrap in circuit breaker and cache.
+            # Success: wrap in circuit breaker and cache. Expose the
+            # manager identity on the raw provider first so app-layer
+            # guards (graph.py ``_bounded_compute``, the ContextEngine
+            # trace semaphore) can key per-(provider, graph) concurrency
+            # without re-deriving it — CircuitBreakerProxy passes plain
+            # attributes through to the wrapped instance.
+            raw_provider.manager_cache_key = cache_key
             breaker_name = f"{ds.provider_id}:{ds.graph_name or ''}"
             self._providers[cache_key] = _wrap_in_breaker(raw_provider, breaker_name)
             state_after, _ = await breaker._record_success()
@@ -591,18 +598,60 @@ class ProviderManager:
     # ------------------------------------------------------------------ #
 
     async def evict_data_source(self, provider_id: str, graph_name: str) -> None:
-        """Evict cached provider for a (provider_id, graph_name) pair."""
+        """Evict cached provider for a (provider_id, graph_name) pair.
+
+        Removes it from the cache (so new traffic re-instantiates cleanly) but
+        DEFERS ``close()`` while the provider has in-flight guarded ops — closing
+        mid-job nulls the graph handle out from under a running aggregation and
+        surfaces as ``'NoneType' object has no attribute 'query'``. When busy we
+        background a drain-then-close so the pool isn't leaked.
+        """
         cache_key = (provider_id, graph_name or "")
         provider = self._providers.pop(cache_key, None)
-        if provider is not None:
-            try:
-                await provider.close()
-            except Exception as exc:
-                logger.warning("Error closing provider %s: %s", cache_key, exc)
         self._locks.pop(cache_key, None)
         # Also reset the instantiation breaker so re-instantiation is attempted
         self._instantiation_breakers.pop(cache_key, None)
+        if provider is not None:
+            inflight = 0
+            try:
+                inflight = provider.inflight_ops()
+            except Exception:
+                inflight = 0
+            if inflight > 0:
+                logger.info(
+                    "Provider %s evicted from cache but has %d in-flight ops — "
+                    "deferring close until idle.", cache_key, inflight,
+                )
+                asyncio.create_task(self._close_when_idle(cache_key, provider))
+            else:
+                try:
+                    await provider.close()
+                except Exception as exc:
+                    logger.warning("Error closing provider %s: %s", cache_key, exc)
         logger.info("Evicted provider for key=%s", cache_key)
+
+    async def _close_when_idle(
+        self, cache_key: tuple, provider: Any, *, timeout_s: float = 600.0,
+    ) -> None:
+        """Wait for a deferred-evicted provider to drain its in-flight ops, then
+        close it. Bounded so a stuck op can't leak the pool forever."""
+        deadline = time.monotonic() + timeout_s
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    if provider.inflight_ops() <= 0:
+                        break
+                except Exception:
+                    break
+                await asyncio.sleep(2.0)
+        finally:
+            try:
+                await provider.close()
+                logger.info("Closed deferred-evicted provider %s.", cache_key)
+            except Exception as exc:
+                logger.warning(
+                    "Error closing deferred provider %s: %s", cache_key, exc,
+                )
 
     async def evict_workspace(self, workspace_id: str, session: AsyncSession) -> None:
         """Evict all cached providers for all data sources in a workspace."""
@@ -687,8 +736,11 @@ class ProviderManager:
         creds = credentials or {}
 
         if ptype == "falkordb":
-            from backend.app.providers.falkordb_provider import FalkorDBProvider
-            host, port = apply_local_dev_falkordb_override(host, port)
+            from backend.app.providers.falkordb_provider import (
+                FalkorDBProvider,
+                resolve_falkordb_target,
+            )
+            host, port = resolve_falkordb_target(host, port)
             # P1.6 — credentials previously dropped here, causing NOAUTH
             # errors to be mis-classified as network failures and tripping
             # the breaker for what is actually a configuration problem.
@@ -700,6 +752,12 @@ class ProviderManager:
             # legacy single-host path. Previously extra_config was dropped
             # on the FalkorDB branch (only Neo4j/Spanner consumed it).
             _falkor_conn = (extra_config or {}).get("falkordbConnection")
+            # Per-provider auth gate (extra_config.falkordbConnection.authEnabled,
+            # default true). When false, the provider nulls the graph
+            # credentials at a single chokepoint so no AUTH leaks to an
+            # unauthenticated FalkorDB (a dedicated cache_redis_url keeps its
+            # own embedded auth).
+            _auth_enabled = (_falkor_conn or {}).get("authEnabled", True)
             return FalkorDBProvider(
                 host=host or "localhost",
                 port=port or 6379,
@@ -709,6 +767,10 @@ class ProviderManager:
                 connection_config=_falkor_conn,
                 # Per-provider dedicated cache Redis (encrypted credential).
                 cache_redis_url=creds.get("cache_redis_url"),
+                auth_enabled=_auth_enabled,
+                # Connection-level TLS (the falkordbConnection.tls object adds
+                # CA/client-cert/verify mode). Previously dropped for FalkorDB.
+                tls_enabled=tls_enabled,
             )
 
         elif ptype == "neo4j":

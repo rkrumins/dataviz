@@ -38,6 +38,8 @@ export interface CanvasKeyboardHandlers {
     onTrace?: () => void
     /** Create new node */
     onCreate?: () => void
+    /** Arm edge connect-mode from the selected node */
+    onConnectMode?: () => void
     /** Undo last action */
     onUndo?: () => void
     /** Redo last undone action */
@@ -189,6 +191,13 @@ export function useCanvasKeyboard({
         if (e.key === 'n' && !isMod) {
             e.preventDefault()
             handlersRef.current.onCreate?.()
+            return
+        }
+
+        // Connect mode: C (no modifier — Cmd/Ctrl+C is copy, handled above)
+        if (e.key === 'c' && !isMod) {
+            e.preventDefault()
+            handlersRef.current.onConnectMode?.()
             return
         }
     }, [enabled, defaultDelete, defaultCancel])

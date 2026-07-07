@@ -57,11 +57,13 @@ import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPa
 // UX components
 import { CanvasContextMenu } from './CanvasContextMenu'
 import { InlineNodeEditor } from './InlineNodeEditor'
-import { QuickCreateNode } from './QuickCreateNode'
 import { CommandPalette } from './CommandPalette'
 import { EditorToolbar } from './EditorToolbar'
 import { TraceToolbar } from './TraceToolbar'
-import { NodePalette } from './NodePalette'
+import { HierarchyBuilderPanel } from './create/HierarchyBuilderPanel'
+import { useHierarchyBuilderStore } from './create/hierarchyBuilderStore'
+import { BuilderEmptyState } from './create/BuilderEmptyState'
+import { BuildPanel } from './create/buildmode/BuildPanel'
 
 // Hooks
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -76,7 +78,12 @@ import { useEdgeDetailPanel, useEdgeTypeFilters, useEdgeFiltersStore } from '@/h
 import { useSemanticZoom } from '@/hooks/useSemanticZoom'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
+import { useLoadingToast, useToast } from '@/components/ui/toast'
+import { EdgeTypePickerPopover } from './edge-create/EdgeTypePickerPopover'
+import { CreateLinkPopover } from './edge-create/CreateLinkPopover'
+import { useCreateLinkStore } from './edge-create/createLinkStore'
+import { deriveConnectableEdges, validateDrawnEdge } from '@/services/ontologyPreflightService'
 
 // Stores
 import { useSchemaStore, normalizeEdgeType, useEdgeTypeMetadataMap } from '@/store/schema'
@@ -116,11 +123,17 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 1. Schema readiness guard
   const isSchemaReady = useViewSchemaIsReady()
 
+  const { showToast } = useToast()
   // 2. Canvas store
-  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges, addNodes } = useCanvasStore()
+  const { setNodes, setEdges, selectNode, selectEdge, clearSelection, addEdges } = useCanvasStore()
   const setVisibleEdges = useCanvasStore((s) => s.setVisibleEdges)
   const rawNodes = useCanvasStore((s) => s.nodes)
   const rawEdges = useCanvasStore((s) => s.edges)
+  // Mirrors ContextViewCanvas's isHydratingInitial — CanvasRouter writes
+  // hydrationPhase into the canvas store for every canvas type, so the empty
+  // state can avoid flashing before the initial load lands.
+  const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
+  const isHydratingInitial = hydrationPhase !== 'complete'
   const selectedNodeIds = useCanvasStore((s) => s.selectedNodeIds)
   const selectedNodeId = selectedNodeIds[0] ?? null
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
@@ -137,7 +150,12 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 4. Local state
   const [showLineageFlow, setShowLineageFlow] = useState(true)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
-  const [isPaletteOpen, setPaletteOpen] = useState(false)
+  // Hierarchy Builder open state — drives right-rail mutual exclusion with the
+  // inspectors ("creation takes the rail"). Selector, not getState-in-render.
+  // `surface` distinguishes the 400px rail from the wider Build Mode panel —
+  // only one of the two (never both) mounts at a time.
+  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail')
+  const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build')
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
@@ -1014,53 +1032,56 @@ export function GraphCanvas({ className }: { className?: string }) {
     [],
   )
 
-  // Helper: find all valid relationship types between two entity types (ontology-driven)
-  // Uses containmentEdgeTypes and lineageEdgeTypes to classify each result.
-  // Treats empty/missing sourceTypes or targetTypes as wildcards (any entity type allowed).
+  // Valid hand-drawable edge types between two entity types — the SHARED ontology helper used
+  // everywhere (lineage-only: containment is set via Add child / "Move to", never drawn), already
+  // endpoint-validated. Returns only the allowed options.
   const getValidEdgeTypes = useCallback(
-    (sourceType: string, targetType: string) => {
-      const containmentSet = new Set(containmentEdgeTypes.map(t => t.toUpperCase()))
-
-      return relationshipTypes
-        .filter(rt => {
-          // Empty arrays or missing = wildcard (any type allowed)
-          const srcOk = !rt.sourceTypes?.length || rt.sourceTypes.includes('*') || rt.sourceTypes.includes(sourceType)
-          const tgtOk = !rt.targetTypes?.length || rt.targetTypes.includes('*') || rt.targetTypes.includes(targetType)
-          return srcOk && tgtOk
-        })
-        .map(rt => ({
-          ...rt,
-          _isContainment: rt.isContainment ?? containmentSet.has(rt.id.toUpperCase()),
-          _isLineage: rt.isLineage ?? !containmentSet.has(rt.id.toUpperCase()),
-          _category: rt.isContainment ? 'Containment' : (rt.isLineage ? 'Lineage' : (rt.category ?? 'Association')),
-        }))
-    },
-    [relationshipTypes, containmentEdgeTypes],
+    (sourceType: string, targetType: string) =>
+      deriveConnectableEdges(sourceType, targetType, relationshipTypes, containmentEdgeTypes, schemaEntityTypes).filter(o => o.allowed),
+    [relationshipTypes, containmentEdgeTypes, schemaEntityTypes],
   )
 
-  // Edge picker state — shown when user needs to choose between multiple valid edge types
+  // Edge picker state — the shared EdgeTypePickerPopover is shown when >1 valid type exists.
   const [edgePicker, setEdgePicker] = useState<{
-    isOpen: boolean
+    sourceId: string
+    targetId: string
     position: { x: number; y: number }
-    connection: { source: string; target: string; sourceName: string; targetName: string } | null
-    validTypes: Array<{ id: string; name: string; description?: string; _isContainment: boolean; _isLineage: boolean; _category: string }>
-  }>({ isOpen: false, position: { x: 0, y: 0 }, connection: null, validTypes: [] })
+  } | null>(null)
 
-  // Create edge with a specific type
+  // Create a lineage edge of a specific type, validated against the ontology + existing edges
+  // (rejects invalid/duplicate; containment is never created here). Deterministic id so the store's
+  // id-dedup also catches an exact duplicate.
   const createEdgeWithType = useCallback(
     (source: string, target: string, edgeTypeId: string) => {
-      const isContainment = containmentEdgeTypes.some(t => t.toUpperCase() === edgeTypeId.toUpperCase())
+      const sourceNode = rawNodes.find(n => n.id === source)
+      const targetNode = rawNodes.find(n => n.id === target)
+      const verdict = validateDrawnEdge({
+        sourceType: (sourceNode?.data?.type as string) ?? null,
+        targetType: (targetNode?.data?.type as string) ?? null,
+        edgeType: edgeTypeId,
+        relationshipTypes,
+        containmentEdgeTypes,
+        existingEdges: useCanvasStore.getState().edges,
+        sourceId: source,
+        targetId: target,
+        entityTypes: schemaEntityTypes,
+      })
+      if (!verdict.allowed) {
+        showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+        setEdgePicker(null)
+        return
+      }
       addEdges([{
-        id: `e-${source}-${target}-${edgeTypeId}-${Date.now()}`,
+        id: `e-${source}-${target}-${edgeTypeId.toUpperCase()}`,
         source,
         target,
-        type: isContainment ? 'smoothstep' : 'lineage',
+        type: 'lineage',
         data: { edgeType: edgeTypeId, relationship: edgeTypeId },
-        animated: !isContainment,
+        animated: true,
       }])
-      setEdgePicker(prev => ({ ...prev, isOpen: false, connection: null }))
+      setEdgePicker(null)
     },
-    [addEdges, containmentEdgeTypes],
+    [rawNodes, addEdges, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
   )
 
   // Create edge by dragging between node handles — ontology-aware
@@ -1077,37 +1098,41 @@ export function GraphCanvas({ className }: { className?: string }) {
       const targetType = (targetNode.data.type as string) ?? ''
       const validTypes = getValidEdgeTypes(sourceType, targetType)
 
-      if (validTypes.length === 0) return
-
-      if (validTypes.length === 1) {
-        createEdgeWithType(connection.source, connection.target, validTypes[0].id)
+      if (validTypes.length === 0) {
+        showToast('info', 'No relationship is allowed between these entities. Use “Add child” to nest one inside the other.')
         return
       }
 
-      // Multiple valid types — show picker
+      if (validTypes.length === 1) {
+        createEdgeWithType(connection.source, connection.target, validTypes[0].edgeType)
+        return
+      }
+
+      // Multiple valid types — show the shared picker (which also disables already-connected types).
       const targetEl = document.querySelector(`[data-id="${connection.target}"]`)
       const rect = targetEl?.getBoundingClientRect()
       setEdgePicker({
-        isOpen: true,
+        sourceId: connection.source,
+        targetId: connection.target,
         position: rect
           ? { x: rect.left + rect.width / 2, y: rect.top }
           : { x: window.innerWidth / 2, y: window.innerHeight / 2 },
-        connection: {
-          source: connection.source,
-          target: connection.target,
-          sourceName: (sourceNode.data.label as string) ?? sourceNode.id,
-          targetName: (targetNode.data.label as string) ?? targetNode.id,
-        },
-        validTypes,
       })
     },
-    [rawNodes, getValidEdgeTypes, createEdgeWithType],
+    [rawNodes, getValidEdgeTypes, createEdgeWithType, showToast],
   )
 
-  // Edge reconnection — ontology-aware
+  // Edge reconnection — ontology-aware. Containment can't be re-drawn (route to "Move to"); a
+  // lineage edge is re-validated against the ontology + existing edges before moving.
   const onReconnect = useCallback(
     (oldEdge: any, newConnection: any) => {
       if (!newConnection.source || !newConnection.target) return
+
+      const originalType = (oldEdge.data?.edgeType ?? oldEdge.data?.relationship ?? '') as string
+      if (containmentEdgeTypes.some(t => t.toUpperCase() === originalType.toUpperCase())) {
+        showToast('info', 'Containment can’t be reconnected — use “Move to” to change an entity’s parent.')
+        return
+      }
 
       const sourceNode = rawNodes.find(n => n.id === newConnection.source)
       const targetNode = rawNodes.find(n => n.id === newConnection.target)
@@ -1115,25 +1140,39 @@ export function GraphCanvas({ className }: { className?: string }) {
 
       const sourceType = (sourceNode.data.type as string) ?? ''
       const targetType = (targetNode.data.type as string) ?? ''
+      // Preserve the edge's OWN relationship type (case-insensitively) — never silently
+      // substitute a different one; if it isn't valid for the new endpoints, block instead.
       const validTypes = getValidEdgeTypes(sourceType, targetType)
+      const edgeType = validTypes.find(o => o.edgeType.toUpperCase() === originalType.toUpperCase())?.edgeType
+      if (!edgeType) {
+        showToast('error', `“${originalType || 'This relationship'}” isn’t allowed between these entities.`)
+        return
+      }
 
-      const originalType = oldEdge.data?.edgeType ?? oldEdge.data?.relationship
-      const edgeType = validTypes.find(rt => rt.id === originalType)?.id ?? validTypes[0]?.id
-      if (!edgeType) return
+      // Re-validate the moved edge (dup check excludes the edge being moved).
+      const verdict = validateDrawnEdge({
+        sourceType, targetType, edgeType, relationshipTypes, containmentEdgeTypes,
+        existingEdges: useCanvasStore.getState().edges.filter(e => e.id !== oldEdge.id),
+        sourceId: newConnection.source, targetId: newConnection.target,
+        entityTypes: schemaEntityTypes,
+      })
+      if (!verdict.allowed) {
+        showToast('error', verdict.reason ?? 'That relationship isn’t allowed between these entities.')
+        return
+      }
 
       const { removeEdge, addEdges: addEdgesFresh } = useCanvasStore.getState()
       removeEdge(oldEdge.id)
-      const isContainment = containmentEdgeTypes.some(t => t.toUpperCase() === edgeType.toUpperCase())
       addEdgesFresh([{
-        id: `e-${newConnection.source}-${newConnection.target}-${edgeType}-${Date.now()}`,
+        id: `e-${newConnection.source}-${newConnection.target}-${edgeType.toUpperCase()}`,
         source: newConnection.source,
         target: newConnection.target,
-        type: isContainment ? 'smoothstep' : 'lineage',
+        type: 'lineage',
         data: { edgeType, relationship: edgeType },
-        animated: !isContainment,
+        animated: true,
       }])
     },
-    [rawNodes, getValidEdgeTypes, containmentEdgeTypes],
+    [rawNodes, getValidEdgeTypes, relationshipTypes, containmentEdgeTypes, schemaEntityTypes, showToast],
   )
 
   // Connection validation — checks ALL ontology relationship types
@@ -1152,37 +1191,6 @@ export function GraphCanvas({ className }: { className?: string }) {
       return getValidEdgeTypes(sourceType, targetType).length > 0
     },
     [rawNodes, getValidEdgeTypes],
-  )
-
-  // Drag-and-drop from NodePalette
-  const onDragOver = useCallback((event: React.DragEvent) => {
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'move'
-  }, [])
-
-  const onDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault()
-      const type = event.dataTransfer.getData('application/reactflow')
-      if (!type || !rfInstance) return
-
-      const position = rfInstance.screenToFlowPosition({
-        x: event.clientX,
-        y: event.clientY,
-      })
-
-      addNodes([{
-        id: `node-${Date.now()}`,
-        type: 'generic',
-        position,
-        data: {
-          type,
-          label: `New ${type}`,
-          urn: `urn:manual:${type}:${Date.now()}`,
-        },
-      }])
-    },
-    [rfInstance, addNodes],
   )
 
   // Save graph to backend
@@ -1218,9 +1226,23 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [trace])
 
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
+  const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
+    duplicateSubtree,
+    onNodeDuplicated: (originalId, newUrn) => {
+      // Mirrors HierarchyBuilderPanel's onEntityStaged: expand the original's
+      // parent (reveals the new sibling) and the copy itself (reveals its
+      // just-staged children without a second click).
+      const parentId = parentMap.get(originalId)
+      setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(newUrn)
+        return next
+      })
+    },
     onCloseEdgePanel: () => {
       if (isEdgePanelOpen) {
         closeEdgePanel()
@@ -1277,7 +1299,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       {/* Editor Toolbar */}
       <div className="absolute top-4 left-4 z-30 flex items-center gap-2">
         <EditorToolbar
-          onAddNode={() => setPaletteOpen(true)}
+          onAddNode={() => useHierarchyBuilderStore.getState().open()}
+          onOpenBuild={() => useHierarchyBuilderStore.getState().openBuild()}
           onSave={handleSave}
           edgeTypes={relationshipTypes}
           activeEdgeType={activeEdgeType}
@@ -1292,13 +1315,6 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </div>
-
-      {/* Node Palette */}
-      <AnimatePresence>
-        {isPaletteOpen && (
-          <NodePalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
-        )}
-      </AnimatePresence>
 
       {/* Header */}
       <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
@@ -1367,8 +1383,14 @@ export function GraphCanvas({ className }: { className?: string }) {
         )}
       </AnimatePresence>
 
+      {/* Canvas + right-rail row. The rail panels (builder / EntityDrawer /
+          EdgeDetailPanel) are width-animated flex siblings, so opening one
+          shrinks the ReactFlow area rather than overlaying it — parity with
+          ContextViewCanvas. The absolute HUD (toolbars, header, stats, legend)
+          stays anchored to the root and floats over this row. */}
+      <div className="flex-1 min-h-0 flex">
       {/* React Flow Canvas */}
-      <div className="flex-1">
+      <div className="relative flex-1 min-w-0">
         <ReactFlow
           onInit={setRfInstance}
           onMoveEnd={(_, viewport) => handleViewportChange(viewport)}
@@ -1387,8 +1409,6 @@ export function GraphCanvas({ className }: { className?: string }) {
           onReconnect={onReconnect}
           onEdgeClick={onEdgeClick}
           onEdgeContextMenu={onEdgeContextMenu}
-          onDrop={onDrop}
-          onDragOver={onDragOver}
           isValidConnection={isValidConnection}
           onNodeContextMenu={(event, node) => {
             event.preventDefault()
@@ -1448,6 +1468,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             </div>
           )}
         </ReactFlow>
+        {rawNodes.length === 0 && !isHydratingInitial && <BuilderEmptyState />}
       </div>
 
       {/* Stats Bar */}
@@ -1502,9 +1523,24 @@ export function GraphCanvas({ className }: { className?: string }) {
         <EdgeLegend defaultExpanded={false} visibleEdges={allVisibleEdges} />
       </div>
 
-      {/* Panels */}
+      {/* Right rail — mutual exclusion: creation takes the rail (an explicit
+          action), so the builder is never hidden behind an inspector the user
+          left open. Mirrors ContextViewCanvas. */}
+      {builderOpen && (
+        <HierarchyBuilderPanel
+          onClose={() => useHierarchyBuilderStore.getState().close()}
+          onEntityStaged={(_tempUrn, parentUrn) => {
+            // Node ids are urns here (useGraphHydration sets id: n.urn), so
+            // expanding by parentUrn reveals the freshly-staged child.
+            if (parentUrn) setExpandedNodes((prev) => new Set([...prev, parentUrn]))
+          }}
+        />
+      )}
+      {buildOpen && (
+        <BuildPanel onClose={() => useHierarchyBuilderStore.getState().close()} />
+      )}
       <AnimatePresence>
-        {!drawerNodeId && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && isEdgePanelOpen && (
           <EdgeDetailPanel
             isOpen={isEdgePanelOpen}
             onClose={closeEdgePanel}
@@ -1513,13 +1549,16 @@ export function GraphCanvas({ className }: { className?: string }) {
           />
         )}
       </AnimatePresence>
-      <EntityDrawer
-        onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
-        onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
-        onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
-        onFocusNode={revealAndFocus}
-        onLocateMany={locateManyOnCanvas}
-      />
+      {!builderOpen && !buildOpen && (
+        <EntityDrawer
+          onTraceUp={(nodeId) => trace.traceUpstream(nodeId)}
+          onTraceDown={(nodeId) => trace.traceDownstream(nodeId)}
+          onFullTrace={(nodeId) => trace.traceFullLineage(nodeId)}
+          onFocusNode={revealAndFocus}
+          onLocateMany={locateManyOnCanvas}
+        />
+      )}
+      </div>{/* end canvas + right-rail row */}
 
       {/* Advanced search trigger + panel. The trigger handles ⌘K
           globally; the panel mounts as a flex-sibling drawer (parity
@@ -1570,12 +1609,19 @@ export function GraphCanvas({ className }: { className?: string }) {
         onDuplicateNode={interactions.duplicateNode}
         onDeleteNode={interactions.deleteNode}
         onCreateChild={interactions.createChild}
+        onLinkNode={(id) => {
+          const node = rawNodes.find(n => n.id === id)
+          useCreateLinkStore.getState().open({
+            sourceUrn: (node?.data?.urn as string) || id,
+            anchor: interactions.state.contextMenu.position,
+          })
+        }}
         onTraceNode={(id) => trace.startTrace(id)}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={interactions.deleteEdge}
         onReverseEdge={interactions.reverseEdge}
-        onCreateNode={(pos) => interactions.openQuickCreate(pos)}
+        onCreateNode={() => useHierarchyBuilderStore.getState().open()}
         onSelectAll={interactions.selectAll}
       />
       <InlineNodeEditor
@@ -1585,129 +1631,29 @@ export function GraphCanvas({ className }: { className?: string }) {
         onSave={interactions.saveInlineEdit}
         onCancel={interactions.cancelInlineEdit}
       />
-      <QuickCreateNode
-        isOpen={interactions.state.quickCreate.isOpen}
-        position={interactions.state.quickCreate.position}
-        parentUrn={interactions.state.quickCreate.parentUrn}
-        onClose={interactions.closeQuickCreate}
-        onCreated={(nodeId) => selectNode(nodeId)}
-        variant="centered"
-      />
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
-        onCreateEntity={(_typeId) => {
+        onCreateEntity={(typeId) => {
           interactions.closeCommandPalette()
-          interactions.openQuickCreate({
-            x: window.innerWidth / 2,
-            y: window.innerHeight / 2,
-          })
+          useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })
         }}
         onSelectEntity={(entityId) => selectNode(entityId)}
       />
 
-      {/* Edge Type Picker — ontology-driven relationship selection */}
-      {edgePicker.isOpen && edgePicker.connection && (
-        <>
-          <div
-            className="fixed inset-0 z-[60] bg-black/20 backdrop-blur-[1px]"
-            onClick={() => setEdgePicker(prev => ({ ...prev, isOpen: false, connection: null }))}
-          />
-          <div
-            className="fixed z-[61] bg-canvas-elevated border border-glass-border rounded-xl shadow-2xl min-w-[280px] max-w-[360px] overflow-hidden"
-            style={{
-              left: Math.min(edgePicker.position.x, window.innerWidth - 380),
-              top: Math.max(edgePicker.position.y - 10, 40),
-              transform: 'translateX(-50%)',
-            }}
-          >
-            {/* Header */}
-            <div className="px-4 py-3 border-b border-glass-border bg-canvas-elevated/80">
-              <p className="text-sm font-semibold text-ink">Connect Entities</p>
-              <p className="text-xs text-ink-muted mt-1">
-                <span className="font-medium text-ink">{edgePicker.connection.sourceName}</span>
-                <span className="mx-1.5 text-ink-muted/50">→</span>
-                <span className="font-medium text-ink">{edgePicker.connection.targetName}</span>
-              </p>
-            </div>
-
-            {/* Grouped by category */}
-            <div className="py-1.5 px-1.5 max-h-[300px] overflow-y-auto">
-              {/* Lineage edges first */}
-              {edgePicker.validTypes.filter(rt => rt._isLineage).length > 0 && (
-                <div className="mb-1">
-                  <p className="px-2.5 py-1 text-2xs font-semibold text-accent-lineage uppercase tracking-wider">
-                    Lineage
-                  </p>
-                  {edgePicker.validTypes.filter(rt => rt._isLineage).map(rt => (
-                    <button
-                      key={rt.id}
-                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors hover:bg-accent-lineage/10"
-                      onClick={() => edgePicker.connection && createEdgeWithType(edgePicker.connection.source, edgePicker.connection.target, rt.id)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />
-                        <span className="font-medium text-ink">{rt.name}</span>
-                      </div>
-                      {rt.description && (
-                        <p className="text-2xs text-ink-muted mt-0.5 ml-3.5 line-clamp-2">{rt.description}</p>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Containment edges */}
-              {edgePicker.validTypes.filter(rt => rt._isContainment).length > 0 && (
-                <div className="mb-1">
-                  <p className="px-2.5 py-1 text-2xs font-semibold text-slate-500 uppercase tracking-wider">
-                    Containment
-                  </p>
-                  {edgePicker.validTypes.filter(rt => rt._isContainment).map(rt => (
-                    <button
-                      key={rt.id}
-                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
-                      onClick={() => edgePicker.connection && createEdgeWithType(edgePicker.connection.source, edgePicker.connection.target, rt.id)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-                        <span className="font-medium text-ink">{rt.name}</span>
-                      </div>
-                      {rt.description && (
-                        <p className="text-2xs text-ink-muted mt-0.5 ml-3.5 line-clamp-2">{rt.description}</p>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Other/association edges */}
-              {edgePicker.validTypes.filter(rt => !rt._isLineage && !rt._isContainment).length > 0 && (
-                <div>
-                  <p className="px-2.5 py-1 text-2xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wider">
-                    Association
-                  </p>
-                  {edgePicker.validTypes.filter(rt => !rt._isLineage && !rt._isContainment).map(rt => (
-                    <button
-                      key={rt.id}
-                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition-colors hover:bg-amber-50 dark:hover:bg-amber-900/20"
-                      onClick={() => edgePicker.connection && createEdgeWithType(edgePicker.connection.source, edgePicker.connection.target, rt.id)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-                        <span className="font-medium text-ink">{rt.name}</span>
-                      </div>
-                      {rt.description && (
-                        <p className="text-2xs text-ink-muted mt-0.5 ml-3.5 line-clamp-2">{rt.description}</p>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </>
+      {/* Edge Type Picker — the SHARED ontology-driven, duplicate-aware popover (lineage-only). */}
+      {edgePicker && (
+        <EdgeTypePickerPopover
+          sourceId={edgePicker.sourceId}
+          targetId={edgePicker.targetId}
+          position={edgePicker.position}
+          onPick={(edgeType) => createEdgeWithType(edgePicker.sourceId, edgePicker.targetId, edgeType)}
+          onCancel={() => setEdgePicker(null)}
+        />
       )}
+
+      {/* Click-based "Link to…" flow — the discoverable sibling of handle-drag connect. */}
+      <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
     </div>
   )
 }

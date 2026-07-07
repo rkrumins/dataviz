@@ -225,6 +225,31 @@ class AggregationWorker:
                 # a fresh cache namespace — no manual invalidation needed.
                 provider.set_containment_edge_types(containment_types)
 
+                # Per-source vocabulary alignment (Task E): the frozen containment/lineage
+                # types carry the ontology's DECLARED casing, but this graph may spell them
+                # differently (has/to vs HAS/TO) and FalkorDB matches types case-sensitively.
+                # Derive declared->observed aliases from live introspection and inject them so
+                # materialization's containment/lineage patterns match a case-variant graph
+                # (else no AGGREGATED edges get written). Best-effort; identity for governed
+                # graphs and a no-op if the provider or introspection can't supply it.
+                if hasattr(provider, "set_source_type_aliases"):
+                    try:
+                        from backend.app.ontology.source_alignment import derive_alignment
+                        _meta = await provider.get_ontology_metadata()
+                        _observed = list((_meta.edge_type_metadata or {}).keys())
+                        _align = derive_alignment(
+                            declared_relationship_types=list(containment_types) + list(lineage_types),
+                            declared_entity_types=[],
+                            observed_relationship_types=_observed,
+                            observed_entity_types=[],
+                        )
+                        provider.set_source_type_aliases(_align.rel_alias_map())
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: source-alignment injection skipped "
+                            "(continuing unaligned): %s", job.id, exc,
+                        )
+
                 # Inject the frozen entity-type level map so ancestor-chain
                 # depth adapts to deep ontologies (max_depth derives from
                 # the level count) and AGGREGATED edges carry correct
@@ -343,6 +368,13 @@ class AggregationWorker:
                         fingerprint=job.graph_fingerprint_after,
                         completed_at=job.completed_at,
                     )
+
+                # Aggregated-edge materialization changed the graph's edge
+                # counts — nudge the insights counts poll (cooldown-
+                # throttled, never raises).
+                if job.workspace_id:
+                    from backend.insights_service.enqueue import mark_stats_changed
+                    await mark_stats_changed(job.data_source_id, job.workspace_id)
 
                 logger.info(
                     "Aggregation job %s completed: %d edges processed, %d AGGREGATED created",
@@ -940,6 +972,11 @@ class AggregationWorker:
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,
             should_cancel=should_cancel,
+            # Resume baselines so a resumed job's progress continues from its
+            # last checkpoint instead of resetting the bar to 0% (the streaming
+            # rebuild applies these only when last_cursor parses).
+            resume_processed=job.processed_edges or 0,
+            resume_created=job.created_edges or 0,
         )
 
         return result

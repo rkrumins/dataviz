@@ -1,0 +1,37 @@
+# Standalone FalkorDB with auth (requirepass) + TLS.
+# Server-auth TLS (clients verify the server; no client cert required) — flip
+# --tls-auth-clients to yes for mutual TLS and point FALKORDB_TEST_TLS_CERT/KEY
+# at client certs.
+#
+#   ./deploy/topologies/gen-certs.sh
+#   docker compose -f deploy/topologies/docker-compose.falkordb-standalone-tls.yml up -d
+#
+# Point the integration test at it:
+#   FALKORDB_TEST_MODE=standalone FALKORDB_TEST_HOST=127.0.0.1 FALKORDB_TEST_PORT=6379 \
+#   FALKORDB_TEST_PASSWORD=testpass FALKORDB_TEST_TLS=1 \
+#   FALKORDB_TEST_TLS_CA=deploy/topologies/certs/ca.crt \
+#   pytest backend/tests/integration/test_topologies.py -v
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"
+    environment:
+      # TLS-only: disable the plaintext port, serve TLS on 6379.
+      REDIS_ARGS: >-
+        --requirepass testpass
+        --port 0
+        --tls-port 6379
+        --tls-cert-file /certs/server.crt
+        --tls-key-file /certs/server.key
+        --tls-ca-cert-file /certs/ca.crt
+        --tls-auth-clients no
+    volumes:
+      - ./certs:/certs:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--cert", "/certs/server.crt",
+             "--key", "/certs/server.key", "--cacert", "/certs/ca.crt",
+             "-a", "testpass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20

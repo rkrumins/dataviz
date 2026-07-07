@@ -20,7 +20,7 @@
  *                             used by both the scope phase and body phase.
  */
 
-import React, { useState, useCallback, useMemo, useEffect, startTransition } from 'react'
+import React, { useState, useCallback, useMemo, useEffect, useRef, startTransition } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
@@ -45,12 +45,19 @@ import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { viewService } from '@/services/viewService'
-import { viewToViewConfig } from '@/services/viewApiService'
+import { viewToViewConfig, updateViewLayout } from '@/services/viewApiService'
+import { provisionBlankGraph, type BlankGraphResult } from '@/services/versioningApiService'
+import type { ProviderResponse } from '@/services/providerService'
+import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { SchemaScope } from '@/components/schema/SchemaScope'
 import { OntologyDriftBanner, hasOntologyDrifted } from '@/components/schema/OntologyDriftBanner'
 import { useViewMetadata, useViewFull, type ViewMetadata } from '@/hooks/useViewMetadata'
 import { useWizardScope } from '@/hooks/useWizardScope'
-import type { ViewConfiguration, ViewLayerConfig, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
+import type { ViewConfiguration, ViewLayerConfig, LayerAssignmentEntry, ScopeEdgeConfig, FieldFilter } from '@/types/schema'
+import { useBlankScopeOptions } from './useBlankScopeOptions'
+import { useBlankSchemaHydration } from './useBlankSchemaHydration'
+import { ontologyToWorkspaceSchema, slugifyGraphName, GRAPH_NAME_RE } from './blankModel'
 
 import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
@@ -81,7 +88,14 @@ export interface ScopeContext {
     dataSourceId: string
     dataSourceLabel: string
     hasOntology: boolean
+    /** Blank-model scope: no data source yet — provider + ontology chosen instead. */
+    isBlank?: boolean
+    providerName?: string
+    ontologyName?: string
 }
+
+/** Which scope the create wizard is building for. */
+export type ScopeMode = 'existing' | 'blank'
 
 export interface ActiveFilter {
     id: string
@@ -99,11 +113,24 @@ export interface WizardFormData {
     dataSourceId?: string
     layoutType: 'graph' | 'hierarchy' | 'reference'
     layers: ViewLayerConfig[]
+    /** Canonical flattened physical-root-urn -> layer assignment map — the same
+     *  shape the canvas writes via persistReferenceLayout. Never embedded back
+     *  into `layers[].entityAssignments` (legacy, deprecated). */
+    assignments: Record<string, LayerAssignmentEntry>
     visibleEntityTypes: string[]
     visibleRelationshipTypes: string[]
     advancedFilters: ActiveFilter[]
     scopeEdges?: ScopeEdgeConfig
     isValid: boolean
+    /** Blank models only: the user-chosen PHYSICAL FalkorDB graph name.
+     *  Undefined = auto-derived from `name` (slugified) until the user edits it. */
+    graphName?: string
+    /** Blank models only: last known availability of the (derived or edited)
+     *  graph name — false blocks Next on Basics; server re-validates at submit. */
+    graphNameAvailable?: boolean
+    /** Blank models only: the Quick Start template the user picked on Layout.
+     *  Undefined until an explicit choice is made — gates Next in blank mode. */
+    layoutTemplateId?: string
 }
 
 type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
@@ -120,6 +147,11 @@ interface ViewWizardBodyProps extends Omit<ViewWizardProps, 'initialWorkspaceId'
     viewMetadata: ViewMetadata | null
     scopeContext: ScopeContext
     onBackToScope?: () => void
+    /** Create-mode scope kind (defaults to 'existing'). Blank skips entities/assignment. */
+    scopeMode?: ScopeMode
+    /** Blank mode: provider + ontology to provision against on submit. */
+    blankProviderId?: string | null
+    blankOntologyId?: string | null
 }
 
 const LAYOUT_TYPES = [
@@ -198,7 +230,7 @@ function WizardShell({
                 transition={{ duration: 0.12 }}
                 className={cn(
                     'relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-2xl shadow-lg overflow-hidden flex flex-col',
-                    isWide ? 'max-w-[1180px]' : 'max-w-4xl',
+                    isWide ? 'max-w-[1180px]' : 'max-w-5xl',
                 )}
             >
                 {/* Header */}
@@ -224,20 +256,23 @@ function WizardShell({
                     </button>
                 </div>
 
-                {/* Progress Steps */}
+                {/* Progress Steps — overflow-proof: connectors flex instead of fixed
+                    widths, pills can shrink with truncating labels, and non-active
+                    labels drop out below lg so all six steps always fit the modal. */}
                 <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center min-w-0">
                         {activeSteps.map((step, index) => {
                             const isActive = step.id === currentStep
                             const isCompleted = currentStepIndex > index
                             const isClickable = isCompleted || isActive
                             return (
-                                <div key={step.id} className="flex items-center">
+                                <div key={step.id} className={cn('flex items-center min-w-0', index < activeSteps.length - 1 && 'flex-1')}>
                                     <button
                                         onClick={() => isClickable && onStepClick(step.id)}
                                         disabled={!isClickable}
+                                        title={step.label}
                                         className={cn(
-                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150',
+                                            'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors duration-150 min-w-0 shrink',
                                             isActive
                                                 ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900'
                                                 : isCompleted
@@ -255,10 +290,12 @@ function WizardShell({
                                                     {index + 1}
                                                 </span>
                                             )}
-                                        {step.label}
+                                        <span className={cn('truncate', !isActive && 'hidden lg:inline')}>
+                                            {step.label}
+                                        </span>
                                     </button>
                                     {index < activeSteps.length - 1 && (
-                                        <div className="w-8 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
+                                        <div className="flex-1 min-w-2 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
                                     )}
                                 </div>
                             )
@@ -517,28 +554,49 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
 
     const [selectedWsId, setSelectedWsId] = useState<string | null>(initialWs)
     const [selectedDsId, setSelectedDsId] = useState<string | null>(initialDs)
+    const [scopeMode, setScopeMode] = useState<ScopeMode>('existing')
+    const [selectedProviderId, setSelectedProviderId] = useState<string | null>(null)
+    const [selectedOntologyId, setSelectedOntologyId] = useState<string | null>(null)
     const [scopeConfirmed, setScopeConfirmed] = useState(false)
 
-    // Fetch stats + probe schema while scope step is visible
+    // Fetch stats + probe schema while scope step is visible (existing mode)
     const probeScope = selectedWsId && selectedDsId
         ? { workspaceId: selectedWsId, dataSourceId: selectedDsId }
         : null
     const scopeData = useWizardScope(!scopeConfirmed, probeScope)
+
+    // Blank-mode pickers: FalkorDB providers + published semantic layers.
+    const blankOptions = useBlankScopeOptions(selectedWsId)
+    const chosenProvider = useMemo(
+        () => blankOptions.providers.find(o => o.provider.id === selectedProviderId)?.provider ?? null,
+        [blankOptions.providers, selectedProviderId],
+    )
+    const chosenOntology = useMemo(
+        () => blankOptions.ontologies.find(o => o.id === selectedOntologyId) ?? null,
+        [blankOptions.ontologies, selectedOntologyId],
+    )
 
     // Reset on wizard reopen
     useEffect(() => {
         if (props.isOpen) {
             setSelectedWsId(initialWs)
             setSelectedDsId(initialDs)
+            setScopeMode('existing')
+            setSelectedProviderId(null)
+            setSelectedOntologyId(null)
             setScopeConfirmed(false)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.isOpen])
 
-    // Clear data source when workspace changes
+    // Clear the downstream selections when workspace changes
     const handleSelectWorkspace = useCallback((wsId: string) => {
         setSelectedWsId(prev => {
-            if (prev !== wsId) setSelectedDsId(null)
+            if (prev !== wsId) {
+                setSelectedDsId(null)
+                setSelectedProviderId(null)
+                setSelectedOntologyId(null)
+            }
             return wsId
         })
     }, [])
@@ -548,45 +606,64 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
     }, [])
 
     const handleScopeConfirm = useCallback(() => {
-        if (selectedWsId && selectedDsId) {
-            saveLastScope(selectedWsId, selectedDsId)
+        if (scopeMode === 'existing') {
+            if (selectedWsId && selectedDsId) {
+                saveLastScope(selectedWsId, selectedDsId)
+                setScopeConfirmed(true)
+            }
+        } else if (selectedWsId && selectedProviderId && selectedOntologyId) {
             setScopeConfirmed(true)
         }
-    }, [selectedWsId, selectedDsId])
+    }, [scopeMode, selectedWsId, selectedDsId, selectedProviderId, selectedOntologyId])
 
     const handleBackToScope = useCallback(() => {
         setScopeConfirmed(false)
     }, [])
 
     const scopeContext = useMemo(
-        () => buildScopeContext(workspaces, selectedWsId, selectedDsId),
-        [workspaces, selectedWsId, selectedDsId],
+        () => scopeMode === 'blank'
+            ? buildBlankScopeContext(workspaces, selectedWsId, chosenProvider, chosenOntology)
+            : buildScopeContext(workspaces, selectedWsId, selectedDsId),
+        [scopeMode, workspaces, selectedWsId, selectedDsId, chosenProvider, chosenOntology],
     )
 
-    // ── Build full step list for create mode ───────────────────
+    // Derive the blank model's schema from the chosen ontology and hydrate the
+    // schema store for the blank body's lifetime (no SchemaScope). Starting
+    // layers are chosen explicitly on the Layout step, not pre-filled here.
+    const blankSchema = useMemo(
+        () => chosenOntology ? ontologyToWorkspaceSchema(chosenOntology) : null,
+        [chosenOntology],
+    )
+    const blankActive = scopeConfirmed && scopeMode === 'blank'
+    const blankReady = useBlankSchemaHydration(blankActive ? blankSchema : null, selectedWsId)
+
+    // ── Build step list for create mode (blank skips entities + assignment) ──
     const allSteps: StepDef[] = useMemo(() => {
         const steps: StepDef[] = [
             { id: 'scope', label: 'Scope', icon: <Database className="w-4 h-4" /> },
             { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
             { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
-            // assignment is added dynamically by ViewWizardBody
-            { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
-            { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
         ]
+        if (scopeMode !== 'blank') {
+            // assignment is added dynamically by ViewWizardBody
+            steps.push({ id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> })
+        }
+        steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [])
+    }, [scopeMode])
 
     // ── Phase A: ScopeStep (no SchemaScope yet) ────────────────
     if (!scopeConfirmed) {
-        const currentStepIndex = 0
-        const canProceed = !!(selectedWsId && selectedDsId)
+        const canProceed = scopeMode === 'existing'
+            ? !!(selectedWsId && selectedDsId)
+            : !!(selectedWsId && selectedProviderId && selectedOntologyId)
 
         return (
             <WizardShell
                 mode="create"
                 currentStep="scope"
                 activeSteps={allSteps}
-                currentStepIndex={currentStepIndex}
+                currentStepIndex={0}
                 onStepClick={() => {}}
                 onBack={() => {}}
                 onNext={handleScopeConfirm}
@@ -597,6 +674,8 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 onSubmit={() => {}}
             >
                 <ScopeStep
+                    scopeMode={scopeMode}
+                    onScopeModeChange={setScopeMode}
                     availableWorkspaces={scopeData.workspaces}
                     schemaAvailability={scopeData.schemaAvailability}
                     selectedWorkspaceId={selectedWsId}
@@ -604,8 +683,35 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                     activeWorkspaceId={activeWorkspaceId}
                     onSelectWorkspace={handleSelectWorkspace}
                     onSelectDataSource={handleSelectDataSource}
+                    providers={blankOptions.providers}
+                    ontologies={blankOptions.ontologies}
+                    blankOptionsLoading={blankOptions.isLoading}
+                    selectedProviderId={selectedProviderId}
+                    selectedOntologyId={selectedOntologyId}
+                    onSelectProvider={setSelectedProviderId}
+                    onSelectOntology={setSelectedOntologyId}
                 />
             </WizardShell>
+        )
+    }
+
+    // ── Phase B (blank): hydrate the schema store, no SchemaScope ──
+    if (scopeMode === 'blank') {
+        if (!blankReady) {
+            return <WizardLoadingShell label="Preparing blank model…" onClose={props.onClose} />
+        }
+        return (
+            <ViewWizardBody
+                {...wizardProps}
+                resolvedWorkspaceId={selectedWsId!}
+                resolvedDataSourceId={null}
+                viewMetadata={null}
+                scopeContext={scopeContext}
+                onBackToScope={handleBackToScope}
+                scopeMode="blank"
+                blankProviderId={selectedProviderId}
+                blankOntologyId={selectedOntologyId}
+            />
         )
     }
 
@@ -624,6 +730,7 @@ function ViewWizardCreateResolver(props: ViewWizardProps & {
                 viewMetadata={null}
                 scopeContext={scopeContext}
                 onBackToScope={handleBackToScope}
+                scopeMode="existing"
             />
         </SchemaScope>
     )
@@ -644,11 +751,34 @@ function ViewWizardBody({
     viewMetadata,
     scopeContext,
     onBackToScope,
+    scopeMode = 'existing',
+    blankProviderId,
+    blankOntologyId,
 }: ViewWizardBodyProps) {
     const navigate = useNavigate()
     const schema = useSchemaStore(s => s.schema)
     const { clearSelection } = useCanvasStore()
-    const { clearAssignments, setLayers } = useReferenceModelStore()
+    const { clearAssignments } = useReferenceModelStore()
+    const isBlank = scopeMode === 'blank'
+
+    // Blank provisioning result — held so a failed createView retry reuses the
+    // same data source instead of provisioning a duplicate.
+    const provisionRef = useRef<BlankGraphResult | null>(null)
+    const [provisionError, setProvisionError] = useState<string | null>(null)
+    // The just-created view's id — held so that if createView succeeds but the
+    // follow-up updateViewLayout fails, a retry re-drives ONLY the layout write
+    // against this id instead of minting a second view.
+    const createdViewIdRef = useRef<string | null>(null)
+
+    // Create-mode initial form: layers start empty for both existing and blank
+    // scopes — blank models choose their starting layers via a template on Layout.
+    const makeCreateFormData = useCallback((): WizardFormData => {
+        const base = getInitialFormData(schema)
+        return {
+            ...base,
+            dataSourceId: resolvedDataSourceId ?? undefined,
+        }
+    }, [schema, resolvedDataSourceId])
 
     const fullViewQuery = useViewFull(mode === 'edit' ? viewId : null)
     const editingView = useMemo(() => {
@@ -659,17 +789,17 @@ function ViewWizardBody({
     const [currentStep, setCurrentStep] = useState<WizardStep>('basics')
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [previousSteps, setPreviousSteps] = useState<WizardStep[]>([])
-    const [linkedContextModelId, setLinkedContextModelId] = useState<string | null>(null)
     const [driftDismissed, setDriftDismissed] = useState(false)
 
-    const [formData, setFormData] = useState<WizardFormData>(() => ({
-        ...getInitialFormData(schema),
-        dataSourceId: resolvedDataSourceId ?? undefined,
-    }))
+    const [formData, setFormData] = useState<WizardFormData>(makeCreateFormData)
 
-    // Hydrate form from view in edit mode.
+    // Hydrate form from view in edit mode. normalizeReferenceLayout up-converts
+    // legacy per-layer entityAssignments/rules into the flattened assignments
+    // map, so canvas-created layer placements (canonical or legacy) become
+    // visible in the wizard here.
     useEffect(() => {
         if (mode === 'edit' && editingView) {
+            const { layers, assignments } = normalizeReferenceLayout(editingView.layout?.referenceLayout)
             setFormData({
                 name: editingView.name,
                 description: editingView.description ?? '',
@@ -678,7 +808,8 @@ function ViewWizardBody({
                 tags: (editingView as any).tags ?? [],
                 dataSourceId: editingView.dataSourceId ?? undefined,
                 layoutType: editingView.layout.type as 'graph' | 'hierarchy' | 'reference',
-                layers: editingView.layout.referenceLayout?.layers ?? [],
+                layers,
+                assignments,
                 visibleEntityTypes: editingView.content.visibleEntityTypes,
                 visibleRelationshipTypes: editingView.content.visibleRelationshipTypes,
                 advancedFilters: (editingView.filters.fieldFilters || []).map(f => ({
@@ -691,7 +822,7 @@ function ViewWizardBody({
                             : `${f.field}=${f.value}`,
                     value: f.value,
                 })),
-                scopeEdges: editingView.layout.referenceLayout?.layers?.[0]?.scopeEdges,
+                scopeEdges: layers[0]?.scopeEdges,
                 isValid: true,
             })
         }
@@ -706,10 +837,7 @@ function ViewWizardBody({
             clearSelection()
             clearAssignments()
             if (mode === 'create') {
-                setFormData({
-                    ...getInitialFormData(schema),
-                    dataSourceId: resolvedDataSourceId ?? undefined,
-                })
+                setFormData(makeCreateFormData())
             }
         } else {
             clearAssignments()
@@ -728,23 +856,42 @@ function ViewWizardBody({
             { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
             { id: 'layout', label: 'Layout', icon: <LayoutTemplate className="w-4 h-4" /> },
         )
-        if (formData.layoutType === 'reference') {
-            steps.push({ id: 'assignment', label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
+        // Blank models skip per-entity scoping + rule assignment — the ontology
+        // defines the whole graph and the derived layers are the starting point.
+        if (!isBlank) {
+            if (formData.layoutType === 'reference') {
+                steps.push({ id: 'assignment', label: 'Assignments', icon: <ClipboardList className="w-4 h-4" /> })
+            }
+            steps.push({ id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> })
         }
-        steps.push(
-            { id: 'entities', label: 'Entities', icon: <Network className="w-4 h-4" /> },
-            { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
-        )
+        steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [formData.layoutType, mode])
+    }, [formData.layoutType, mode, isBlank])
 
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
 
     const canProceed = useMemo(() => {
         switch (currentStep) {
-            case 'basics': return formData.name.trim().length > 0
-            case 'layout': return formData.layoutType !== undefined
+            case 'basics': {
+                if (formData.name.trim().length === 0) return false
+                if (isBlank) {
+                    // The physical graph name must be shaped right and not known-taken
+                    // (unknown availability passes — the server re-validates at submit).
+                    const gname = formData.graphName ?? slugifyGraphName(formData.name)
+                    return GRAPH_NAME_RE.test(gname) && formData.graphNameAvailable !== false
+                }
+                return true
+            }
+            case 'layout': {
+                // Blank models must make an explicit Quick Start template choice
+                // before proceeding (empty is a valid, explicit choice). Reference
+                // layout is where templates/layers apply; other layouts pass through.
+                if (isBlank && formData.layoutType === 'reference') {
+                    return formData.layoutTemplateId !== undefined
+                }
+                return formData.layoutType !== undefined
+            }
             case 'assignment': return true
             case 'entities': return formData.visibleEntityTypes.length > 0
             case 'preview': return true
@@ -807,57 +954,135 @@ function ViewWizardBody({
 
     const handleSubmit = useCallback(async () => {
         setIsSubmitting(true)
+        setProvisionError(null)
         try {
             const layersWithScope = formData.layers.map(l => ({ ...l, scopeEdges: formData.scopeEdges }))
+            // Canonical-clean: strips any stray legacy entityAssignments and merges
+            // them into the flattened map so nothing is silently lost.
+            const normalizedLayout = normalizeReferenceLayout({ layers: layersWithScope, assignments: formData.assignments })
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
             if (mode === 'create') {
-                const result = await viewService.createView({
-                    name: formData.name,
-                    description: formData.description,
-                    icon: formData.icon,
-                    layoutType: formData.layoutType,
-                    layers: layersWithScope,
-                    visibleEntityTypes: formData.visibleEntityTypes,
-                    visibleRelationshipTypes: formData.visibleRelationshipTypes,
-                    fieldFilters,
-                    workspaceId: resolvedWorkspaceId,
-                    dataSourceId: resolvedDataSourceId ?? undefined,
-                    contextModelId: linkedContextModelId ?? undefined,
-                    visibility: formData.visibility,
-                    tags: formData.tags.length > 0 ? formData.tags : undefined,
-                })
-                if (result.success && result.data) {
-                    const savedLayers = result.data.layout?.referenceLayout?.layers
-                    if (savedLayers?.length) setLayers(savedLayers)
-                    onComplete?.(result.data)
+                let dataSourceId = resolvedDataSourceId ?? undefined
+                if (isBlank) {
+                    // Provision the blank model (data source + genesis graph). Reuse a
+                    // prior result on retry so a failed createView never duplicates it.
+                    let provisioned = provisionRef.current
+                    if (!provisioned) {
+                        try {
+                            provisioned = await provisionBlankGraph(resolvedWorkspaceId, {
+                                name: formData.name,
+                                description: formData.description || undefined,
+                                providerId: blankProviderId!,
+                                ontologyId: blankOntologyId!,
+                                // Always name the physical graph — the user's edit, or the
+                                // slug of the model name. The server validates authoritatively
+                                // (a 422 lands in the provisionError banner).
+                                graphName: formData.graphName ?? slugifyGraphName(formData.name),
+                            })
+                            provisionRef.current = provisioned
+                        } catch (err) {
+                            setProvisionError(err instanceof Error ? err.message : 'Could not create the blank model. Please try again.')
+                            return
+                        }
+                    }
+                    dataSourceId = provisioned.dataSourceId
+                    // The workspaces store is the app's cache of each workspace's data
+                    // sources (ViewPage's health check and the view execution context
+                    // both read it). It was loaded before this data source existed —
+                    // refresh it or the new view opens onto a false "data source has
+                    // been deleted" overlay.
+                    await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
+                }
+                // Reuse a successful create's id on retry — it's the layout write that's
+                // being retried here, not the view itself, so a retry must never call
+                // createView again (that would mint a second, half-baked view).
+                let createdViewId = createdViewIdRef.current
+                if (!createdViewId) {
+                    const result = await viewService.createView({
+                        name: formData.name,
+                        description: formData.description,
+                        icon: formData.icon,
+                        layoutType: formData.layoutType,
+                        layers: normalizedLayout.layers,
+                        visibleEntityTypes: formData.visibleEntityTypes,
+                        visibleRelationshipTypes: formData.visibleRelationshipTypes,
+                        fieldFilters,
+                        workspaceId: resolvedWorkspaceId,
+                        dataSourceId,
+                        visibility: formData.visibility,
+                        tags: formData.tags.length > 0 ? formData.tags : undefined,
+                    })
+                    if (!result.success || !result.data) return
+                    createdViewId = result.data.id
+                    createdViewIdRef.current = createdViewId
+                }
+
+                // The layout endpoint is the single writer of referenceLayout — write
+                // the full layers+assignments (a new view has no prior layout to race).
+                const entityScope = deriveEntityScope(undefined, normalizedLayout)
+                try {
+                    const layoutResult = await updateViewLayout(createdViewId, {
+                        referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                        entityScope,
+                    })
+                    const savedView = viewToViewConfig(layoutResult)
+                    useSchemaStore.getState().addOrUpdateView(savedView)
+                    onComplete?.(savedView)
                     onClose()
-                    navigate(`/views/${result.data.id}`)
+                    navigate(`/views/${createdViewId}`)
+                } catch (err) {
+                    // The view itself was created; only its layout failed to save. Leave
+                    // the modal open (isSubmitting resets below) so the user can retry —
+                    // createdViewIdRef makes that retry skip straight back to here.
+                    console.error('[ViewWizard] updateViewLayout failed after create', err)
                 }
             } else if (viewId) {
+                // Ordering dependency: buildViewConfig's `content` block never carries
+                // entityScope, so this updateView call's config PUT (base's referenceLayout
+                // is preserved, but content is rebuilt) transiently wipes content.entityScope
+                // — the immediately-following updateViewLayout call is what restores it. If
+                // that layout write fails (caught below), the view is left with entityScope
+                // wiped until a successful retry. Task 5/6 make scope explicit everywhere,
+                // closing this window; for now it's a narrow gap between two awaited calls.
                 const result = await viewService.updateView(viewId, {
                     name: formData.name,
                     description: formData.description,
                     icon: formData.icon,
                     layoutType: formData.layoutType,
-                    layers: layersWithScope,
+                    layers: normalizedLayout.layers,
                     visibleEntityTypes: formData.visibleEntityTypes,
                     visibleRelationshipTypes: formData.visibleRelationshipTypes,
                     fieldFilters,
                     visibility: formData.visibility,
                     tags: formData.tags.length > 0 ? formData.tags : undefined,
-                })
+                }, fullViewQuery.data?.config)
                 if (result.success && result.data) {
-                    const savedLayers = result.data.layout?.referenceLayout?.layers
-                    if (savedLayers?.length) setLayers(savedLayers)
-                    onComplete?.(result.data)
-                    onClose()
+                    // Preserve an explicit editingView.content.entityScope; otherwise derive
+                    // from the submitted assignments — a deliberate wizard save is allowed to
+                    // set scope explicitly, unlike implicit canvas gestures.
+                    const entityScope = deriveEntityScope(editingView?.content, normalizedLayout)
+                    try {
+                        const layoutResult = await updateViewLayout(viewId, {
+                            referenceLayout: { layers: normalizedLayout.layers, assignments: normalizedLayout.assignments },
+                            entityScope,
+                        })
+                        const savedView = viewToViewConfig(layoutResult)
+                        useSchemaStore.getState().addOrUpdateView(savedView)
+                        onComplete?.(savedView)
+                        onClose()
+                    } catch (err) {
+                        // The rest of the view saved; only its layout failed. Leave the modal
+                        // open (isSubmitting resets below) so the user can retry rather than
+                        // silently losing their layer/assignment edits.
+                        console.error('[ViewWizard] updateViewLayout failed after update', err)
+                    }
                 }
             }
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, onComplete, onClose, navigate, setLayers, buildFieldFilters, linkedContextModelId])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
         setFormData(prev => ({ ...prev, ...updates }))
@@ -892,6 +1117,16 @@ function ViewWizardBody({
                 />
             )}
 
+            {provisionError && (
+                <div className="mb-6 flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3">
+                    <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-red-700 dark:text-red-300">Couldn't create the blank model</p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">{provisionError}</p>
+                    </div>
+                </div>
+            )}
+
             {currentStep === 'basics' && (
                 <BasicsStep
                     formData={formData}
@@ -899,6 +1134,9 @@ function ViewWizardBody({
                     mode={mode}
                     scopeContext={scopeContext}
                     onChangeScope={mode === 'create' ? onBackToScope : undefined}
+                    blankNaming={isBlank && blankProviderId
+                        ? { workspaceId: resolvedWorkspaceId, providerId: blankProviderId }
+                        : undefined}
                 />
             )}
             {currentStep === 'layout' && (
@@ -907,14 +1145,13 @@ function ViewWizardBody({
                     updateFormData={updateFormData}
                     layoutTypes={LAYOUT_TYPES}
                     dataSourceId={formData.dataSourceId}
+                    blank={isBlank}
                 />
             )}
             {currentStep === 'assignment' && (
                 <AssignmentStep
                     formData={formData}
                     updateFormData={updateFormData}
-                    linkedContextModelId={linkedContextModelId}
-                    onDraftSaved={setLinkedContextModelId}
                 />
             )}
             {currentStep === 'entities' && (
@@ -951,6 +1188,26 @@ function buildScopeContext(
     }
 }
 
+/** Blank-model scope context — no data source yet, so surface the chosen provider + ontology. */
+function buildBlankScopeContext(
+    workspaces: ReturnType<typeof useWorkspacesStore.getState>['workspaces'],
+    wsId: string | null,
+    provider: ProviderResponse | null,
+    ontology: OntologyDefinitionResponse | null,
+): ScopeContext {
+    const ws = workspaces.find(w => w.id === wsId)
+    return {
+        workspaceId: wsId ?? '',
+        workspaceName: ws?.name ?? 'Unknown',
+        dataSourceId: '',
+        dataSourceLabel: ontology?.name ?? 'Blank model',
+        hasOntology: true,
+        isBlank: true,
+        providerName: provider?.name,
+        ontologyName: ontology?.name,
+    }
+}
+
 function getInitialFormData(schema: ReturnType<typeof useSchemaStore.getState>['schema']): WizardFormData {
     return {
         name: '',
@@ -960,6 +1217,7 @@ function getInitialFormData(schema: ReturnType<typeof useSchemaStore.getState>['
         tags: [],
         layoutType: 'reference',
         layers: [],
+        assignments: {},
         visibleEntityTypes: schema?.entityTypes.map(e => e.id) ?? [],
         visibleRelationshipTypes: schema?.relationshipTypes.map(r => r.id) ?? [],
         advancedFilters: [],

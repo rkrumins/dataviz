@@ -23,6 +23,7 @@ from ..models import (
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
+    ViewLayoutUpdateRequest,
     ViewResponse,
     ViewListResponse,
     ViewFacetValue,
@@ -98,27 +99,38 @@ async def _is_favourited(
 # ORM → Pydantic conversion                                           #
 # ------------------------------------------------------------------ #
 
-async def _get_creator_info(
-    session: AsyncSession, user_id: Optional[str],
-) -> tuple[Optional[str], Optional[str]]:
-    """Resolve ``(display_name, email)`` for a view's creator.
+async def resolve_user_ids(
+    session: AsyncSession, user_ids: Set[Optional[str]],
+) -> Dict[str, tuple[Optional[str], Optional[str]]]:
+    """Resolve a set of user ids to ``{id: (display_name, email)}`` in one query.
 
-    Returns ``(None, None)`` when the user id is NULL, the legacy
-    ``"anonymous"`` sentinel, or the user record no longer exists.
-    Callers fall back to ``created_by`` (the raw id) in that case.
+    Shared by the single-row (:func:`_to_enriched_response`) and batched
+    (:func:`_batch_enrich_rows`) paths so both resolve a view's creator AND
+    its last modifier from the SAME lookup — no N+1, no second query per row.
+    Exported (not underscored) so the versioning API boundary can reuse the
+    exact same display-name formula when resolving commit/branch/PR actors.
+
+    Ids that are NULL, the legacy ``"anonymous"`` sentinel, or reference a
+    user record that no longer exists are simply absent from the result;
+    callers treat a miss as "unresolvable" and fall back to the raw id.
     """
-    if not user_id or user_id == "anonymous":
-        return None, None
+    clean = {uid for uid in user_ids if uid and uid != "anonymous"}
+    if not clean:
+        return {}
     result = await session.execute(
-        select(UserORM.first_name, UserORM.last_name, UserORM.email)
-        .where(UserORM.id == user_id)
+        select(UserORM.id, UserORM.first_name, UserORM.last_name, UserORM.email)
+        .where(UserORM.id.in_(clean))
     )
-    row = result.one_or_none()
-    if not row:
-        return None, None
-    first, last, email = row
-    display = f"{first or ''} {last or ''}".strip() or email
-    return display, email
+    resolved: Dict[str, tuple[Optional[str], Optional[str]]] = {}
+    for uid, first, last, email in result.all():
+        display = f"{first or ''} {last or ''}".strip() or email
+        resolved[uid] = (display, email)
+    return resolved
+
+
+# Backward-compatible private alias — internal callers below reference the
+# original underscored name; keep it so this diff stays surgical.
+_resolve_user_ids = resolve_user_ids
 
 
 def _to_response(
@@ -129,6 +141,10 @@ def _to_response(
     context_model_name: Optional[str] = None,
     created_by_name: Optional[str] = None,
     created_by_email: Optional[str] = None,
+    updated_by_name: Optional[str] = None,
+    updated_by_email: Optional[str] = None,
+    data_updated_by_name: Optional[str] = None,
+    data_updated_by_email: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
 ) -> ViewResponse:
@@ -156,6 +172,13 @@ def _to_response(
         createdBy=row.created_by,
         createdByName=created_by_name,
         createdByEmail=created_by_email,
+        updatedBy=row.updated_by,
+        updatedByName=updated_by_name,
+        updatedByEmail=updated_by_email,
+        dataUpdatedAt=getattr(row, 'data_updated_at', None),
+        dataUpdatedBy=getattr(row, 'data_updated_by', None),
+        dataUpdatedByName=data_updated_by_name,
+        dataUpdatedByEmail=data_updated_by_email,
         tags=json.loads(row.tags) if row.tags else None,
         isPinned=bool(row.is_pinned) if row.is_pinned else False,
         favouriteCount=favourite_count,
@@ -181,7 +204,14 @@ async def _to_enriched_response(
     ws_name = await _get_workspace_name(session, row.workspace_id)
     ds_name = await _get_data_source_name(session, row.data_source_id)
     cm_name = await _get_context_model_name(session, row.context_model_id)
-    creator_name, creator_email = await _get_creator_info(session, row.created_by)
+    # Resolve creator, modifier AND data-publisher in one batched lookup
+    # (dedupes when they're the same principal).
+    user_map = await _resolve_user_ids(
+        session, {row.created_by, row.updated_by, getattr(row, 'data_updated_by', None)})
+    creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
+    modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
+    publisher_name, publisher_email = user_map.get(
+        getattr(row, 'data_updated_by', None) or "", (None, None))
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     return _to_response(
@@ -191,6 +221,10 @@ async def _to_enriched_response(
         context_model_name=cm_name,
         created_by_name=creator_name,
         created_by_email=creator_email,
+        updated_by_name=modifier_name,
+        updated_by_email=modifier_email,
+        data_updated_by_name=publisher_name,
+        data_updated_by_email=publisher_email,
         favourite_count=fav_count,
         is_favourited=fav,
     )
@@ -250,9 +284,9 @@ async def _batch_enrich_rows(
     workspace_ids: Set[str] = {r.workspace_id for r in rows if r.workspace_id}
     ds_ids: Set[str] = {r.data_source_id for r in rows if r.data_source_id}
     cm_ids: Set[str] = {r.context_model_id for r in rows if r.context_model_id}
-    creator_ids: Set[str] = {
-        r.created_by for r in rows
-        if r.created_by and r.created_by != "anonymous"
+    user_ids: Set[Optional[str]] = {
+        uid for r in rows
+        for uid in (r.created_by, r.updated_by, getattr(r, 'data_updated_by', None))
     }
     view_ids: List[str] = [r.id for r in rows]
 
@@ -280,15 +314,8 @@ async def _batch_enrich_rows(
         )
         cm_map = {cid: name for cid, name in res.all()}
 
-    user_map: Dict[str, tuple[Optional[str], Optional[str]]] = {}
-    if creator_ids:
-        res = await session.execute(
-            select(UserORM.id, UserORM.first_name, UserORM.last_name, UserORM.email)
-            .where(UserORM.id.in_(creator_ids))
-        )
-        for uid, first, last, email in res.all():
-            display = f"{first or ''} {last or ''}".strip() or email
-            user_map[uid] = (display, email)
+    # One users lookup resolves every creator AND modifier id in the batch.
+    user_map = await _resolve_user_ids(session, user_ids)
 
     # Favourite counts: skip the GROUP BY when the caller already has
     # them (popular views computes them from its JOINed subquery).
@@ -316,6 +343,8 @@ async def _batch_enrich_rows(
     responses: List[ViewResponse] = []
     for row in rows:
         creator = user_map.get(row.created_by or "", (None, None))
+        modifier = user_map.get(row.updated_by or "", (None, None))
+        publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None))
         responses.append(_to_response(
             row,
             workspace_name=ws_map.get(row.workspace_id) if row.workspace_id else None,
@@ -323,6 +352,10 @@ async def _batch_enrich_rows(
             context_model_name=cm_map.get(row.context_model_id) if row.context_model_id else None,
             created_by_name=creator[0],
             created_by_email=creator[1],
+            updated_by_name=modifier[0],
+            updated_by_email=modifier[1],
+            data_updated_by_name=publisher[0],
+            data_updated_by_email=publisher[1],
             favourite_count=fav_counts.get(row.id, 0),
             is_favourited=row.id in fav_set,
         ))
@@ -406,6 +439,7 @@ async def update_view(
     req: ViewUpdateRequest,
     *,
     ontology_digest: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Optional[ViewResponse]:
     """Update an existing view.
 
@@ -414,6 +448,10 @@ async def update_view(
     the CURRENT ontology state (not the one it was originally created
     against). This resets the drift-detection baseline on every explicit
     save; passing None preserves the existing digest unchanged.
+
+    ``user_id`` is stamped into ``updated_by`` so surfaces can show who
+    last edited the view. When None (e.g. legacy callers / seed scripts)
+    the existing ``updated_by`` is preserved.
     """
     result = await session.execute(
         select(ViewORM).where(ViewORM.id == view_id)
@@ -440,7 +478,71 @@ async def update_view(
         row.is_pinned = req.is_pinned
     if ontology_digest is not None:
         row.ontology_digest = ontology_digest
+    if user_id is not None:
+        row.updated_by = user_id
 
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    await session.flush()
+    return await _to_enriched_response(session, row)
+
+
+async def update_view_layout(
+    session: AsyncSession,
+    view_id: str,
+    req: ViewLayoutUpdateRequest,
+    *,
+    user_id: Optional[str] = None,
+) -> Optional[ViewResponse]:
+    """Persist a view's layer layout in isolation.
+
+    Only touches ``config["layout"]["referenceLayout"]`` (and, when
+    supplied, ``config["content"]["entityScope"]`` and
+    ``referenceLayout["displayRules"]``) — every other config key
+    (name/description/content/filters/...) is left untouched.
+
+    Raises ``ValueError`` if an assignment names a ``layerId`` that isn't
+    one of the submitted layers' ids (the endpoint maps this to a 422).
+    """
+    result = await session.execute(
+        select(ViewORM).where(ViewORM.id == view_id).with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        return None
+
+    config = json.loads(row.config or "{}")
+    if not isinstance(config, dict):
+        config = {}
+    layout = config.get("layout")
+    if not isinstance(layout, dict):
+        layout = {}
+    layout["referenceLayout"] = req.reference_layout
+    config["layout"] = layout
+
+    if req.entity_scope is not None:
+        content = config.get("content")
+        if not isinstance(content, dict):
+            content = {}
+        content["entityScope"] = req.entity_scope
+        config["content"] = content
+
+    if req.display_rules is not None:
+        layout["referenceLayout"]["displayRules"] = req.display_rules
+
+    layer_ids = {
+        layer.get("id") for layer in req.reference_layout.get("layers", [])
+        if isinstance(layer, dict)
+    }
+    for urn, assignment in req.reference_layout.get("assignments", {}).items():
+        layer_id = assignment.get("layerId") if isinstance(assignment, dict) else None
+        if layer_id not in layer_ids:
+            raise ValueError(
+                f"assignment for '{urn}' names unknown layerId '{layer_id}'"
+            )
+
+    row.config = json.dumps(config)
+    if user_id is not None:
+        row.updated_by = user_id
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row)
@@ -981,7 +1083,9 @@ async def list_popular_views(
         ws_name = await _get_workspace_name(session, row.workspace_id)
         ds_name = await _get_data_source_name(session, row.data_source_id)
         cm_name = await _get_context_model_name(session, row.context_model_id)
-        creator_name, creator_email = await _get_creator_info(session, row.created_by)
+        user_map = await _resolve_user_ids(session, {row.created_by, row.updated_by})
+        creator_name, creator_email = user_map.get(row.created_by or "", (None, None))
+        modifier_name, modifier_email = user_map.get(row.updated_by or "", (None, None))
         is_fav = await _is_favourited(session, row.id, user_id)
         responses.append(_to_response(
             row,
@@ -990,6 +1094,8 @@ async def list_popular_views(
             context_model_name=cm_name,
             created_by_name=creator_name,
             created_by_email=creator_email,
+            updated_by_name=modifier_name,
+            updated_by_email=modifier_email,
             favourite_count=fav_count,
             is_favourited=is_fav,
         ))
@@ -1026,6 +1132,8 @@ async def update_visibility(
     if not row:
         return None
     row.visibility = visibility
+    if user_id is not None:
+        row.updated_by = user_id
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row, user_id)

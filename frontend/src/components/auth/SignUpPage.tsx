@@ -6,6 +6,7 @@ import { useAuthStore } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { authService } from '@/services/authService'
 import { cn } from '@/lib/utils'
+import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // Lazy-load zxcvbn to keep the initial bundle small
 let zxcvbnModule: typeof import('@zxcvbn-ts/core') | null = null
@@ -55,6 +56,8 @@ export function SignUpPage() {
 
     const navigate = useNavigate()
     const { signup, error, clearError, isLoading, isAuthenticated } = useAuthStore()
+
+    useDocumentTitle('Sign up')
 
     // If already authenticated, redirect to homepage
     useEffect(() => {

@@ -140,39 +140,3 @@ async def delete_context_model(
         delete(ContextModelORM).where(ContextModelORM.id == context_model_id)
     )
     return result.rowcount > 0
-
-
-async def instantiate_template(
-    session: AsyncSession,
-    template_id: str,
-    workspace_id: str,
-    name: str,
-    data_source_id: Optional[str] = None,
-) -> Optional[ContextModelResponse]:
-    """Create a workspace-scoped context model from a template."""
-    result = await session.execute(
-        select(ContextModelORM).where(
-            ContextModelORM.id == template_id,
-            ContextModelORM.is_template == True,
-        )
-    )
-    template = result.scalar_one_or_none()
-    if not template:
-        return None
-
-    row = ContextModelORM(
-        name=name,
-        description=f"Created from template: {template.name}",
-        workspace_id=workspace_id,
-        data_source_id=data_source_id,
-        is_template=False,
-        category=template.category,
-        layers_config=template.layers_config,
-        scope_filter=template.scope_filter,
-        instance_assignments="{}",  # Fresh — no entity assignments from template
-        scope_edge_config=template.scope_edge_config,
-        display_rules_config=template.display_rules_config,
-    )
-    session.add(row)
-    await session.flush()
-    return _to_response(row)

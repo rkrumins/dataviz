@@ -10,7 +10,10 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
+import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -146,6 +149,13 @@ export const GenericNode = memo(function GenericNode({
   const isExpandable = entityType.behavior.expandable && ((entityData.childCount ?? 0) > 0)
   // Expansion mode from ontology definition: 'inline' expands in-place, 'graph' expands the canvas
   const expansionMode: 'inline' | 'graph' = (entityType.behavior as any).expansionMode ?? 'graph'
+  // Add-child affordance is ontology-gated: shown only when this type can
+  // contain others. Resolves normally for isPending:'create' ghost nodes.
+  // A deletion ghost is READ-ONLY: no add-child / trace toolbar (a deleted entity must not be
+  // mutated in place); its toolbar is just Restore.
+  const canAddChild = !isGhost && (entityType?.hierarchy?.canContain?.length ?? 0) > 0
+  const canTrace = !isGhost && (entityType?.behavior.traceable ?? false)
+  const restoreGhost = useRestoreGhost()
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
   // the canonical identifier; fall back to the React Flow node id
@@ -155,6 +165,8 @@ export const GenericNode = memo(function GenericNode({
   const searchUrn = (entityFields['urn'] as string | undefined) ?? id
   const schemaForBadge = useSchemaStore((s) => s.schema)
   const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
+  // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
+  const changeDeco = useEntityChangeDecoration().for(searchUrn)
   // GraphCanvas nodes are typically uncollapsed (they render their
   // children as separate React Flow nodes), so the ancestor badge
   // only makes sense on nodes that have collapsed children
@@ -176,18 +188,54 @@ export const GenericNode = memo(function GenericNode({
 
   return (
     <>
-      {/* Node Toolbar (appears on selection) */}
-      {entityType.behavior.traceable && (
+      {/* Node Toolbar (appears on selection). Rendered when the type is
+          traceable OR can contain children. The trace/pin/more cluster keeps
+          its traceable gate; the Add-inside button is ontology-gated on
+          canContain and opens the Hierarchy Builder scoped to this node. */}
+      {(canTrace || canAddChild) && (
         <NodeToolbar
           isVisible={!!selected}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
-          <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />
-          <ToolbarButton icon="ArrowDownLeft" label="Trace Downstream" />
-          <div className="w-px h-4 bg-glass-border mx-0.5" />
-          <ToolbarButton icon="Pin" label="Pin" />
-          <ToolbarButton icon="MoreHorizontal" label="More" />
+          {canTrace && (
+            <>
+              <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />
+              <ToolbarButton icon="ArrowDownLeft" label="Trace Downstream" />
+              <div className="w-px h-4 bg-glass-border mx-0.5" />
+              <ToolbarButton icon="Pin" label="Pin" />
+              <ToolbarButton icon="MoreHorizontal" label="More" />
+            </>
+          )}
+          {canAddChild && (
+            <ToolbarButton
+              icon="Plus"
+              label={`Add inside ${primaryLabel}`}
+              onClick={(e) => {
+                e.stopPropagation()
+                useHierarchyBuilderStore.getState().open({ parentUrn: searchUrn })
+              }}
+            />
+          )}
+        </NodeToolbar>
+      )}
+
+      {/* Ghost (committed deletion) toolbar — read-only entity, so the only action is to bring it
+          back. Restore stages a resurrect (create over the tombstone by its original urn). */}
+      {isGhost && !!selected && (
+        <NodeToolbar
+          isVisible
+          position={Position.Top}
+          className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
+        >
+          <ToolbarButton
+            icon="RotateCcw"
+            label="Restore"
+            onClick={(e) => {
+              e.stopPropagation()
+              restoreGhost(searchUrn)
+            }}
+          />
         </NodeToolbar>
       )}
 
@@ -236,7 +284,10 @@ export const GenericNode = memo(function GenericNode({
           // Generic traced node (neither up nor down but in path)
           isTraced && !isFocus && !isUpstream && !isDownstream && "ring-2 ring-purple-400 ring-offset-1 shadow-[0_0_15px_rgba(192,132,252,0.4)] z-50",
           // Jump-to-node arrival pulse — one-shot ring animation
-          isPulsing && "lineage-pulse"
+          isPulsing && "lineage-pulse",
+          // Change decoration — dashed=staged (unsaved), solid=committed (not merged); color by
+          // type. Skipped while selected/focused/traced so those primary rings win.
+          !selected && !isFocus && !isTraced && nodeDecorationClass(changeDeco)
         )}
         style={{
           borderColor: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
@@ -251,7 +302,12 @@ export const GenericNode = memo(function GenericNode({
                   ? '0 0 20px rgba(192,132,252,0.4)'
                   : selected
                     ? `0 0 20px ${visual.color}40`
-                    : '0 4px 12px rgba(0,0,0,0.1)',
+                    : changeDeco
+                      // Decorated + default state: defer to the Tailwind ring+glow from
+                      // nodeDecorationClass (an inline boxShadow would override the box-shadow-based
+                      // ring, hiding the committed/staged colour highlight on the graph).
+                      ? undefined
+                      : '0 4px 12px rgba(0,0,0,0.1)',
           ['--ring-color' as string]: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
         }}
         // Add data attributes for testing/debugging
@@ -582,10 +638,12 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
 }
 
 // Toolbar Button Component
-function ToolbarButton({ icon, label }: { icon: string; label: string }) {
+function ToolbarButton({ icon, label, onClick }: { icon: string; label: string; onClick?: (e: React.MouseEvent) => void }) {
   return (
     <button
       title={label}
+      aria-label={label}
+      onClick={onClick}
       className={cn(
         "w-7 h-7 rounded-md flex items-center justify-center",
         "text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/10",

@@ -45,7 +45,7 @@ from typing import AsyncIterator, Optional
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from backend.app.db.engine import PoolRole, get_session_factory
+from backend.app.db.engine import get_jobs_session, get_readonly_session
 from backend.app.db.models import (
     ProviderAdmissionConfigORM,
     ProviderHealthWindowORM,
@@ -249,9 +249,8 @@ class _AdmissionController:
         if provider_id in self._config_cache:
             return self._config_cache[provider_id]
 
-        factory = get_session_factory(PoolRole.READONLY)
         try:
-            async with factory() as session:
+            async with get_readonly_session() as session:
                 row = await session.get(ProviderAdmissionConfigORM, provider_id)
         except Exception as exc:
             logger.warning(
@@ -427,9 +426,8 @@ class _AdmissionController:
         if not self._pending:
             return
         snapshot, self._pending = self._pending, {}
-        factory = get_session_factory(PoolRole.JOBS)
         try:
-            async with factory() as session:
+            async with get_jobs_session() as session:
                 dialect = (
                     session.bind.dialect.name if session.bind else "sqlite"
                 )
@@ -491,7 +489,6 @@ class _AdmissionController:
                         set_=update_values,
                     )
                     await session.execute(stmt)
-                await session.commit()
         except Exception as exc:
             # If flush fails, fold the snapshot back into the pending
             # buffer so a subsequent flush retries — losing counters
@@ -505,6 +502,22 @@ class _AdmissionController:
                     existing.failure_delta += pending.failure_delta
                     existing.consecutive_failures = pending.consecutive_failures
             logger.warning("admission.drain_failed err=%s", exc)
+
+    async def stop(self) -> None:
+        """Cancel the periodic flush task and flush remaining counters.
+
+        Called once from the service shutdown path, before the DB
+        engines are disposed. Cancelling ``_flush_task`` triggers its
+        CancelledError handler, which performs the final drain; when no
+        task is running (nothing was ever reported), drain directly.
+        """
+        task, self._flush_task = self._flush_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        else:
+            await self.drain()
 
 
 # Process-singleton.

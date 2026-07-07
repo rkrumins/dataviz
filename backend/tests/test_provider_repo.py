@@ -169,3 +169,27 @@ async def test_has_workspaces_returns_true_with_data_sources(db_session):
 
     result = await provider_repo.has_workspaces(db_session, created.id)
     assert result is True
+
+
+# ── falkor_max_resident (per-provider eviction budget) ────────────────
+
+async def test_falkor_max_resident_round_trips(db_session):
+    created = await provider_repo.create_provider(
+        db_session, _make_create_req(falkor_max_resident=3)
+    )
+    assert created.falkor_max_resident == 3
+
+    fetched = await provider_repo.get_provider(db_session, created.id)
+    assert fetched.falkor_max_resident == 3
+    assert await provider_repo.get_falkor_budget(db_session, created.id) == 3
+
+    updated = await provider_repo.update_provider(
+        db_session, created.id, ProviderUpdateRequest(falkor_max_resident=10)
+    )
+    assert updated.falkor_max_resident == 10
+
+
+async def test_falkor_max_resident_defaults_to_none(db_session):
+    created = await provider_repo.create_provider(db_session, _make_create_req())
+    assert created.falkor_max_resident is None
+    assert await provider_repo.get_falkor_budget(db_session, created.id) is None

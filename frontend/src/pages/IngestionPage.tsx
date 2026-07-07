@@ -141,8 +141,8 @@ export function IngestionPage() {
     return (
         <div className="absolute inset-0 flex flex-col animate-in fade-in duration-500">
             {/* Fixed header area — does not scroll */}
-            <div className="shrink-0 px-8 pt-8">
-                <div className="max-w-7xl mx-auto">
+            <div className="shrink-0">
+                <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 pt-8">
                     {/* Header */}
                     <div className="flex items-center gap-3 mb-6">
                         <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
@@ -233,7 +233,7 @@ export function IngestionPage() {
                 {activeTab === 'jobs' ? (
                     <RegistryJobHistory />
                 ) : (
-                    <div className="px-8 py-6 max-w-7xl mx-auto">
+                    <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-6">
                         {activeTab === 'providers' && canReadProviders && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
                     </div>

@@ -2,13 +2,21 @@
 
 Wires up three concurrent tasks:
     1. Scheduler  — every tick, enqueues due data sources to Redis.
-    2. Worker     — XREADGROUP loop on three streams (stats / discovery /
-       schema), routes via the dispatcher to the registered handler.
+    2. Worker     — XREADGROUP loop on four streams (stats counts /
+       stats deep / discovery / purge), routed via the dispatcher to the
+       registered handler under per-lane concurrency budgets.
     3. Health HTTP — minimal liveness probe on the configured health port.
 
 Gracefully drains in-flight jobs on SIGTERM (up to
 ``STATS_DRAIN_TIMEOUT_SECS``) so container restarts do not leave
 partial upserts behind.
+
+Redis degradation contract: Redis down → the whole stats pipeline
+pauses (streams, dedup claims, and cooldown keys are Redis), the web
+read path keeps serving Postgres rows with ``status=stale``, and the
+admission GCRA fails open. All Redis state here is ADVISORY — lost
+claims/cooldowns/queue entries heal within one scheduler tick + poll
+interval of Redis returning; Postgres rows are the only authority.
 
 Usage:
     python -m backend.insights_service [--health-port PORT]
@@ -39,6 +47,7 @@ from .redis_streams import (
 )
 from .scheduler import (
     get_discovery_scheduler_status,
+    get_due_backlog,
     get_scheduler_status,
     run_discovery_scheduler,
     run_scheduler,
@@ -126,11 +135,10 @@ async def _preflight() -> None:
     # error — importing engine.py eagerly loads asyncpg.
     from sqlalchemy import text
 
-    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.db.engine import get_readonly_session
 
     async def _select_one() -> None:
-        factory = get_session_factory(PoolRole.READONLY)
-        async with factory() as session:
+        async with get_readonly_session() as session:
             await session.execute(text("SELECT 1"))
 
     try:
@@ -173,8 +181,7 @@ async def _preflight() -> None:
     # service_healthy). If someone launches us directly against a fresh
     # DB, say so instead of crashing with a SQL 42P01 on the first tick.
     try:
-        factory = get_session_factory(PoolRole.READONLY)
-        async with factory() as session:
+        async with get_readonly_session() as session:
             for table in _REQUIRED_TABLES:
                 result = await session.execute(
                     text("SELECT to_regclass(:name)"), {"name": table}
@@ -226,11 +233,13 @@ async def main(args: argparse.Namespace) -> None:
     # Sanity-check registration before opening Redis loops — if a
     # handler module silently failed to import, surface the gap here
     # rather than DLQing every incoming message of that kind.
-    if "stats_poll" not in dispatcher.registered_kinds():
-        logger.critical(
-            "stats_poll handler not registered; collector.py failed to import. Aborting."
-        )
-        sys.exit(1)
+    for required_kind in ("stats_poll", "stats_deep"):
+        if required_kind not in dispatcher.registered_kinds():
+            logger.critical(
+                "%s handler not registered; collector.py failed to import. Aborting.",
+                required_kind,
+            )
+            sys.exit(1)
 
     await _preflight()
 
@@ -272,6 +281,11 @@ async def main(args: argparse.Namespace) -> None:
                     provider_id: {"last_call_duration_ms": ms}
                     for provider_id, ms in admission.controller.last_durations_snapshot().items()
                 }
+                # Per-lane in-flight counts + SQL-derived staleness gauges.
+                # Lane-accounting bugs and stale-forever rows are invisible
+                # without these — the stream depths alone can look healthy.
+                payload["lanes"] = consumer.lane_active_snapshot()
+                payload.update(await get_due_backlog())
                 _health_snapshot.update(payload)
             except asyncio.CancelledError:
                 raise
@@ -363,25 +377,35 @@ async def main(args: argparse.Namespace) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
+        # Drain in-flight cache-warm tasks — they hold READONLY-pool
+        # sessions and must not outlive the engines disposed below.
+        from . import cache_warmer
+        await cache_warmer.shutdown()
+
         # Stop the cross-process cancel listener.
         try:
             await cancel_listener.stop()
         except Exception:
             pass
 
-        # Final drain of buffered admission counters before the
-        # process exits — the periodic flush task is cancelled below
-        # and would otherwise drop the last window of outcomes.
+        # Stop the admission flush task; its cancellation handler runs
+        # the final drain of buffered counters. The drain writes to
+        # Postgres, so this must happen before close_db().
         try:
             from . import admission
-            await admission.controller.drain()
+            await admission.controller.stop()
         except Exception as exc:
-            logger.warning("admission final drain failed: %s", exc)
+            logger.warning("admission stop failed: %s", exc)
 
         health_server.close()
         await health_server.wait_closed()
 
         await close_redis()
+        # Dispose the per-role engines LAST so every teardown step above
+        # can still write, and no asyncpg connection survives into
+        # event-loop close (the "Event loop is closed" GC noise).
+        from backend.app.db.engine import close_db
+        await close_db()
         logger.info("=== Insights Service shutdown complete ===")
 
 

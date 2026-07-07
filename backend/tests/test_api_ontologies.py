@@ -234,3 +234,31 @@ async def test_validate_ontology(test_client: AsyncClient):
     body = resp.json()
     assert "isValid" in body
     assert "issues" in body
+
+
+# ── Authoring guard: case-insensitive-unique type ids (create / update / import) ──
+
+async def test_create_ontology_rejects_case_insensitive_dup_type_ids(test_client: AsyncClient):
+    payload = _ontology_payload("Dup Rel", relationshipTypeDefinitions={
+        "HAS": {"label": "Has"}, "has": {"label": "has"}})
+    resp = await test_client.post("/api/v1/admin/ontologies", json=payload)
+    assert resp.status_code == 422
+    assert "case" in resp.json()["detail"].lower()
+
+
+async def test_update_ontology_rejects_case_insensitive_dup_type_ids(test_client: AsyncClient):
+    ont = await _create_ontology(test_client, "Guarded Update")
+    resp = await test_client.put(
+        f"/api/v1/admin/ontologies/{ont['id']}",
+        json={"entityTypeDefinitions": {"Table": {"label": "Table"}, "table": {"label": "t"}}})
+    assert resp.status_code == 422
+    assert "case" in resp.json()["detail"].lower()
+
+
+async def test_import_ontology_rejects_case_insensitive_dup_type_ids(test_client: AsyncClient):
+    # The authoring guard must also cover the import routes (exported JSON is untrusted).
+    payload = _ontology_payload("Imp Dup", entityTypeDefinitions={
+        "Table": {"label": "Table"}, "table": {"label": "table"}})
+    resp = await test_client.post("/api/v1/admin/ontologies/import", json=payload)
+    assert resp.status_code == 422
+    assert "case" in resp.json()["detail"].lower()
