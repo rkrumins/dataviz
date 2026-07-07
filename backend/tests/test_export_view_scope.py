@@ -125,6 +125,43 @@ class TestResolveExportViewScope:
         assert await _resolve_export_view_scope(None, None, "v1") is None
         assert await _resolve_export_view_scope("ws1", None, None) is None
 
+    async def test_branch_effective_scope_uses_overlay(self, db_session: AsyncSession):
+        """A draft export (branch_id) scopes to the draft's OWN assignments
+        (base ⊕ overlay); no branch / no overlay falls back to the base."""
+        from backend.app.db.models import ViewLayoutOverlayORM
+
+        ws = await _seed_workspace(db_session)
+        view = await _seed_view(db_session, ws, config={
+            "layout": {
+                "referenceLayout": {
+                    "layers": [{"id": "source"}],
+                    "assignments": {
+                        "urn:base": {"layerId": "source", "inheritsChildren": True},
+                    },
+                },
+            },
+        })
+        db_session.add(ViewLayoutOverlayORM(
+            view_id=view.id, branch_id="br_draft",
+            reference_layout=json.dumps({
+                "layers": [{"id": "source"}],
+                "assignments": {
+                    "urn:draft": {"layerId": "source", "inheritsChildren": True},
+                },
+            }),
+            entity_scope=None,
+            fork_base_layout=json.dumps({}), fork_base_entity_scope=None,
+        ))
+        await db_session.flush()
+
+        base = await _resolve_export_view_scope(ws.id, None, view.id)
+        draft = await _resolve_export_view_scope(ws.id, None, view.id, "br_draft")
+        other = await _resolve_export_view_scope(ws.id, None, view.id, "br_none")
+
+        assert base["assigned_urns"] == ["urn:base"]
+        assert draft["assigned_urns"] == ["urn:draft"]     # overlay wins
+        assert other["assigned_urns"] == ["urn:base"]      # no overlay → base
+
     async def test_malformed_config_fails_open(self, db_session: AsyncSession):
         """A view row whose config isn't valid JSON must not raise — it
         fails open to `None` (whole-DS export), matching the resolver's

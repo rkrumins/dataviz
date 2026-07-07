@@ -266,11 +266,15 @@ class ImportExportService:
     async def run_export(self, job_id: str) -> Dict[str, int]:
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            ws, ds, view_id, options = ((row.workspace_id, row.data_source_id, row.scope_view_id,
-                                         row.field_scope) if row else (None, None, None, None))
+            ws, ds, view_id, branch_id, options = (
+                (row.workspace_id, row.data_source_id, row.scope_view_id,
+                 row.branch_id, row.field_scope)
+                if row else (None, None, None, None, None))
         scope = None
         if view_id and self._scope_resolver is not None:
-            scope = await self._scope_resolver(ws, ds, view_id)
+            # Branch-effective: an export of a draft branch scopes to that
+            # draft's own view assignments (base ⊕ overlay).
+            scope = await self._scope_resolver(ws, ds, view_id, branch_id)
         return await ExportWorker(self._svc, self._store, scope=scope, options=options or {}).run(job_id)
 
     async def run_export_safe(self, job_id: str) -> None:

@@ -439,7 +439,11 @@ async def get_view(
 
 
 async def get_view_enriched(
-    session: AsyncSession, view_id: str, user_id: Optional[str] = None
+    session: AsyncSession,
+    view_id: str,
+    user_id: Optional[str] = None,
+    *,
+    branch_id: Optional[str] = None,
 ) -> Optional[ViewResponse]:
     result = await session.execute(
         select(ViewORM).where(ViewORM.id == view_id)
@@ -447,7 +451,12 @@ async def get_view_enriched(
     row = result.scalar_one_or_none()
     if not row:
         return None
-    return await _to_enriched_response(session, row, user_id)
+    # Branch-effective read: when a draft (branch_id) is reading, project the
+    # base ⊕ overlay config; no branch (or no overlay) → base, byte-identical.
+    override = (
+        await effective_view_config(session, row, branch_id) if branch_id else None
+    )
+    return await _to_enriched_response(session, row, user_id, config_override=override)
 
 
 async def update_view(

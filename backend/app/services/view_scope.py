@@ -63,6 +63,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM
+from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import parse_reference_layout
 from backend.common.models.search import SearchScope
 
@@ -236,6 +237,7 @@ def _compute_scope_hash(
     entity_types: FrozenSet[str],
     layer_ids: FrozenSet[str],
     max_depth: int,
+    branch_id: Optional[str] = None,
 ) -> str:
     """Stable 12-char sha1 of every input + the view's ``updated_at``.
 
@@ -243,10 +245,16 @@ def _compute_scope_hash(
     cache entry keyed by this hash; not including any URLs / wall-clock
     means two requests against an unchanged view produce identical
     hashes (cache hits).
+
+    ``branch_id`` folds the resolving branch into the key so a draft's
+    scoped search (whose effective config is base ⊕ its layout overlay)
+    can never share a cached scope with a published search on the same
+    view — or with a different draft. Published (no branch) hashes as "".
     """
     payload = {
         "view_id": view_id,
         "updated_at": updated_at or "",
+        "branch_id": branch_id or "",
         "root_urns": list(root_urns),
         "entity_types": sorted(entity_types),
         "layer_ids": sorted(layer_ids),
@@ -295,6 +303,7 @@ class ViewScopeResolver:
         workspace_id: str,
         requested: SearchScope,
         data_source_id: Optional[str] = None,
+        branch_id: Optional[str] = None,
     ) -> EffectiveViewScope:
         """Produce the authoritative scope or raise.
 
@@ -306,6 +315,11 @@ class ViewScopeResolver:
         - ``data_source_id`` (when provided) is forwarded only for the
           ``EffectiveViewScope`` record; the resolver does not currently
           gate by data source (views own that mapping internally).
+        - ``branch_id`` (when a draft is reading) resolves the view's
+          BRANCH-EFFECTIVE config (base ⊕ the branch's layout overlay) so a
+          draft's search sees its own layer/assignment edits; published /
+          other branches see the base. Also folded into the scope hash so a
+          draft and a published search never share a cached scope.
         - ``requested.root_urns`` and ``requested.entity_types`` are
           treated as *narrowing* hints; the resolver intersects them
           with the view's allowed scope and never widens.
@@ -322,7 +336,9 @@ class ViewScopeResolver:
                 f"view '{requested.view_id}' has been deleted"
             )
 
-        config = _parse_view_config(view.config)
+        # Branch-effective read: base config when no branch/overlay, else
+        # base ⊕ the branch's layout overlay (see view_repo).
+        config = await effective_view_config(self._session, view, branch_id)
         canvas_kind = _classify_canvas(view.view_type, config)
 
         # Per-canvas root + entity-type + layer extraction.
@@ -353,6 +369,7 @@ class ViewScopeResolver:
         scope_hash = _compute_scope_hash(
             view_id=view.id,
             updated_at=view.updated_at,
+            branch_id=branch_id,
             root_urns=tuple(effective_root_urns),
             entity_types=effective_entity_types,
             layer_ids=layer_ids,

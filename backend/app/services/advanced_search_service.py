@@ -269,11 +269,13 @@ class AdvancedSearchService:
         session: Optional[AsyncSession],
         workspace_id: Optional[str],
         data_source_id: Optional[str] = None,
+        branch_id: Optional[str] = None,
     ) -> None:
         self._engine = engine
         self._session = session
         self._workspace_id = workspace_id
         self._data_source_id = data_source_id
+        self._branch_id = branch_id
 
     @classmethod
     def for_diagnostics(cls, engine: ContextEngine) -> "AdvancedSearchService":
@@ -475,6 +477,7 @@ class AdvancedSearchService:
                 workspace_id=self._workspace_id,
                 requested=requested,
                 data_source_id=self._data_source_id,
+                branch_id=self._branch_id,
             )
         except ViewNotFound as exc:
             # The HTTP layer maps NotImplementedError → 501 and

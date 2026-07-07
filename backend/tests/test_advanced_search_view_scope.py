@@ -159,6 +159,36 @@ class TestComputeScopeHash:
         )
         assert h1 != h2
 
+    def test_branch_id_changes_hash(self):
+        # Critical: a draft's scoped search must never share a cached scope
+        # with the published search on the same view (or a different draft).
+        base = _compute_scope_hash(
+            view_id="v", updated_at="t",
+            root_urns=("a",), entity_types=frozenset(),
+            layer_ids=frozenset(), max_depth=12,
+        )
+        draft = _compute_scope_hash(
+            view_id="v", updated_at="t",
+            root_urns=("a",), entity_types=frozenset(),
+            layer_ids=frozenset(), max_depth=12,
+            branch_id="br_x",
+        )
+        other = _compute_scope_hash(
+            view_id="v", updated_at="t",
+            root_urns=("a",), entity_types=frozenset(),
+            layer_ids=frozenset(), max_depth=12,
+            branch_id="br_y",
+        )
+        assert base != draft
+        assert draft != other
+        # No branch and branch_id="" hash identically (published canonical form).
+        assert base == _compute_scope_hash(
+            view_id="v", updated_at="t",
+            root_urns=("a",), entity_types=frozenset(),
+            layer_ids=frozenset(), max_depth=12,
+            branch_id="",
+        )
+
     def test_root_urn_order_insensitive_via_sort(self):
         # We sort entity_types but NOT root_urns — root_urns ordering is
         # preserved because the compiler will see it as part of the
@@ -783,3 +813,73 @@ async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSessi
         requested=SearchScope(view_id=view.id),
     )
     assert eff1.scope_hash != eff2.scope_hash
+
+
+async def test_resolver_branch_effective_config_and_distinct_hash(
+    db_session: AsyncSession,
+):
+    # A draft's scoped search must resolve the branch-effective config (base ⊕
+    # the branch's layout overlay), while published (no branch) sees the base —
+    # and the two must NOT share a scope hash (no cross-branch cache collision).
+    from backend.app.db.models import ViewLayoutOverlayORM
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "layout": {
+                "referenceLayout": {
+                    "layers": [{"id": "source"}],
+                    "assignments": {
+                        "urn:base": {"layerId": "source", "inheritsChildren": True},
+                    },
+                },
+            },
+        },
+    )
+    # The draft overlay re-places a DIFFERENT entity into the layer.
+    overlay = ViewLayoutOverlayORM(
+        view_id=view.id,
+        branch_id="br_draft",
+        reference_layout=json.dumps({
+            "layers": [{"id": "source"}],
+            "assignments": {
+                "urn:draft": {"layerId": "source", "inheritsChildren": True},
+            },
+        }),
+        entity_scope=None,
+        fork_base_layout=json.dumps({}),
+        fork_base_entity_scope=None,
+    )
+    db_session.add(overlay)
+    await db_session.flush()
+
+    resolver = ViewScopeResolver(db_session)
+
+    published = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(view_id=view.id),
+    )
+    draft = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(view_id=view.id),
+        branch_id="br_draft",
+    )
+    # No overlay for this branch → base (identical to published).
+    other_draft = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(view_id=view.id),
+        branch_id="br_other",
+    )
+
+    assert published.root_urns == ("urn:base",)
+    assert draft.root_urns == ("urn:draft",)          # overlay wins
+    assert other_draft.root_urns == ("urn:base",)     # no overlay → base
+
+    # Distinct scope hashes: published, this draft, and a branch with no
+    # overlay all key differently (branch_id is folded into the hash).
+    assert published.scope_hash != draft.scope_hash
+    assert published.scope_hash != other_draft.scope_hash
+    assert draft.scope_hash != other_draft.scope_hash

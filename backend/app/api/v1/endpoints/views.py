@@ -393,11 +393,16 @@ async def create_view(
 @router.get("/{view_id}", response_model=ViewResponse)
 async def get_view(
     view_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Get a single view by ID, enriched with workspace context and favourite data."""
+    """Get a single view by ID, enriched with workspace context and favourite data.
+
+    ``branchId`` (a draft ref) projects the branch-effective config — base ⊕ the
+    branch's layout overlay — so a draft sees its own layer/scope edits; published
+    and other branches see the base. Absent (or no overlay) → base, unchanged."""
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
         ctx = await _viewer_context(session, user, claims)
@@ -407,7 +412,7 @@ async def get_view(
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
 
     view = await view_repo.get_view_enriched(
-        session, view_id, user_id=_user_id(user),
+        session, view_id, user_id=_user_id(user), branch_id=branch_id,
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")

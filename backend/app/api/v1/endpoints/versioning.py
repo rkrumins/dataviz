@@ -1974,7 +1974,7 @@ async def sync_ingest(
 _ie_service = None
 
 
-async def _resolve_export_view_scope(workspace_id, data_source_id, view_id):
+async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, branch_id=None):
     """Resolve a view's ENTITY SET for a **view-scoped export**, from the authoritative source:
     the view's stored ``config`` reference-layout ``assignments`` map (canonical, up-converted from
     legacy per-layer ``entityAssignments`` by ``parse_reference_layout``) — the explicit
@@ -1989,12 +1989,15 @@ async def _resolve_export_view_scope(workspace_id, data_source_id, view_id):
     try:
         from backend.app.db.engine import get_async_session
         from backend.app.db.models import ViewORM
+        from backend.app.db.repositories.view_repo import effective_view_config
         from backend.app.services.layout_config import parse_reference_layout
         async with get_async_session() as session:
             view = await session.get(ViewORM, view_id)
             if view is None:
                 return None
-            config = json.loads(view.config or "{}")
+            # Branch-effective export scope: a draft export scopes to the draft's
+            # own layer assignments (base ⊕ overlay); no branch/overlay → base.
+            config = await effective_view_config(session, view, branch_id)
             cont = await _live_containment_types(session, workspace_id, data_source_id)
         layout = parse_reference_layout(config)
         # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
