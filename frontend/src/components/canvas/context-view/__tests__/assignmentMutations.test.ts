@@ -4,6 +4,8 @@ import {
   unassignEntities,
   remapAssignmentUrn,
   checkAssignmentConflict,
+  pruneTempAssignments,
+  isTempUrn,
 } from '../assignmentMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 import type { LayerAssignmentEntry } from '@/types/schema'
@@ -168,5 +170,34 @@ describe('assignmentMutations — checkAssignmentConflict', () => {
   it('returns null for a root node (no parent)', () => {
     const assignments = { root: { layerId: 'A', inheritsChildren: true } as LayerAssignmentEntry }
     expect(checkAssignmentConflict(parentMap, assignments, 'root', 'B')).toBeNull()
+  })
+})
+
+describe('assignmentMutations — pruneTempAssignments', () => {
+  it('isTempUrn only matches the urn:staged: prefix', () => {
+    expect(isTempUrn('urn:staged:Table:abc')).toBe(true)
+    expect(isTempUrn('urn:real:Table:abc')).toBe(false)
+    expect(isTempUrn('domain:finance')).toBe(false)
+  })
+
+  it('drops temp-urn keys and keeps real ones', () => {
+    const next = pruneTempAssignments(layout({
+      'urn:staged:Object:dead': { layerId: 'l1', inheritsChildren: true },
+      'urn:real:Object:live': { layerId: 'l1', inheritsChildren: true },
+    }))
+    expect(Object.keys(next.assignments)).toEqual(['urn:real:Object:live'])
+  })
+
+  it('is a no-op (same reference) when there are no temp urns', () => {
+    const before = layout({ 'urn:real:x': { layerId: 'l1', inheritsChildren: true } })
+    expect(pruneTempAssignments(before)).toBe(before)
+  })
+
+  it('preserves layers and does not mutate the input', () => {
+    const before = layout({ 'urn:staged:X:1': { layerId: 'l1', inheritsChildren: true } })
+    const next = pruneTempAssignments(before)
+    expect(next.layers).toBe(before.layers)
+    expect(before.assignments['urn:staged:X:1']).toBeDefined() // input untouched
+    expect(next.assignments['urn:staged:X:1']).toBeUndefined()
   })
 })

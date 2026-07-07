@@ -1114,4 +1114,12 @@ export interface LayerAssignmentRequest {
         entityAssignments?: EntityAssignmentConfig[];
     }[];
     includeEdges: boolean;
+    /**
+     * Canonical view-config placements (urn -> config), threaded by the caller from
+     * the active view's referenceLayout. The backend treats these as authoritative,
+     * overriding per-layer entityAssignments on collision (see layout_config.py).
+     */
+    assignments?: Record<string, EntityAssignmentConfig>;
+    /** The active view's scope ('all' | 'curated'). */
+    entityScope?: 'all' | 'curated';
 }

@@ -13,6 +13,8 @@ import { saveStagedChangesToDraft } from '../saveStagedChangesToDraft'
 import { applyGraphChanges } from '@/services/versioningApiService'
 import { useCanvasStore } from '@/store/canvas'
 import type { StagedChange } from '@/store/stagedChangesStore'
+import { remapAssignmentUrn, pruneTempAssignments } from '@/components/canvas/context-view/assignmentMutations'
+import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 
 const mockApply = vi.mocked(applyGraphChanges)
 
@@ -132,5 +134,51 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
     // containment edge rebuilt with the real id + real endpoints
     const edge = st.edges.find((e) => e.source === 'urn:real:p' && e.target === 'urn:real:c')
     expect(edge?.id).toBe('edge_real')
+  })
+})
+
+describe('saveStagedChangesToDraft — temp-urn assignment prune (discarded creates)', () => {
+  const refLayout = (assignments: NormalizedReferenceLayout['assignments']): NormalizedReferenceLayout => ({
+    layers: [{ id: 'L1', name: 'L1', order: 0, entityTypes: [] }],
+    assignments,
+  })
+
+  beforeEach(() => {
+    mockApply.mockReset()
+    mockApply.mockResolvedValue({ commitId: 'x', assigned: {} } as any)
+    useCanvasStore.setState({ nodes: [], edges: [], _nodeIndex: new Set(), _edgeIndex: new Set() } as any)
+  })
+
+  it('remaps a KEPT create temp→real and PRUNES a discarded create’s temp-urn entry', async () => {
+    // The view config carries two temp-urn placements: one for a create in THIS save (kept →
+    // remapped to its minted urn), and one left by a create discarded earlier (not in changes).
+    let layout = refLayout({
+      'urn:staged:Object:kept': { layerId: 'L1', inheritsChildren: true },
+      'urn:staged:Object:discarded': { layerId: 'L1', inheritsChildren: true },
+    })
+    mockApply.mockResolvedValueOnce({ commitId: 'x', assigned: { 'urn:staged:Object:kept': 'urn:real:kept' } } as any)
+
+    await saveStagedChangesToDraft(
+      [sc({ id: 'k', type: 'create_entity', targetId: 'urn:staged:Object:kept', targetUrn: 'urn:staged:Object:kept', after: { entityType: 'Object', displayName: 'Kept' } })],
+      {
+        ...target,
+        remapEntityId: (oldId, newId) => { layout = remapAssignmentUrn(layout, oldId, newId) },
+        pruneTempAssignments: () => { layout = pruneTempAssignments(layout) },
+      },
+    )
+
+    expect(layout.assignments['urn:real:kept']).toBeDefined()                 // kept create → remapped
+    expect(layout.assignments['urn:staged:Object:kept']).toBeUndefined()
+    expect(layout.assignments['urn:staged:Object:discarded']).toBeUndefined() // discarded create → pruned
+  })
+
+  it('prunes a discarded temp-urn entry even on a layer-only save (zero graph ops)', async () => {
+    let layout = refLayout({ 'urn:staged:Object:discarded': { layerId: 'L1', inheritsChildren: true } })
+    await saveStagedChangesToDraft(
+      [sc({ type: 'assign_layer', targetId: 'x', after: { layerId: 'L1' } })], // produces zero ops
+      { ...target, pruneTempAssignments: () => { layout = pruneTempAssignments(layout) } },
+    )
+    expect(mockApply).not.toHaveBeenCalled()
+    expect(layout.assignments).toEqual({})
   })
 })

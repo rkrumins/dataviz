@@ -17,6 +17,18 @@ vi.mock('@/services/contextModelService', () => ({
   listTemplates: vi.fn().mockResolvedValue([]),
 }))
 
+// The workspaces store transitively imports @/main (createRoot) — mock it so the module graph
+// stays test-safe (mirrors ViewWizard.test.tsx). LayoutStep reads activeWorkspaceId to fetch
+// workspace-scoped templates; a value here exercises that path (the mocked listTemplates → []).
+vi.mock('@/store/workspaces', () => {
+  const state = { activeWorkspaceId: 'ws1' }
+  const useWorkspacesStore = Object.assign(
+    (selector: (s: typeof state) => unknown) => selector(state),
+    { getState: () => state },
+  )
+  return { useWorkspacesStore }
+})
+
 import { LayoutStep } from '../LayoutStep'
 import type { WizardFormData } from '../../ViewWizard'
 

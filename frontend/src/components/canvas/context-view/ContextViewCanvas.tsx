@@ -73,7 +73,7 @@ import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
 
-import type { ViewLayerConfig } from '@/types/schema'
+import type { ViewLayerConfig, DisplayRuleConfig } from '@/types/schema'
 
 // Extracted types, constants, hooks, and components
 import { defaultReferenceModelLayers } from './constants'
@@ -498,8 +498,10 @@ export function ContextViewCanvas({
   const resetAssignmentStatus = useReferenceModelStore(s => s.resetAssignmentStatus)
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
-  const syncStatus = useReferenceModelStore(s => s.syncStatus)
-  const activeContextModelName = useReferenceModelStore(s => s.activeContextModelName)
+  // Display rules are session state on the store, edited via the Property Manager. The canvas
+  // owns their persistence: seed from the view on open (hydrate effect) + write them into the
+  // debounced updateViewLayout payload on change (persist effect) — see below.
+  const displayRules = useReferenceModelStore(s => s.displayRules)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
   const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
@@ -569,22 +571,38 @@ export function ContextViewCanvas({
   const pendingLayoutSave = useRef<
     { viewId: string; referenceLayout: NormalizedReferenceLayout; entityScope: 'all' | 'curated' } | null
   >(null)
+  // Sync indicator DERIVED from the canvas debounce (replaces the deleted store syncStatus): 'saving'
+  // from the moment a save is armed until the durable PUT settles, else 'idle'. The header subline
+  // shows a small spinner while 'saving'.
+  const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving'>('idle')
 
   const doLayoutSave = useCallback(async () => {
     if (layoutSaveTimer.current) { clearTimeout(layoutSaveTimer.current); layoutSaveTimer.current = null }
     const pending = pendingLayoutSave.current
-    if (!pending) return
+    if (!pending) { setLayoutSyncStatus('idle'); return }
     pendingLayoutSave.current = null
     try {
       await updateViewLayout(pending.viewId, {
         referenceLayout: pending.referenceLayout,
         entityScope: pending.entityScope,
+        // Always send the live display rules so a layer-only save never wipes them (the endpoint
+        // replaces referenceLayout wholesale, then re-nests displayRules only when supplied).
+        displayRules: useReferenceModelStore.getState().displayRules,
       })
     } catch (err) {
       // Swallow to avoid unhandled-rejection noise; the next edit re-arms the save.
       console.error('[ContextViewCanvas] layout save failed', err)
+    } finally {
+      setLayoutSyncStatus('idle')
     }
   }, [])
+
+  /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator. */
+  const armLayoutSave = useCallback(() => {
+    setLayoutSyncStatus('saving')
+    if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
+    layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
+  }, [doLayoutSave])
 
   /** Flush any pending debounced layout save NOW (no-op if none pending). Used by the Save button. */
   const flushLayoutSave = useCallback(async () => { await doLayoutSave() }, [doLayoutSave])
@@ -619,9 +637,8 @@ export function ContextViewCanvas({
     // prior blueprint-autosync gate).
     if (!canManage) return
     pendingLayoutSave.current = { viewId: view.id, referenceLayout, entityScope }
-    if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current)
-    layoutSaveTimer.current = setTimeout(() => { void doLayoutSave() }, 1500)
-  }, [canManage, doLayoutSave])
+    armLayoutSave()
+  }, [canManage, armLayoutSave])
 
   // Step 1: Sync view layers to store when activeView changes
   useEffect(() => {
@@ -644,6 +661,43 @@ export function ContextViewCanvas({
       setLayers(viewLayers)
     }
   }, [activeView?.id, activeView?.layout?.referenceLayout?.layers, setLayers, storeLayers])
+
+  // Step 1b — HYDRATE display rules from the view on open. Display rules are view-scoped session
+  // state on the store, edited via the Property Manager; seeding them here (they no longer arrive via
+  // a context-model load) is what makes a view's saved tags appear, and re-seeding on every view
+  // switch prevents one view's rules leaking into another. Defined BEFORE the persist effect so on a
+  // switch the store is updated first and the persist effect's stale-guard catches the transition.
+  useEffect(() => {
+    const view = useSchemaStore.getState().getActiveView()
+    const raw = view?.layout?.referenceLayout?.displayRules
+    useReferenceModelStore.getState().setDisplayRules(Array.isArray(raw) ? (raw as DisplayRuleConfig[]) : [])
+  }, [activeView?.id])
+
+  // Step 1c — PERSIST display-rule edits. When the store's rules diverge from the active view's saved
+  // rules, fold them into the LOCAL view (so an in-session view switch re-hydrates them) and arm the
+  // debounced durable save — which always sends the live displayRules (see doLayoutSave), so a
+  // layer-only save never wipes them. Guards: ignore a stale render whose captured rules the store
+  // has already moved past (e.g. a switch just re-hydrated), and skip when the view already carries
+  // these rules (the hydration seed / no net change). Managers only.
+  useEffect(() => {
+    if (useReferenceModelStore.getState().displayRules !== displayRules) return
+    if (!canManage) return
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view?.id) return
+    const savedRaw = view.layout?.referenceLayout?.displayRules
+    const saved = Array.isArray(savedRaw) ? savedRaw : []
+    if (JSON.stringify(saved) === JSON.stringify(displayRules)) return
+    const norm = normalizeReferenceLayout(view.layout?.referenceLayout)
+    const entityScope = scopeForPersist(view.content, view.layout?.referenceLayout)
+    useSchemaStore.getState().updateView(view.id, {
+      layout: {
+        ...(view.layout ?? {}),
+        referenceLayout: { layers: norm.layers, assignments: norm.assignments, displayRules },
+      },
+    })
+    pendingLayoutSave.current = { viewId: view.id, referenceLayout: norm, entityScope }
+    armLayoutSave()
+  }, [displayRules, canManage, armLayoutSave])
 
   // Step 2: Load assignments from backend when layers are synced and nodes are available
   // Uses a ref to track what we've computed for, preventing cascading re-fetches.
@@ -669,7 +723,15 @@ export function ContextViewCanvas({
     if (assignmentComputedRef.current === layerFingerprint) return
     assignmentComputedRef.current = layerFingerprint
 
-    computeAssignments(provider)
+    // Thread the active view's canonical placements + scope into the compute request (read LIVE,
+    // same as persistReferenceLayout). The store no longer owns these; the adapter in
+    // buildAssignmentRequest fills the backend EntityAssignmentConfig fields.
+    const view = useSchemaStore.getState().getActiveView()
+    const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
+    computeAssignments(provider, {
+      assignments: norm.assignments,
+      entityScope: deriveEntityScope(view?.content, norm),
+    })
   }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
 
   // Bounded recovery: the 'error' state is otherwise terminal (the compute
@@ -738,7 +800,8 @@ export function ContextViewCanvas({
     // A session-created/duplicated ROOT carries a stale reference-model-store instanceAssignment (from
     // the create/duplicate path) that wins at top priority in useLayerAssignment and would shadow this
     // canonical move until reload. Clear it so the canonical value renders immediately (on discard the
-    // node falls back to its durable node-property/delta placement — the pre-move layer).
+    // move's staged `discard` hook restores the pre-move canonical layout via persistReferenceLayout —
+    // there is no node-property fallback anymore, that was removed in Phase 3b).
     useReferenceModelStore.getState().removeEntityAssignment(entityId)
 
     // Surface it in Review & Save as a VIEW-LAYOUT change: no graph op, undoable via discard/reapply.
@@ -2434,14 +2497,14 @@ export function ContextViewCanvas({
         propertyManagerOpen={propertyManagerOpen}
         viewName={activeView?.name}
         entityTypeCount={activeView?.content.visibleEntityTypes.length}
-        activeContextModelName={activeContextModelName}
+        activeContextModelName={null}
         canEditView={canEditView}
         canShareView={canShareView}
         viewVisibility={viewVisibility}
         onRenameView={handleRenameView}
         onEditViewDetails={handleEditViewDetails}
         onShareView={() => void handleShareView()}
-        syncStatus={syncStatus}
+        syncStatus={layoutSyncStatus}
         onRetrySync={() => { void flushLayoutSave() }}
         isDraft={isDraft}
         canManage={canManage}
@@ -2588,6 +2651,11 @@ export function ContextViewCanvas({
                 remapEntityId: (oldId, newId) => {
                   remapEntityId(oldId, newId)
                   persistReferenceLayout(assignmentOps.remapAssignmentUrn(currentLayout(), oldId, newId))
+                },
+                // After the remaps, drop any placement still keyed by a temp urn — a create that was
+                // staged (writing its placement) then discarded before this Save (see assignmentMutations).
+                pruneTempAssignments: () => {
+                  persistReferenceLayout(assignmentOps.pruneTempAssignments(currentLayout()))
                 },
                 message: `Canvas edits (${stagedChangeList.length})`,
               })

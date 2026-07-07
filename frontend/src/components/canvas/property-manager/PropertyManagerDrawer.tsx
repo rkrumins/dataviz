@@ -15,7 +15,7 @@
  * canvases can mount it with just a ``viewId``.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { Save, SlidersHorizontal, Tags, Layers, X } from 'lucide-react'
+import { SlidersHorizontal, Tags, Layers, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -70,7 +70,6 @@ export function PropertyManagerDrawer({
     const removeDisplayRule = useReferenceModelStore((s) => s.removeDisplayRule)
     const toggleDisplayRule = useReferenceModelStore((s) => s.toggleDisplayRule)
     const reorderDisplayRules = useReferenceModelStore((s) => s.reorderDisplayRules)
-    const syncStatus = useReferenceModelStore((s) => s.syncStatus)
     const { showToast } = useToast()
 
     const handleSaveRule = (rule: DisplayRuleConfig) => {
@@ -182,18 +181,6 @@ export function PropertyManagerDrawer({
                                     label="Properties"
                                 />
                             </div>
-
-                            {/* Auto-save reassurance — display-rule edits dirty
-                                the blueprint, which is now persisted
-                                automatically (debounced), so reassure rather
-                                than nag about a Save button that no longer
-                                exists. */}
-                            {syncStatus === 'dirty' && rules.length > 0 && (
-                                <div className="mt-2.5 flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200/90">
-                                    <Save className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-                                    <span>Changes to view settings are saved automatically.</span>
-                                </div>
-                            )}
                         </div>
 
                         {/* Body — animated list ⇄ editor transition.

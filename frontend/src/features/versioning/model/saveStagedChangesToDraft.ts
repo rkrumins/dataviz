@@ -28,6 +28,11 @@ export interface DraftSaveTarget {
    * so a node created in a layer keeps its column after the save reconciles.
    */
   remapEntityId?: (oldId: string, newId: string) => void
+  /**
+   * Prune any view-config assignment entries STILL keyed by a temp urn after the remap pass — a
+   * discarded create leaves an inert temp-urn placement behind. Called once, after all remaps.
+   */
+  pruneTempAssignments?: () => void
 }
 
 export async function saveStagedChangesToDraft(
@@ -40,7 +45,12 @@ export async function saveStagedChangesToDraft(
   // on save, `remapEntityId` re-keys a created entity's assignment temp→real (see the canvas caller).
   const ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes
 
-  if (ops.length === 0) return { commitId: null }
+  if (ops.length === 0) {
+    // No graph ops (e.g. a layer-only save), but a discarded create may still have left an inert
+    // temp-urn placement in the view config — prune it so it doesn't accumulate.
+    target.pruneTempAssignments?.()
+    return { commitId: null }
+  }
 
   // ── One atomic commit ───────────────────────────────────────────────────────────────────────
   // On any failure NOTHING is persisted (no partial state). The error propagates to the caller,
@@ -68,6 +78,11 @@ export async function saveStagedChangesToDraft(
     const tempUrn = c.targetUrn
     if (tempUrn && resolveRef(tempUrn) !== tempUrn) target.remapEntityId?.(tempUrn, resolveRef(tempUrn))
   }
+
+  // After every kept create's placement is remapped temp→real, any assignment entry STILL keyed by
+  // a temp urn belonged to a create that was discarded before this save — prune it (see the canvas
+  // caller's pruneTempAssignments, which rewrites referenceLayout.assignments).
+  target.pruneTempAssignments?.()
 
   // Re-add user-drawn edges with the real edge id + resolved endpoints (the swapped nodes now carry
   // their real urns).

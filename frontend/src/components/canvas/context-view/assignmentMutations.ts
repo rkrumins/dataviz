@@ -60,6 +60,32 @@ export function unassignEntities(
   return { layers: layout.layers, assignments }
 }
 
+/**
+ * Temp urn prefix minted by the create paths (useStageEntityCreation / stageBuildRows mint
+ * `urn:staged:<type>:<id>`). A temp urn is never a durable, backend-issued urn.
+ */
+export const TEMP_URN_PREFIX = 'urn:staged:'
+
+export function isTempUrn(urn: string): boolean {
+  return urn.startsWith(TEMP_URN_PREFIX)
+}
+
+/**
+ * Drop assignment entries still keyed by a temp urn. A create is staged with a canonical placement
+ * keyed by its temp urn; if the create is later DISCARDED, that placement is orphaned — it never
+ * resolves or renders, but it lingers in `referenceLayout.assignments` and wastes a provider lookup
+ * on curated hydration. Call on Save AFTER the temp→real remap pass: a create that was kept has had
+ * its key remapped to the minted urn, so any SURVIVING temp-urn key is a discarded create. Returns
+ * the SAME layout (referential stability) when there is nothing to prune.
+ */
+export function pruneTempAssignments(layout: NormalizedReferenceLayout): NormalizedReferenceLayout {
+  const tempKeys = Object.keys(layout.assignments).filter(isTempUrn)
+  if (tempKeys.length === 0) return layout
+  const assignments = { ...layout.assignments }
+  for (const key of tempKeys) delete assignments[key]
+  return { layers: layout.layers, assignments }
+}
+
 /** Re-key one assignment from `oldUrn` to `newUrn` (temp→real on Save). No-op if `oldUrn` is unassigned. */
 export function remapAssignmentUrn(
   layout: NormalizedReferenceLayout,

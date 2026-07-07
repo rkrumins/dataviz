@@ -23,6 +23,7 @@ import type { ViewLayerConfig } from '@/types/schema'
 import { listTemplates as fetchBackendTemplates } from '@/services/contextModelService'
 import { useDataSourceSchema } from '@/hooks/useDataSourceSchema'
 import { useSchemaEntityTypes, useSchemaStore } from '@/store/schema'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { blankQuickStartTemplates } from '../blankTemplates'
 import { deriveLayersFromOntology } from '../blankModel'
 
@@ -279,10 +280,14 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
     // ── Backend templates ────────────────────────────────────────────────────
     const [backendTemplates, setBackendTemplates] = useState<LayerTemplate[]>([])
     const [templatesLoading, setTemplatesLoading] = useState(false)
+    // Templates read via the workspace-scoped route (workspace:datasource:read) — any
+    // member can browse them. Without a workspace we fall back to the local templates.
+    const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
     useEffect(() => {
+        if (!activeWorkspaceId) return
         setTemplatesLoading(true)
-        fetchBackendTemplates()
+        fetchBackendTemplates(activeWorkspaceId)
             .then(results => {
                 if (results.length > 0) {
                     // Map backend ContextModel → LayerTemplate
@@ -305,7 +310,7 @@ export function LayoutStep({ formData, updateFormData, layoutTypes, dataSourceId
             })
             .catch(() => { /* silent — fallback to local */ })
             .finally(() => setTemplatesLoading(false))
-    }, [])
+    }, [activeWorkspaceId])
 
     // Use backend templates if available, otherwise local fallbacks
     const activeTemplates = backendTemplates.length > 0 ? backendTemplates : LOCAL_FALLBACK_TEMPLATES

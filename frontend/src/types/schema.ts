@@ -241,6 +241,10 @@ export interface ViewLayoutConfig {
     // views have no top-level `assignments` and are up-converted on read via
     // normalizeReferenceLayout() (frontend/src/utils/referenceLayout.ts).
     assignments?: Record<string, LayerAssignmentEntry>;
+    // Property-Manager display rules (tag overlay), persisted here by the
+    // canvas's debounced layout save and hydrated into referenceModelStore on
+    // view open. Not part of the normalized layer/assignment shape.
+    displayRules?: DisplayRuleConfig[];
   };
 
   // LOD (Level of Detail) configuration
