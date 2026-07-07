@@ -244,3 +244,12 @@ class TestDeriveEntityScope:
 
     def test_none_config_derives_all(self):
         assert derive_entity_scope(None) == "all"
+
+    def test_garbage_scope_falls_through_to_derivation(self):
+        # A non-'all'/'curated' value must NOT short-circuit — it falls through
+        # to assignment-based derivation (Python parity with the TS suite).
+        config = {
+            "content": {"entityScope": "bogus"},
+            "layout": {"referenceLayout": {"layers": [], "assignments": {"urn:a": {"layerId": "l1", "inheritsChildren": True}}}},
+        }
+        assert derive_entity_scope(config) == "curated"
