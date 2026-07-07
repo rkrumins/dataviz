@@ -31,8 +31,11 @@ that exists only on published-since-fork is appended at the end, and ``order``
 is renumbered 0..n-1 on the final list. A final referential-integrity pass
 drops any surviving assignment whose ``layerId`` is no longer a merged layer.
 
-``merge_scope_3way`` applies the same draft-wins rule to the scalar
-``entityScope`` and is kept separate so callers compose the two.
+``merge_scope_3way`` (scalar ``entityScope``) and ``merge_display_rules_3way``
+(the opaque, ordered ``displayRules`` array) apply the same draft-wins rule to
+the referenceLayout's non-keyed side-fields and are kept separate so callers
+compose them with ``merge_layout_3way`` — which, merging only the keyed
+``layers``/``assignments`` collections, would otherwise drop ``displayRules``.
 """
 from __future__ import annotations
 
@@ -206,3 +209,34 @@ def merge_scope_3way(fork_scope: str, published_scope: str, draft_scope: str) ->
     if draft_scope != fork_scope:
         return draft_scope
     return published_scope
+
+
+def _display_rules_of(layout: Any) -> list | None:
+    """Extract the ``displayRules`` array from a bare ``referenceLayout``, or
+    ``None`` when absent/malformed. Applies ``_guard_bare_layout`` so a full
+    config accidentally passed here reads its nested displayRules rather than
+    silently normalizing to none (the same wipe the guard prevents for
+    layers/assignments)."""
+    raw = layout if isinstance(layout, dict) else {}
+    if raw:
+        raw = _guard_bare_layout(raw)
+    rules = raw.get("displayRules")
+    return rules if isinstance(rules, list) else None
+
+
+def merge_display_rules_3way(fork_base: dict, published: dict, draft: dict) -> list | None:
+    """3-way merge a ``referenceLayout``'s ``displayRules`` — an opaque, ordered
+    array of rule objects treated as ONE value — with the same draft-wins rule
+    as ``merge_scope_3way``: the draft's array when the draft changed it vs the
+    fork-point base, else the (possibly since-fork moved) published array.
+
+    Kept separate from ``merge_layout_3way`` (which returns only the merged
+    ``layers``/``assignments``) so the caller re-attaches the result and the
+    promote never wipes displayRules. Returns the winning array, or ``None`` when
+    it resolves to absent (the caller then writes no ``displayRules`` key)."""
+    f = _display_rules_of(fork_base)
+    p = _display_rules_of(published)
+    d = _display_rules_of(draft)
+    if d != f:
+        return d
+    return p

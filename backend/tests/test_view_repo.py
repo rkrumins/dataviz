@@ -721,6 +721,43 @@ async def test_promote_overlay_applies_create_update_delete_and_clears(db_sessio
     assert await view_repo.get_overlay(db_session, created.id, "br1") is None
 
 
+async def test_promote_overlay_preserves_display_rules(db_session: AsyncSession):
+    """Regression: promote must NOT drop ``referenceLayout.displayRules``.
+
+    ``merge_layout_3way`` returns only {layers, assignments}; promote_overlay
+    re-attaches the 3-way-merged displayRules (draft wins). Before the fix the
+    published base lost its displayRules on every merge."""
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1", "Base")])
+
+    # Publish a base displayRules array (the fork-point the overlay snapshots).
+    await view_repo.update_view_layout(
+        db_session, created.id,
+        ViewLayoutUpdateRequest(
+            referenceLayout={"layers": [_layer("l1", "Base")], "assignments": {}},
+            displayRules=[{"id": "r_base", "op": "hide"}],
+        ),
+    )
+
+    # Draft: add a layer AND change the displayRules (frontend re-sends them).
+    await view_repo.update_overlay_layout(
+        db_session, created.id, "br1",
+        ViewLayoutUpdateRequest(
+            referenceLayout={
+                "layers": [_layer("l1", "Base"), _layer("l2", "Draft")],
+                "assignments": {},
+            },
+            displayRules=[{"id": "r_draft", "op": "color"}],
+        ),
+    )
+
+    assert await view_repo.promote_overlay(db_session, created.id, "br1", actor=None) is True
+
+    ref = (await view_repo.get_view(db_session, created.id)).config["layout"]["referenceLayout"]
+    assert [l["id"] for l in ref["layers"]] == ["l1", "l2"]          # layers still merged
+    assert ref["displayRules"] == [{"id": "r_draft", "op": "color"}]  # draft's rules won, not dropped
+
+
 async def test_promote_overlays_for_branch_counts_and_drops(db_session: AsyncSession):
     ws = await _create_workspace(db_session)
     v1 = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
