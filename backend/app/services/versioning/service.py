@@ -2744,16 +2744,26 @@ class GraphVersioningService:
         return {"added": added, "removed": removed, "modified": modified}
 
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
-        """The draft's patch set vs its ``main`` base, **reader-shaped** for a read-overlay
-        (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert and the
-        before-values of those it removed. Bounded by draft size (the entities the draft wrote
-        rows for); **empty for a no-change draft** — which is what makes the overlay a pure
-        pass-through (a draft then reads exactly like ``main``). Edge endpoints are urns
-        (node ``entity_id`` == urn), so no extra resolution is needed by the caller."""
+        """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
+        read-overlay (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert
+        and the before-values of those it removed, PLUS a rewind of any change main took after the
+        fork (see below). Bounded by draft size + main's post-fork advance. **Empty only when the
+        draft has no edits AND is up to date with main** — that is the pure pass-through case (the
+        draft reads exactly like ``main``).
+
+        Fork-point isolation: the overlay is applied on a LIVE main (head) read, but a draft must
+        read ``main`` AS OF ITS FORK POINT ⊕ its own edits. So when main advanced after the fork
+        (another branch merged into it), this patch also rewinds those advances — main-added
+        entities are removed, main-modified/deleted ones restored to their fork-point value — for
+        every entity the draft did not itself touch. Without this a draft silently reflects changes
+        it never merged (a commit-less "pull"). Edge endpoints are urns (node ``entity_id`` == urn),
+        so no extra resolution is needed by the caller."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             main_id = await self._main_branch_id(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
             base_seq = branch.base_commit_seq or 0
+            head_seq = graph.main_head_commit_seq if graph is not None else base_seq
             changed: set = set()
             for model in (NodeVersionORM, EdgeVersionORM):
                 rows = (await s.execute(
@@ -2764,10 +2774,21 @@ class GraphVersioningService:
                 changed.update(rows)
             empty = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
                      "nodesNew": []}
-            if not changed:
-                return empty
-            before = await self._values_at(s, graph_id, main_id, changed, base_seq)
-            after = await self._current_values(s, graph_id, branch_id, list(changed))
+            # Fork-point isolation: entities MAIN advanced in (base_seq, head] since this draft forked,
+            # minus the draft's own touched set (its edits already win via the delta below). The overlay
+            # applies on a LIVE main (head) read, so without this a draft silently reflects any change
+            # another branch merged into main — a commit-less "pull". Empty when the draft is up to date.
+            advanced: set = set()
+            if head_seq > base_seq:
+                advanced = (await self._changed_in_window(
+                    s, graph_id, main_id, base_seq, head_seq)) - changed
+            if not changed and not advanced:
+                return empty                       # no draft edits AND up to date → pure pass-through
+            before = await self._values_at(s, graph_id, main_id, changed, base_seq) if changed else {}
+            after = await self._current_values(s, graph_id, branch_id, list(changed)) if changed else {}
+            # For the rewind: each advanced entity's value at the fork point (base) vs main head.
+            rewind_base = await self._values_at(s, graph_id, main_id, advanced, base_seq) if advanced else {}
+            rewind_head = await self._values_at(s, graph_id, main_id, advanced, head_seq) if advanced else {}
         nodes_upsert: List[dict] = []
         nodes_remove: List[dict] = []
         edges_upsert: List[dict] = []
@@ -2798,6 +2819,27 @@ class GraphVersioningService:
                     nodes_upsert.append(_graphnode_dict(eid, urn, a))
                     if b is None:                          # created in the draft — not present in main
                         nodes_new.append(urn)
+        # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
+        # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
+        # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-MODIFIED or
+        # main-DELETED (present at base) → restore its fork-point value. Bounded by main's advance.
+        for eid in advanced:
+            bv = rewind_base.get(eid) or None
+            hv = rewind_head.get(eid) or None
+            if bv is None and hv is None:
+                continue
+            if bv is not None:                             # existed at the fork point → restore that value
+                if _is_edge_payload(bv):
+                    src, tgt = _edge_src_tgt(bv)
+                    edges_upsert.append(_graphedge_dict(eid, bv, {src: src, tgt: tgt}))
+                else:
+                    nodes_upsert.append(_graphnode_dict(eid, bv.get("urn") or f"gv:{eid}", bv))
+            else:                                          # absent at fork, present on main head → main added it → hide
+                if _is_edge_payload(hv):
+                    src, tgt = _edge_src_tgt(hv)
+                    edges_remove.append(_graphedge_dict(eid, hv, {src: src, tgt: tgt}))
+                else:
+                    nodes_remove.append(_graphnode_dict(eid, (hv or {}).get("urn") or f"gv:{eid}", hv))
         return {"nodesUpsert": nodes_upsert, "nodesRemove": nodes_remove,
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
 

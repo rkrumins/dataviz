@@ -81,6 +81,24 @@ async def _run() -> None:
     assert [n["urn"] for n in delta3["nodesUpsert"]] == ["A.c2"], delta3
     assert [e["id"] for e in delta3["edgesUpsert"]] == ["cA2"], delta3
 
+    # ── FORK-POINT ISOLATION: main advances AFTER a draft forks (e.g. another branch merged
+    #    into it) → the draft must NOT reflect main's new content. Otherwise a draft reads live
+    #    main and silently "pulls" changes it never merged (no commit, no user action). The
+    #    overlay must rewind main from head back to the draft's fork point. ─────────────────
+    d_iso = await svc.open_draft(graph_id=gid, owner="u")            # forks at current main head; NO own edits
+    await svc.apply_ops(graph_id=gid, actor="u", message="main advances after fork",
+                        containment_edge_types=CONT,
+                        ops=[_n("M.new", "Table"),                  # main ADDS a node
+                             {"op": "update", "entity_kind": "node", "entity_id": "A",  # main MODIFIES A
+                              "payload": {"urn": "A", "entityType": "Table", "displayName": "A-renamed"}}])
+    iso = await svc.branch_overlay_delta(graph_id=gid, branch_id=d_iso)
+    # main-ADDED "M.new" is absent at the draft's fork point → overlay REMOVES it so it can't leak in.
+    # (This also proves the no-change draft is isolated — d_iso has no edits of its own.)
+    assert "M.new" in [n["urn"] for n in iso["nodesRemove"]], iso
+    # main-MODIFIED "A" → overlay restores the FORK-POINT value ("A"), not main's live "A-renamed".
+    a_up = [n for n in iso["nodesUpsert"] if n["urn"] == "A"]
+    assert a_up and a_up[0]["displayName"] == "A", iso
+
     await db.dispose_engine()
 
 
