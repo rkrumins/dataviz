@@ -262,3 +262,35 @@ async def test_import_ontology_rejects_case_insensitive_dup_type_ids(test_client
     resp = await test_client.post("/api/v1/admin/ontologies/import", json=payload)
     assert resp.status_code == 422
     assert "case" in resp.json()["detail"].lower()
+
+
+def test_reconcile_relationship_endpoints_strips_undeclared_types():
+    """Authoring invariant: a relationship's endpoint types are reconciled to the ontology's
+    declared entity types — undeclared refs dropped, partial overlap kept as a subset, an
+    all-undeclared constraint cleared to unrestricted."""
+    from types import SimpleNamespace
+    from backend.app.api.v1.endpoints.ontologies import _reconcile_relationship_endpoints
+    req = SimpleNamespace(
+        entity_type_definitions={"attribute": {}, "object": {}, "layer": {}},
+        relationship_type_definitions={
+            "FLOWS_TO": {"source_types": ["dataset", "dataJob"], "target_types": ["column"]},
+            "LINKS": {"source_types": ["attribute", "dataset"], "target_types": ["object"]},
+            "OPEN": {"source_types": [], "target_types": []},
+        },
+    )
+    _reconcile_relationship_endpoints(req)
+    r = req.relationship_type_definitions
+    assert r["FLOWS_TO"]["source_types"] == [] and r["FLOWS_TO"]["target_types"] == []
+    assert r["LINKS"]["source_types"] == ["attribute"] and r["LINKS"]["target_types"] == ["object"]
+    assert r["OPEN"]["source_types"] == []
+
+
+def test_reconcile_relationship_endpoints_skips_partial_update_without_entity_types():
+    """A relationships-only partial update (no entity types in the request) is left untouched —
+    the read-time resolver filter still covers it."""
+    from types import SimpleNamespace
+    from backend.app.api.v1.endpoints.ontologies import _reconcile_relationship_endpoints
+    req = SimpleNamespace(entity_type_definitions=None,
+                          relationship_type_definitions={"FLOWS_TO": {"source_types": ["dataset"]}})
+    _reconcile_relationship_endpoints(req)
+    assert req.relationship_type_definitions["FLOWS_TO"]["source_types"] == ["dataset"]

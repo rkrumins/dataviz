@@ -374,13 +374,20 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if not d.lineage_changed and not d.node_remove:
             return base
-        scope = {n.urn for n in base.nodes}
-        edges = [e for e in base.edges if e.id not in d.edge_remove]
+        # Drop nodes the rewind/draft removed (e.g. a main-added node that must not leak into this
+        # draft's trace) and any base edge INCIDENT to a removed node. Keep other base edges verbatim —
+        # a base trace can legitimately carry boundary edges whose endpoint node was capped out of
+        # base.nodes (max_nodes), and those must not be dropped just because the scope shrank.
+        nodes = [n for n in base.nodes if n.urn not in d.node_remove]
+        scope = {n.urn for n in nodes}
+        edges = [e for e in base.edges
+                 if e.id not in d.edge_remove
+                 and e.source_urn not in d.node_remove and e.target_urn not in d.node_remove]
         seen = {e.id for e in edges}
         for e in d.lineage_added:
             if e.id not in seen and e.source_urn in scope and e.target_urn in scope:
                 edges.append(e)
-        return base.model_copy(update={"edges": edges})
+        return base.model_copy(update={"nodes": nodes, "edges": edges})
 
     # ---- writes: commit to the draft (reused from the branch provider) -- #
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
