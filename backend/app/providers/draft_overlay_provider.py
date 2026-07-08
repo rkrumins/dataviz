@@ -375,11 +375,14 @@ class DraftOverlayProvider:
         if not d.lineage_changed and not d.node_remove:
             return base
         # Drop nodes the rewind/draft removed (e.g. a main-added node that must not leak into this
-        # draft's trace), then bound the scope to what remains before patching lineage edges.
+        # draft's trace) and any base edge INCIDENT to a removed node. Keep other base edges verbatim —
+        # a base trace can legitimately carry boundary edges whose endpoint node was capped out of
+        # base.nodes (max_nodes), and those must not be dropped just because the scope shrank.
         nodes = [n for n in base.nodes if n.urn not in d.node_remove]
         scope = {n.urn for n in nodes}
         edges = [e for e in base.edges
-                 if e.id not in d.edge_remove and e.source_urn in scope and e.target_urn in scope]
+                 if e.id not in d.edge_remove
+                 and e.source_urn not in d.node_remove and e.target_urn not in d.node_remove]
         seen = {e.id for e in edges}
         for e in d.lineage_added:
             if e.id not in seen and e.source_urn in scope and e.target_urn in scope:

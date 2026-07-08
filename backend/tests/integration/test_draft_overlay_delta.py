@@ -96,6 +96,8 @@ async def _run() -> None:
                              {"op": "update", "entity_kind": "node", "entity_id": "A",  # main MODIFIES A
                               "payload": {"urn": "A", "entityType": "Table", "displayName": "A-renamed"}},
                              _e("M.lin", "B.c", "A.c", "LINEAGE"),  # main ADDS a lineage edge
+                             {"op": "delete", "entity_kind": "edge",  # main DELETES a base lineage edge
+                              "entity_id": "lin1", "payload": None},
                              {"op": "delete", "entity_kind": "node",  # main DELETES the seeded node
                               "entity_id": "DEL", "payload": None}])
     iso = await svc.branch_overlay_delta(graph_id=gid, branch_id=d_iso)
@@ -104,6 +106,8 @@ async def _run() -> None:
     assert "M.new" in [n["urn"] for n in iso["nodesRemove"]], iso
     # main-ADDED lineage EDGE → REMOVED from the read.
     assert "M.lin" in [e["id"] for e in iso["edgesRemove"]], iso
+    # main-DELETED-after-fork edge → RESTORED to the read (fork-point value).
+    assert "lin1" in [e["id"] for e in iso["edgesUpsert"]], iso
     # main-MODIFIED node → restored to the FORK-POINT value ("A"), not main's live "A-renamed".
     a_up = [n for n in iso["nodesUpsert"] if n["urn"] == "A"]
     assert a_up and a_up[0]["displayName"] == "A", iso
