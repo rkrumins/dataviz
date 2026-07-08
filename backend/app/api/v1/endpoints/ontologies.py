@@ -104,6 +104,34 @@ def _reject_case_insensitive_type_dupes(req) -> None:
         raise HTTPException(status_code=422, detail="; ".join(collisions))
 
 
+def _reconcile_relationship_endpoints(req) -> None:
+    """Authoring invariant: a relationship's source/target endpoint types may reference ONLY
+    entity types declared in THIS ontology. Reconcile in place — drop references to types not
+    declared (case-insensitive) — so the STORED ontology is self-consistent by construction:
+    the read-time resolver filter becomes a harmless no-op and the displayed constraint is honest.
+    A now-empty constraint means unrestricted (any → any).
+
+    This closes the class of bug where an ontology's relationship types (e.g. a system-default
+    ``FLOWS_TO`` with ``dataset``/``dataJob``/``column`` endpoints) are combined with a different
+    entity-type set (e.g. a manual ontology's ``layer``/``object``/``group``/``attribute``) — a
+    phantom, unsatisfiable constraint that silently blocks EVERY edge of that type. Only runs when
+    the request carries BOTH the entity types and the relationships; a relationships-only partial
+    update is left untouched (the read-time filter still covers it). Only ever removes references
+    to undeclared types — never adds a constraint."""
+    rel_defs = getattr(req, "relationship_type_definitions", None)
+    ent_defs = getattr(req, "entity_type_definitions", None)
+    if not rel_defs or not ent_defs:
+        return
+    declared = {str(k).lower() for k in ent_defs}
+    for rel in rel_defs.values():
+        if not isinstance(rel, dict):
+            continue
+        for key in ("source_types", "sourceTypes", "target_types", "targetTypes"):
+            types = rel.get(key)
+            if isinstance(types, list) and types:
+                rel[key] = [t for t in types if str(t).lower() in declared]
+
+
 @router.get("", response_model=List[OntologyDefinitionResponse])
 async def list_ontologies(
     all_versions: bool = False,
@@ -139,6 +167,7 @@ async def create_ontology(
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
     _reject_case_insensitive_type_dupes(req)
+    _reconcile_relationship_endpoints(req)
     result = await ontology_definition_repo.create_ontology(session, req)
     await _invalidate_ontology_caches(session, getattr(result, "id", None))
     return result
@@ -236,6 +265,7 @@ async def update_ontology(
     Returns the updated or newly created ontology.
     """
     _reject_case_insensitive_type_dupes(req)
+    _reconcile_relationship_endpoints(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
     if not ontology:
@@ -672,6 +702,7 @@ async def import_ontology_new(
     Validates the JSON structure against the export format.
     """
     _reject_case_insensitive_type_dupes(req)
+    _reconcile_relationship_endpoints(req)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
         await _invalidate_ontology_caches(session, getattr(result, "ontology_id", None))
@@ -699,6 +730,7 @@ async def import_ontology_into(
     - No changes detected → returns status="no_changes" without modification.
     """
     _reject_case_insensitive_type_dupes(req)
+    _reconcile_relationship_endpoints(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=ontology_id)
