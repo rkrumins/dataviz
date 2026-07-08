@@ -18,7 +18,7 @@ import { BoundedQueue } from '@/lib/concurrency'
 import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
-import { normalizeReferenceLayout } from '@/utils/referenceLayout'
+import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
 import { POLLING_INTERVALS, PROVIDER_RETRY_MAX_ATTEMPTS, withJitter } from '@/config/polling'
 import { getCircuitBreaker } from '@/services/circuitBreaker'
 
@@ -366,13 +366,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     const viewTypes = activeView?.content?.visibleEntityTypes ?? []
 
                     // Collect all assigned root URNs from the canonical assignment map.
-                    const { assignments } = normalizeReferenceLayout(activeView?.layout?.referenceLayout)
+                    const normLayout = normalizeReferenceLayout(activeView?.layout?.referenceLayout)
                     const assignedUrns = new Set<string>()
-                    for (const [urn, entry] of Object.entries(assignments)) {
+                    for (const [urn, entry] of Object.entries(normLayout.assignments)) {
                         if (entry?.layerId) assignedUrns.add(urn)
                     }
 
-                    const hasExplicitAssignments = assignedUrns.size > 0
+                    // Respect the view's entityScope (curated is the default once assignments exist).
+                    // A CURATED view loads strictly by its assigned URNs (∪ this branch's created
+                    // delta); an OPEN ('all') view loads type-based, so assignments only PLACE
+                    // entities into layers, never hide them. Gating on the SCOPE — not merely "has
+                    // any assignment" — is what stops an open view that happens to carry a few
+                    // assignments from collapsing to just those (the entities-vanish bug). Aligns
+                    // hydration with useLayerAssignment's deriveEntityScope gate.
+                    const loadByUrn = deriveEntityScope(activeView?.content, normLayout) === 'curated'
 
                     setHydrationPhase('roots')
 
@@ -397,8 +404,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         }
                     }
 
-                    if (hasExplicitAssignments) {
-                        // ── Assignment-driven loading ──
+                    if (loadByUrn) {
+                        // ── Assignment-driven loading (curated scope) ──
                         // Load the specific entities assigned to layers by URN,
                         // UNIONED (in a draft) with entities created in this
                         // branch — they have no persisted entityAssignment yet

@@ -25,11 +25,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // anything under test here.
 const { mockProvider, viewLayers, EMPTY, activeView } = vi.hoisted(() => {
   const EMPTY: never[] = []
-  const viewLayers = [{ entityAssignments: [{ entityId: 'urn:assigned' }] }]
+  // Layer needs an `id` so normalizeReferenceLayout up-converts the legacy entityAssignment
+  // into a layer-keyed assignment; entityScope 'curated' makes this a closed-scope view that
+  // loads strictly by its assigned URNs (the behaviour under test).
+  const viewLayers = [{ id: 'layer-1', entityAssignments: [{ entityId: 'urn:assigned' }] }]
   const activeView = {
     id: 'v1',
     layout: { type: 'reference', referenceLayout: { layers: viewLayers } },
-    content: { visibleEntityTypes: EMPTY },
+    content: { visibleEntityTypes: EMPTY, entityScope: 'curated' },
   }
   return {
     mockProvider: {
