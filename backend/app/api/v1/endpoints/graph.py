@@ -819,6 +819,7 @@ async def search_advanced(
     response: Response,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -857,6 +858,7 @@ async def search_advanced(
         session=session,
         workspace_id=ws_id,
         data_source_id=dataSourceId,
+        branch_id=branchId,
     )
     try:
         page, eff_scope = await svc.search(query)
@@ -883,6 +885,7 @@ async def search_explain(
     query: SearchQuery,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
+    branchId: Optional[str] = Query(None),
     engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -912,6 +915,7 @@ async def search_explain(
         session=session,
         workspace_id=ws_id,
         data_source_id=dataSourceId,
+        branch_id=branchId,
     )
     try:
         return await svc.explain(query)

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import (
     ViewORM,
     ViewFavouriteORM,
+    ViewLayoutOverlayORM,
     WorkspaceORM,
     ContextModelORM,
     WorkspaceDataSourceORM,
@@ -30,6 +31,12 @@ from backend.common.models.management import (
     ViewFacetCreator,
     ViewFacetsResponse,
     ViewCatalogStats,
+)
+from backend.app.services.layout_config import derive_entity_scope
+from backend.app.services.versioning.layout_promote import (
+    merge_layout_3way,
+    merge_scope_3way,
+    merge_display_rules_3way,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,8 +154,12 @@ def _to_response(
     data_updated_by_email: Optional[str] = None,
     favourite_count: int = 0,
     is_favourited: bool = False,
+    config_override: Optional[dict] = None,
 ) -> ViewResponse:
-    config_dict = json.loads(row.config or "{}")
+    # ``config_override`` lets branch-scoped-layout callers project the
+    # EFFECTIVE (base ⊕ overlay) config into the response without touching the
+    # row. Default None = read ``row.config`` verbatim (unchanged behaviour).
+    config_dict = config_override if config_override is not None else json.loads(row.config or "{}")
     # Project layoutType from config so metadata-only consumers (e.g. the
     # ViewWizard scope resolver) don't have to parse the full config blob.
     layout_type = None
@@ -194,12 +205,18 @@ async def _to_enriched_response(
     session: AsyncSession,
     row: ViewORM,
     user_id: Optional[str] = None,
+    *,
+    config_override: Optional[dict] = None,
 ) -> ViewResponse:
     """Build a ViewResponse enriched with workspace name, data source name, CM name, and favourite info.
 
     Single-row enrichment used by create/get/update paths where N+1 is not a concern.
     For list paths, call :func:`_batch_enrich_rows` instead — it issues 5 batched queries
     in parallel regardless of row count.
+
+    ``config_override`` is forwarded to :func:`_to_response` so branch-scoped
+    callers can project the effective (base ⊕ overlay) config; default None
+    reads the row's stored config unchanged.
     """
     ws_name = await _get_workspace_name(session, row.workspace_id)
     ds_name = await _get_data_source_name(session, row.data_source_id)
@@ -227,6 +244,7 @@ async def _to_enriched_response(
         data_updated_by_email=publisher_email,
         favourite_count=fav_count,
         is_favourited=fav,
+        config_override=config_override,
     )
 
 
@@ -422,7 +440,11 @@ async def get_view(
 
 
 async def get_view_enriched(
-    session: AsyncSession, view_id: str, user_id: Optional[str] = None
+    session: AsyncSession,
+    view_id: str,
+    user_id: Optional[str] = None,
+    *,
+    branch_id: Optional[str] = None,
 ) -> Optional[ViewResponse]:
     result = await session.execute(
         select(ViewORM).where(ViewORM.id == view_id)
@@ -430,7 +452,12 @@ async def get_view_enriched(
     row = result.scalar_one_or_none()
     if not row:
         return None
-    return await _to_enriched_response(session, row, user_id)
+    # Branch-effective read: when a draft (branch_id) is reading, project the
+    # base ⊕ overlay config; no branch (or no overlay) → base, byte-identical.
+    override = (
+        await effective_view_config(session, row, branch_id) if branch_id else None
+    )
+    return await _to_enriched_response(session, row, user_id, config_override=override)
 
 
 async def update_view(
@@ -546,6 +573,283 @@ async def update_view_layout(
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()
     return await _to_enriched_response(session, row)
+
+
+# ------------------------------------------------------------------ #
+# Branch-scoped layout overlays                                        #
+# ------------------------------------------------------------------ #
+#
+# A draft branch's layer edits live in ``view_layout_overlays`` keyed by
+# (view_id, branch_id) instead of on the published ``views.config``, so they
+# don't leak to Published until the draft is promoted (merge/publish). Each
+# overlay holds the draft's effective BARE referenceLayout + entityScope plus a
+# fork-point snapshot of the published base, which the 3-way promote merge
+# (``layout_promote``) uses to tell what the draft actually changed.
+#
+# INVARIANT: ``merge_layout_3way`` and the overlay columns operate on the BARE
+# ``referenceLayout`` (``config["layout"]["referenceLayout"]``), never the full
+# view config — see ``_base_reference_layout``.
+
+
+def _base_reference_layout(config: dict) -> dict:
+    """Extract the BARE published referenceLayout from a full view config,
+    tolerating the legacy top-level ``config["referenceLayout"]`` spelling.
+    Returns ``{}`` when absent."""
+    if not isinstance(config, dict):
+        return {}
+    layout = config.get("layout")
+    if isinstance(layout, dict) and isinstance(layout.get("referenceLayout"), dict):
+        return layout["referenceLayout"]
+    legacy = config.get("referenceLayout")
+    if isinstance(legacy, dict):
+        return legacy
+    return {}
+
+
+def _load_config(row: ViewORM) -> dict:
+    config = json.loads(row.config or "{}")
+    return config if isinstance(config, dict) else {}
+
+
+async def get_overlay(
+    session: AsyncSession, view_id: str, branch_id: str
+) -> Optional[ViewLayoutOverlayORM]:
+    """Return the (view_id, branch_id) overlay row, or None if none exists."""
+    result = await session.execute(
+        select(ViewLayoutOverlayORM).where(
+            ViewLayoutOverlayORM.view_id == view_id,
+            ViewLayoutOverlayORM.branch_id == branch_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def ensure_overlay(
+    session: AsyncSession, view_id: str, branch_id: str
+) -> ViewLayoutOverlayORM:
+    """Idempotently return the (view_id, branch_id) overlay, creating it from
+    the view's published base if absent.
+
+    On first creation the draft's effective layout EQUALS the base: both
+    ``reference_layout`` and ``fork_base_layout`` snapshot the view's current
+    BARE referenceLayout, and both scope columns snapshot the derived base
+    ``entityScope``. Raises ValueError if the view does not exist (an overlay
+    can't reference a missing view — the FK would reject it anyway)."""
+    existing = await get_overlay(session, view_id, branch_id)
+    if existing is not None:
+        return existing
+
+    result = await session.execute(select(ViewORM).where(ViewORM.id == view_id))
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise ValueError(f"cannot open a layout overlay for missing view '{view_id}'")
+
+    config = _load_config(row)
+    base_layout = _base_reference_layout(config)
+    base_scope = derive_entity_scope(config)
+
+    overlay = ViewLayoutOverlayORM(
+        view_id=view_id,
+        branch_id=branch_id,
+        reference_layout=json.dumps(base_layout),
+        entity_scope=base_scope,
+        fork_base_layout=json.dumps(base_layout),
+        fork_base_entity_scope=base_scope,
+    )
+    session.add(overlay)
+    await session.flush()
+    return overlay
+
+
+def _validate_layer_refs(reference_layout: dict) -> None:
+    """Raise ValueError (endpoint maps to 422) if any assignment names a
+    ``layerId`` that isn't one of the submitted layers — mirrors
+    :func:`update_view_layout`'s validation."""
+    layer_ids = {
+        layer.get("id") for layer in reference_layout.get("layers", [])
+        if isinstance(layer, dict)
+    }
+    for urn, assignment in reference_layout.get("assignments", {}).items():
+        layer_id = assignment.get("layerId") if isinstance(assignment, dict) else None
+        if layer_id not in layer_ids:
+            raise ValueError(
+                f"assignment for '{urn}' names unknown layerId '{layer_id}'"
+            )
+
+
+async def update_overlay_layout(
+    session: AsyncSession,
+    view_id: str,
+    branch_id: str,
+    req: ViewLayoutUpdateRequest,
+) -> Optional[ViewResponse]:
+    """Write a draft's layer layout onto its branch overlay (never the views
+    row). Returns the view enriched with the EFFECTIVE (overlay) layout, or
+    None if the view doesn't exist.
+
+    Raises ValueError (→ 422) if an assignment names an unknown ``layerId``,
+    matching :func:`update_view_layout`."""
+    result = await session.execute(select(ViewORM).where(ViewORM.id == view_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        return None
+
+    # Validate BEFORE any write so a bad request never mutates the overlay.
+    _validate_layer_refs(req.reference_layout)
+
+    overlay = await ensure_overlay(session, view_id, branch_id)
+
+    reference_layout = dict(req.reference_layout)
+    if req.display_rules is not None:
+        reference_layout["displayRules"] = req.display_rules
+    overlay.reference_layout = json.dumps(reference_layout)
+    if req.entity_scope is not None:
+        overlay.entity_scope = req.entity_scope
+    await session.flush()  # onupdate stamps overlay.updated_at
+
+    effective = await effective_view_config(session, row, branch_id)
+    return await _to_enriched_response(session, row, config_override=effective)
+
+
+async def effective_view_config(
+    session: AsyncSession,
+    view_row_or_id,
+    branch_id: Optional[str],
+) -> dict:
+    """Central read-side merge: return the view's config with the branch
+    overlay projected in.
+
+    When ``branch_id`` is given AND an overlay exists, override
+    ``config["layout"]["referenceLayout"]`` with the overlay's draft layout and
+    ``config["content"]["entityScope"]`` with the overlay's scope. Otherwise
+    the base config is returned unchanged. ``view_row_or_id`` may be a loaded
+    ``ViewORM`` (GET path) or a view id; a missing id yields ``{}``."""
+    if isinstance(view_row_or_id, ViewORM):
+        row = view_row_or_id
+    else:
+        result = await session.execute(
+            select(ViewORM).where(ViewORM.id == view_row_or_id)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return {}
+
+    config = _load_config(row)
+    if not branch_id:
+        return config
+
+    overlay = await get_overlay(session, row.id, branch_id)
+    if overlay is None:
+        return config
+
+    layout = config.get("layout")
+    if not isinstance(layout, dict):
+        layout = {}
+    layout["referenceLayout"] = json.loads(overlay.reference_layout or "{}")
+    config["layout"] = layout
+
+    if overlay.entity_scope is not None:
+        content = config.get("content")
+        if not isinstance(content, dict):
+            content = {}
+        content["entityScope"] = overlay.entity_scope
+        config["content"] = content
+
+    return config
+
+
+async def promote_overlay(
+    session: AsyncSession, view_id: str, branch_id: str, *, actor: Optional[str] = None
+) -> bool:
+    """Promote a draft overlay into the published base via the pure 3-way merge
+    and DELETE the overlay. Returns True iff an overlay existed and was promoted.
+
+    F = overlay fork-base, P = current published base, D = overlay draft. The
+    merge handles CREATE/UPDATE/DELETE of layers and assignments (draft wins
+    conflicts) and self-heals orphaned assignments; ``entityScope`` merges with
+    the same draft-wins rule. Best-effort by design — the merge never raises."""
+    overlay = await get_overlay(session, view_id, branch_id)
+    if overlay is None:
+        return False
+
+    result = await session.execute(
+        select(ViewORM).where(ViewORM.id == view_id).with_for_update()
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        # Orphaned overlay (shouldn't happen under the FK) — discard it.
+        await session.delete(overlay)
+        await session.flush()
+        return False
+
+    config = _load_config(row)
+    fork_base = json.loads(overlay.fork_base_layout or "{}")
+    published = _base_reference_layout(config)
+    draft = json.loads(overlay.reference_layout or "{}")
+
+    merged_layout = merge_layout_3way(fork_base, published, draft)
+    # merge_layout_3way returns only {layers, assignments}; re-attach the merged
+    # displayRules so promote never wipes them off the published base.
+    merged_display_rules = merge_display_rules_3way(fork_base, published, draft)
+    if merged_display_rules is not None:
+        merged_layout["displayRules"] = merged_display_rules
+    merged_scope = merge_scope_3way(
+        overlay.fork_base_entity_scope,
+        derive_entity_scope(config),
+        overlay.entity_scope,
+    )
+
+    layout = config.get("layout")
+    if not isinstance(layout, dict):
+        layout = {}
+    layout["referenceLayout"] = merged_layout
+    config["layout"] = layout
+
+    content = config.get("content")
+    if not isinstance(content, dict):
+        content = {}
+    content["entityScope"] = merged_scope
+    config["content"] = content
+
+    row.config = json.dumps(config)
+    if actor is not None:
+        row.updated_by = actor
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+
+    await session.delete(overlay)
+    await session.flush()
+    return True
+
+
+async def promote_overlays_for_branch(
+    session: AsyncSession, branch_id: str, *, actor: Optional[str] = None
+) -> int:
+    """Promote every overlay on ``branch_id`` (usually one — branch-per-view)
+    into its view's published base. Returns the number promoted."""
+    result = await session.execute(
+        select(ViewLayoutOverlayORM.view_id).where(
+            ViewLayoutOverlayORM.branch_id == branch_id
+        )
+    )
+    view_ids = [vid for (vid,) in result.all()]
+    promoted = 0
+    for view_id in view_ids:
+        if await promote_overlay(session, view_id, branch_id, actor=actor):
+            promoted += 1
+    return promoted
+
+
+async def drop_overlays_for_branch(
+    session: AsyncSession, branch_id: str
+) -> int:
+    """Discard every overlay on ``branch_id`` (draft abandon). Returns the
+    number of overlay rows deleted."""
+    result = await session.execute(
+        delete(ViewLayoutOverlayORM).where(
+            ViewLayoutOverlayORM.branch_id == branch_id
+        )
+    )
+    return result.rowcount or 0
 
 
 async def delete_view(

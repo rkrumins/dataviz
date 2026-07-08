@@ -85,13 +85,20 @@ export function useViewMetadata(viewId: string | null | undefined) {
  * Fetches the raw View by id. Called by ViewWizardBody to hydrate the
  * wizard's form state — only invoked once the wizard's <SchemaScope>
  * has confirmed the ontology is loaded for the view's scope.
+ *
+ * `branchId` — when the wizard is opened on a draft, pass its branch id so the
+ * hydrated layout/entityScope is the BRANCH-EFFECTIVE one (base ⊕ overlay). The
+ * wizard's submit re-writes layout to that same overlay, so reading base here
+ * would let a metadata-only edit overwrite the draft's canvas layout with base.
+ * Without a branch (Published / create) the key stays ['view', viewId] so it
+ * still shares useViewMetadata's cache entry — exactly one GET per view open.
  */
-export function useViewFull(viewId: string | null | undefined) {
+export function useViewFull(viewId: string | null | undefined, branchId?: string | null) {
   return useQuery<View>({
-    queryKey: [...VIEW_QUERY_KEY, viewId],
+    queryKey: branchId ? [...VIEW_QUERY_KEY, viewId, branchId] : [...VIEW_QUERY_KEY, viewId],
     queryFn: async () => {
       if (!viewId) throw new Error('useViewFull called without a viewId')
-      return await getView(viewId)
+      return await getView(viewId, branchId ?? undefined)
     },
     enabled: Boolean(viewId),
     ...VIEW_QUERY_OPTIONS,

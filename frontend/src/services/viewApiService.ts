@@ -333,9 +333,16 @@ export async function createView(data: ViewCreateRequest): Promise<View> {
     })
 }
 
-/** Get a single view by ID (enriched with workspace name + favourite data) */
-export async function getView(viewId: string): Promise<View> {
-    return apiFetch<View>(`/api/v1/views/${viewId}`)
+/**
+ * Get a single view by ID (enriched with workspace name + favourite data).
+ *
+ * `branchId` — when an open draft is reading, pass its active branch id so the
+ * response projects that branch's layout overlay (base ⊕ overlay). Omit on
+ * Published/main (or when no overlay exists) → base config, unchanged.
+ */
+export async function getView(viewId: string, branchId?: string): Promise<View> {
+    const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
+    return apiFetch<View>(`/api/v1/views/${viewId}${qs}`)
 }
 
 /** Update an existing view */
@@ -350,6 +357,11 @@ export async function updateView(viewId: string, data: ViewUpdateRequest): Promi
  * Update a view's layer layout (layers + assignments) in isolation — does
  * not touch name/content (other than entityScope)/filters/any other
  * config key. See backend `view_repo.update_view_layout`.
+ *
+ * `branchId` — when an open draft is editing, pass its active branch id so
+ * the write lands on that branch's layout overlay instead of the published
+ * view row (the backend routes on `?branchId`). Omit on Published/main so
+ * the write updates the base config as before.
  */
 export async function updateViewLayout(
     viewId: string,
@@ -358,8 +370,10 @@ export async function updateViewLayout(
         entityScope?: 'all' | 'curated'
         displayRules?: unknown[]
     },
+    branchId?: string,
 ): Promise<View> {
-    return apiFetch<View>(`/api/v1/views/${viewId}/layout`, {
+    const qs = branchId ? `?branchId=${encodeURIComponent(branchId)}` : ''
+    return apiFetch<View>(`/api/v1/views/${viewId}/layout${qs}`, {
         method: 'PUT',
         body: JSON.stringify(body),
     })

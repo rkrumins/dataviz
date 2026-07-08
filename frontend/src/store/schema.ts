@@ -281,7 +281,29 @@ export const useSchemaStore = create<SchemaState>()(
       loadFromBackend: (backendSchema, scope) => {
         try {
           const entityTypes = backendSchema.entityTypes.map(convertBackendEntityType)
-          const relationshipTypes = backendSchema.relationshipTypes.map(convertBackendRelationshipType)
+          // Self-consistent endpoint constraints (mirror of the backend resolver). A
+          // relationship's source/target type list is only meaningful for entity types that
+          // exist in THIS ontology. A constraint referencing only ABSENT types — e.g. a
+          // system-default FLOWS_TO carrying dataset/dataJob/column endpoints bolted onto a
+          // manual ontology whose entity types are layer/object/group/attribute — is
+          // unsatisfiable and would grey out every draw of that edge. Filter each constraint to
+          // the ontology's own entity types (case-insensitive); a now-empty list is
+          // "unrestricted" (endpointOk treats empty as any → any), so lineage between the real
+          // types is drawable. Genuinely self-consistent constraints (ingested ontologies) keep
+          // every type and enforce exactly as before — this only ever removes references to
+          // types that don't exist, never adds a constraint.
+          const entityTypeIdsLower = new Set(entityTypes.map((et) => et.id.toLowerCase()))
+          const selfConsistentEndpoints = (types: string[]): string[] =>
+            types.length === 0
+              ? types
+              : types.filter((t) => entityTypeIdsLower.has(String(t).toLowerCase()))
+          const relationshipTypes = backendSchema.relationshipTypes
+            .map(convertBackendRelationshipType)
+            .map((rt) => ({
+              ...rt,
+              sourceTypes: selfConsistentEndpoints(rt.sourceTypes),
+              targetTypes: selfConsistentEndpoints(rt.targetTypes),
+            }))
           // Derive a scope key from whatever the caller passed — if none,
           // fall back to the currently-active scope. The scope key is part
           // of the no-op guard so two workspaces with a coincidentally-

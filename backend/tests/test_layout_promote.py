@@ -19,6 +19,7 @@ import pytest
 from backend.app.services.versioning.layout_promote import (
     merge_layout_3way,
     merge_scope_3way,
+    merge_display_rules_3way,
 )
 
 
@@ -292,3 +293,80 @@ class TestFullConfigGuard:
         assert merge_layout_3way(
             {"foo": 1}, {"bar": 2}, {}
         ) == {"layers": [], "assignments": {}}
+
+
+def _dr(*names):
+    """A displayRules array — one opaque rule object per name."""
+    return [{"id": n, "op": "color", "value": n} for n in names]
+
+
+def _with_rules(layout, rules):
+    return {**layout, "displayRules": rules}
+
+
+class TestDisplayRulesMerge:
+    """``merge_display_rules_3way``: the opaque displayRules array follows the
+    same draft-wins rule as ``merge_scope_3way`` (whole-array value)."""
+
+    def test_draft_changed_wins_over_published(self):
+        # Draft edited the rules; published also moved → draft wins the conflict.
+        f = _with_rules(_layout(), _dr("a"))
+        p = _with_rules(_layout(), _dr("a", "pub"))
+        d = _with_rules(_layout(), _dr("a", "draft"))
+        assert merge_display_rules_3way(f, p, d) == _dr("a", "draft")
+
+    def test_draft_untouched_takes_published_since_fork_change(self):
+        # Draft left rules as forked → published's own since-fork change survives.
+        f = _with_rules(_layout(), _dr("a"))
+        p = _with_rules(_layout(), _dr("a", "pub"))
+        d = _with_rules(_layout(), _dr("a"))
+        assert merge_display_rules_3way(f, p, d) == _dr("a", "pub")
+
+    def test_draft_cleared_rules_removes_them(self):
+        # Fork had rules, draft dropped the key entirely → draft (None) wins.
+        f = _with_rules(_layout(), _dr("a"))
+        p = _with_rules(_layout(), _dr("a"))
+        d = _layout()  # no displayRules key
+        assert merge_display_rules_3way(f, p, d) is None
+
+    def test_draft_adds_rules_where_none_existed(self):
+        f = _layout()
+        p = _layout()
+        d = _with_rules(_layout(), _dr("new"))
+        assert merge_display_rules_3way(f, p, d) == _dr("new")
+
+    def test_all_absent_is_none(self):
+        assert merge_display_rules_3way(_layout(), _layout(), _layout()) is None
+
+    def test_malformed_rules_treated_as_absent(self):
+        # A non-list displayRules normalizes to None on every side.
+        f = {"layers": [], "assignments": {}, "displayRules": "nope"}
+        assert merge_display_rules_3way(f, f, f) is None
+
+    def test_full_config_side_reads_nested_rules_not_wiped(self):
+        # A full config passed as the draft is unwrapped to its bare
+        # referenceLayout so its displayRules are read, not silently lost.
+        f = _with_rules(_layout(), _dr("a"))
+        p = _with_rules(_layout(), _dr("a"))
+        d = {"layout": {"referenceLayout": _with_rules(_layout(), _dr("draft"))},
+             "content": {}}
+        assert merge_display_rules_3way(f, p, d) == _dr("draft")
+
+    def test_round_trip_layout_plus_rules_preserves_both(self):
+        # merge_layout_3way alone DROPS displayRules; composing it with
+        # merge_display_rules_3way (as promote_overlay does) preserves them.
+        f = _with_rules(_layout(layers=[_layer("l1", "A", 0)]), _dr("a"))
+        p = _with_rules(_layout(layers=[_layer("l1", "A", 0)]), _dr("a"))
+        d = _with_rules(
+            _layout(
+                layers=[_layer("l1", "A", 0), _layer("l2", "B", 1)],
+                assignments={"urn:b": _assign("l2")},
+            ),
+            _dr("a", "draft"),
+        )
+        merged = merge_layout_3way(f, p, d)
+        assert "displayRules" not in merged  # dropped by the keyed-only merge
+        rules = merge_display_rules_3way(f, p, d)
+        merged["displayRules"] = rules
+        assert _ids(merged) == ["l1", "l2"]
+        assert merged["displayRules"] == _dr("a", "draft")

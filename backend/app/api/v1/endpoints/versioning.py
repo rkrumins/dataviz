@@ -277,6 +277,65 @@ async def _touch_views_data_updated(graph_id: str, actor: str) -> None:
         logger.warning("view data-freshness stamp for %s skipped: %s", graph_id, exc)
 
 
+async def _ensure_view_layout_overlay(view_id: Optional[str], branch_id: Optional[str]) -> None:
+    """Snapshot a view's published base layout into its branch overlay when a draft is opened
+    FOR that view — the fork-point base for the eventual 3-way layout promote (BSL Phase 6). On
+    first open the overlay's effective layout EQUALS the base, so nothing changes for readers
+    until the draft edits it. Idempotent: resuming an existing draft returns the existing row
+    (no duplicate, base not re-snapshotted).
+
+    Best-effort by contract, mirroring ``_touch_views_data_updated``: a draft opened off any
+    particular view (``view_id`` absent) creates no overlay, and overlay bookkeeping — including
+    ``ensure_overlay`` raising on a since-deleted view — must NEVER fail the user's draft open
+    (the write path lazily ensures the overlay on first edit as the fallback)."""
+    if not view_id or not branch_id:
+        return
+    try:
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.repositories import view_repo
+        async with get_async_session() as session:
+            await view_repo.ensure_overlay(session, view_id, branch_id)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("layout overlay ensure for view %s / branch %s skipped: %s",
+                       view_id, branch_id, exc)
+
+
+async def _drop_view_layout_overlays(branch_id: Optional[str]) -> None:
+    """Discard a branch's layout overlays when its draft is abandoned — layout edits vanish with
+    the draft (Git-like), so a later draft on the same view forks from the published base again.
+    Best-effort, mirroring ``_touch_views_data_updated``."""
+    if not branch_id:
+        return
+    try:
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.repositories import view_repo
+        async with get_async_session() as session:
+            await view_repo.drop_overlays_for_branch(session, branch_id)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("layout overlay drop for branch %s skipped: %s", branch_id, exc)
+
+
+async def _promote_view_layout_overlay(branch_id: Optional[str], actor: str) -> None:
+    """Fold a draft's layout overlay into the published base on publish / MR merge — the layer &
+    assignment CREATES, UPDATES and DELETES the draft made are 3-way-merged (vs the fork-point base)
+    into ``views.config`` so the published version reflects them, then the overlay is deleted. Runs
+    AFTER the graphver commit lands; best-effort by contract (mirroring ``_touch_views_data_updated``:
+    the management DB may be separate, no 2PC), so a failure logs and never fails the user's merge —
+    the overlay simply stays until a later publish retries."""
+    if not branch_id:
+        return
+    try:
+        from backend.app.db.engine import get_async_session
+        from backend.app.db.repositories import view_repo
+        async with get_async_session() as session:
+            await view_repo.promote_overlays_for_branch(session, branch_id, actor=actor)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("layout overlay promote for branch %s skipped: %s", branch_id, exc)
+
+
 async def graph_in_workspace(
     ws_id: str,
     graph_id: str,
@@ -1228,6 +1287,9 @@ async def resolve_graph_open(
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
+    draft = res.get("my_draft")
+    await _ensure_view_layout_overlay(
+        body.originating_view_id, draft.get("branch_id") if draft else None)
     return res
 
 
@@ -1246,6 +1308,7 @@ async def open_draft(
             graph_id=graph_id, owner=user.id, name=body.name,
             originating_view_id=body.originating_view_id, shared=body.shared,
         )
+    await _ensure_view_layout_overlay(body.originating_view_id, branch_id)
     return {"branch_id": branch_id}
 
 
@@ -1356,6 +1419,7 @@ async def publish(
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
+    await _promote_view_layout_overlay(branch_id, user.id)   # fold the draft's layer/assignment edits into the published view
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
@@ -1368,7 +1432,9 @@ async def abandon_draft(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        return await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+        result = await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
+    await _drop_view_layout_overlays(branch_id)   # layout edits vanish with the draft (Git-like)
+    return result
 
 
 @router.patch("/graphs/{graph_id}/branches/{branch_id}", response_model=BranchResponse)
@@ -1928,7 +1994,7 @@ async def sync_ingest(
 _ie_service = None
 
 
-async def _resolve_export_view_scope(workspace_id, data_source_id, view_id):
+async def _resolve_export_view_scope(workspace_id, data_source_id, view_id, branch_id=None):
     """Resolve a view's ENTITY SET for a **view-scoped export**, from the authoritative source:
     the view's stored ``config`` reference-layout ``assignments`` map (canonical, up-converted from
     legacy per-layer ``entityAssignments`` by ``parse_reference_layout``) — the explicit
@@ -1943,12 +2009,15 @@ async def _resolve_export_view_scope(workspace_id, data_source_id, view_id):
     try:
         from backend.app.db.engine import get_async_session
         from backend.app.db.models import ViewORM
+        from backend.app.db.repositories.view_repo import effective_view_config
         from backend.app.services.layout_config import parse_reference_layout
         async with get_async_session() as session:
             view = await session.get(ViewORM, view_id)
             if view is None:
                 return None
-            config = json.loads(view.config or "{}")
+            # Branch-effective export scope: a draft export scopes to the draft's
+            # own layer assignments (base ⊕ overlay); no branch/overlay → base.
+            config = await effective_view_config(session, view, branch_id)
             cont = await _live_containment_types(session, workspace_id, data_source_id)
         layout = parse_reference_layout(config)
         # An assignment with a ``layerId`` is a real placement; ``logicalNodeId``-only ones are UI
@@ -2629,5 +2698,7 @@ async def merge_merge_request(
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
+    _src_branch = _pr.get("source_branch_id")   # the merged draft — fold its layout overlay into the published view
+    await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}

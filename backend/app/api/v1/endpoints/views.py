@@ -393,11 +393,16 @@ async def create_view(
 @router.get("/{view_id}", response_model=ViewResponse)
 async def get_view(
     view_id: str = Path(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Get a single view by ID, enriched with workspace context and favourite data."""
+    """Get a single view by ID, enriched with workspace context and favourite data.
+
+    ``branchId`` (a draft ref) projects the branch-effective config — base ⊕ the
+    branch's layout overlay — so a draft sees its own layer/scope edits; published
+    and other branches see the base. Absent (or no overlay) → base, unchanged."""
     if rbac_flag("RBAC_ENFORCE_VIEWS"):
         view_orm = await _load_view_orm(session, view_id)
         ctx = await _viewer_context(session, user, claims)
@@ -407,7 +412,7 @@ async def get_view(
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
 
     view = await view_repo.get_view_enriched(
-        session, view_id, user_id=_user_id(user),
+        session, view_id, user_id=_user_id(user), branch_id=branch_id,
     )
     if not view:
         raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
@@ -456,6 +461,7 @@ async def update_view(
 async def update_view_layout(
     view_id: str = Path(...),
     req: ViewLayoutUpdateRequest = Body(...),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -465,6 +471,13 @@ async def update_view_layout(
     Layout-only: does not touch name/description/content (other than
     entityScope)/filters/or any other config key — see
     ``view_repo.update_view_layout`` for the merge + validation logic.
+
+    ``branchId`` — when a draft branch is editing, the frontend threads its
+    active branch id here so the write lands on that branch's
+    ``view_layout_overlays`` row instead of the published ``views.config``.
+    This keeps a draft's layer/assignment edits from leaking to Published (or
+    other branches) until the draft is promoted. Omitted (base/published edit)
+    → the published row is updated in place, exactly as before.
     """
     existing = await view_repo.get_view(session, view_id)
     if not existing:
@@ -480,9 +493,14 @@ async def update_view_layout(
             )
 
     try:
-        view = await view_repo.update_view_layout(
-            session, view_id, req, user_id=_user_id(user),
-        )
+        if branch_id:
+            view = await view_repo.update_overlay_layout(
+                session, view_id, branch_id, req,
+            )
+        else:
+            view = await view_repo.update_view_layout(
+                session, view_id, req, user_id=_user_id(user),
+            )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     if not view:

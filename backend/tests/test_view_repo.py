@@ -1,16 +1,24 @@
 """
 Tests for backend.app.db.repositories.view_repo.
 """
+import json
 from contextlib import contextmanager
 
+import pytest
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
+from backend.app.db.engine import Base
 from backend.app.db.repositories import view_repo
 from backend.app.db.models import WorkspaceORM, UserORM
 from backend.common.models.management import (
     ViewCreateRequest,
     ViewUpdateRequest,
+    ViewLayoutUpdateRequest,
     ViewResponse,
 )
 
@@ -478,3 +486,342 @@ async def test_batch_list_resolves_creator_and_modifier(db_session: AsyncSession
 
     assert item.created_by_name == "Aut Hor"
     assert item.updated_by_name == "Ed Two"
+
+
+# ---------------------------------------------------------------------------
+# Branch-scoped layout overlays (BSL Phase 1)
+# ---------------------------------------------------------------------------
+
+def _layer(lid, name="L", order=0):
+    return {"id": lid, "name": name, "order": order}
+
+
+def _assign(layer_id):
+    return {"layerId": layer_id, "inheritsChildren": True}
+
+
+def _base_config(layers=None, assignments=None, entity_scope="curated"):
+    """A full view config whose canonical layout lives at
+    ``layout.referenceLayout`` — the published base the overlay forks from."""
+    return {
+        "content": {"entityScope": entity_scope},
+        "layout": {
+            "referenceLayout": {
+                "layers": list(layers or []),
+                "assignments": dict(assignments or {}),
+            }
+        },
+        "filters": {},
+    }
+
+
+async def _create_view_with_layout(session, ws_id, **cfg_kwargs):
+    return await view_repo.create_view(
+        session,
+        _make_create_req(ws_id, config=_base_config(**cfg_kwargs)),
+    )
+
+
+async def test_get_overlay_none_when_absent(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(db_session, ws.id)
+    assert await view_repo.get_overlay(db_session, created.id, "br1") is None
+
+
+async def test_ensure_overlay_snapshots_bare_reference_layout(db_session: AsyncSession):
+    """First open snapshots the BARE referenceLayout (not the full config) into
+    BOTH fork_base_layout and reference_layout; scope is the derived base."""
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(
+        db_session,
+        ws.id,
+        layers=[_layer("l1", "Systems")],
+        assignments={"urn:a": _assign("l1")},
+        entity_scope="curated",
+    )
+
+    overlay = await view_repo.ensure_overlay(db_session, created.id, "br1")
+
+    fork = json.loads(overlay.fork_base_layout)
+    ref = json.loads(overlay.reference_layout)
+    # BARE layout — no 'content'/'layout'/'filters' wrappers leaked in.
+    assert set(fork.keys()) == {"layers", "assignments"}
+    assert fork["layers"][0]["id"] == "l1"
+    assert "urn:a" in fork["assignments"]
+    # effective == base on first open.
+    assert ref == fork
+    assert overlay.entity_scope == "curated"
+    assert overlay.fork_base_entity_scope == "curated"
+
+
+async def test_ensure_overlay_is_idempotent(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(
+        db_session, ws.id, layers=[_layer("l1")]
+    )
+
+    first = await view_repo.ensure_overlay(db_session, created.id, "br1")
+    # Mutate so we can prove the second call returns the SAME row, not a reset.
+    first.reference_layout = json.dumps({"layers": [_layer("l1"), _layer("l2")], "assignments": {}})
+    await db_session.flush()
+
+    second = await view_repo.ensure_overlay(db_session, created.id, "br1")
+    assert second.view_id == first.view_id
+    assert second.branch_id == first.branch_id
+    assert len(json.loads(second.reference_layout)["layers"]) == 2  # not re-snapshotted
+
+    # Exactly one overlay row for this (view, branch).
+    from backend.app.db.models import ViewLayoutOverlayORM
+    from sqlalchemy import select, func
+    n = await db_session.execute(
+        select(func.count()).where(
+            ViewLayoutOverlayORM.view_id == created.id,
+            ViewLayoutOverlayORM.branch_id == "br1",
+        )
+    )
+    assert n.scalar() == 1
+
+
+async def test_ensure_overlay_missing_view_raises(db_session: AsyncSession):
+    with pytest.raises(ValueError, match="missing view"):
+        await view_repo.ensure_overlay(db_session, "view_nope", "br1")
+
+
+async def test_update_overlay_layout_writes_overlay_not_views_row(db_session: AsyncSession):
+    """The draft edit lands on the overlay; the published views.config is
+    untouched; the response projects the EFFECTIVE (overlay) layout."""
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(
+        db_session, ws.id, layers=[_layer("l1", "Base")]
+    )
+
+    req = ViewLayoutUpdateRequest(
+        referenceLayout={
+            "layers": [_layer("l1", "Base"), _layer("l2", "Draft")],
+            "assignments": {"urn:d": _assign("l2")},
+        },
+        entityScope="curated",
+    )
+    resp = await view_repo.update_overlay_layout(db_session, created.id, "br1", req)
+
+    # Response reflects the draft (effective) layout.
+    resp_layers = resp.config["layout"]["referenceLayout"]["layers"]
+    assert [l["id"] for l in resp_layers] == ["l1", "l2"]
+
+    # Published base row is UNCHANGED (no leak).
+    base = await view_repo.get_view(db_session, created.id)
+    base_layers = base.config["layout"]["referenceLayout"]["layers"]
+    assert [l["id"] for l in base_layers] == ["l1"]
+
+    # Overlay carries the draft.
+    overlay = await view_repo.get_overlay(db_session, created.id, "br1")
+    assert [l["id"] for l in json.loads(overlay.reference_layout)["layers"]] == ["l1", "l2"]
+
+
+async def test_update_overlay_layout_bad_layer_id_raises(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
+
+    req = ViewLayoutUpdateRequest(
+        referenceLayout={
+            "layers": [_layer("l1")],
+            "assignments": {"urn:x": _assign("ghost_layer")},
+        },
+    )
+    with pytest.raises(ValueError, match="unknown layerId"):
+        await view_repo.update_overlay_layout(db_session, created.id, "br1", req)
+
+    # Validation ran before any write — no overlay was created.
+    assert await view_repo.get_overlay(db_session, created.id, "br1") is None
+
+
+async def test_update_overlay_layout_missing_view_returns_none(db_session: AsyncSession):
+    req = ViewLayoutUpdateRequest(referenceLayout={"layers": [], "assignments": {}})
+    result = await view_repo.update_overlay_layout(db_session, "view_nope", "br1", req)
+    assert result is None
+
+
+async def test_effective_view_config_base_when_no_overlay_or_branch(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1", "Base")])
+    row = (await db_session.execute(
+        __import__("sqlalchemy").select(view_repo.ViewORM).where(view_repo.ViewORM.id == created.id)
+    )).scalar_one()
+
+    # No branch → base config.
+    cfg_no_branch = await view_repo.effective_view_config(db_session, row, None)
+    assert [l["id"] for l in cfg_no_branch["layout"]["referenceLayout"]["layers"]] == ["l1"]
+
+    # Branch given but no overlay yet → still base config.
+    cfg_no_overlay = await view_repo.effective_view_config(db_session, row, "br1")
+    assert [l["id"] for l in cfg_no_overlay["layout"]["referenceLayout"]["layers"]] == ["l1"]
+
+
+async def test_effective_view_config_overrides_from_overlay(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(
+        db_session, ws.id, layers=[_layer("l1", "Base")], entity_scope="all"
+    )
+    req = ViewLayoutUpdateRequest(
+        referenceLayout={
+            "layers": [_layer("l1", "Base"), _layer("l2", "Draft")],
+            "assignments": {},
+        },
+        entityScope="curated",
+    )
+    await view_repo.update_overlay_layout(db_session, created.id, "br1", req)
+
+    cfg = await view_repo.effective_view_config(db_session, created.id, "br1")
+    assert [l["id"] for l in cfg["layout"]["referenceLayout"]["layers"]] == ["l1", "l2"]
+    assert cfg["content"]["entityScope"] == "curated"
+
+
+async def test_promote_overlay_no_overlay_returns_false(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
+    assert await view_repo.promote_overlay(db_session, created.id, "br1", actor=None) is False
+
+
+async def test_promote_overlay_applies_create_update_delete_and_clears(db_session: AsyncSession):
+    """Promote merges the draft into the published base (create + rename +
+    DELETE), stamps the actor, and deletes the overlay row."""
+    ws = await _create_workspace(db_session)
+    await _seed_user(db_session, "usr_merger", first="Mer", last="Ger")
+    created = await _create_view_with_layout(
+        db_session,
+        ws.id,
+        layers=[_layer("l1", "Keep"), _layer("l2", "DeleteMe")],
+        assignments={"urn:a": _assign("l1"), "urn:b": _assign("l2")},
+    )
+
+    # Draft: rename l1, DELETE l2 (and its assignment), ADD l3.
+    req = ViewLayoutUpdateRequest(
+        referenceLayout={
+            "layers": [_layer("l1", "Renamed"), _layer("l3", "New")],
+            "assignments": {"urn:a": _assign("l1"), "urn:c": _assign("l3")},
+        },
+    )
+    await view_repo.update_overlay_layout(db_session, created.id, "br1", req)
+
+    promoted = await view_repo.promote_overlay(
+        db_session, created.id, "br1", actor="usr_merger"
+    )
+    assert promoted is True
+
+    base = await view_repo.get_view(db_session, created.id)
+    layers = base.config["layout"]["referenceLayout"]["layers"]
+    assignments = base.config["layout"]["referenceLayout"]["assignments"]
+    assert [l["id"] for l in layers] == ["l1", "l3"]     # l2 DELETED, l3 CREATED
+    assert layers[0]["name"] == "Renamed"                # UPDATE applied
+    assert "urn:b" not in assignments                    # deleted layer's assignment gone
+    assert "urn:c" in assignments
+    assert base.updated_by == "usr_merger"               # actor stamped
+
+    # Overlay row is gone.
+    assert await view_repo.get_overlay(db_session, created.id, "br1") is None
+
+
+async def test_promote_overlay_preserves_display_rules(db_session: AsyncSession):
+    """Regression: promote must NOT drop ``referenceLayout.displayRules``.
+
+    ``merge_layout_3way`` returns only {layers, assignments}; promote_overlay
+    re-attaches the 3-way-merged displayRules (draft wins). Before the fix the
+    published base lost its displayRules on every merge."""
+    ws = await _create_workspace(db_session)
+    created = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1", "Base")])
+
+    # Publish a base displayRules array (the fork-point the overlay snapshots).
+    await view_repo.update_view_layout(
+        db_session, created.id,
+        ViewLayoutUpdateRequest(
+            referenceLayout={"layers": [_layer("l1", "Base")], "assignments": {}},
+            displayRules=[{"id": "r_base", "op": "hide"}],
+        ),
+    )
+
+    # Draft: add a layer AND change the displayRules (frontend re-sends them).
+    await view_repo.update_overlay_layout(
+        db_session, created.id, "br1",
+        ViewLayoutUpdateRequest(
+            referenceLayout={
+                "layers": [_layer("l1", "Base"), _layer("l2", "Draft")],
+                "assignments": {},
+            },
+            displayRules=[{"id": "r_draft", "op": "color"}],
+        ),
+    )
+
+    assert await view_repo.promote_overlay(db_session, created.id, "br1", actor=None) is True
+
+    ref = (await view_repo.get_view(db_session, created.id)).config["layout"]["referenceLayout"]
+    assert [l["id"] for l in ref["layers"]] == ["l1", "l2"]          # layers still merged
+    assert ref["displayRules"] == [{"id": "r_draft", "op": "color"}]  # draft's rules won, not dropped
+
+
+async def test_promote_overlays_for_branch_counts_and_drops(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    v1 = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
+    v2 = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
+    await view_repo.ensure_overlay(db_session, v1.id, "shared_branch")
+    await view_repo.ensure_overlay(db_session, v2.id, "shared_branch")
+
+    count = await view_repo.promote_overlays_for_branch(
+        db_session, "shared_branch", actor=None
+    )
+    assert count == 2
+    assert await view_repo.get_overlay(db_session, v1.id, "shared_branch") is None
+    assert await view_repo.get_overlay(db_session, v2.id, "shared_branch") is None
+
+
+async def test_drop_overlays_for_branch(db_session: AsyncSession):
+    ws = await _create_workspace(db_session)
+    v1 = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
+    v2 = await _create_view_with_layout(db_session, ws.id, layers=[_layer("l1")])
+    await view_repo.ensure_overlay(db_session, v1.id, "br_discard")
+    await view_repo.ensure_overlay(db_session, v2.id, "br_discard")
+    # An overlay on a different branch must survive the drop.
+    await view_repo.ensure_overlay(db_session, v1.id, "br_keep")
+
+    dropped = await view_repo.drop_overlays_for_branch(db_session, "br_discard")
+    assert dropped == 2
+    assert await view_repo.get_overlay(db_session, v1.id, "br_discard") is None
+    assert await view_repo.get_overlay(db_session, v2.id, "br_discard") is None
+    assert await view_repo.get_overlay(db_session, v1.id, "br_keep") is not None
+
+
+async def test_overlay_cascades_on_view_hard_delete():
+    """ON DELETE CASCADE removes a view's overlays when the view is hard-deleted.
+
+    Postgres enforces this natively (verified live during the migration). The
+    shared SQLite test engine leaves FK enforcement off, so this test spins up
+    a dedicated in-memory engine with ``PRAGMA foreign_keys=ON`` to exercise the
+    cascade behaviourally."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", connect_args={"check_same_thread": False}
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _on_connect(dbapi_conn, _rec):  # noqa: ANN001
+        # Mirror the shared conftest engine's aggregation attach, and turn on
+        # FK enforcement so ON DELETE CASCADE actually fires under SQLite.
+        dbapi_conn.execute("ATTACH DATABASE ':memory:' AS aggregation")
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    Session = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with Session() as session:
+            ws = await _create_workspace(session)
+            created = await _create_view_with_layout(session, ws.id, layers=[_layer("l1")])
+            await view_repo.ensure_overlay(session, created.id, "br1")
+            await session.commit()
+            assert await view_repo.get_overlay(session, created.id, "br1") is not None
+
+            await view_repo.permanently_delete_view(session, created.id)
+            await session.commit()
+
+            assert await view_repo.get_overlay(session, created.id, "br1") is None
+    finally:
+        await engine.dispose()
