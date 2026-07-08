@@ -85,19 +85,60 @@ async def _run() -> None:
     #    into it) → the draft must NOT reflect main's new content. Otherwise a draft reads live
     #    main and silently "pulls" changes it never merged (no commit, no user action). The
     #    overlay must rewind main from head back to the draft's fork point. ─────────────────
+    # seed a node "DEL" onto main BEFORE forking, so it is present at the draft's fork point and we
+    # can prove a main-DELETE-after-fork is RESTORED (not lost).
+    await svc.apply_ops(graph_id=gid, actor="u", message="seed DEL",
+                        containment_edge_types=CONT, ops=[_n("DEL", "Table")])
     d_iso = await svc.open_draft(graph_id=gid, owner="u")            # forks at current main head; NO own edits
     await svc.apply_ops(graph_id=gid, actor="u", message="main advances after fork",
                         containment_edge_types=CONT,
                         ops=[_n("M.new", "Table"),                  # main ADDS a node
                              {"op": "update", "entity_kind": "node", "entity_id": "A",  # main MODIFIES A
-                              "payload": {"urn": "A", "entityType": "Table", "displayName": "A-renamed"}}])
+                              "payload": {"urn": "A", "entityType": "Table", "displayName": "A-renamed"}},
+                             _e("M.lin", "B.c", "A.c", "LINEAGE"),  # main ADDS a lineage edge
+                             {"op": "delete", "entity_kind": "node",  # main DELETES the seeded node
+                              "entity_id": "DEL", "payload": None}])
     iso = await svc.branch_overlay_delta(graph_id=gid, branch_id=d_iso)
-    # main-ADDED "M.new" is absent at the draft's fork point → overlay REMOVES it so it can't leak in.
-    # (This also proves the no-change draft is isolated — d_iso has no edits of its own.)
+    # main-ADDED node absent at fork → REMOVED (the reported "Whoopppp/New Layer" leak). Also proves the
+    # no-change draft is isolated — d_iso has no edits of its own.
     assert "M.new" in [n["urn"] for n in iso["nodesRemove"]], iso
-    # main-MODIFIED "A" → overlay restores the FORK-POINT value ("A"), not main's live "A-renamed".
+    # main-ADDED lineage EDGE → REMOVED from the read.
+    assert "M.lin" in [e["id"] for e in iso["edgesRemove"]], iso
+    # main-MODIFIED node → restored to the FORK-POINT value ("A"), not main's live "A-renamed".
     a_up = [n for n in iso["nodesUpsert"] if n["urn"] == "A"]
     assert a_up and a_up[0]["displayName"] == "A", iso
+    # main-DELETED-after-fork node → restored via upsert AND marked new so the list/search reads surface it.
+    assert "DEL" in [n["urn"] for n in iso["nodesUpsert"]], iso
+    assert "DEL" in iso["nodesNew"], iso
+
+    # ── draft-wins: an entity the DRAFT itself modified is never rewound to main (or fork) ──────────
+    d_own = await svc.open_draft(graph_id=gid, owner="u")
+    await svc.apply_ops(graph_id=gid, branch_id=d_own, actor="u", message="draft renames A",
+                        containment_edge_types=CONT,
+                        ops=[{"op": "update", "entity_kind": "node", "entity_id": "A",
+                              "payload": {"urn": "A", "entityType": "Table", "displayName": "A-draft"}}])
+    await svc.apply_ops(graph_id=gid, actor="u", message="main also renames A",
+                        containment_edge_types=CONT,
+                        ops=[{"op": "update", "entity_kind": "node", "entity_id": "A",
+                              "payload": {"urn": "A", "entityType": "Table", "displayName": "A-main2"}}])
+    own = await svc.branch_overlay_delta(graph_id=gid, branch_id=d_own)
+    a_own = [n for n in own["nodesUpsert"] if n["urn"] == "A"]
+    assert a_own and a_own[0]["displayName"] == "A-draft", own      # draft's own value — not rewound
+
+    # ── FORK GRAPH: a PARENT-SEEDED entity (no local rows in the fork) modified by a post-fork advance
+    #    of the fork's main must be RESTORED to its fork-point value — a non-fork-aware base lookup
+    #    would find no local row and wrongly REMOVE it (data disappearance). ─────────────────────────
+    F = await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="u")
+    fid = F["graph_id"]
+    d_fork = await svc.open_draft(graph_id=fid, owner="u")           # forks F at its fork point; no own edits
+    await svc.apply_ops(graph_id=fid, actor="u", message="fork main modifies a parent-seeded node",
+                        containment_edge_types=CONT,
+                        ops=[{"op": "update", "entity_kind": "node", "entity_id": "B",  # B is parent-seeded in F
+                              "payload": {"urn": "B", "entityType": "Table", "displayName": "B-fork"}}])
+    fk = await svc.branch_overlay_delta(graph_id=fid, branch_id=d_fork)
+    b_up = [n for n in fk["nodesUpsert"] if n["urn"] == "B"]
+    assert b_up and b_up[0]["displayName"] == "B", fk               # restored to fork-point value via parent seeding
+    assert "B" not in [n["urn"] for n in fk["nodesRemove"]], fk     # NOT removed
 
     await db.dispose_engine()
 
