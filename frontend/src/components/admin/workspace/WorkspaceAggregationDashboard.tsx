@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
+import { AggregationFleetPanel } from './AggregationFleetPanel'
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -171,6 +172,9 @@ export function WorkspaceAggregationDashboard({
                     </span>
                 )}
             </div>
+
+            {/* ─── Worker fleet + global tuning defaults ─────────────── */}
+            <AggregationFleetPanel />
 
             {/* ─── Summary chips (interactive filters) ──────────────── */}
             <div className="flex flex-wrap items-center gap-2">
