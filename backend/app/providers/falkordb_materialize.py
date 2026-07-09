@@ -65,7 +65,6 @@ import bisect
 import logging
 import os
 import time
-from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
@@ -106,8 +105,10 @@ def _max_pending_pairs() -> int:
     """Memory cap on the in-worker pair accumulator AND the raw-pair base
     map. Crossing it triggers a lattice roll-up (base) or an early flush
     to the graph (accumulator) — memory stays bounded on pathological
-    graphs at the cost of extra writes."""
-    return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 2_000_000, 50_000, 50_000_000)
+    graphs at the cost of extra writes. Default 5M (~500MB packed) keeps
+    typical multi-million-edge graphs on the flush-free diff path within
+    the worker's 4Gi budget."""
+    return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 5_000_000, 50_000, 50_000_000)
 
 
 def _delete_chunk() -> int:
@@ -213,28 +214,6 @@ class _PairValues:
 
 
 # ---------------------------------------------------------------------------
-# Bounded ID → (urn, label) cache
-# ---------------------------------------------------------------------------
-
-class _IdCache:
-    def __init__(self, cap: int) -> None:
-        self._cap = cap
-        self._data: "OrderedDict[int, Tuple[Optional[str], Optional[str]]]" = OrderedDict()
-
-    def get(self, node_id: int):
-        val = self._data.get(node_id)
-        if val is not None:
-            self._data.move_to_end(node_id)
-        return val
-
-    def put(self, node_id: int, urn: Optional[str], label: Optional[str]) -> None:
-        self._data[node_id] = (urn, label)
-        self._data.move_to_end(node_id)
-        while len(self._data) > self._cap:
-            self._data.popitem(last=False)
-
-
-# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -274,9 +253,15 @@ class AggregationPipeline:
             getattr(provider, "_entity_type_levels", None) or {}
         )
         self._level_digest: str = getattr(provider, "_level_digest", None) or ""
-        self._id_cache = _IdCache(
-            _env_int("AGGREGATION_ID_CACHE_MAX", 500_000, 10_000, 5_000_000)
-        )
+        # ID → (urn, label) directory, loaded lazily with ID-range scans
+        # the first time a write/delete needs URN resolution. NEVER
+        # resolved with ``WHERE ID(n) = x`` under UNWIND — FalkorDB does
+        # not drive that from a NodeByIdSeek, so it degrades to a full
+        # node scan PER ROW (observed 30s+ per 5k-row batch on a 500k-node
+        # graph and the direct cause of the timeout death spiral this
+        # replaces).
+        self._node_dir: Optional[Dict[int, Tuple[str, str]]] = None
+        self._indexed_labels: Set[str] = set()
 
         # Run state
         self._run_start_ms: int = 0
@@ -734,41 +719,60 @@ class AggregationPipeline:
 
     # -- node resolution -------------------------------------------------------
 
-    async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
-        """Resolve node IDs → (urn, first label) via NodeByIdSeek, LRU-cached.
-        Unresolvable nodes (deleted mid-run, missing urn/label) are absent
-        from the result; callers drop those pairs with a warning."""
-        out: Dict[int, Tuple[str, str]] = {}
-        missing: List[int] = []
-        for i in ids:
-            hit = self._id_cache.get(i)
-            if hit is not None:
-                if hit[0] and hit[1]:
-                    out[i] = (hit[0], hit[1])
-                continue
-            missing.append(i)
-        for start in range(0, len(missing), 5000):
-            chunk = missing[start:start + 5000]
+    async def _ensure_node_directory(self) -> Dict[int, Tuple[str, str]]:
+        """Load the full node ID → (urn, label) directory with ID-range
+        scans — one bounded pass, ~10 queries for 2M nodes.
+
+        FalkorDB does not seek ``WHERE ID(n) = x`` under UNWIND (it scans
+        all nodes per row), so per-batch ID lookups are pathological at
+        scale; a single range-scanned directory is dramatically cheaper
+        and is only built when a write/delete actually needs it (a no-op
+        diff run never pays for it). Labels are interned so 2M entries
+        stay in the low hundreds of MB."""
+        if self._node_dir is not None:
+            return self._node_dir
+        import sys
+        width = _scan_range_width()
+        res = await self.p._ro_query(
+            "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
+        )
+        rows = res.result_set or []
+        max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+        directory: Dict[int, Tuple[str, str]] = {}
+        lo = 0
+        while lo <= max_id:
+            hi = lo + width
             self._cancel_check()
             res = await self.p._ro_query(
-                "UNWIND $ids AS i MATCH (n) WHERE ID(n) = i "
-                "RETURN i, n.urn, labels(n)",
-                params={"ids": chunk},
+                "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
+                "RETURN ID(n), n.urn, labels(n)",
+                params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
-            found: Set[int] = set()
             for row in (res.result_set or []):
-                nid = int(row[0])
-                urn = row[1]
-                labels = row[2] or []
-                label = labels[0] if labels else None
-                found.add(nid)
-                self._id_cache.put(nid, urn, label)
-                if urn and label:
-                    out[nid] = (urn, label)
-            for nid in chunk:
-                if nid not in found:
-                    self._id_cache.put(nid, None, None)
+                nid, urn, labels = row[0], row[1], row[2] or []
+                if nid is None or not urn or not labels:
+                    continue
+                directory[int(nid)] = (urn, sys.intern(str(labels[0])))
+            lo = hi
+        self._node_dir = directory
+        logger.info(
+            "aggregation pipeline on %s: node directory loaded — %d entries.",
+            self.p._graph_name, len(directory),
+        )
+        return directory
+
+    async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
+        """Resolve node IDs → (urn, first label) from the range-scanned
+        directory. Nodes absent from the directory (deleted mid-run,
+        missing urn/label) are absent from the result; callers drop those
+        pairs with a warning."""
+        directory = await self._ensure_node_directory()
+        out: Dict[int, Tuple[str, str]] = {}
+        for i in ids:
+            hit = directory.get(i)
+            if hit is not None:
+                out[i] = hit
         return out
 
     # -- writes ------------------------------------------------------------------
@@ -796,8 +800,6 @@ class AggregationPipeline:
             t_urn, t_label = t_res
             mask = values.mask(val)
             items.append({
-                "aid": sid,
-                "bid": tid,
                 "s": s_urn,
                 "t": t_urn,
                 "_sl_label": s_label,
@@ -817,11 +819,13 @@ class AggregationPipeline:
         return items
 
     def _sub_batch_size(self) -> int:
-        # The provider's AIMD sizer targets ~0.8-2.0s per write. Its state
-        # was tuned for 500-row MERGE batches; ID-seek MERGEs are cheaper
-        # per row, so scale it up while honoring the bulk-create ceiling.
+        # The provider's AIMD sizer targets ~0.8-2.0s per write: start at
+        # its conservative base and let sustained-healthy growth raise it,
+        # honoring the bulk-create ceiling. Ramping up beats starting big —
+        # an oversized first batch on a cold/loaded server stalls the whole
+        # write path behind one slow query.
         return max(100, min(
-            self.p._aggregation_sub_batch_size * 4,
+            self.p._aggregation_sub_batch_size,
             self.p._bulk_create_batch_size,
         ))
 
@@ -853,9 +857,17 @@ class AggregationPipeline:
     ) -> None:
         """MERGE prepared items as :AGGREGATED edges in AIMD-sized, paced
         sub-batches. ``weight_mode='overwrite'`` sets the final weight;
-        ``'add'`` accumulates (repeat overflow flushes only)."""
+        ``'add'`` accumulates (repeat overflow flushes only).
+
+        Node matching is ALWAYS by (label, urn) — an index seek via the
+        per-label URN index. Never by internal ID: FalkorDB does not seek
+        ``WHERE ID(a) = item.aid`` under UNWIND, and the resulting
+        scan-per-row was the production CPU/timeout death spiral on
+        multi-hundred-thousand-node graphs.
+        """
         if not items:
             return
+        from backend.app.providers.falkordb_provider import _sanitize_label
         dedicated = getattr(self.p, "_projection_mode", "in_source") == "dedicated"
         weight_expr = (
             "coalesce(r.weight, 0) + item.w" if weight_mode == "add" else "item.w"
@@ -866,31 +878,35 @@ class AggregationPipeline:
             "r.levelDigest = $digest, r.latestUpdate = timestamp()"
         )
 
-        if not dedicated:
-            groups = [(
-                "UNWIND $batch AS item "
-                "MATCH (a) WHERE ID(a) = item.aid "
-                "MATCH (b) WHERE ID(b) = item.bid "
-                "MERGE (a)-[r:AGGREGATED {aggKey: item.k}]->(b) "
-                + set_tail,
-                items,
-            )]
-        else:
-            # Dedicated projection graph: source-graph node IDs do not
-            # exist there — MERGE nodes by (label, urn) instead, exactly
-            # like the legacy dedicated-mode path.
-            from backend.app.providers.falkordb_provider import _sanitize_label
-            by_label: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-            for it in items:
-                by_label.setdefault((it["_sl_label"], it["_tl_label"]), []).append(it)
-            groups = [(
-                "UNWIND $batch AS item "
-                f"MERGE (s:{_sanitize_label(sl)} {{urn: item.s}}) "
-                f"MERGE (t:{_sanitize_label(tl)} {{urn: item.t}}) "
-                "MERGE (s)-[r:AGGREGATED {aggKey: item.k}]->(t) "
-                + set_tail,
-                group_items,
-            ) for (sl, tl), group_items in by_label.items()]
+        by_label: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for it in items:
+            by_label.setdefault((it["_sl_label"], it["_tl_label"]), []).append(it)
+
+        # Per-label URN indexes make every node match below an index seek.
+        labels = {lbl for pair in by_label for lbl in pair}
+        new_labels = labels - self._indexed_labels
+        if new_labels and hasattr(self.p, "_ensure_label_urn_indexes"):
+            try:
+                await self.p._ensure_label_urn_indexes(new_labels)
+            except Exception as exc:
+                logger.warning(
+                    "aggregation pipeline on %s: label URN index ensure "
+                    "failed (%s) — writes may be slower.",
+                    self.p._graph_name, exc,
+                )
+            self._indexed_labels |= new_labels
+
+        # in_source: nodes exist in the source graph → MATCH by label+urn.
+        # dedicated: the projection graph is populated on demand → MERGE.
+        node_kw = "MERGE" if dedicated else "MATCH"
+        groups = [(
+            "UNWIND $batch AS item "
+            f"{node_kw} (s:{_sanitize_label(sl)} {{urn: item.s}}) "
+            f"{node_kw} (t:{_sanitize_label(tl)} {{urn: item.t}}) "
+            "MERGE (s)-[r:AGGREGATED {aggKey: item.k}]->(t) "
+            + set_tail,
+            group_items,
+        ) for (sl, tl), group_items in by_label.items()]
 
         for cypher, batch in groups:
             pos = 0
@@ -973,7 +989,8 @@ class AggregationPipeline:
                 res = await runner(
                     "MATCH (a)-[r:AGGREGATED]->(b) "
                     "WHERE ID(r) >= $lo AND ID(r) < $hi "
-                    "RETURN ID(a), ID(b), r.weight, r.levelDigest, r.latestUpdate",
+                    "RETURN ID(a), ID(b), r.aggKey, r.weight, r.levelDigest, "
+                    "r.latestUpdate",
                     params={"lo": lo, "hi": hi},
                     timeout=_scan_timeout_s(),
                 )
@@ -985,20 +1002,18 @@ class AggregationPipeline:
                     params={"lo": lo, "hi": hi},
                     timeout=_scan_timeout_s(),
                 )
-            to_delete: List[Any] = []
+            to_delete: List[str] = []
             to_overwrite: List[int] = []
             to_add: List[int] = []
             for row in (res.result_set or []):
                 if not dedicated:
-                    aid, bid, weight, row_digest, latest = row
+                    aid, bid, agg_key, weight, row_digest, latest = row
                     if aid is None or bid is None:
                         continue
                     key: Optional[int] = _pack(int(aid), int(bid))
-                    delete_ref: Any = {"a": int(aid), "b": int(bid)}
                 else:
                     agg_key, weight, row_digest, latest = row
                     key = key_by_aggkey.get(agg_key) if agg_key else None
-                    delete_ref = agg_key
                 val = self._acc.get(key) if key is not None else None
                 if val is None or key in existing:
                     # Not desired by this run (or a duplicate edge for an
@@ -1008,8 +1023,8 @@ class AggregationPipeline:
                     latest_i = int(latest) if latest is not None else 0
                     if latest_i >= run_start:
                         continue
-                    if delete_ref is not None:
-                        to_delete.append(delete_ref)
+                    if agg_key:
+                        to_delete.append(agg_key)
                     continue
                 existing.add(key)
                 if key in self._flushed:
@@ -1023,7 +1038,7 @@ class AggregationPipeline:
                 ):
                     to_overwrite.append(key)
 
-            await self._delete_stale(to_delete, dedicated=dedicated)
+            await self._delete_stale(to_delete)
             await self._write_keys(self._acc, to_overwrite, weight_mode="overwrite")
             await self._write_keys(self._acc, to_add, weight_mode="add")
             for key in to_add:
@@ -1054,34 +1069,26 @@ class AggregationPipeline:
                     self.p._graph_name, exc,
                 )
 
-    async def _delete_stale(self, refs: List[Any], *, dedicated: bool) -> None:
-        """Delete stale edges in paced chunks. The server-side
-        ``latestUpdate < $runStart`` re-check makes the delete safe even if
-        an edge was touched between our scan and this delete."""
-        if not refs:
+    async def _delete_stale(self, agg_keys: List[str]) -> None:
+        """Delete stale edges by ``aggKey`` (edge-property index seek) in
+        paced chunks — never by internal-ID matching, which scans under
+        UNWIND. The server-side ``latestUpdate < $runStart`` re-check makes
+        the delete safe even if an edge was touched between our scan and
+        this delete."""
+        if not agg_keys:
             return
         chunk_size = _delete_chunk()
         run_start = self._run_start_ms
-        for start in range(0, len(refs), chunk_size):
+        cypher = (
+            "UNWIND $keys AS k "
+            "MATCH ()-[r:AGGREGATED {aggKey: k}]->() "
+            "WHERE r.latestUpdate IS NULL OR r.latestUpdate < $runStart "
+            "DELETE r"
+        )
+        for start in range(0, len(agg_keys), chunk_size):
             self._cancel_check()
-            chunk = refs[start:start + chunk_size]
-            if dedicated:
-                cypher = (
-                    "UNWIND $keys AS k "
-                    "MATCH ()-[r:AGGREGATED {aggKey: k}]->() "
-                    "WHERE r.latestUpdate IS NULL OR r.latestUpdate < $runStart "
-                    "DELETE r"
-                )
-                params: Dict[str, Any] = {"keys": chunk, "runStart": run_start}
-            else:
-                cypher = (
-                    "UNWIND $batch AS it "
-                    "MATCH (a) WHERE ID(a) = it.a "
-                    "MATCH (a)-[r:AGGREGATED]->(b) WHERE ID(b) = it.b "
-                    "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
-                    "DELETE r"
-                )
-                params = {"batch": chunk, "runStart": run_start}
+            chunk = agg_keys[start:start + chunk_size]
+            params: Dict[str, Any] = {"keys": chunk, "runStart": run_start}
             await self._paced_write(lambda c=cypher, p=params: self.p._proj_query(
                 c, params=p, timeout=self.p._bulk_create_timeout_s,
             ))

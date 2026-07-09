@@ -46,8 +46,18 @@ so `/edges/aggregated` responses (browse-mode canvases) are unchanged.
    changed edges are updated in place. There is **no epoch sweep**: a
    failed or resumed run can never wipe good edges.
 4. **APPLY**: missing pairs are MERGE-created in sorted-key order
-   (deterministic resume cursor), matched by internal node ID
-   (`in_source` mode) or label+urn (`dedicated` projection mode).
+   (deterministic resume cursor), with nodes matched by **label+urn**
+   (per-label URN index seek) in both projection modes.
+
+**Hard rule: no ID-equality under UNWIND.** FalkorDB does not drive
+``WHERE ID(n) = x`` from a NodeByIdSeek inside an UNWIND — it scans all
+nodes per row (observed: 30s+ per 5k-row batch on a 500k-node graph,
+producing a timeout/quiesce/retry loop). The pipeline therefore resolves
+node IDs → (urn, label) through a lazily-built, range-scanned **node
+directory** (one bounded pass; only loaded when a write/delete actually
+needs it), writes via label+urn MERGE, and deletes via the aggKey edge
+index. Internal IDs are used only in range predicates
+(``ID(x) >= lo AND ID(x) < hi``), which are cheap filters.
 
 In steady state a re-run after small source changes writes only the
 diff — near-zero load. Full recompute *is* the incremental strategy.
@@ -97,11 +107,10 @@ the **first checkpoint**, before any graph work. Resume rules:
 | Env var | Default | Meaning |
 |---|---|---|
 | `AGGREGATION_SCAN_RANGE_WIDTH` | 250000 | Edge-ID range width per scan query |
-| `AGGREGATION_MAX_PENDING_PAIRS` | 2000000 | In-memory pair cap before overflow flush |
+| `AGGREGATION_MAX_PENDING_PAIRS` | 5000000 | In-memory pair cap before overflow flush |
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 0.5 | Sleep-after-write ratio |
-| `AGGREGATION_ID_CACHE_MAX` | 500000 | Node-ID→(urn,label) LRU entries |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |

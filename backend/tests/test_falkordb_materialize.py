@@ -73,17 +73,25 @@ class _FakeFalkor:
 
     _TYPE_RE = re.compile(r"\[r:`([^`]+)`\]")
 
+    def _urn_to_id(self, urn):
+        for nid, (u, _label) in self.nodes.items():
+            if u == urn:
+                return nid
+        raise AssertionError(f"unknown urn in write: {urn}")
+
     async def ro_query(self, cypher, params=None, **kw):
         params = params or {}
-        if "UNWIND $ids AS i" in cypher:
-            rows = []
-            for nid in params["ids"]:
-                node = self.nodes.get(nid)
-                if node is not None:
-                    rows.append([nid, node[0], [node[1]]])
-            return _Result(rows)
         if "r:AGGREGATED" in cypher:
             return await self._agg_read(cypher, params)
+        if "MATCH (n)" in cypher and "max(ID(n))" in cypher:
+            return _Result([[max(self.nodes, default=None)]])
+        if "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi" in cypher:
+            lo, hi = params["lo"], params["hi"]
+            return _Result([
+                [nid, urn, [label]]
+                for nid, (urn, label) in self.nodes.items()
+                if lo <= nid < hi
+            ])
         m = self._TYPE_RE.search(cypher)
         etype = m.group(1) if m else None
         edges = self.typed_edges.get(etype, [])
@@ -105,7 +113,10 @@ class _FakeFalkor:
             rows = []
             for (aid, bid), v in self.agg.items():
                 if lo <= v["rid"] < hi:
-                    rows.append([aid, bid, v["weight"], v["digest"], v["latest"]])
+                    rows.append([
+                        aid, bid, v["aggKey"], v["weight"], v["digest"],
+                        v["latest"],
+                    ])
             return _Result(rows)
         raise AssertionError(f"unhandled agg read: {cypher}")
 
@@ -115,15 +126,16 @@ class _FakeFalkor:
             return _Result()
         self.write_queries += 1
         now_ms = int(time.time() * 1000)
-        if "MERGE (a)-[r:AGGREGATED {aggKey: item.k}]->(b)" in cypher:
+        if "MERGE (s)-[r:AGGREGATED {aggKey: item.k}]->(t)" in cypher:
+            # Label+urn node match (index seek) — the only supported write
+            # form; ID-seek-under-UNWIND is banned (scans per row).
             add_mode = "coalesce(r.weight, 0) + item.w" in cypher
             for item in params["batch"]:
-                key = (item["aid"], item["bid"])
+                key = (self._urn_to_id(item["s"]), self._urn_to_id(item["t"]))
                 edge = self.agg.get(key)
                 if edge is None:
-                    edge = {"rid": self._alloc_rid()}
+                    edge = {"rid": self._alloc_rid(), "weight": 0}
                     self.agg[key] = edge
-                    edge["weight"] = 0
                 edge["aggKey"] = item["k"]
                 edge["weight"] = (
                     edge.get("weight", 0) + item["w"] if add_mode else item["w"]
@@ -136,10 +148,13 @@ class _FakeFalkor:
             return _Result()
         if "DELETE r" in cypher:
             run_start = params["runStart"]
-            for it in params["batch"]:
-                key = (it["a"], it["b"])
-                edge = self.agg.get(key)
-                if edge is not None and edge.get("latest", 0) < run_start:
+            for agg_key in params["keys"]:
+                match = [
+                    key for key, edge in self.agg.items()
+                    if edge.get("aggKey") == agg_key
+                    and edge.get("latest", 0) < run_start
+                ]
+                for key in match:
                     self.deleted_pairs.append(key)
                     del self.agg[key]
             return _Result()

@@ -921,11 +921,15 @@ class AggregationWorker:
             # The pipeline supplies a phase-weighted 0-100 percentage so
             # the bar is monotonic across phases; without it, fall back to
             # the processed/total ratio (clamped — ``total`` can lag when
-            # driven off a stale estimate).
+            # driven off a stale estimate). Clamped monotonic per job row:
+            # a transient-failure retry restarts the (cheap) extract phase
+            # from zero, and without the floor the UI bar would snap from
+            # 45% back to 0% on every retry.
             if progress_pct is not None:
-                job.progress = max(0, min(100, int(progress_pct)))
+                computed_pct = max(0, min(100, int(progress_pct)))
             else:
-                job.progress = min(100, int((processed / total) * 100)) if total > 0 else 0
+                computed_pct = min(100, int((processed / total) * 100)) if total > 0 else 0
+            job.progress = max(job.progress or 0, computed_pct)
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
             batches_since_commit += 1
