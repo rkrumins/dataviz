@@ -79,12 +79,24 @@ class _FakeFalkor:
                 return nid
         raise AssertionError(f"unknown urn in write: {urn}")
 
+    _LABEL_SCAN_RE = re.compile(r"MATCH \(n:`([^`]+)`\) WHERE ID\(n\)")
+
     async def ro_query(self, cypher, params=None, **kw):
         params = params or {}
         if "r:AGGREGATED" in cypher:
             return await self._agg_read(cypher, params)
         if "MATCH (n)" in cypher and "max(ID(n))" in cypher:
             return _Result([[max(self.nodes, default=None)]])
+        lbl_match = self._LABEL_SCAN_RE.search(cypher)
+        if lbl_match:
+            lbl = lbl_match.group(1)
+            lo, hi = params["lo"], params["hi"]
+            rows = [
+                ([nid, urn] if "n.urn" in cypher else [nid])
+                for nid, (urn, label) in self.nodes.items()
+                if label == lbl and lo <= nid < hi
+            ]
+            return _Result(rows)
         if "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi" in cypher:
             lo, hi = params["lo"], params["hi"]
             return _Result([
@@ -214,12 +226,20 @@ def _seed_two_chain_graph(fake):
     return levels
 
 
-# Full ancestor cross-product of ([col_a, table_a, domain_abc] ×
-# [col_b, table_b, domain_def]) minus the leaf↔leaf mirror (col_a, col_b).
+# Default (level-based boundary): only pairs where BOTH endpoints are
+# non-leaf-LEVEL nodes are materialized — bounded by container counts.
+# Leaf-involving pairs (column→table, column→domain, …) are served on
+# demand by the read path.
 _EXPECTED_PAIRS = {
+    (2, 12), (2, 11),
+    (1, 12), (1, 11),
+}
+
+# Legacy full-cube mode (materialize_fine_pairs=true): the full ancestor
+# cross-product minus the leaf↔leaf mirror (col_a, col_b).
+_EXPECTED_FINE_PAIRS = _EXPECTED_PAIRS | {
     (3, 12), (3, 11),
-    (2, 13), (2, 12), (2, 11),
-    (1, 13), (1, 12), (1, 11),
+    (2, 13), (1, 13),
 }
 
 
@@ -259,13 +279,27 @@ def test_cross_product_semantics_drop_leaf_pairs():
         assert edge["digest"] == "digest-1"
     # Level stamps come from the ontology's entity-type levels.
     assert fake.agg[(1, 11)]["sl"] == 0 and fake.agg[(1, 11)]["tl"] == 0
-    assert fake.agg[(2, 13)]["sl"] == 1 and fake.agg[(2, 13)]["tl"] == 2
+    assert fake.agg[(2, 12)]["sl"] == 1 and fake.agg[(2, 12)]["tl"] == 1
     assert result["aggregated_edges_affected"] == len(_EXPECTED_PAIRS)
     assert result["processed"] == 2
     assert result["errors"] == 0
 
 
+def test_fine_pairs_env_flag_restores_full_cube(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p))
+
+    assert set(fake.agg.keys()) == _EXPECTED_FINE_PAIRS
+    for key in _EXPECTED_FINE_PAIRS:
+        assert fake.agg[key]["weight"] == 2, key
+
+
 def test_leaf_pairs_env_flag_restores_mirrors(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
     monkeypatch.setenv("AGGREGATION_MATERIALIZE_LEAF_PAIRS", "true")
     fake = _FakeFalkor()
     levels = _seed_two_chain_graph(fake)
@@ -273,13 +307,15 @@ def test_leaf_pairs_env_flag_restores_mirrors(monkeypatch):
 
     _run(_materialize(p))
 
-    assert set(fake.agg.keys()) == _EXPECTED_PAIRS | {(3, 13)}
+    assert set(fake.agg.keys()) == _EXPECTED_FINE_PAIRS | {(3, 13)}
     assert fake.agg[(3, 13)]["weight"] == 2
 
 
-def test_equal_endpoint_pairs_excluded_but_rollups_kept():
+def test_equal_endpoint_pairs_excluded_but_rollups_kept(monkeypatch):
     """Lineage between siblings under one table: the (table, table)
-    self-pair is excluded, but its parents' cross pairs must exist."""
+    self-pair is excluded, but its parents' cross pairs must exist.
+    (Fine mode: the mixed pairs asserted here are on-demand by default.)"""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
     fake = _FakeFalkor()
     levels = {"table": 0, "column": 1}
     fake.add_node(1, "urn:t", "table")
@@ -297,9 +333,10 @@ def test_equal_endpoint_pairs_excluded_but_rollups_kept():
     assert set(fake.agg.keys()) == {(2, 1), (1, 3)}
 
 
-def test_multi_parent_longest_chain():
+def test_multi_parent_longest_chain(monkeypatch):
     """A node with two parents follows the parent with the LONGEST chain
     (legacy ``ORDER BY length(path) DESC`` parity)."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
     fake = _FakeFalkor()
     levels = {"root": 0, "mid": 1, "leaf": 2}
     fake.add_node(1, "urn:deep_root", "root")
@@ -511,7 +548,8 @@ def test_no_lineage_types_returns_zero_result():
     assert result["processed"] == 0
 
 
-def test_containment_cycle_is_broken():
+def test_containment_cycle_is_broken(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
     fake = _FakeFalkor()
     levels = {"a": 0, "b": 1}
     fake.add_node(1, "urn:x", "a")
@@ -525,3 +563,33 @@ def test_containment_cycle_is_broken():
     # Must terminate and produce the acyclic part of the rollup.
     _run(_materialize(p))
     assert (1, 3) in fake.agg
+
+
+def test_write_budget_guard_fails_loud_instead_of_oom(monkeypatch):
+    """The pipeline must refuse to materialize more edges than the
+    configured budget — failing the job with guidance instead of
+    OOM-killing the shared FalkorDB instance (the production incident:
+    1.17M edges → 5.6M pairs → instance down)."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    monkeypatch.setattr(mat, "_max_materialized_edges", lambda: 4)
+
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    # Fine mode computes 8 pairs > budget of 4 — the guard fires before
+    # any write reaches the graph.
+    with pytest.raises(ValueError, match="max_materialized_edges"):
+        _run(_materialize(p))
+    assert fake.agg == {}
+
+
+def test_run_stats_reports_boundary_effect():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    result = _run(_materialize(p))
+    stats = result["run_stats"]
+    # Leaf-involving merges were skipped by the boundary, not materialized.
+    assert stats["fine_merges_skipped"] > 0
+    assert stats["pairs"] == len(_EXPECTED_PAIRS)

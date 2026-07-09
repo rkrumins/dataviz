@@ -82,6 +82,17 @@ class AggregationTuning(BaseModel):
         None, alias="materializeLeafPairs",
         description="Also materialize leaf-to-leaf mirror pairs (legacy behavior).",
     )
+    materialize_fine_pairs: Optional[bool] = Field(
+        None, alias="materializeFinePairs",
+        description="Legacy full-cube mode: also materialize pairs involving "
+                    "leaf-level nodes (scales as edges x depth; can exceed "
+                    "FalkorDB memory). Default false: served on demand.",
+    )
+    max_materialized_edges: Optional[int] = Field(
+        None, alias="maxMaterializedEdges", ge=10_000, le=50_000_000,
+        description="Hard write budget: fail the job instead of writing more "
+                    ":AGGREGATED edges than this (~0.5KB RAM each).",
+    )
 
     class Config:
         populate_by_name = True

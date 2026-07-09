@@ -34,12 +34,19 @@ stamped from the ontology's entity-type levels. Containment and lineage
 edge types are the ontology-frozen sets carried on the job row. Ragged
 hierarchies and multi-parent nodes follow the legacy longest-chain rule.
 
-The one deliberate change: same-position **leaf↔leaf pairs** (the
-``(s, t)`` mirror of each raw lineage edge) are no longer materialized —
-they duplicated the raw edges 1:1 and doubled write volume. Readers that
-need them synthesize from raw lineage edges (see
-``get_aggregated_edges_between``). Set
-``AGGREGATION_MATERIALIZE_LEAF_PAIRS=true`` to restore the old behavior.
+**Level-based materialization boundary (the scale contract):** only
+pairs where BOTH endpoints are non-leaf-LEVEL nodes are materialized —
+with COMPLETE weights (every lattice cell, including direct
+container-level lineage, contributes). This set is bounded by container
+counts, independent of leaf-edge count. Pairs involving leaf-level nodes
+(column→table, column→domain, column→column) scale as edges × depth —
+the full cube observed to OOM FalkorDB (1.17M edges → 5.6M pairs) — and
+are served ON DEMAND by ``get_aggregated_edges_between`` from raw
+lineage fan-out + upward containment walks, bounded by the requested
+visible set. Same answers, same response shape; the graph stops storing
+millions of precomputed answers. ``AGGREGATION_MATERIALIZE_FINE_PAIRS``
+restores the legacy full cube (guarded by the write budget); jobs
+without an ontology level map fall back to it automatically.
 
 Cursor format
 -------------
@@ -141,6 +148,30 @@ def _materialize_leaf_pairs() -> bool:
     return os.getenv(
         "AGGREGATION_MATERIALIZE_LEAF_PAIRS", "false"
     ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _materialize_fine_pairs() -> bool:
+    """Legacy full-cube mode: also materialize pairs involving leaf-LEVEL
+    nodes (column→table, column→domain, …). These cells scale as
+    edges × hierarchy depth — the cube blow-up that can exceed the
+    FalkorDB instance's memory (observed: 1.17M edges → 5.6M pairs →
+    OOM). Default OFF: leaf-involving pairs are served on demand by
+    ``get_aggregated_edges_between`` from raw lineage + upward
+    containment walks, so the capability is unchanged while the
+    materialized set stays bounded by CONTAINER counts, independent of
+    edge count."""
+    return os.getenv(
+        "AGGREGATION_MATERIALIZE_FINE_PAIRS", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _max_materialized_edges() -> int:
+    """Hard write budget: the pipeline refuses (fails the job loudly with
+    guidance) rather than writing more :AGGREGATED edges than this into
+    the shared FalkorDB instance. The materialized result lives in
+    FalkorDB's RAM at ~0.5KB/edge — exceeding the instance's memory
+    kills it for every graph it hosts."""
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 2_000_000, 10_000, 50_000_000)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +304,12 @@ class AggregationPipeline:
         # replaces).
         self._node_dir: Optional[Dict[int, Tuple[str, str]]] = None
         self._indexed_labels: Set[str] = set()
+        # IDs of non-leaf-LEVEL nodes (labels whose ontology level is above
+        # the finest). Loaded via cheap per-label ID scans when the fine
+        # filter is active; the set is bounded by CONTAINER counts (small),
+        # never by edge or leaf counts. None = filter inactive.
+        self._nonleaf_ids: Optional[Set[int]] = None
+        self._fine_merges_skipped = 0
 
         # Run state
         self._run_start_ms: int = 0
@@ -375,6 +412,9 @@ class AggregationPipeline:
 
             # EXTRACT + COMPUTE always re-run (deterministic, minutes).
             await self._extract_and_compute()
+            # Hard write budget: refuse a result that cannot fit in the
+            # FalkorDB instance BEFORE the first write reaches it.
+            self._check_write_budget()
             self._mark_phase("reconcile_s")
 
             # RECONCILE: resume from the recorded range when the prior
@@ -425,6 +465,7 @@ class AggregationPipeline:
                 "deletes": self._deletes,
                 "pairs": affected,
                 "scanned_edges": self._scanned,
+                "fine_merges_skipped": self._fine_merges_skipped,
             },
         }
 
@@ -604,6 +645,9 @@ class AggregationPipeline:
             self.p._graph_name, len(parents), len(multi_parents),
         )
 
+        # ---- materialization boundary (non-leaf node IDs) ----
+        await self._load_nonleaf_ids()
+
         # ---- total lineage count (honest processed/total display) ----
         totals = 0
         for etype in self._effective_types:
@@ -735,19 +779,33 @@ class AggregationPipeline:
                 )
             return out
 
+        nonleaf = self._nonleaf_ids  # None = fine filter inactive
+
         async def merge_cell(cell: Dict[int, int]) -> None:
             acc = self._acc
+            skipped = 0
             for key, val in cell.items():
                 sid, tid = _unpack(key)
                 if sid == tid:
+                    continue
+                if nonleaf is not None and (
+                    sid not in nonleaf or tid not in nonleaf
+                ):
+                    # Leaf-involving pair: served on demand by the read
+                    # path — materializing these is the cube blow-up
+                    # (edges × depth) that exceeds FalkorDB memory.
+                    skipped += 1
                     continue
                 cur = acc.get(key)
                 acc[key] = val if cur is None else values.merge(
                     cur, values.weight(val), values.mask(val),
                 )
+            self._fine_merges_skipped += skipped
             await self._maybe_overflow_flush()
 
-        if self._knob_bool("materialize_leaf_pairs", _materialize_leaf_pairs):
+        if nonleaf is not None or self._knob_bool(
+            "materialize_leaf_pairs", _materialize_leaf_pairs,
+        ):
             await merge_cell(base)
 
         row = base
@@ -781,6 +839,7 @@ class AggregationPipeline:
         cap = self._pair_cap()
         if len(self._acc) < cap:
             return
+        self._check_write_budget()
         flushed = self._flushed
         overwrite = [k for k in self._acc if k not in flushed]
         add = [k for k in self._acc if k in flushed]
@@ -794,6 +853,88 @@ class AggregationPipeline:
         await self._write_keys(snapshot, overwrite, weight_mode="overwrite")
         await self._write_keys(snapshot, add, weight_mode="add")
         flushed.update(snapshot.keys())
+
+
+    # -- level-based materialization boundary --------------------------------
+
+    def _fine_filter_active(self) -> bool:
+        """True when leaf-involving pairs are excluded from materialization
+        (the default). Requires the ontology level map to classify labels;
+        legacy jobs without it fall back to full-cube behavior."""
+        if not self._entity_levels:
+            return False
+        return not self._knob_bool("materialize_fine_pairs", _materialize_fine_pairs)
+
+    def _nonleaf_labels(self) -> List[str]:
+        finest = max(self._entity_levels.values())
+        return [lbl for lbl, lv in self._entity_levels.items() if lv < finest]
+
+    async def _scan_label_nodes(self, label: str, *, want_urn: bool):
+        """Yield rows for all nodes of one label via ID-range scans (label
+        matrix iteration + cheap ID filter — never an unlabeled scan)."""
+        from backend.app.providers.falkordb_provider import _sanitize_label
+        safe = _sanitize_label(label)
+        width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
+        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
+        res = await self.p._ro_query(
+            "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
+        )
+        rows = res.result_set or []
+        max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
+        returns = "ID(n), n.urn" if want_urn else "ID(n)"
+
+        async def fetch(lo: int):
+            r = await self.p._ro_query(
+                f"MATCH (n:`{safe}`) WHERE ID(n) >= $lo AND ID(n) < $hi "
+                f"RETURN {returns}",
+                params={"lo": lo, "hi": lo + width},
+                timeout=_scan_timeout_s(),
+            )
+            return r.result_set or []
+
+        lows = list(range(0, max_id + 1, width))
+        for start in range(0, len(lows), conc):
+            self._cancel_check()
+            wave = lows[start:start + conc]
+            for result in await asyncio.gather(*(fetch(lo) for lo in wave)):
+                for row in result:
+                    yield row
+
+    async def _load_nonleaf_ids(self) -> None:
+        """Populate the non-leaf node-ID set used by the materialization
+        boundary. Bounded by container counts — cheap at any graph size."""
+        if self._nonleaf_ids is not None or not self._fine_filter_active():
+            return
+        ids: Set[int] = set()
+        for label in self._nonleaf_labels():
+            async for row in self._scan_label_nodes(label, want_urn=False):
+                if row and row[0] is not None:
+                    ids.add(int(row[0]))
+        self._nonleaf_ids = ids
+        logger.info(
+            "aggregation pipeline on %s: materialization boundary loaded — "
+            "%d non-leaf nodes (pairs involving leaf-level nodes are served "
+            "on demand, not materialized).",
+            self.p._graph_name, len(ids),
+        )
+
+    def _check_write_budget(self) -> None:
+        """Refuse to exceed the FalkorDB write budget — failing the job with
+        guidance beats OOM-killing the shared instance."""
+        cap = self._knob_int(
+            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
+        )
+        projected = len(self._acc) + len(self._flushed)
+        if projected > cap:
+            raise ValueError(
+                f"aggregation would materialize ~{projected} :AGGREGATED edges, "
+                f"exceeding max_materialized_edges={cap} for graph "
+                f"'{self.p._graph_name}'. Writing this would risk exhausting the "
+                f"FalkorDB instance's memory. Fixes: keep the default "
+                f"level-based materialization (materialize_fine_pairs=false) so "
+                f"leaf-involving pairs are served on demand; raise the cap via "
+                f"tuning only if the instance has headroom (~0.5KB per edge)."
+            )
 
     # -- node resolution -------------------------------------------------------
 
@@ -810,6 +951,21 @@ class AggregationPipeline:
         if self._node_dir is not None:
             return self._node_dir
         import sys
+        if self._fine_filter_active():
+            directory: Dict[int, Tuple[str, str]] = {}
+            for label in self._nonleaf_labels():
+                interned = sys.intern(str(label))
+                async for row in self._scan_label_nodes(label, want_urn=True):
+                    if row and row[0] is not None and row[1]:
+                        directory[int(row[0])] = (row[1], interned)
+            self._node_dir = directory
+            logger.info(
+                "aggregation pipeline on %s: node directory loaded — %d "
+                "non-leaf entries (leaf nodes excluded by the "
+                "materialization boundary).",
+                self.p._graph_name, len(directory),
+            )
+            return directory
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         res = await self.p._ro_query(

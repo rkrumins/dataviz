@@ -19,12 +19,25 @@ entity-type levels. Containment and lineage edge types are the
 ontology-resolved sets frozen onto the job row at trigger time; the
 worker re-validates the ontology fingerprint before running.
 
-**Changed:** same-position leaf↔leaf mirror pairs (an AGGREGATED edge
-duplicating a raw lineage edge 1:1) are no longer materialized — they
-doubled edge count and write volume for zero information. The read path
-(`get_aggregated_edges_between`) synthesizes them from raw lineage edges
-so `/edges/aggregated` responses (browse-mode canvases) are unchanged.
-`AGGREGATION_MATERIALIZE_LEAF_PAIRS=true` restores the old behavior.
+**The level-based materialization boundary (the scale contract):**
+only pairs where BOTH endpoints are non-leaf-level nodes are
+materialized — with complete weights. This set is bounded by CONTAINER
+counts, independent of leaf-edge count, so FalkorDB write volume and
+storage no longer grow with graph size. Pairs involving leaf-level
+nodes (column→table, column→domain, column→column) scale as
+edges × depth — the full cube (observed: 1.17M edges → 5.6M pairs →
+FalkorDB OOM) — and are computed ON DEMAND by
+`get_aggregated_edges_between`: raw lineage fan-out from the requested
+leaf nodes plus `*0..k` upward containment walks, all index-driven,
+bounded by the visible set (milliseconds even 8 levels deep on
+multi-million-edge graphs). Same answers, same response shape. Trace is
+unaffected: trace-at-level reads same-level coarse cells (still
+materialized) and already uses raw edges at the finest level. A hard
+write budget (`AGGREGATION_MAX_MATERIALIZED_EDGES`, default 2M) fails a
+job loudly with guidance rather than ever letting a result OOM the
+shared instance. `AGGREGATION_MATERIALIZE_FINE_PAIRS=true` restores the
+legacy full cube (budget-guarded); jobs without an ontology level map
+fall back to it automatically.
 
 ## Phases
 
@@ -121,7 +134,9 @@ pipeline).
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 0.5 | Sleep-after-write ratio |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
-| `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs |
+| `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
+| `AGGREGATION_MATERIALIZE_FINE_PAIRS` | false | Legacy full cube incl. leaf-level pairs |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 2000000 | Hard write budget (fail loud, never OOM) |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 2 | Concurrent read-only range scans (waves) |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 900 | Watchdog stall window |

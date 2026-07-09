@@ -50,6 +50,7 @@ const TUNING_FIELDS: TuningField[] = [
     { key: 'extractConcurrency', label: 'Extract concurrency', min: 1, max: 4, placeholder: '2', help: 'Parallel read scans per job' },
     { key: 'applyChunk', label: 'Apply chunk', min: 1_000, max: 200_000, placeholder: '20000', help: 'Pairs written per apply chunk' },
     { key: 'deleteChunk', label: 'Delete chunk', min: 100, max: 50_000, placeholder: '10000', help: 'Stale edges deleted per query' },
+    { key: 'maxMaterializedEdges', label: 'Write budget (edges)', min: 10_000, max: 50_000_000, placeholder: '2000000', help: 'Fail loudly instead of exceeding this' },
 ]
 
 function DefaultsDialog({ onClose }: { onClose: () => void }) {
@@ -156,6 +157,14 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
                                 onChange={e => setTuning(prev => ({ ...prev, materializeLeafPairs: e.target.checked || undefined }))}
                             />
                             Materialize leaf-to-leaf mirror pairs (legacy behavior; doubles write volume)
+                        </label>
+                        <label className="flex items-center gap-2 text-[12px] text-ink">
+                            <input
+                                type="checkbox"
+                                checked={tuning.materializeFinePairs === true}
+                                onChange={e => setTuning(prev => ({ ...prev, materializeFinePairs: e.target.checked || undefined }))}
+                            />
+                            Materialize fine (leaf-level) pairs — legacy full cube; scales with edges × depth and can exceed FalkorDB memory
                         </label>
                         {message && (
                             <p className="text-[11px] font-medium text-ink-muted">{message}</p>

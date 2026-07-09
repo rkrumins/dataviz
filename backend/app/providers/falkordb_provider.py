@@ -4062,15 +4062,18 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             rows = await _run_batch(source_urns)
 
-        # Same-node "mirror" pairs (an AGGREGATED edge duplicating a raw
-        # lineage edge 1:1) are no longer materialized by the pipeline —
-        # synthesize them from the raw lineage edges so browse-mode
-        # canvases (which only read /edges/aggregated) still render
-        # direct lineage between fully drilled-down nodes. Deduped in
+        # Leaf-involving pairs (column→column, column→table, column→domain,
+        # …) are no longer materialized — the full cube scales as
+        # edges × hierarchy depth and OOMs the instance on large graphs.
+        # They are computed here ON DEMAND for the requested (bounded)
+        # URN sets: raw lineage fan-out + upward containment walks, all
+        # index-driven. Coarse pairs (both endpoints non-leaf) come from
+        # the materialized rows above with complete weights. Deduped in
         # favor of a materialized row (covers graphs written before the
-        # pipeline change and AGGREGATION_MATERIALIZE_LEAF_PAIRS=true).
-        raw_rows = await self._synthesize_raw_lineage_pairs(
-            source_urns, target_urns, lineage_edges, timeout=timeout,
+        # boundary change until their next re-aggregation).
+        raw_rows = await self._synthesize_ondemand_lineage_pairs(
+            source_urns, target_urns, containment_edges, lineage_edges,
+            timeout=timeout,
         )
         if raw_rows:
             seen_pairs = {(row[0], row[1]) for row in rows}
@@ -4092,6 +4095,157 @@ class FalkorDBProvider(GraphDataProvider):
     # ------------------------------------------------------------------
     # Helpers for get_aggregated_edges_between
     # ------------------------------------------------------------------
+
+
+    async def _synthesize_ondemand_lineage_pairs(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        containment_edges: Optional[List[str]],
+        lineage_edges: Optional[List[str]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> list:
+        """Compute leaf-involving aggregated pairs on demand for bounded
+        URN sets — the read-side half of the level-based materialization
+        boundary.
+
+        A pair involves a leaf-LEVEL node only when that node is the raw
+        edge endpoint itself (leaves have no descendants), so every such
+        pair is reachable by anchoring on the leaf side's indexed
+        ``(label {urn})`` lookup and walking the OTHER endpoint upward
+        through containment (``*0..k`` — one parent per hop, bound-end
+        traversal). Cost ≈ fan-out(requested leaves) × hierarchy depth,
+        independent of graph size — this is what makes an 8-level,
+        multi-million-edge graph answer "which domains does this column
+        reach" in milliseconds without materializing edges × depth cells.
+
+        Pairs where BOTH endpoints are non-leaf are NOT produced here —
+        they come from the materialized coarse cells (complete weights),
+        so the two sources are disjoint by construction.
+
+        Falls back to exact-endpoint raw synthesis when no ontology level
+        map is injected (legacy full-cube graphs).
+        """
+        from ..config.resilience import (
+            AGGREGATED_EDGE_RESULT_CAP,
+            AGGREGATED_SOURCE_URN_BATCH_SIZE,
+        )
+
+        ltypes = self._alias_rel_types(
+            [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
+        )
+        if not ltypes or not source_urns:
+            return []
+        levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        if not levels:
+            return await self._synthesize_raw_lineage_pairs(
+                source_urns, target_urns, lineage_edges, timeout=timeout,
+            )
+
+        finest = max(levels.values())
+        leaf_labels = [lbl for lbl, lv in levels.items() if lv == finest]
+        try:
+            containment = list(self._alias_rel_types(
+                [t for t in (containment_edges or []) if t]
+            ) or self._get_containment_edge_types())
+        except Exception:
+            containment = []
+        if not leaf_labels or not containment:
+            return await self._synthesize_raw_lineage_pairs(
+                source_urns, target_urns, lineage_edges, timeout=timeout,
+            )
+        c_pattern = "|".join(_sanitize_label(t) for t in containment)
+        hops = max(len(levels), 10)
+        cap = AGGREGATED_EDGE_RESULT_CAP
+        batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
+        lt_list = list(ltypes)
+
+        async def _classify_leaves(urns: List[str]) -> Dict[str, List[str]]:
+            """label → member urns, via per-leaf-label indexed IN lookups."""
+            out: Dict[str, List[str]] = {}
+            for lbl in leaf_labels:
+                safe = _sanitize_label(lbl)
+                members: List[str] = []
+                for i in range(0, len(urns), batch):
+                    chunk = urns[i:i + batch]
+                    try:
+                        res = await self._ro_query(
+                            f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
+                            params={"urns": chunk},
+                            timeout=timeout,
+                        )
+                        members.extend(r[0] for r in (res.result_set or []) if r and r[0])
+                    except Exception as e:
+                        logger.warning("On-demand pair classification failed: %s", e)
+                if members:
+                    out[lbl] = members
+            return out
+
+        async def _run(cypher: str, params: Dict[str, Any]) -> list:
+            try:
+                res = await self._ro_query(cypher, params=params, timeout=timeout)
+                return res.result_set or []
+            except Exception as e:
+                logger.warning("On-demand lineage pair query failed: %s", e)
+                return []
+
+        rows: list = []
+        src_leaf_by_label = await _classify_leaves(source_urns)
+        src_leaf_set = {u for m in src_leaf_by_label.values() for u in m}
+
+        if target_urns:
+            # Q1 — requested LEAF sources: their raw fan-out, targets resolved
+            # exactly or upward to any requested ancestor.
+            for lbl, members in src_leaf_by_label.items():
+                safe = _sanitize_label(lbl)
+                for i in range(0, len(members), batch):
+                    rows.extend(await _run(
+                        f"MATCH (x:{safe})-[r]->(t) "
+                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                        f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
+                        f"WHERE y.urn IN $ys AND x.urn <> y.urn "
+                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                        f"count(DISTINCT r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"xs": members[i:i + batch], "ys": target_urns, "lt": lt_list},
+                    ))
+            # Q2 — requested LEAF targets: their raw fan-in, sources resolved
+            # exactly or upward to any requested NON-leaf node (leaf sources
+            # were fully covered by Q1 — the two are disjoint).
+            tgt_leaf_by_label = await _classify_leaves(target_urns)
+            src_nonleaf = [u for u in source_urns if u not in src_leaf_set]
+            if src_nonleaf:
+                for lbl, members in tgt_leaf_by_label.items():
+                    safe = _sanitize_label(lbl)
+                    for i in range(0, len(members), batch):
+                        rows.extend(await _run(
+                            f"MATCH (s)-[r]->(y:{safe}) "
+                            f"WHERE y.urn IN $ys AND type(r) IN $lt "
+                            f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
+                            f"WHERE x.urn IN $xs AND x.urn <> y.urn "
+                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                            f"count(DISTINCT r) AS weight, "
+                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                            {"ys": members[i:i + batch], "xs": src_nonleaf, "lt": lt_list},
+                        ))
+        else:
+            # Source-only mode (no target set): exact raw fan-out of the
+            # requested leaf sources. Upward resolution is skipped — with no
+            # target set to bound it, it would enumerate every ancestor.
+            for lbl, members in src_leaf_by_label.items():
+                safe = _sanitize_label(lbl)
+                for i in range(0, len(members), batch):
+                    rows.extend(await _run(
+                        f"MATCH (x:{safe})-[r]->(t) "
+                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                        f"AND t.urn <> x.urn "
+                        f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
+                        f"count(r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"xs": members[i:i + batch], "lt": lt_list},
+                    ))
+        return rows
 
     async def _synthesize_raw_lineage_pairs(
         self,
