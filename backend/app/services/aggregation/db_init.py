@@ -94,6 +94,14 @@ async def init_aggregation_db() -> None:
                 # per-label indexing without an ontology-module dependency.
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS entity_type_levels TEXT NULL",
+                # Iteration 2 (2026-07) — per-job pipeline tuning (JSON),
+                # durable per-phase run stats, and which worker ran the job.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS tuning_json TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS run_stats TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS worker_id TEXT NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

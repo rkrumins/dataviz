@@ -421,23 +421,29 @@ def test_first_checkpoint_persists_parseable_cursor():
     p = _make_provider(fake, levels)
     cursors = []
 
-    async def progress(processed, total, cursor, created, phase, *, progress_pct=None):
-        cursors.append((cursor, phase, progress_pct))
+    async def progress(
+        processed, total, cursor, created, phase,
+        *, progress_pct=None, stats=None,
+    ):
+        cursors.append((cursor, phase, progress_pct, stats))
 
     _run(_materialize(p, progress=progress))
 
     assert cursors, "no checkpoints fired"
-    first_cursor, first_phase, _ = cursors[0]
+    first_cursor, first_phase, _, _ = cursors[0]
     assert mat.parse_cursor(first_cursor) is not None
     assert first_phase == "extracting"
     # progress_pct is monotonic 0-100 across phases
-    pcts = [pct for (_, _, pct) in cursors if pct is not None]
+    pcts = [pct for (_, _, pct, _) in cursors if pct is not None]
     assert pcts == sorted(pcts)
     assert pcts[-1] == 100
     # every phase label surfaced to the UI is one of the new set
-    assert {ph for (_, ph, _) in cursors} <= {
+    assert {ph for (_, ph, _, _) in cursors} <= {
         "extracting", "computing", "reconciling", "applying",
     }
+    # live write/delete stats ride along on every checkpoint
+    final_stats = cursors[-1][3]
+    assert final_stats is not None and final_stats["writes"] == len(_EXPECTED_PAIRS)
 
 
 def test_cancel_then_resume_completes_exactly():

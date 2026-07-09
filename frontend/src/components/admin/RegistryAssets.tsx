@@ -916,7 +916,11 @@ export function RegistryAssets() {
 
         showLoading('reaggregate', 'Discovering data sources…')
         try {
-            const wsList = await workspaceService.list()
+            // Admin-level tuning defaults seed the dialog; best-effort only.
+            const [wsList, settings] = await Promise.all([
+                workspaceService.list(),
+                aggregationService.getAggregationSettings().catch(() => null),
+            ])
             const dataSourcesToTrigger: Array<{ id: string; projectionMode?: string | null }> =
                 wsList.flatMap((ws: any) =>
                     ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
@@ -940,6 +944,7 @@ export function RegistryAssets() {
                     projectionMode: firstMode,
                     maxRetries: 3,
                     timeoutMinutes: 120,
+                    tuning: settings?.tuning ?? undefined,
                 },
             })
         } catch (e: any) {
@@ -957,6 +962,7 @@ export function RegistryAssets() {
         const { dataSources } = reaggregateCtx
         showLoading('reaggregate', `Triggering aggregation for ${dataSources.length} data source(s)…`)
         const timeoutSecs = overrides.timeoutMinutes * 60
+        const tuning = overrides.tuning && Object.keys(overrides.tuning).length > 0 ? overrides.tuning : undefined
         try {
             const results = await Promise.allSettled(dataSources.map(ds =>
                 aggregationService.triggerAggregation(ds.id, {
@@ -964,6 +970,7 @@ export function RegistryAssets() {
                     batchSize: overrides.batchSize,
                     maxRetries: overrides.maxRetries,
                     timeoutSecs,
+                    tuning,
                 }, 'manual')
             ))
 

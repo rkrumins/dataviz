@@ -88,6 +88,19 @@ class AggregationJobORM(Base):
     # ── Dynamic timeout (estimated from graph size at trigger time) ──
     timeout_secs = Column(Integer, nullable=True)  # None = use global default
 
+    # ── Pipeline tuning + run reporting (Iteration 2) ─────────────────
+    # tuning_json: JSON object of pipeline knob overrides (scan range
+    # width, memory cap, pacing, chunks, extract concurrency, leaf-pair
+    # toggle). Frozen at trigger time = request.tuning merged over the
+    # stored global defaults; resume overrides replace it. NULL = env
+    # defaults only (legacy rows).
+    tuning_json = Column(Text, nullable=True)
+    # run_stats: JSON written on completion — per-phase durations plus
+    # writes/deletes/pairs counters for the job detail UI.
+    run_stats = Column(Text, nullable=True)
+    # worker_id: which worker (pod/consumer) executed this job.
+    worker_id = Column(Text, nullable=True)
+
     # ── Fingerprinting (change detection) ────────────────────────────
     graph_fingerprint_before = Column(Text, nullable=True)
     graph_fingerprint_after = Column(Text, nullable=True)
@@ -169,3 +182,19 @@ class AggregationDataSourceStateORM(Base):
     aggregation_edge_count = Column(Integer, nullable=False, default=0)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
+
+
+class AggregationSettingsORM(Base):
+    """Global aggregation defaults (single row, id='global').
+
+    Stores the default pipeline tuning applied to every job at trigger
+    time (request-level tuning overrides layer on top). Editable via
+    GET/PUT /aggregation/settings and the admin Defaults dialog.
+    """
+    __tablename__ = "aggregation_settings"
+    __table_args__ = ({"schema": "aggregation"},)
+
+    id = Column(Text, primary_key=True, default="global")
+    tuning_json = Column(Text, nullable=True)  # JSON: AggregationTuning fields
+    updated_at = Column(Text, nullable=True)
+    updated_by = Column(Text, nullable=True)

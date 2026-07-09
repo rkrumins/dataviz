@@ -3951,6 +3951,7 @@ class FalkorDBProvider(GraphDataProvider):
         should_cancel: Optional[Callable[[], bool]] = None,
         resume_processed: int = 0,
         resume_created: int = 0,
+        tuning: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Materialize :AGGREGATED rollup edges (single resumable pipeline).
 
@@ -3977,6 +3978,7 @@ class FalkorDBProvider(GraphDataProvider):
             should_cancel=should_cancel,
             resume_processed=resume_processed,
             resume_created=resume_created,
+            tuning=tuning,
         )
 
     async def get_aggregated_edges_between(

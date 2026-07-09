@@ -7,9 +7,12 @@
  * with a fully-formed value on every edit. Only UI-only state (`showAdvanced`)
  * lives inside the component.
  *
- * Bounds: batchSize 100..50,000, maxRetries 0..10, timeoutMinutes 1..1440.
- * Out-of-range values are clamped on blur (live keystrokes are forwarded as-is
- * so the user can finish typing).
+ * Bounds: maxRetries 0..10, timeoutMinutes 1..1440, plus the pipeline tuning
+ * caps/floors in TUNING_FIELDS. Out-of-range values are clamped on blur (live
+ * keystrokes are forwarded as-is so the user can finish typing).
+ *
+ * Note: `batchSize` remains in the value shape for API backward compatibility
+ * but is no longer rendered — the new pipeline self-tunes its batches (AIMD).
  */
 import { useMemo, useState, type JSX } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -18,16 +21,18 @@ import {
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
+import type { AggregationTuning } from '@/services/aggregationService'
 
 // ============================================
 // Public Contract
 // ============================================
 
 export interface AggregationOverridesValue {
-    batchSize: number          // 100..50000 (validator displays a warning outside this range)
+    batchSize: number          // kept for API backward-compat; inert on the self-tuning pipeline (not rendered)
     projectionMode: 'in_source' | 'dedicated'
     maxRetries: number         // 0..10
     timeoutMinutes: number     // 1..1440 (UI uses minutes; callers convert to seconds at the API boundary)
+    tuning?: AggregationTuning // optional caps/floors for the self-tuning pipeline
 }
 
 export interface AggregationOverridesFormProps {
@@ -42,14 +47,11 @@ export interface AggregationOverridesFormProps {
 // Bounds & Clamping
 // ============================================
 
-const BATCH_MIN = 100
-const BATCH_MAX = 50000
 const RETRIES_MIN = 0
 const RETRIES_MAX = 10
 const TIMEOUT_MIN = 1
 const TIMEOUT_MAX = 1440
 
-const clampBatch = (n: number) => Math.max(BATCH_MIN, Math.min(BATCH_MAX, n))
 const clampRetries = (n: number) => Math.max(RETRIES_MIN, Math.min(RETRIES_MAX, n))
 const clampTimeout = (n: number) => Math.max(TIMEOUT_MIN, Math.min(TIMEOUT_MAX, n))
 
@@ -96,6 +98,150 @@ function ImpactMeter({ label, level, max = 5 }: { label: string; level: number; 
 }
 
 // ============================================
+// Advanced Tuning (shared with the admin "Defaults" dialog)
+// ============================================
+
+interface TuningFieldSpec {
+    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency'
+    label: string
+    tip: string
+    help: string
+    min: number
+    max: number
+    placeholder: number
+    step?: number
+    float?: boolean
+}
+
+const TUNING_FIELDS: TuningFieldSpec[] = [
+    {
+        key: 'scanRangeWidth',
+        label: 'Scan range width',
+        tip: 'Width of each edge-ID range the extract phase scans per query. The pipeline shrinks this automatically under pressure — this value is the ceiling.',
+        help: 'Edges per scan range (10,000-5,000,000)',
+        min: 10_000, max: 5_000_000, placeholder: 250_000,
+    },
+    {
+        key: 'writePacingRatio',
+        label: 'Write pacing ratio',
+        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries; 0 disables pacing.',
+        help: 'Pause between writes (0-10)',
+        min: 0, max: 10, placeholder: 0.5, step: 0.1, float: true,
+    },
+    {
+        key: 'maxPendingPairs',
+        label: 'Memory cap — max pending pairs',
+        tip: 'Maximum aggregated pairs held in memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles.',
+        help: 'Pairs held in memory (50,000-50,000,000)',
+        min: 50_000, max: 50_000_000, placeholder: 5_000_000,
+    },
+    {
+        key: 'extractConcurrency',
+        label: 'Extract concurrency',
+        tip: 'Number of parallel extract scans. Higher values speed up the extract phase but put more read load on the provider.',
+        help: 'Parallel scans (1-4)',
+        min: 1, max: 4, placeholder: 2,
+    },
+]
+
+export interface TuningFieldsProps {
+    value: AggregationTuning
+    onChange: (next: AggregationTuning) => void
+    disabled?: boolean
+}
+
+/**
+ * TuningFields — the raw Advanced-tuning inputs, without the collapsible
+ * shell, so the workspace dashboard's "Defaults" dialog can reuse them.
+ * Empty inputs mean "no override" (the key is omitted from `tuning`).
+ */
+export function TuningFields({ value, onChange, disabled = false }: TuningFieldsProps): JSX.Element {
+    const setField = (spec: TuningFieldSpec, raw: string, clamp: boolean) => {
+        const next: AggregationTuning = { ...value }
+        const parsed = spec.float ? parseFloat(raw) : parseInt(raw)
+        if (raw === '' || !Number.isFinite(parsed)) {
+            // Cleared (or garbage on blur) → drop the override, fall back to default.
+            if (raw === '' || clamp) {
+                delete next[spec.key]
+                onChange(next)
+            }
+            return
+        }
+        next[spec.key] = clamp ? Math.max(spec.min, Math.min(spec.max, parsed)) : parsed
+        onChange(next)
+    }
+
+    const materialize = value.materializeLeafPairs ?? true
+
+    return (
+        <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+                {TUNING_FIELDS.map(spec => (
+                    <div key={spec.key}>
+                        <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
+                            {spec.label}
+                            <Tip label={spec.tip}>
+                                <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
+                            </Tip>
+                        </label>
+                        <input
+                            type="number"
+                            min={spec.min}
+                            max={spec.max}
+                            step={spec.step}
+                            disabled={disabled}
+                            placeholder={String(spec.placeholder)}
+                            value={value[spec.key] ?? ''}
+                            onChange={e => setField(spec, e.target.value, false)}
+                            onBlur={e => setField(spec, e.target.value, true)}
+                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
+                        />
+                        <p className="text-[10px] text-ink-muted mt-1">{spec.help}</p>
+                    </div>
+                ))}
+            </div>
+
+            {/* Materialize leaf-to-leaf pairs toggle */}
+            <button
+                type="button"
+                role="switch"
+                aria-checked={materialize}
+                disabled={disabled}
+                onClick={() => onChange({ ...value, materializeLeafPairs: !materialize })}
+                className={cn(
+                    'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-colors duration-150',
+                    materialize
+                        ? 'border-indigo-500/30 bg-indigo-500/5'
+                        : 'border-glass-border hover:border-indigo-500/20',
+                    disabled && 'cursor-not-allowed'
+                )}
+            >
+                <div className={cn(
+                    'flex-shrink-0 w-[32px] h-[18px] rounded-full relative transition-colors duration-200',
+                    materialize ? 'bg-indigo-500/85' : 'bg-ink-muted/25 dark:bg-white/15',
+                )}>
+                    <div className={cn(
+                        'absolute top-[2px] w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-all duration-200',
+                        materialize ? 'left-[15px]' : 'left-[2px]',
+                    )} />
+                </div>
+                <div className="flex-1 min-w-0">
+                    <span className={cn(
+                        'block text-[11px] font-medium',
+                        materialize ? 'text-indigo-400' : 'text-ink-secondary'
+                    )}>
+                        Materialize leaf-to-leaf pairs
+                    </span>
+                    <span className="block text-[10px] text-ink-muted mt-0.5">
+                        Write direct leaf-to-leaf aggregated edges in addition to rollups. Disable to cut writes and memory on very dense graphs.
+                    </span>
+                </div>
+            </button>
+        </div>
+    )
+}
+
+// ============================================
 // Config Presets
 // ============================================
 
@@ -104,39 +250,44 @@ interface ConfigPreset {
     label: string
     description: string
     icon: typeof Shield
-    batchSize: number
     maxRetries: number
     timeoutMinutes: number
+    tuning: AggregationTuning
 }
 
 const CONFIG_PRESETS: ConfigPreset[] = [
     {
         id: 'conservative',
         label: 'Conservative',
-        description: 'Safest option — low memory, high resilience',
+        description: 'Safest option — low provider load, gentle write pacing',
         icon: Shield,
-        batchSize: 500,
         maxRetries: 5,
         timeoutMinutes: 180,
+        tuning: { scanRangeWidth: 100_000, writePacingRatio: 1.0, extractConcurrency: 1 },
     },
     {
         id: 'balanced',
         label: 'Balanced',
-        description: 'Recommended for most workloads',
+        description: 'Recommended — self-tuning defaults',
         icon: Activity,
-        batchSize: 1000,
         maxRetries: 3,
         timeoutMinutes: 120,
+        tuning: {},
     },
     {
         id: 'performance',
         label: 'Performance',
-        description: 'Maximum throughput, less fault-tolerant',
+        description: 'Maximum throughput, heavier provider load',
         icon: Zap,
-        batchSize: 5000,
         maxRetries: 1,
         timeoutMinutes: 60,
+        tuning: { scanRangeWidth: 500_000, writePacingRatio: 0.25, extractConcurrency: 3 },
     },
+]
+
+const TUNING_KEYS: (keyof AggregationTuning)[] = [
+    'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
+    'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
 ]
 
 // ============================================
@@ -152,26 +303,22 @@ export function AggregationOverridesForm({
     const [showAdvanced, setShowAdvanced] = useState(false)
 
     const activePreset = useMemo(() => {
+        const tuning = value.tuning ?? {}
         return CONFIG_PRESETS.find(p =>
-            p.batchSize === value.batchSize &&
             p.maxRetries === value.maxRetries &&
-            p.timeoutMinutes === value.timeoutMinutes
+            p.timeoutMinutes === value.timeoutMinutes &&
+            TUNING_KEYS.every(k => tuning[k] === p.tuning[k])
         )?.id ?? null
-    }, [value.batchSize, value.maxRetries, value.timeoutMinutes])
+    }, [value.maxRetries, value.timeoutMinutes, value.tuning])
 
     const currentTraits = useMemo(() => {
-        const bs = value.batchSize
         const mr = value.maxRetries
         const tm = value.timeoutMinutes
         return {
-            memory: bs <= 500 ? 1 : bs <= 1000 ? 2 : bs <= 2000 ? 3 : bs <= 5000 ? 4 : 5,
-            speed: Math.min(5, Math.max(1, Math.round(
-                (bs <= 500 ? 1 : bs <= 1000 ? 2 : bs <= 2000 ? 3 : bs <= 5000 ? 4 : 5) * 0.6 +
-                (tm <= 60 ? 5 : tm <= 120 ? 3 : tm <= 180 ? 2 : 1) * 0.4
-            ))),
+            speed: tm <= 60 ? 5 : tm <= 120 ? 3 : tm <= 180 ? 2 : 1,
             reliability: mr >= 5 ? 5 : mr >= 3 ? 3 : mr >= 1 ? 2 : 1,
         }
-    }, [value.batchSize, value.maxRetries, value.timeoutMinutes])
+    }, [value.maxRetries, value.timeoutMinutes])
 
     const update = (patch: Partial<AggregationOverridesValue>) => {
         onChange({ ...value, ...patch })
@@ -179,9 +326,9 @@ export function AggregationOverridesForm({
 
     const applyPreset = (preset: ConfigPreset) => {
         update({
-            batchSize: preset.batchSize,
             maxRetries: preset.maxRetries,
             timeoutMinutes: preset.timeoutMinutes,
+            tuning: { ...preset.tuning },
         })
     }
 
@@ -332,39 +479,7 @@ export function AggregationOverridesForm({
                                 </div>
 
                                 {/* Parameter Grid */}
-                                <div className="grid grid-cols-3 gap-4">
-                                    {/* Batch Size */}
-                                    <div>
-                                        <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                                            Batch Size
-                                            <Tip label="Number of edges processed per database transaction. Higher values mean fewer round trips to the database but require more memory per batch. Start low for graphs with complex edge properties.">
-                                                <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
-                                            </Tip>
-                                        </label>
-                                        <input
-                                            type="number"
-                                            min={BATCH_MIN}
-                                            max={BATCH_MAX}
-                                            disabled={disabled}
-                                            value={value.batchSize}
-                                            onChange={e => {
-                                                const parsed = parseInt(e.target.value)
-                                                if (Number.isFinite(parsed)) {
-                                                    update({ batchSize: parsed })
-                                                }
-                                            }}
-                                            onBlur={e => {
-                                                const v = parseInt(e.target.value)
-                                                update({ batchSize: clampBatch(Number.isFinite(v) ? v : 1000) })
-                                            }}
-                                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
-                                        />
-                                        <p className="text-[10px] text-ink-muted mt-1">Edges per batch (100-50,000)</p>
-                                        <div className="mt-1.5">
-                                            <ImpactMeter label="Memory" level={currentTraits.memory} />
-                                        </div>
-                                    </div>
-
+                                <div className="grid grid-cols-2 gap-4">
                                     {/* Max Retries */}
                                     <div>
                                         <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
@@ -430,23 +545,21 @@ export function AggregationOverridesForm({
                                     </div>
                                 </div>
 
-                                {/* Estimated Impact Guidance */}
-                                <div className="pt-3 border-t border-glass-border/50">
-                                    <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider mb-2">Guidance for Your Graph Size</p>
-                                    <div className="grid grid-cols-3 gap-3">
-                                        <div className="text-[11px] text-ink-muted">
-                                            <span className="font-semibold text-ink-secondary">Small (&lt;10K edges)</span>
-                                            <p className="mt-0.5 leading-relaxed">Batch 500 &middot; 2-5 min</p>
-                                        </div>
-                                        <div className="text-[11px] text-ink-muted">
-                                            <span className="font-semibold text-ink-secondary">Medium (10K-100K)</span>
-                                            <p className="mt-0.5 leading-relaxed">Batch 1000 &middot; 10-30 min</p>
-                                        </div>
-                                        <div className="text-[11px] text-ink-muted">
-                                            <span className="font-semibold text-ink-secondary">Large (100K+)</span>
-                                            <p className="mt-0.5 leading-relaxed">Batch 5000 &middot; 30-120 min</p>
-                                        </div>
+                                {/* Advanced tuning — pipeline caps/floors */}
+                                <div className="pt-3 border-t border-glass-border/50 space-y-3">
+                                    <div>
+                                        <p className="text-[10px] font-bold text-ink-muted uppercase tracking-wider">Advanced Tuning</p>
+                                        <p className="text-[11px] text-ink-muted mt-1 leading-relaxed">
+                                            The pipeline is self-tuning (AIMD) — it adapts batch and chunk sizes to
+                                            provider latency automatically. These settings are caps and floors, not
+                                            fixed values. Leave blank to use the defaults shown.
+                                        </p>
                                     </div>
+                                    <TuningFields
+                                        value={value.tuning ?? {}}
+                                        onChange={tuning => update({ tuning })}
+                                        disabled={disabled}
+                                    />
                                 </div>
                             </div>
                         </motion.div>

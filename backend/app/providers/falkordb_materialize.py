@@ -130,6 +130,13 @@ def _scan_timeout_s() -> float:
     return _env_float("FALKORDB_SCAN_RANGE_TIMEOUT", 30.0, 5.0, 600.0)
 
 
+def _extract_concurrency() -> int:
+    """Concurrent read-only range scans (extract/reconcile/node directory).
+    Bounded well below the server's THREAD_COUNT so interactive readers
+    always have query threads."""
+    return _env_int("AGGREGATION_EXTRACT_CONCURRENCY", 2, 1, 4)
+
+
 def _materialize_leaf_pairs() -> bool:
     return os.getenv(
         "AGGREGATION_MATERIALIZE_LEAF_PAIRS", "false"
@@ -239,8 +246,12 @@ class AggregationPipeline:
         progress_callback: Optional[Any],
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
+        tuning: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.p = provider
+        # Per-job tuning overrides (frozen on the job row at trigger time)
+        # layered over env defaults — see _knob_int/_knob_float/_knob_bool.
+        self._tuning: Dict[str, Any] = dict(tuning or {})
         self._containment_arg = containment_edge_types
         self._lineage_arg = lineage_edge_types
         self._last_cursor = last_cursor
@@ -279,7 +290,46 @@ class AggregationPipeline:
         self._progress_pct = 0
         self._max_applied_key = 0
 
-        self._pacing_ratio = _pacing_ratio()
+        self._pacing_ratio = self._knob_float("write_pacing_ratio", _pacing_ratio, 0.0, 10.0)
+        self._phase_started = time.monotonic()
+        self._phase_timings: Dict[str, float] = {}
+
+    # -- tuning knob resolution ---------------------------------------------
+
+    def _knob_int(self, name: str, env_default: Callable[[], int], lo: int, hi: int) -> int:
+        raw = self._tuning.get(name)
+        if raw is None:
+            return env_default()
+        try:
+            return max(lo, min(hi, int(raw)))
+        except (TypeError, ValueError):
+            return env_default()
+
+    def _knob_float(self, name: str, env_default: Callable[[], float], lo: float, hi: float) -> float:
+        raw = self._tuning.get(name)
+        if raw is None:
+            return env_default()
+        try:
+            return max(lo, min(hi, float(raw)))
+        except (TypeError, ValueError):
+            return env_default()
+
+    def _knob_bool(self, name: str, env_default: Callable[[], bool]) -> bool:
+        raw = self._tuning.get(name)
+        if raw is None:
+            return env_default()
+        return bool(raw)
+
+    def _mark_phase(self, name: str) -> None:
+        """Close the previous timing bucket and open ``name``."""
+        now = time.monotonic()
+        elapsed = now - self._phase_started
+        if elapsed > 0 and getattr(self, "_current_timing", None):
+            self._phase_timings[self._current_timing] = round(
+                self._phase_timings.get(self._current_timing, 0.0) + elapsed, 2,
+            )
+        self._current_timing = name
+        self._phase_started = now
 
     # -- public entry ------------------------------------------------------
 
@@ -319,10 +369,13 @@ class AggregationPipeline:
             # Persist a parseable cursor IMMEDIATELY — before any graph
             # work — so an early crash resumes instead of restarting with
             # a NULL cursor (the v2 wipe-on-resume failure mode).
+            self._current_timing = "extract_s"
+            self._phase_started = time.monotonic()
             await self._checkpoint(PHASE_AGGREGATE, 0, phase_label="extracting")
 
             # EXTRACT + COMPUTE always re-run (deterministic, minutes).
             await self._extract_and_compute()
+            self._mark_phase("reconcile_s")
 
             # RECONCILE: resume from the recorded range when the prior
             # attempt died mid-scan; earlier ranges' deletes/updates are
@@ -334,8 +387,10 @@ class AggregationPipeline:
             # resume past a mid-apply crash the earlier attempt's
             # ``existing`` set is unknown, so remaining keys are simply
             # (idempotently) MERGE-written again.
+            self._mark_phase("apply_s")
             apply_after = pos if phase == PHASE_APPLY else None
             await self._apply_missing(existing, after_key=apply_after)
+            self._mark_phase("done")
 
             await self._stamp_materialized()
             final_total = len(self._flushed | set(self._acc.keys()))
@@ -364,6 +419,13 @@ class AggregationPipeline:
             "errors": 0,
             "writes": self._writes,
             "deletes": self._deletes,
+            "run_stats": {
+                **{k: v for k, v in self._phase_timings.items() if k != "done"},
+                "writes": self._writes,
+                "deletes": self._deletes,
+                "pairs": affected,
+                "scanned_edges": self._scanned,
+            },
         }
 
     def _cancel_check(self) -> None:
@@ -384,13 +446,16 @@ class AggregationPipeline:
             self._scanned, max(self._total, self._scanned), cursor,
             self._writes, phase_label,
         )
+        live_stats = {"writes": self._writes, "deletes": self._deletes}
         from backend.app.services.aggregation.cancel import JobCancelled
         try:
             if self._cb_accepts_pct is False:
                 await self._progress_cb(*args)
             else:
                 try:
-                    await self._progress_cb(*args, progress_pct=self._progress_pct)
+                    await self._progress_cb(
+                        *args, progress_pct=self._progress_pct, stats=live_stats,
+                    )
                     self._cb_accepts_pct = True
                 except TypeError:
                     if self._cb_accepts_pct is True:
@@ -473,29 +538,38 @@ class AggregationPipeline:
 
     async def _scan_type_ranges(self, safe_type: str, *, proj: bool = False):
         """Yield ``(range_lo, rows)`` for one edge type in fixed ID-range
-        partitions.
+        partitions, fetched in bounded-concurrency WAVES.
 
         ``WHERE ID(r) >= lo AND ID(r) < hi`` with no ORDER BY / LIMIT: each
         range is one relation-matrix iteration with a cheap ID filter, so a
         full scan costs O(E × ranges) matrix hops instead of the legacy
-        O(E²) sorted re-scans. Ranges are deterministic → resumable.
+        O(E²) sorted re-scans. Ranges are deterministic → resumable. Waves
+        of ``extract_concurrency`` read-only queries run in parallel —
+        FalkorDB serves reads on THREAD_COUNT threads, so this hides the
+        per-range round-trip latency without touching the write path.
         """
-        width = _scan_range_width()
+        width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
+        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         max_id = await self._max_edge_id(f"()-[r:`{safe_type}`]->()", proj=proj)
         runner = self.p._proj_ro_query if proj else self.p._ro_query
-        lo = 0
-        while lo <= max_id:
-            hi = lo + width
-            self._cancel_check()
+
+        async def fetch(lo: int):
             res = await runner(
                 f"MATCH (s)-[r:`{safe_type}`]->(t) "
                 f"WHERE ID(r) >= $lo AND ID(r) < $hi "
                 f"RETURN ID(s), ID(t)",
-                params={"lo": lo, "hi": hi},
+                params={"lo": lo, "hi": lo + width},
                 timeout=_scan_timeout_s(),
             )
-            yield lo, (res.result_set or [])
-            lo = hi
+            return lo, (res.result_set or [])
+
+        lows = list(range(0, max_id + 1, width))
+        for start in range(0, len(lows), conc):
+            self._cancel_check()
+            wave = lows[start:start + conc]
+            results = await asyncio.gather(*(fetch(lo) for lo in wave))
+            for lo, rows in results:
+                yield lo, rows
 
     async def _extract_and_compute(self) -> None:
         """Load containment into a child→parent map, stream lineage edges
@@ -538,7 +612,7 @@ class AggregationPipeline:
 
         # ---- stream lineage edges → base map → lattice roll-ups ----
         values = self._values
-        cap = _max_pending_pairs()
+        cap = self._pair_cap()
         base: Dict[int, int] = {}
 
         for etype in self._effective_types:
@@ -571,6 +645,7 @@ class AggregationPipeline:
                     base = {}
 
         self._progress_pct = 45
+        self._mark_phase("compute_s")
         await self._checkpoint(
             PHASE_AGGREGATE, self._scanned, phase_label="computing",
         )
@@ -672,7 +747,7 @@ class AggregationPipeline:
                 )
             await self._maybe_overflow_flush()
 
-        if _materialize_leaf_pairs():
+        if self._knob_bool("materialize_leaf_pairs", _materialize_leaf_pairs):
             await merge_cell(base)
 
         row = base
@@ -692,6 +767,9 @@ class AggregationPipeline:
             await merge_cell(row)
             await asyncio.sleep(0)
 
+    def _pair_cap(self) -> int:
+        return self._knob_int("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000)
+
     async def _maybe_overflow_flush(self) -> None:
         """Early-apply the accumulator when it exceeds the memory cap.
 
@@ -700,7 +778,7 @@ class AggregationPipeline:
         flushes ADD. Flushed edges carry ``latestUpdate >= run_start_ms``
         so the reconcile delete pass never removes them. Weights therefore
         stay EXACT across flushes and across restart-from-zero resumes."""
-        cap = _max_pending_pairs()
+        cap = self._pair_cap()
         if len(self._acc) < cap:
             return
         flushed = self._flushed
@@ -732,29 +810,33 @@ class AggregationPipeline:
         if self._node_dir is not None:
             return self._node_dir
         import sys
-        width = _scan_range_width()
+        width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
+        conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         res = await self.p._ro_query(
             "MATCH (n) RETURN max(ID(n))", timeout=_scan_timeout_s(),
         )
         rows = res.result_set or []
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
         directory: Dict[int, Tuple[str, str]] = {}
-        lo = 0
-        while lo <= max_id:
-            hi = lo + width
-            self._cancel_check()
-            res = await self.p._ro_query(
+
+        async def fetch(lo: int):
+            return await self.p._ro_query(
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
                 "RETURN ID(n), n.urn, labels(n)",
-                params={"lo": lo, "hi": hi},
+                params={"lo": lo, "hi": lo + width},
                 timeout=_scan_timeout_s(),
             )
-            for row in (res.result_set or []):
-                nid, urn, labels = row[0], row[1], row[2] or []
-                if nid is None or not urn or not labels:
-                    continue
-                directory[int(nid)] = (urn, sys.intern(str(labels[0])))
-            lo = hi
+
+        lows = list(range(0, max_id + 1, width))
+        for start in range(0, len(lows), conc):
+            self._cancel_check()
+            wave = lows[start:start + conc]
+            for res in await asyncio.gather(*(fetch(lo) for lo in wave)):
+                for row in (res.result_set or []):
+                    nid, urn, labels = row[0], row[1], row[2] or []
+                    if nid is None or not urn or not labels:
+                        continue
+                    directory[int(nid)] = (urn, sys.intern(str(labels[0])))
         self._node_dir = directory
         logger.info(
             "aggregation pipeline on %s: node directory loaded — %d entries.",
@@ -934,7 +1016,7 @@ class AggregationPipeline:
         self, source: Dict[int, int], keys: List[int], *, weight_mode: str,
     ) -> None:
         """Resolve + write the given pair keys in bounded chunks."""
-        chunk_size = _apply_chunk()
+        chunk_size = self._knob_int("apply_chunk", _apply_chunk, 1_000, 200_000)
         for start in range(0, len(keys), chunk_size):
             chunk_keys = keys[start:start + chunk_size]
             ids: Set[int] = set()
@@ -972,7 +1054,7 @@ class AggregationPipeline:
                 if s_res and t_res:
                     key_by_aggkey[f"{s_res[0]}|{t_res[0]}"] = key
 
-        width = _scan_range_width()
+        width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         max_id = await self._max_edge_id("()-[r:AGGREGATED]->()", proj=True)
         runner = self.p._proj_ro_query
         values = self._values
@@ -1077,7 +1159,7 @@ class AggregationPipeline:
         this delete."""
         if not agg_keys:
             return
-        chunk_size = _delete_chunk()
+        chunk_size = self._knob_int("delete_chunk", _delete_chunk, 100, 50_000)
         run_start = self._run_start_ms
         cypher = (
             "UNWIND $keys AS k "
@@ -1108,7 +1190,7 @@ class AggregationPipeline:
             missing = missing[start_idx:]
             self._max_applied_key = after_key
         total = len(missing) or 1
-        chunk_size = _apply_chunk()
+        chunk_size = self._knob_int("apply_chunk", _apply_chunk, 1_000, 200_000)
         done = 0
         flushed = self._flushed
 
@@ -1153,6 +1235,7 @@ async def materialize_aggregated_edges(
     should_cancel: Optional[Callable[[], bool]] = None,
     resume_processed: int = 0,
     resume_created: int = 0,
+    tuning: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Entry point used by ``FalkorDBProvider.materialize_aggregated_edges_batch``."""
     pipeline = AggregationPipeline(
@@ -1163,5 +1246,6 @@ async def materialize_aggregated_edges(
         progress_callback=progress_callback,
         intra_batch_callback=intra_batch_callback,
         should_cancel=should_cancel,
+        tuning=tuning,
     )
     return await pipeline.run()

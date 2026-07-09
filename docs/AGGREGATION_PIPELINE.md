@@ -104,6 +104,15 @@ the **first checkpoint**, before any graph work. Resume rules:
 
 ## Tuning
 
+Resolution order per knob: **job `tuning` (frozen at trigger) → stored
+global defaults (`GET/PUT /api/v1/admin/aggregation/settings`, editable
+in the admin Defaults dialog) → env var → code default.** Per-job
+overrides ride the trigger/resume APIs (`tuning` object with camelCase
+fields mirroring the env vars below plus `extractConcurrency`); the
+control plane freezes the merged dict onto the job row so workers stay
+stateless. `batch_size` is deprecated (accepted, ignored by the
+pipeline).
+
 | Env var | Default | Meaning |
 |---|---|---|
 | `AGGREGATION_SCAN_RANGE_WIDTH` | 250000 | Edge-ID range width per scan query |
@@ -114,8 +123,28 @@ the **first checkpoint**, before any graph work. Resume rules:
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
+| `AGGREGATION_EXTRACT_CONCURRENCY` | 2 | Concurrent read-only range scans (waves) |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 900 | Watchdog stall window |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net |
+| `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
+| `AGGREGATION_LARGE_JOB_EDGE_THRESHOLD` | 500000 | Edge count classifying a job as "large" |
+| `AGGREGATION_MAX_LARGE_JOBS_PER_WORKER` | 1 | Large jobs one worker may hold concurrently |
+
+## Worker fleet
+
+Each worker heartbeats a TTL'd registry entry (`agg:worker:{id}` on the
+job-bus Redis) with its active jobs, large-job count, RSS vs cgroup
+limit, and drain state. `GET /api/v1/admin/aggregation/workers` returns
+the fleet plus job-stream depth (the right signal for queue-based HPA);
+the workspace aggregation dashboard renders it as the Workers panel.
+Before executing a delivered job, a worker applies the **memory-aware
+claim policy** — draining, RSS above the high-water mark, or a second
+"large" job (estimated edges over the threshold) are deferred by
+re-enqueueing the job for an idle sibling, so one pod's big jobs can
+never OOM-stack while another idles. SIGTERM flips drain (no new
+claims; running jobs checkpoint and hand over via exec-lock expiry).
+Every job records `worker_id`, and completed jobs persist `run_stats`
+(per-phase durations + writes/deletes) shown in the job detail panel.
 
 Memory budget per large job at 2M nodes / 5M edges: child→parent map
 ~200MB + accumulator (capped) ~250MB + ID cache ~125MB ≈ under 1GB;

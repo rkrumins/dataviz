@@ -30,6 +30,14 @@ function phaseLabel(currentPhase: string | null | undefined): string {
     return 'Processing lineage edges'
 }
 
+// Per-phase duration keys emitted in ``job.runStats`` by the pipeline.
+const PHASE_STAT_KEYS: Array<[label: string, key: string]> = [
+    ['Extract', 'extract_s'],
+    ['Compute', 'compute_s'],
+    ['Reconcile', 'reconcile_s'],
+    ['Apply', 'apply_s'],
+]
+
 // ── Tooltip ──────────────────────────────────────────────────────────
 
 export function Tip({ children, label }: { children: React.ReactNode; label: string }) {
@@ -132,8 +140,14 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                 progress: liveOverlay.snapshot.progress ?? jobFromList.progress,
                 lastCursor: liveOverlay.snapshot.last_cursor ?? jobFromList.lastCursor,
                 lastCheckpointAt: liveOverlay.snapshot.last_heartbeat_at ?? jobFromList.lastCheckpointAt,
+                currentPhase: liveOverlay.snapshot.currentPhase ?? jobFromList.currentPhase,
             }
             : jobFromList
+
+    // Live write/reconcile counters only exist on the SSE stream — they are
+    // not part of the polled job row, so read them off the snapshot directly.
+    const liveWrites = isActive && !liveOverlay.terminal ? liveOverlay.snapshot.writes : undefined
+    const liveDeletes = isActive && !liveOverlay.terminal ? liveOverlay.snapshot.deletes : undefined
 
     const cfg = STATUS_CONFIG[job.status] ?? STATUS_CONFIG.pending
     const StatusIcon = cfg.icon
@@ -280,6 +294,16 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                             {job.status === 'completed' && job.createdEdges > 0 && (
                                 <span className="text-[10px] text-emerald-500 font-semibold block tabular-nums">
                                     +{job.createdEdges.toLocaleString()} materialized
+                                </span>
+                            )}
+                            {isRunning && liveWrites != null && liveWrites > 0 && (
+                                <span className="text-[10px] text-emerald-500 font-semibold block tabular-nums">
+                                    +{liveWrites.toLocaleString()} written
+                                </span>
+                            )}
+                            {isRunning && liveDeletes != null && liveDeletes > 0 && (
+                                <span className="text-[10px] text-amber-500 font-semibold block tabular-nums">
+                                    {'−'}{liveDeletes.toLocaleString()} reconciled
                                 </span>
                             )}
                         </div>
@@ -433,14 +457,21 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         )}
 
                                         {/* Stat grid */}
-                                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                                             <StatCell
                                                 label="Trigger"
                                                 value={job.triggerSource === 'purge' ? 'Purge' : job.triggerSource}
                                                 capitalize
                                             />
                                             <StatCell label="Batch Size" value={
-                                                job.triggerSource === 'purge' ? '\u2014' : job.batchSize.toLocaleString()
+                                                job.triggerSource === 'purge' ? '\u2014'
+                                                    : job.tuning ? 'Self-tuning'
+                                                    : job.batchSize.toLocaleString()
+                                            } />
+                                            <StatCell label="Worker" value={
+                                                job.workerId
+                                                    ? <span className="block truncate" title={job.workerId}>{job.workerId}</span>
+                                                    : '\u2014'
                                             } />
                                             <StatCell label="Duration" value={
                                                 <span className="flex items-center gap-1">
@@ -482,6 +513,22 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 }
                                             />
                                         </div>
+
+                                        {/* Per-phase durations (self-tuning pipeline) */}
+                                        {job.runStats && PHASE_STAT_KEYS.some(([, key]) => job.runStats?.[key] != null) && (
+                                            <div className="rounded-lg bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2 flex items-center gap-6">
+                                                {PHASE_STAT_KEYS.map(([label, key]) => {
+                                                    const secs = job.runStats?.[key]
+                                                    if (secs == null) return null
+                                                    return (
+                                                        <div key={key}>
+                                                            <span className="block text-[9px] text-ink-muted/60 uppercase tracking-wider font-bold mb-1">{label}</span>
+                                                            <span className="text-[12px] font-semibold text-ink tabular-nums">{formatDuration(secs)}</span>
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
+                                        )}
 
                                         {/* Timeline */}
                                         <div className="flex items-center gap-3 text-[10px] text-ink-muted border-t border-glass-border/30 pt-3">

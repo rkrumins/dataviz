@@ -42,6 +42,9 @@ export interface JobLiveOverlay {
         progress: number
         last_cursor: string
         last_heartbeat_at: string
+        currentPhase: string
+        writes: number
+        deletes: number
     }>
 }
 
@@ -132,6 +135,12 @@ export function useJob(
             if (typeof cursor === 'string') next.last_cursor = cursor
             const heartbeat = payload['last_heartbeat_at']
             if (typeof heartbeat === 'string') next.last_heartbeat_at = heartbeat
+            const phase = payload['current_phase']
+            if (typeof phase === 'string') next.currentPhase = phase
+            const writes = _coerceNumeric(payload['writes'])
+            if (writes !== undefined) next.writes = writes
+            const deletes = _coerceNumeric(payload['deletes'])
+            if (deletes !== undefined) next.deletes = deletes
 
             setState((prev) => ({
                 connected: true,

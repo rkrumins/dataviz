@@ -37,7 +37,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import (
-    Depends, FastAPI, HTTPException, Query, Request, Response, status,
+    Body, Depends, FastAPI, HTTPException, Query, Request, Response, status,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -185,12 +185,16 @@ async def _get_session(request: Request):
 
 from .schemas import (  # noqa: E402
     AggregationTriggerRequest,
+    AggregationSettingsRequest,
+    AggregationSettingsResponse,
     AggregationSkipRequest,
     AggregationScheduleRequest,
     AggregationJobResponse,
     PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    ResumeOverrides,
+    WorkersResponse,
 )
 from .service import ConflictError, NotFoundError  # noqa: E402
 
@@ -347,11 +351,15 @@ async def get_job(
 async def resume_job(
     ds_id: str,
     job_id: str,
+    overrides: Optional[ResumeOverrides] = Body(default=None),
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
+    # The overrides body was previously dropped here, so resume tunables
+    # (timeout / retries / tuning) silently never applied in proxy
+    # deployments — accept and forward it.
     try:
-        return await svc.resume(ds_id, job_id, session)
+        return await svc.resume(ds_id, job_id, session, overrides=overrides)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -455,6 +463,46 @@ async def skip_aggregation(
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── GET/PUT /aggregation/settings — global tuning defaults ──────────
+
+@app.get(
+    "/aggregation/settings",
+    response_model=AggregationSettingsResponse,
+    summary="Get global aggregation tuning defaults",
+)
+async def get_settings(
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    return await svc.get_settings(session)
+
+
+@app.put(
+    "/aggregation/settings",
+    response_model=AggregationSettingsResponse,
+    summary="Replace global aggregation tuning defaults",
+)
+async def put_settings(
+    body: AggregationSettingsRequest,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    return await svc.put_settings(session, body.tuning)
+
+
+# ── GET /aggregation/workers — worker fleet + queue depth ───────────
+
+@app.get(
+    "/aggregation/workers",
+    response_model=WorkersResponse,
+    summary="List live aggregation workers and job-queue depth",
+)
+async def list_workers():
+    from .fleet import read_fleet
+
+    return await read_fleet()
 
 
 # ── PUT /aggregation/data-sources/{ds_id}/schedule ───────────────────

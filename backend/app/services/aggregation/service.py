@@ -21,8 +21,10 @@ from .models import AggregationJobORM
 from .reservation import claim_exclusive
 from .schemas import (
     AggregationJobResponse,
+    AggregationSettingsResponse,
     AggregationSkipRequest,
     AggregationTriggerRequest,
+    AggregationTuning,
     DataSourceReadinessResponse,
     DriftCheckResponse,
     PaginatedJobsResponse,
@@ -239,8 +241,13 @@ class AggregationService:
                 batch_size=request.batch_size,
                 idempotency_key=idem_key,
                 # Per-job overrides: when None, the worker / ORM defaults
-                # apply (timeout_secs → _JOB_TIMEOUT_SECS env, max_retries → 3).
+                # apply (timeout_secs → stall-timeout env, max_retries → 3).
                 timeout_secs=request.timeout_secs,
+                # Pipeline tuning: request overrides layered over the stored
+                # global defaults, frozen here so the worker stays stateless.
+                tuning_json=json.dumps(
+                    await self._effective_tuning(session, getattr(request, "tuning", None))
+                ) or None,
                 created_at=_now(),
             )
             # Only set max_retries when caller supplied one, so the ORM
@@ -593,6 +600,70 @@ class AggregationService:
             # compatible against any ORM instance that pre-dates the
             # column.
             current_phase=getattr(job, "current_phase", None),
+            tuning=AggregationService._job_tuning_dict(job),
+            run_stats=AggregationService._job_run_stats_dict(job),
+            worker_id=getattr(job, "worker_id", None),
+        )
+
+
+    # ── Global tuning defaults (settings) ─────────────────────────────
+
+    async def _effective_tuning(
+        self, session: AsyncSession, request_tuning: Optional[AggregationTuning],
+    ) -> dict:
+        """Request tuning layered over the stored global defaults. The
+        merged dict is frozen onto the job row so the worker never reads
+        the settings table (stateless jobs; consistent with the frozen
+        edge-type pattern)."""
+        from .models import AggregationSettingsORM
+
+        defaults: dict = {}
+        try:
+            row = await session.get(AggregationSettingsORM, "global")
+            if row is not None and row.tuning_json:
+                defaults = json.loads(row.tuning_json) or {}
+        except Exception as exc:
+            logger.warning(
+                "Aggregation settings read failed (using env defaults): %s", exc,
+            )
+        if request_tuning is None:
+            return defaults
+        return request_tuning.merged_over(defaults)
+
+    async def get_settings(self, session: AsyncSession) -> AggregationSettingsResponse:
+        from .models import AggregationSettingsORM
+
+        row = await session.get(AggregationSettingsORM, "global")
+        if row is None or not row.tuning_json:
+            return AggregationSettingsResponse(tuning=None)
+        try:
+            tuning = AggregationTuning(**json.loads(row.tuning_json))
+        except Exception:
+            tuning = None
+        return AggregationSettingsResponse(
+            tuning=tuning,
+            updated_at=row.updated_at,
+            updated_by=row.updated_by,
+        )
+
+    async def put_settings(
+        self,
+        session: AsyncSession,
+        tuning: AggregationTuning,
+        updated_by: Optional[str] = None,
+    ) -> AggregationSettingsResponse:
+        from .models import AggregationSettingsORM
+
+        row = await session.get(AggregationSettingsORM, "global")
+        if row is None:
+            row = AggregationSettingsORM(id="global")
+            session.add(row)
+        row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
+        row.updated_at = _now()
+        row.updated_by = updated_by
+        await session.commit()
+        return AggregationSettingsResponse(
+            tuning=tuning, updated_at=row.updated_at, updated_by=row.updated_by,
         )
 
     # ── Resume ────────────────────────────────────────────────────────
@@ -631,6 +702,17 @@ class AggregationService:
                 job.projection_mode = overrides.projection_mode
             if overrides.max_retries is not None:
                 job.max_retries = overrides.max_retries
+            if overrides.tuning is not None:
+                # Layer the new tuning over whatever the job carries so a
+                # partial override (e.g. just writePacingRatio) keeps the
+                # rest of the frozen tuning intact.
+                try:
+                    current = json.loads(job.tuning_json or "{}")
+                except (TypeError, ValueError):
+                    current = {}
+                job.tuning_json = json.dumps(
+                    overrides.tuning.merged_over(current)
+                )
 
         # A manual resume/restart is ALWAYS allowed for a failed/cancelled job —
         # the max_retries cap bounds only AUTOMATED retries (crash recovery /
@@ -1177,6 +1259,23 @@ class AggregationService:
 
     # ── Response Helpers ─────────────────────────────────────────────
 
+
+    @staticmethod
+    def _job_tuning_dict(job) -> dict | None:
+        try:
+            raw = getattr(job, "tuning_json", None)
+            return json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _job_run_stats_dict(job) -> dict | None:
+        try:
+            raw = getattr(job, "run_stats", None)
+            return json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _to_response(job: AggregationJobORM) -> AggregationJobResponse:
         """Convert ORM to response model."""
@@ -1223,6 +1322,9 @@ class AggregationService:
             max_retries=job.max_retries,
             timeout_secs=job.timeout_secs,
             projection_mode=job.projection_mode,
+            tuning=AggregationService._job_tuning_dict(job),
+            run_stats=AggregationService._job_run_stats_dict(job),
+            worker_id=getattr(job, "worker_id", None),
         )
 
 

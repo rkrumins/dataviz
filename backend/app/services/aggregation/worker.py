@@ -82,10 +82,12 @@ class AggregationWorker:
         session_factory: Any,
         registry: Any,
         event_publisher: Any = None,
+        worker_id: Optional[str] = None,
     ) -> None:
         self._session_factory = session_factory
         self._registry = registry
         self._events = event_publisher
+        self._worker_id = worker_id
 
     async def run(self, job_id: str) -> None:
         """Full materialization pipeline.
@@ -116,6 +118,9 @@ class AggregationWorker:
             job.status = "running"
             job.started_at = job.started_at or _now()
             job.updated_at = _now()
+            # Which worker executed this job — fleet attribution for the UI.
+            if self._worker_id and hasattr(job, "worker_id"):
+                job.worker_id = self._worker_id
             await session.commit()
 
             # Register a cooperative cancel event before any heavy work so
@@ -368,6 +373,13 @@ class AggregationWorker:
                 job.progress = 100
                 job.completed_at = _now()
                 job.created_edges = result.get("aggregated_edges_affected", 0)
+                # Durable per-phase timings + write/delete counters for the
+                # job detail UI (best-effort; NULL on legacy providers).
+                if hasattr(job, "run_stats") and isinstance(result.get("run_stats"), dict):
+                    try:
+                        job.run_stats = json.dumps(result["run_stats"])
+                    except (TypeError, ValueError):
+                        pass
                 job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
 
                 # Update aggregation-owned data source state
@@ -896,6 +908,7 @@ class AggregationWorker:
             processed: int, total: int, cursor: Optional[str],
             aggregated: int = 0, phase: Optional[str] = None,
             *, progress_pct: Optional[int] = None,
+            stats: Optional[dict] = None,
         ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
             # Cooperative cancel point at the outer-batch boundary. The
@@ -1008,6 +1021,8 @@ class AggregationWorker:
                     "progress": job.progress,
                     "last_cursor": cursor or "",
                     "current_phase": job.current_phase or "",
+                    "writes": (stats or {}).get("writes"),
+                    "deletes": (stats or {}).get("deletes"),
                 },
                 live_state={
                     "status": "running",
@@ -1018,6 +1033,8 @@ class AggregationWorker:
                     "last_cursor": cursor or "",
                     "last_checkpoint_at": job.last_checkpoint_at or "",
                     "current_phase": job.current_phase or "",
+                    "writes": (stats or {}).get("writes", 0) or 0,
+                    "deletes": (stats or {}).get("deletes", 0) or 0,
                 },
             )
 
@@ -1063,10 +1080,15 @@ class AggregationWorker:
         def should_cancel() -> bool:
             return cancel_event.is_set()
 
+        try:
+            job_tuning = json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+        except (TypeError, ValueError):
+            job_tuning = {}
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,
             lineage_edge_types=lineage_types,
             batch_size=job.batch_size,
+            tuning=job_tuning,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,
