@@ -8,4 +8,12 @@ data:
   FALKORDB_SOCKET_TIMEOUT: "60"
   WORKER_CONCURRENCY: "4"
   MAX_CONCURRENT_PER_GRAPH: "2"
+  # Kept for the control-plane scheduler's stale-job backstop (2x this
+  # with no updated_at movement = worker died silently).
   AGGREGATION_JOB_TIMEOUT_SECS: "7200"
+  # Progress-aware watchdog: kill only on no-forward-progress (stall) or
+  # the wall-clock safety net — never a progressing multi-hour job.
+  AGGREGATION_STALL_TIMEOUT_SECS: "900"
+  AGGREGATION_JOB_MAX_WALL_SECS: "86400"
+  # Cross-pod concurrent aggregation-write budget per FalkorDB endpoint.
+  FALKORDB_ENDPOINT_WRITE_SLOTS: "2"

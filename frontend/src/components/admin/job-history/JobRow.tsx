@@ -11,17 +11,16 @@ import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
 import { formatDuration, timeAgo, STATUS_CONFIG, type DataSourceMeta } from './shared'
 
-// Phase 1.7 — UI phase visibility. Maps the backend's short phase IDs
-// (emitted by FalkorDBProvider's bulk-rebuild path) to operator-
-// readable status labels. ``null`` / unrecognized values fall back to
-// the generic "Processing lineage edges" string so legacy / non-
-// FalkorDB paths keep the old UX.
+// UI phase visibility. Maps the backend's short phase IDs (emitted by
+// the aggregation pipeline's EXTRACT → COMPUTE → RECONCILE → APPLY
+// stages) to operator-readable status labels. ``null`` / unrecognized
+// values fall back to the generic "Processing lineage edges" string so
+// legacy / non-FalkorDB paths keep the old UX.
 const PHASE_LABELS: Record<string, string> = {
-    wiping: 'Wiping previous aggregated edges',
-    scanning: 'Scanning lineage edges',
-    resolving_labels: 'Resolving entity labels',
-    creating: 'Creating aggregated edges in graph',
-    finalizing: 'Finalizing bookkeeping',
+    extracting: 'Extracting lineage edges',
+    computing: 'Computing rollups',
+    reconciling: 'Reconciling existing aggregated edges',
+    applying: 'Writing aggregated edges',
 }
 
 function phaseLabel(currentPhase: string | null | undefined): string {

@@ -87,7 +87,8 @@ export function AggregationProgressBanner({
   }
 
   const { activeJob } = readiness;
-  const progress = activeJob ? Math.round(activeJob.progress * 100) : 0;
+  // Backend progress is already a 0-100 percentage.
+  const progress = activeJob ? Math.round(activeJob.progress) : 0;
   
   return (
     <div className="mb-6 rounded-xl border border-indigo-500/20 bg-indigo-500/5 overflow-hidden">

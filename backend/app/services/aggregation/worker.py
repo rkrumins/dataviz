@@ -54,7 +54,14 @@ logger = logging.getLogger(__name__)
 
 _CHECKPOINT_MAX_INTERVAL_SECS: float = 2.0
 _CHECKPOINT_MAX_BATCHES: int = 5
-_JOB_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
+# Progress-aware watchdog (replaces the old fixed AGGREGATION_JOB_TIMEOUT_SECS
+# kill that terminated 3h+ jobs at 2h regardless of forward progress):
+# a job is killed only when it makes NO forward progress for the stall
+# window, or exceeds the (very generous) wall-clock safety net.
+# ``job.timeout_secs`` — when set on the job row — overrides the stall
+# window, preserving the column's "how long may this hang" intent.
+_STALL_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_STALL_TIMEOUT_SECS", "900"))
+_MAX_WALL_SECS: int = int(os.getenv("AGGREGATION_JOB_MAX_WALL_SECS", "86400"))
 
 
 def _now() -> str:
@@ -118,6 +125,8 @@ class AggregationWorker:
             # block below.
             cancel_registry = get_cancel_registry()
             cancel_event = cancel_registry.register(job_id)
+            provider = None
+            admission_attached = False
 
             # Platform JobEmitter — the only path for live progress
             # updates. Seed its per-job sequence counter from the
@@ -280,18 +289,40 @@ class AggregationWorker:
                             "index if any): %s", job.id, exc,
                         )
 
+                # Distributed write-admission control: N workers × M pods
+                # share one write budget per FalkorDB endpoint (per-graph
+                # lease + per-endpoint slots) instead of each pod throttling
+                # only itself. Best-effort: without it the provider's
+                # per-process gates still apply.
+                if hasattr(provider, "set_admission_controller"):
+                    try:
+                        from .admission import AggregationAdmission
+                        from .redis_client import get_redis
+                        provider.set_admission_controller(
+                            AggregationAdmission(get_redis())
+                        )
+                        admission_attached = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: admission controller not "
+                            "attached (continuing with per-process limits): %s",
+                            job.id, exc,
+                        )
+
                 # Compute fingerprint before aggregation
                 job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
                 await session.commit()
 
-                # Run cursor-based batch materialization with retry + timeout.
-                # On transient provider failures (AggregationBatchAbort, connection
-                # errors), retry up to max_retries times with exponential backoff.
-                # The overall job is wrapped in a timeout to catch hung queries.
-                # Use per-job timeout if set, otherwise global default
-                job_timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
+                # Run materialization with retries under a progress-aware
+                # watchdog: the job is killed only when it stops making
+                # forward progress for the stall window (checkpoints and
+                # intra-batch heartbeats both count as progress), or when
+                # it exceeds the wall-clock safety net. A steadily
+                # progressing multi-hour job is never killed by a timer.
+                stall_timeout = job.timeout_secs or _STALL_TIMEOUT_SECS
+                progress_marker = {"at": time.monotonic()}
 
-                result = await asyncio.wait_for(
+                materialize_task = asyncio.create_task(
                     self._materialize_with_retries(
                         session=session,
                         job=job,
@@ -301,9 +332,36 @@ class AggregationWorker:
                         cancel_event=cancel_event,
                         emitter=emitter,
                         scope=scope,
-                    ),
-                    timeout=job_timeout,
+                        progress_marker=progress_marker,
+                    )
                 )
+                wall_start = time.monotonic()
+                timeout_reason = ""
+                while True:
+                    done, _ = await asyncio.wait(
+                        {materialize_task}, timeout=10.0,
+                    )
+                    if done:
+                        result = materialize_task.result()
+                        break
+                    now = time.monotonic()
+                    stalled_for = now - progress_marker["at"]
+                    if stalled_for > stall_timeout:
+                        timeout_reason = (
+                            f"no forward progress for {int(stalled_for)}s "
+                            f"(stall timeout {stall_timeout}s)"
+                        )
+                    elif now - wall_start > _MAX_WALL_SECS:
+                        timeout_reason = (
+                            f"exceeded wall-clock safety net {_MAX_WALL_SECS}s"
+                        )
+                    if timeout_reason:
+                        materialize_task.cancel()
+                        try:
+                            await materialize_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                        raise asyncio.TimeoutError(timeout_reason)
 
                 # Success
                 job.status = "completed"
@@ -381,15 +439,17 @@ class AggregationWorker:
                     job_id, job.processed_edges, job.created_edges,
                 )
 
-            except asyncio.TimeoutError:
-                timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
+            except asyncio.TimeoutError as timeout_exc:
+                reason = str(timeout_exc) or "watchdog timeout"
                 job.status = "failed"
                 job.error_message = (
-                    f"Job timed out after {timeout}s. "
+                    f"Job killed by watchdog: {reason}. "
                     f"Progress: {job.processed_edges}/{job.total_edges} edges. "
                     f"Resume from last_cursor is possible."
                 )
-                logger.error("Aggregation job %s timed out after %ds", job_id, timeout)
+                logger.error(
+                    "Aggregation job %s killed by watchdog: %s", job_id, reason,
+                )
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
 
@@ -515,6 +575,14 @@ class AggregationWorker:
                 # uncaught exceptions, so a future job re-using this
                 # job_id (resume) starts with a fresh event.
                 cancel_registry.unregister(job_id)
+                # Detach the per-job admission controller from the shared
+                # provider instance so a non-aggregation caller never runs
+                # under a stale job's admission gates.
+                if admission_attached and provider is not None:
+                    try:
+                        provider.set_admission_controller(None)
+                    except Exception:
+                        pass
 
     async def _update_ds_state(
         self,
@@ -553,6 +621,7 @@ class AggregationWorker:
         cancel_event: asyncio.Event,
         emitter: Any,
         scope: PlatformJobScope,
+        progress_marker: Optional[dict] = None,
     ) -> dict:
         """Retry wrapper around _materialize_with_checkpoints.
 
@@ -593,6 +662,14 @@ class AggregationWorker:
         # on transient resets alone.
         attempt = 0
         last_progress = job.processed_edges or 0
+
+        def _mark_alive() -> None:
+            # Deliberate waiting (quiesce park, retry backoff) is not a
+            # stall — keep the watchdog's progress marker fresh so it only
+            # fires on genuine hangs.
+            if progress_marker is not None:
+                progress_marker["at"] = time.monotonic()
+
         while True:
             try:
                 return await self._materialize_with_checkpoints(
@@ -604,6 +681,7 @@ class AggregationWorker:
                     cancel_event=cancel_event,
                     emitter=emitter,
                     scope=scope,
+                    progress_marker=progress_marker,
                 )
             except JobCancelled:
                 # Cooperative cancel — control-flow signal, not a transient
@@ -646,6 +724,7 @@ class AggregationWorker:
                     attempt + 1, e,
                 )
                 await asyncio.sleep(delay)
+                _mark_alive()
                 # Rewind the attempt counter so the iteration ahead doesn't
                 # consume retry budget. Python ``range`` iterators can't
                 # be rewound, so emulate by re-entering: we decrement a
@@ -666,6 +745,7 @@ class AggregationWorker:
                             cancel_event=cancel_event,
                             emitter=emitter,
                             scope=scope,
+                            progress_marker=progress_marker,
                         )
                     except ProviderBusy as e2:
                         quiesce_event_count += 1
@@ -687,6 +767,7 @@ class AggregationWorker:
                             job.id, quiesce_event_count, max_quiesce_events, e2,
                         )
                         await asyncio.sleep(delay)
+                        _mark_alive()
                         # Loop again — still NOT a retry.
                         continue
                     # Any other exception breaks out of the quiesce park
@@ -743,6 +824,7 @@ class AggregationWorker:
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
                     await asyncio.sleep(delay)
+                    _mark_alive()
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
@@ -770,6 +852,7 @@ class AggregationWorker:
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
                     await asyncio.sleep(delay)
+                    _mark_alive()
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
@@ -788,6 +871,7 @@ class AggregationWorker:
         cancel_event: asyncio.Event,
         emitter: Any,
         scope: PlatformJobScope,
+        progress_marker: Optional[dict] = None,
     ) -> dict:
         """Run batch materialization with coalesced DB checkpointing.
 
@@ -811,6 +895,7 @@ class AggregationWorker:
         async def checkpoint(
             processed: int, total: int, cursor: Optional[str],
             aggregated: int = 0, phase: Optional[str] = None,
+            *, progress_pct: Optional[int] = None,
         ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
             # Cooperative cancel point at the outer-batch boundary. The
@@ -820,21 +905,27 @@ class AggregationWorker:
             # completed cleanly, and resume from ``cursor`` is sound.
             if cancel_event.is_set():
                 raise JobCancelled(job.id, _now())
+            # Any checkpoint is forward progress — feed the watchdog.
+            if progress_marker is not None:
+                progress_marker["at"] = time.monotonic()
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
             if aggregated > 0:
                 job.created_edges = aggregated
-            # Phase 1.7 — surface the active phase to the UI. Providers
-            # that emit phase signals (FalkorDB bulk-rebuild) pass a
-            # short ID; legacy paths leave it None so the existing
-            # generic UI label keeps working.
+            # Surface the active phase to the UI. The pipeline passes a
+            # short ID (extracting/computing/reconciling/applying); None
+            # keeps the generic UI label working.
             if phase is not None:
                 job.current_phase = phase
-            # Clamp to [0, 100]: the streaming path drives ``total`` off a
-            # cheap (possibly stale) estimate, so ``processed`` can exceed
-            # it late in a run. Without the clamp the bar would read >100%.
-            job.progress = min(100, int((processed / total) * 100)) if total > 0 else 0
+            # The pipeline supplies a phase-weighted 0-100 percentage so
+            # the bar is monotonic across phases; without it, fall back to
+            # the processed/total ratio (clamped — ``total`` can lag when
+            # driven off a stale estimate).
+            if progress_pct is not None:
+                job.progress = max(0, min(100, int(progress_pct)))
+            else:
+                job.progress = min(100, int((processed / total) * 100)) if total > 0 else 0
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
             batches_since_commit += 1
@@ -912,6 +1003,7 @@ class AggregationWorker:
                     "created_edges": job.created_edges,
                     "progress": job.progress,
                     "last_cursor": cursor or "",
+                    "current_phase": job.current_phase or "",
                 },
                 live_state={
                     "status": "running",
@@ -921,6 +1013,7 @@ class AggregationWorker:
                     "progress": job.progress,
                     "last_cursor": cursor or "",
                     "last_checkpoint_at": job.last_checkpoint_at or "",
+                    "current_phase": job.current_phase or "",
                 },
             )
 
@@ -939,6 +1032,8 @@ class AggregationWorker:
             those advance only at the boundary between outer batches
             and live in PG.
             """
+            if progress_marker is not None:
+                progress_marker["at"] = time.monotonic()
             await emitter.publish(
                 job_id=job.id,
                 kind="aggregation",
@@ -954,8 +1049,8 @@ class AggregationWorker:
                 },
             )
 
-        # Cooperative cancel hook handed to the provider. FalkorDB's
-        # ``_materialize_edges_batched`` checks this between MERGE
+        # Cooperative cancel hook handed to the provider. The pipeline
+        # checks this between scan ranges and write
         # sub-batches inside a single outer batch; True there raises
         # JobCancelled out of the provider, which the worker's outer
         # try/except catches and converts to a terminal ``cancelled``.

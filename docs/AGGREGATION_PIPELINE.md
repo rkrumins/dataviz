@@ -1,0 +1,136 @@
+# Aggregation Materialization Pipeline
+
+How `:AGGREGATED` rollup edges are computed and written to FalkorDB, and
+how the system protects the graph provider while doing it. This replaces
+the three legacy strategies (wipe-first bulk rebuild, epoch-swept
+streaming rebuild, cursor-paged MERGE loop) with a single resumable
+pipeline: **EXTRACT → COMPUTE → RECONCILE → APPLY**
+(`backend/app/providers/falkordb_materialize.py`).
+
+## Semantics
+
+Given an ontology hierarchy (e.g. `Domain ⊃ Application ⊃ Database ⊃
+Table ⊃ Column`), each lineage edge between two leaf nodes produces
+`:AGGREGATED` edges for the **full cross-product of both ancestor
+chains** — column→table, table→table, table→database, domain→domain, and
+every other combination — weighted by the number of underlying lineage
+edges and stamped with `sourceLevel`/`targetLevel` from the ontology's
+entity-type levels. Containment and lineage edge types are the
+ontology-resolved sets frozen onto the job row at trigger time; the
+worker re-validates the ontology fingerprint before running.
+
+**Changed:** same-position leaf↔leaf mirror pairs (an AGGREGATED edge
+duplicating a raw lineage edge 1:1) are no longer materialized — they
+doubled edge count and write volume for zero information. The read path
+(`get_aggregated_edges_between`) synthesizes them from raw lineage edges
+so `/edges/aggregated` responses (browse-mode canvases) are unchanged.
+`AGGREGATION_MATERIALIZE_LEAF_PAIRS=true` restores the old behavior.
+
+## Phases
+
+1. **EXTRACT** (read-only): containment and lineage edges are scanned
+   with fixed **ID-range partitions** (`WHERE ID(r) >= lo AND ID(r) <
+   hi`, no ORDER BY/LIMIT) — tens of queries per edge type instead of the
+   legacy thousands of sorted re-scans (which were O(E²) end-to-end and
+   the main reason multi-million-edge graphs took hours).
+2. **COMPUTE** (pure Python, zero FalkorDB load): ancestor chains are
+   dict walks over the extracted child→parent map; pair weights are
+   aggregated bottom-up through the ancestor lattice. Deterministic —
+   a crashed run just recomputes (minutes). Memory is bounded by
+   `AGGREGATION_MAX_PENDING_PAIRS`; overflow triggers an early flush
+   with first-touch-overwrite semantics that keeps weights exact.
+3. **RECONCILE**: the current `:AGGREGATED` set is range-scanned once;
+   stale edges are deleted precisely (guarded by `latestUpdate <
+   run_start`, so edges written during the run — by overflow flushes, a
+   prior attempt, or `on_lineage_edge_written` — are never deleted),
+   changed edges are updated in place. There is **no epoch sweep**: a
+   failed or resumed run can never wipe good edges.
+4. **APPLY**: missing pairs are MERGE-created in sorted-key order
+   (deterministic resume cursor), matched by internal node ID
+   (`in_source` mode) or label+urn (`dedicated` projection mode).
+
+In steady state a re-run after small source changes writes only the
+diff — near-zero load. Full recompute *is* the incremental strategy.
+
+## Resume
+
+The job cursor is `v3:{run_start_ms}:{phase}:{pos}` and is persisted from
+the **first checkpoint**, before any graph work. Resume rules:
+
+* `aggregate` phase (or a legacy/garbage cursor): restart from zero —
+  cheap by design. Legacy `v2:` cursors from in-flight jobs at upgrade
+  time resume as clean fresh runs **without wiping** existing edges; the
+  first RECONCILE also cleans up any stale generations left by the old
+  epoch machinery.
+* `reconcile` / `apply`: EXTRACT+COMPUTE re-run (deterministic), then the
+  phase continues from its recorded position. All writes are idempotent.
+
+## Provider protection
+
+* **Server-side query kill**: every deploy manifest now sets
+  `TIMEOUT_MAX` (FalkorDB ignores per-query timeouts on *write* queries
+  without it), `TIMEOUT_DEFAULT`, `MAX_QUEUED_QUERIES`,
+  `QUERY_MEM_CAPACITY`, and — critically — `OMP_THREAD_COUNT 1`
+  (unbounded per-query OpenMP threads on a big node under a small cgroup
+  quota were the main cause of the 150% CPU spikes). See
+  `docs/FALKORDB_DEPLOYMENT.md` for sizing rules.
+* **Distributed admission control**
+  (`backend/app/services/aggregation/admission.py`, on the job-bus
+  Redis): a per-graph write lease (one materializing job per graph across
+  all pods) and a per-endpoint write-slot semaphore
+  (`FALKORDB_ENDPOINT_WRITE_SLOTS`, default 2) so an HPA-scaled worker
+  fleet cannot stampede one FalkorDB. Fails **open** to the per-process
+  limits if Redis is down.
+* **Pacing**: every write sub-batch is AIMD-sized (shrinks on latency
+  creep) and followed by `duration × AGGREGATION_WRITE_PACING_RATIO`
+  sleep (default 0.5 → ≤ ~66% write duty cycle), on top of the existing
+  per-process write semaphore and latency-quiesce circuit.
+* **Progress-aware watchdog** (worker): a job is killed only when it
+  makes no forward progress for `AGGREGATION_STALL_TIMEOUT_SECS`
+  (default 900) or exceeds `AGGREGATION_JOB_MAX_WALL_SECS` (default
+  86400). The old fixed 2-hour kill (which terminated healthy 3-hour
+  jobs mid-flight) is gone; `job.timeout_secs` now overrides the stall
+  window.
+
+## Tuning
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `AGGREGATION_SCAN_RANGE_WIDTH` | 250000 | Edge-ID range width per scan query |
+| `AGGREGATION_MAX_PENDING_PAIRS` | 2000000 | In-memory pair cap before overflow flush |
+| `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
+| `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
+| `AGGREGATION_WRITE_PACING_RATIO` | 0.5 | Sleep-after-write ratio |
+| `AGGREGATION_ID_CACHE_MAX` | 500000 | Node-ID→(urn,label) LRU entries |
+| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
+| `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs |
+| `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
+| `AGGREGATION_STALL_TIMEOUT_SECS` | 900 | Watchdog stall window |
+| `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net |
+
+Memory budget per large job at 2M nodes / 5M edges: child→parent map
+~200MB + accumulator (capped) ~250MB + ID cache ~125MB ≈ under 1GB;
+worker pods ship with a 4Gi limit.
+
+## Removed (release notes)
+
+* `AGGREGATION_BULK_REBUILD_ENABLED` / `AGGREGATION_STREAMING_REBUILD_ENABLED`
+  env flags and all three legacy strategies. Rollback = version rollback.
+* The `aggEpoch` edge property is no longer written and its index is no
+  longer created; stale epochs are cleaned by the first RECONCILE.
+* Job phase IDs changed to `extracting / computing / reconciling /
+  applying` (UI label map updated; unknown phases degrade to a generic
+  label, so mixed-version windows are safe).
+* `AGGREGATION_JOB_TIMEOUT_SECS` no longer bounds a running job (the
+  control-plane scheduler still uses it as a stale-row backstop).
+
+## Validation
+
+`backend/scripts/benchmark_aggregation_scan.py` seeds a synthetic graph
+into a live FalkorDB and verifies the pipeline's benchmark-gated
+assumptions: ID-range scan cost vs the legacy sorted page scan, ID-seek
+MERGE vs label+urn MERGE, and that a pathological write is killed
+server-side at its timeout (requires `TIMEOUT_MAX`). Unit coverage lives
+in `backend/tests/test_falkordb_materialize.py` (semantics, exact
+weights under overflow and cancel+resume, no-op re-runs, guarded
+deletes) and `backend/tests/test_aggregation_admission.py`.

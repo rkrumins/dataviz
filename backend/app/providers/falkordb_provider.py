@@ -656,14 +656,17 @@ class FalkorDBProvider(GraphDataProvider):
         # 60s vs the standard 15s ``_WRITE_TIMEOUT``: bulk writes
         # legitimately need more headroom than incremental MERGEs,
         # especially on graphs where FalkorDB is concurrently serving
-        # trace reads. Clamped to [5s, 600s].
+        # trace reads. Clamped to [5s, 170s]: the ceiling must stay below
+        # the server's TIMEOUT_MAX (180s in the shipped FALKORDB_ARGS) or
+        # FalkorDB rejects the per-query timeout and the write becomes
+        # unkillable server-side.
         _bulk_timeout_raw = os.getenv("FALKORDB_BULK_CREATE_TIMEOUT_S")
         if _bulk_timeout_raw is None:
             self._bulk_create_timeout_s: float = 60.0
         else:
             try:
                 _bulk_timeout_parsed = float(_bulk_timeout_raw)
-                self._bulk_create_timeout_s = max(5.0, min(600.0, _bulk_timeout_parsed))
+                self._bulk_create_timeout_s = max(5.0, min(170.0, _bulk_timeout_parsed))
                 if self._bulk_create_timeout_s != 60.0:
                     logger.info(
                         "FALKORDB_BULK_CREATE_TIMEOUT_S=%s (clamped to %.1fs, "
@@ -697,6 +700,13 @@ class FalkorDBProvider(GraphDataProvider):
             )
         self._write_semaphore = asyncio.Semaphore(_write_conc)
         self._write_concurrency_cap: int = _write_conc
+
+        # Distributed admission controller (aggregation writes). Injected
+        # per-job by the aggregation worker via ``set_admission_controller``
+        # so N workers × M pods share one write budget per FalkorDB
+        # endpoint instead of each pod throttling only itself. None →
+        # the per-process ``_write_semaphore`` above is the only gate.
+        self._admission_controller: Optional[Any] = None
 
         # Latency-quiesce: rolling window of last 50 write latencies (in
         # seconds), computed as p95 lazily on each write attempt. When
@@ -1405,8 +1415,14 @@ class FalkorDBProvider(GraphDataProvider):
         for label in labels:
             for prop in properties:
                 try:
+                    # Server-side timeout too — an abandoned DDL statement
+                    # must not keep burning FalkorDB CPU after the client
+                    # deadline fires.
                     await asyncio.wait_for(
-                        self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"),
+                        self._graph.query(
+                            f"CREATE INDEX FOR (n:{label}) ON (n.{prop})",
+                            timeout=self._db_timeout_ms(_init_timeout),
+                        ),
                         timeout=_init_timeout,
                     )
                 except Exception:
@@ -1433,7 +1449,10 @@ class FalkorDBProvider(GraphDataProvider):
         for index_cypher in aggregated_edge_indices:
             try:
                 await asyncio.wait_for(
-                    self._graph.query(index_cypher), timeout=_init_timeout,
+                    self._graph.query(
+                        index_cypher, timeout=self._db_timeout_ms(_init_timeout),
+                    ),
+                    timeout=_init_timeout,
                 )
             except Exception:
                 pass  # Older FalkorDB or already exists — ignore
@@ -1651,6 +1670,12 @@ class FalkorDBProvider(GraphDataProvider):
             "Projection mode changed %s → %s for graph %s",
             old, mode, self._graph_name,
         )
+
+    def set_admission_controller(self, controller: Optional[Any]) -> None:
+        """Inject the distributed write-admission controller for aggregation
+        writes (see ``backend.app.services.aggregation.admission``). Called
+        per-job by the aggregation worker; pass None to detach."""
+        self._admission_controller = controller
 
     def set_resolved_edge_metadata(
         self,
@@ -3116,347 +3141,6 @@ class FalkorDBProvider(GraphDataProvider):
     _MERGE_SUB_BATCH_GROW_AFTER = 5
     _MERGE_SUB_BATCH_GROW_STEP = 100
 
-    async def _materialize_edges_batched(
-        self,
-        rows: list,
-        ancestors_cache: Dict[str, List[str]],
-        *,
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        baseline_aggregated: int = 0,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> tuple[int, int]:
-        """Batch-level materialization — all Redis + Cypher ops in ~4 round-trips.
-
-        Replaces the previous per-edge loop that did 3 round-trips per edge
-        (SADD pipeline + SCARD pipeline + Cypher MERGE × N edges). Now:
-
-        1. Compute all ancestor pairs across ALL edges in memory (O(1) per
-           edge using ``ancestors_cache`` populated by bulk pre-compute).
-        2. ONE Redis SADD pipeline for all pairs across all edges.
-        3. ONE Redis SCARD pipeline for newly-added pairs only.
-        4. ONE (or a few) Cypher UNWIND+MERGE for all new pairs.
-
-        Returns (created_count, error_count).
-        Raises AggregationBatchAbort on sustained provider failure.
-        """
-        await self._ensure_connected()
-        members_key_prefix = f"{self._graph_name}:agg_members"
-
-        # Step 1: Compute all ancestor pairs across ALL edges in the batch.
-        # Each edge (s, t) with edge_id and edge_type generates pairs from
-        # s_chain × t_chain (excluding self-loops).
-        all_sadd_ops: list[tuple[str, str, str, str, str]] = []  # (redis_key, edge_id, s, t, edge_type)
-        for row in rows:
-            s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
-            if not edge_id:
-                edge_id = f"{s_urn}|{edge_type}|{t_urn}"
-
-            s_chain = [s_urn] + ancestors_cache.get(s_urn, [])
-            t_chain = [t_urn] + ancestors_cache.get(t_urn, [])
-
-            for s in s_chain:
-                for t in t_chain:
-                    if s != t:
-                        key = f"{members_key_prefix}:{s}:{t}"
-                        all_sadd_ops.append((key, edge_id, s, t, edge_type))
-
-        if not all_sadd_ops:
-            return 0, 0
-
-        # Step 2: ONE Redis SADD pipeline for all pairs.
-        # SADD returns 1 if the member was newly added, 0 if already present.
-        pipe = self._redis.pipeline(transaction=False)
-        for redis_key, edge_id_val, _, _, _ in all_sadd_ops:
-            pipe.execute_command("SADD", redis_key, edge_id_val)
-        sadd_results = await pipe.execute()
-
-        # Step 3: Collect newly-added pairs and their keys for SCARD.
-        # Deduplicate by (s, t) — multiple input edges may generate the
-        # same ancestor pair, but we only need one SCARD + one MERGE per pair.
-        new_pair_keys: dict[tuple[str, str], tuple[str, str]] = {}  # (s,t) -> (redis_key, edge_type)
-        for i, (redis_key, _, s, t, etype) in enumerate(all_sadd_ops):
-            if sadd_results[i] != 0:
-                pair = (s, t)
-                if pair not in new_pair_keys:
-                    new_pair_keys[pair] = (redis_key, etype)
-
-        if not new_pair_keys:
-            return 0, 0
-
-        # ONE Redis SCARD pipeline for all newly-added pairs.
-        ordered_pairs = list(new_pair_keys.items())
-        pipe = self._redis.pipeline(transaction=False)
-        for (_, _), (redis_key, _) in ordered_pairs:
-            pipe.execute_command("SCARD", redis_key)
-        scard_results = await pipe.execute()
-
-        # Step 4: Build merge batch with edge type lists per pair.
-        # Collect all distinct edge types per (s, t) pair so we can
-        # store them in sourceEdgeTypes in a single Cypher call.
-        pair_edge_types: dict[tuple[str, str], set[str]] = {}
-        for _, _, s, t, etype in all_sadd_ops:
-            if (s, t) in new_pair_keys:
-                pair_edge_types.setdefault((s, t), set()).add(etype)
-
-        # Resolve s/t levels for the level-pair fast path. Pre-fetches
-        # labels for every URN in the batch from the Redis URN→label cache
-        # (populated as a side effect of node upserts / get_node calls),
-        # then maps label → hierarchy.level via the in-process entity-type
-        # level map injected by the ContextEngine. URNs without a resolved
-        # level are left as None and the Cypher uses ``coalesce`` so a
-        # missing level never clobbers an existing one written by the
-        # backfill script.
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        url_levels: Dict[str, Optional[int]] = {}
-        if entity_levels:
-            all_urns = sorted({s for (s, _), _ in ordered_pairs}
-                              | {t for (_, t), _ in ordered_pairs})
-            if all_urns:
-                try:
-                    label_key = self._urn_label_key()
-                    label_pipe = self._redis.pipeline(transaction=False)
-                    for u in all_urns:
-                        label_pipe.hget(label_key, u)
-                    label_rows = await label_pipe.execute()
-                    for u, raw in zip(all_urns, label_rows):
-                        if not raw:
-                            continue
-                        lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                        lvl = entity_levels.get(lbl)
-                        if lvl is not None:
-                            url_levels[u] = lvl
-                except Exception as exc:
-                    # Best-effort: if Redis is down we skip the level
-                    # annotation. Backfill_aggregated_levels.py covers
-                    # any edges materialised without props.
-                    logger.warning(
-                        "materialize: level lookup pipeline failed (%d urns): %s",
-                        len(all_urns), exc,
-                    )
-
-        merge_batch: list[dict[str, Any]] = []
-        for i, ((s, t), _) in enumerate(ordered_pairs):
-            weight = scard_results[i] if scard_results[i] else 1
-            etypes = list(pair_edge_types.get((s, t), set()))
-            merge_batch.append({
-                "s": s, "t": t, "w": int(weight), "et": etypes,
-                "sl": url_levels.get(s),
-                "tl": url_levels.get(t),
-            })
-
-        # Execute the MERGE as one or more (cypher, batch) work units. In
-        # dedicated projection mode the units are LABELED node merges grouped
-        # by resolved (srcLabel, tgtLabel) so the per-label URN index serves
-        # the match — removing the dependency on the FalkorDB >=2.10 unlabeled
-        # URN index. in_source mode stays a single unlabeled unit. Each unit
-        # runs through the shared adaptive sub-batch loop.
-        work_units = await self._build_aggregated_merge_units(merge_batch)
-
-        created = 0
-        for unit_cypher, unit_batch in work_units:
-            created += await self._run_aggregated_merge_loop(
-                unit_cypher, unit_batch,
-                baseline_aggregated=baseline_aggregated,
-                running_created=created,
-                intra_batch_callback=intra_batch_callback,
-                should_cancel=should_cancel,
-            )
-
-        return created, 0
-
-    # Shared SET tail for the incremental AGGREGATED MERGE — identical for the
-    # labeled and unlabeled node-match variants. ``coalesce`` never regresses
-    # known level metadata to NULL; REDUCE unions sourceEdgeTypes in one pass.
-    _AGG_MERGE_SET = (
-        "MERGE (s)-[r:AGGREGATED]->(t) "
-        "SET r.weight = item.w, "
-        "    r.latestUpdate = timestamp(), "
-        "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
-        "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
-        "    r.sourceEdgeTypes = REDUCE(acc = "
-        "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
-        "           ELSE r.sourceEdgeTypes END, "
-        "      et IN item.et | "
-        "      CASE WHEN et IN acc THEN acc "
-        "           ELSE acc + et END)"
-    )
-    _AGG_MERGE_UNLABELED = (
-        "UNWIND $batch AS item MERGE (s {urn: item.s}) MERGE (t {urn: item.t}) "
-        + _AGG_MERGE_SET
-    )
-
-    async def _build_aggregated_merge_units(
-        self, merge_batch: list[dict[str, Any]],
-    ) -> list[tuple[str, list[dict[str, Any]]]]:
-        """Split an incremental MERGE batch into (cypher, batch) work units.
-
-        ``in_source`` mode → one unlabeled unit (the real entity nodes already
-        carry labels in the source graph). ``dedicated`` mode → one LABELED
-        unit per resolved ``(srcLabel, tgtLabel)`` group plus an unlabeled
-        remainder for pairs whose labels can't be resolved (correctness is
-        preserved — those few fall back rather than being dropped, unlike the
-        bulk-rebuild path). Labeled MERGE lets the per-label URN index serve
-        the node match in the synthetic projection graph, so the write path no
-        longer depends on the FalkorDB >=2.10 unlabeled URN index.
-        """
-        if not merge_batch:
-            return []
-        if self._projection_mode != "dedicated":
-            return [(self._AGG_MERGE_UNLABELED, merge_batch)]
-
-        urns = {it["s"] for it in merge_batch} | {it["t"] for it in merge_batch}
-        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
-
-        labeled: Dict[Tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-        unlabeled: list[dict[str, Any]] = []
-        for it in merge_batch:
-            sl = urn_label_map.get(it["s"])
-            tl = urn_label_map.get(it["t"])
-            if sl and tl:
-                labeled[(sl, tl)].append(it)
-            else:
-                unlabeled.append(it)
-
-        labels = {lbl for pair in labeled for lbl in pair}
-        if labels:
-            # Per-label URN indexes on the projection graph make the labeled
-            # MATCH an index seek instead of a scan.
-            await self._ensure_label_urn_indexes(labels)
-
-        units: list[tuple[str, list[dict[str, Any]]]] = []
-        for (sl, tl), items in labeled.items():
-            cypher = (
-                f"UNWIND $batch AS item "
-                f"MERGE (s:{_sanitize_label(sl)} {{urn: item.s}}) "
-                f"MERGE (t:{_sanitize_label(tl)} {{urn: item.t}}) "
-                + self._AGG_MERGE_SET
-            )
-            units.append((cypher, items))
-        if unlabeled:
-            units.append((self._AGG_MERGE_UNLABELED, unlabeled))
-        return units
-
-    async def _run_aggregated_merge_loop(
-        self,
-        merge_cypher: str,
-        merge_batch: list[dict[str, Any]],
-        *,
-        baseline_aggregated: int,
-        running_created: int,
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """Run ``merge_cypher`` over ``merge_batch`` in adaptive sub-batches.
-
-        Shared by the labeled and unlabeled incremental MERGE units:
-        cooperative cancel between sub-batches, AIMD sub-batch sizing under
-        provider load, and the intra-batch progress heartbeat. Returns the
-        count created in THIS call; the progress callback reports
-        ``baseline_aggregated + running_created + <created-so-far>`` so a job
-        spanning several units still shows a monotonic running total.
-        """
-        created = 0
-        chunk_start = 0
-        while chunk_start < len(merge_batch):
-            # Cooperative cancel between MERGE sub-batches. The previous
-            # sub-batch's MERGE has fully landed in FalkorDB before we reach
-            # this check, so raising here cannot orphan a Cypher transaction.
-            if should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<provider-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-
-            # Adaptive sub-batch size: starts at the ceiling and shrinks toward
-            # _MERGE_SUB_BATCH_MIN when MERGE latency creeps past the high
-            # target — the WS1.4 backpressure mechanism.
-            sub_batch_size = self._aggregation_sub_batch_size
-            chunk = merge_batch[chunk_start:chunk_start + sub_batch_size]
-            chunk_start += len(chunk)
-
-            t_merge_start = time.monotonic()
-            await self._proj_query(merge_cypher, params={"batch": chunk})
-            t_merge_elapsed = time.monotonic() - t_merge_start
-            created += len(chunk)
-
-            # AIMD adjustment. Shrink fast (multiplicative decrease) when
-            # latency creeps; grow slow (additive increase) only after a
-            # sustained run of healthy sub-batches. Bounds: [_MIN, _MAX].
-            current = self._aggregation_sub_batch_size
-            if t_merge_elapsed > self._MERGE_SUB_BATCH_TARGET_HIGH_S:
-                new_size = max(self._MERGE_SUB_BATCH_MIN, current // 2)
-                if new_size != current:
-                    logger.warning(
-                        "Aggregation MERGE sub-batch latency %.2fs > %.1fs "
-                        "target on %s; halving sub-batch size %d -> %d to "
-                        "relieve provider load.",
-                        t_merge_elapsed, self._MERGE_SUB_BATCH_TARGET_HIGH_S,
-                        self._graph_name, current, new_size,
-                    )
-                    self._aggregation_sub_batch_size = new_size
-                self._aggregation_sub_batch_under_target_run = 0
-            elif t_merge_elapsed < self._MERGE_SUB_BATCH_TARGET_LOW_S:
-                self._aggregation_sub_batch_under_target_run += 1
-                if (
-                    self._aggregation_sub_batch_under_target_run
-                    >= self._MERGE_SUB_BATCH_GROW_AFTER
-                    and current < self._MERGE_SUB_BATCH_SIZE
-                ):
-                    new_size = min(
-                        self._MERGE_SUB_BATCH_SIZE,
-                        current + self._MERGE_SUB_BATCH_GROW_STEP,
-                    )
-                    logger.info(
-                        "Aggregation MERGE sub-batch healthy (%d consecutive "
-                        "< %.1fs) on %s; growing sub-batch size %d -> %d.",
-                        self._aggregation_sub_batch_under_target_run,
-                        self._MERGE_SUB_BATCH_TARGET_LOW_S,
-                        self._graph_name, current, new_size,
-                    )
-                    self._aggregation_sub_batch_size = new_size
-                    self._aggregation_sub_batch_under_target_run = 0
-            else:
-                # In the steady-state band; reset growth counter so growth
-                # only triggers after a run of clearly-under-target calls.
-                self._aggregation_sub_batch_under_target_run = 0
-
-            # Intra-batch heartbeat so the worker's checkpoint can update
-            # created_edges / last_checkpoint_at during a multi-minute outer
-            # batch instead of the UI appearing frozen.
-            if intra_batch_callback is not None:
-                try:
-                    await intra_batch_callback(
-                        baseline_aggregated + running_created + created
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "Intra-batch progress callback failed at sub-batch "
-                        "ending %d (continuing): %s",
-                        chunk_start + len(chunk), cb_exc, exc_info=True,
-                    )
-        return created
-
-    # ====================================================================== #
-    # Bulk Rebuild Path (Phase 1 of aggregation hardening)                    #
-    #                                                                        #
-    # Adopts the solidatus-generator pattern: pre-dedupe pairs in worker     #
-    # memory, ensure per-label URN indexes, drop existing AGGREGATED edges,  #
-    # group pairs by (src_label, tgt_label), bulk-CREATE with label-         #
-    # qualified MATCH. Replaces MERGE-on-relationship (O(out_degree) in      #
-    # FalkorDB — no relationship-existence index) with CREATE (O(1) per      #
-    # row), eliminating the 200% CPU pathology on graphs with high-degree    #
-    # ancestor nodes.                                                        #
-    #                                                                        #
-    # Trade-off: wipe-and-rebuild semantics mean trace reads on the same     #
-    # projection graph see a partial AGGREGATED set during the rebuild       #
-    # window. Phase 3 (blue-green projection slots) eliminates this; Phase   #
-    # 1 accepts it. Recovery: bulk rebuild always restarts from cursor=NULL  #
-    # rather than resuming from a partial mid-rebuild state — the wipe      #
-    # phase cleans up any partial AGGREGATED writes from a prior attempt.    #
-    # ====================================================================== #
-
     # UNWIND batch size for bulk-CREATE. FalkorDB's documented best
     # practice is 10k–50k rows per UNWIND: large batches amortize the
     # parser/planner overhead, and CREATE is O(1) per row so larger
@@ -3780,668 +3464,6 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, total_cached, len(labels), elapsed_ms,
         )
 
-    async def _bulk_create_aggregated_edges_from_pairs(
-        self,
-        *,
-        pair_data: Dict[Tuple[str, str], Dict[str, Any]],
-        urn_label_map: Dict[str, Optional[str]],
-        level_digest: Optional[str],
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        baseline_aggregated: int = 0,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """Bulk-CREATE all AGGREGATED edges from a deduped pair set.
-
-        Groups pairs by (src_label, tgt_label) so each Cypher query has
-        a uniform shape that FalkorDB plans once and executes via index
-        seeks on both endpoint URNs. Pairs whose endpoint label could
-        not be resolved fall through to an unlabeled MATCH branch
-        (slower but rare and bounded).
-
-        Pre-dedup + CREATE is the core of the solidatus pattern: each
-        CREATE is O(1) per row vs MERGE-on-relationship's O(out_degree).
-        Caller must guarantee no duplicate pairs in ``pair_data``;
-        ``Dict`` keying by ``(src_urn, tgt_urn)`` already enforces this.
-
-        Returns total edges created.
-        """
-        if not pair_data:
-            return 0
-
-        from collections import defaultdict
-        grouped: Dict[
-            Tuple[Optional[str], Optional[str]], List[Dict[str, Any]]
-        ] = defaultdict(list)
-        for (s, t), meta in pair_data.items():
-            sl = urn_label_map.get(s)
-            tl = urn_label_map.get(t)
-            item = {
-                "s": s,
-                "t": t,
-                "w": int(meta.get("weight", 1)),
-                "et": list(meta.get("edge_types") or []),
-                "sl": meta.get("source_level"),
-                "tl": meta.get("target_level"),
-            }
-            grouped[(sl, tl)].append(item)
-
-        created = 0
-        digest_val = level_digest or ""
-
-        # Phase 1.8: drop-and-warn for pairs whose endpoint labels could
-        # not be resolved (after the URN→label warmup that ran in
-        # Phase C). The unlabeled-fallback CREATE that previously lived
-        # here was the root cause of the ``sol_xlarge_test2`` write-
-        # timeout fire: a single batch's per-row unlabeled scan can
-        # run for many minutes on a multi-million-node graph, bust
-        # the write timeout, trigger worker retries from scratch, and
-        # never make forward progress. After warmup, any URN still
-        # without a resolved label is genuinely label-less (legacy
-        # MERGE-on-node residue) or a missing-node reference — the
-        # unlabeled CREATE wouldn't have produced a usable edge for
-        # those anyway. Drop the pair, log a count + URN sample, and
-        # let the rest of the run finish cleanly.
-        dropped_pairs = 0
-        dropped_sample: List[Tuple[Optional[str], Optional[str]]] = []
-        for (sl_label, tl_label), items in grouped.items():
-            if not (sl_label and tl_label):
-                dropped_pairs += len(items)
-                if len(dropped_sample) < 10:
-                    for item in items[: 10 - len(dropped_sample)]:
-                        dropped_sample.append((item.get("s"), item.get("t")))
-                continue
-
-            cypher = (
-                f"UNWIND $batch AS item "
-                f"MATCH (a:{sl_label} {{urn: item.s}}) "
-                f"MATCH (b:{tl_label} {{urn: item.t}}) "
-                f"CREATE (a)-[r:AGGREGATED {{"
-                f"weight: item.w, "
-                f"sourceLevel: item.sl, "
-                f"targetLevel: item.tl, "
-                f"sourceEdgeTypes: item.et, "
-                f"levelDigest: $digest, "
-                f"latestUpdate: timestamp()"
-                f"}}]->(b)"
-            )
-
-            for i in range(0, len(items), self._bulk_create_batch_size):
-                if should_cancel is not None and should_cancel():
-                    from backend.app.services.aggregation.cancel import JobCancelled
-                    from datetime import datetime, timezone
-                    raise JobCancelled(
-                        job_id="<bulk-create-cancel>",
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-
-                chunk = items[i : i + self._bulk_create_batch_size]
-                t_batch_start = time.monotonic()
-                # Phase 1.8: pass a Phase-D-specific timeout (default
-                # 60s, env-tunable) rather than the 15s ``_WRITE_TIMEOUT``
-                # default. Bulk-CREATE batches against a graph under
-                # concurrent trace load can legitimately exceed 15s
-                # without indicating a stuck/runaway query.
-                await self._proj_query(
-                    cypher,
-                    params={"batch": chunk, "digest": digest_val},
-                    timeout=self._bulk_create_timeout_s,
-                )
-                t_batch = (time.monotonic() - t_batch_start) * 1000
-                created += len(chunk)
-
-                logger.debug(
-                    "Bulk CREATE chunk on %s: group=(%s,%s) size=%d "
-                    "elapsed=%.1fms total_created=%d",
-                    self._graph_name, sl_label, tl_label,
-                    len(chunk), t_batch, created,
-                )
-
-                if intra_batch_callback is not None:
-                    try:
-                        await intra_batch_callback(baseline_aggregated + created)
-                    except Exception as cb_exc:
-                        logger.error(
-                            "Intra-batch progress callback failed during bulk "
-                            "CREATE (continuing): %s", cb_exc, exc_info=True,
-                        )
-
-        if dropped_pairs > 0:
-            sample_str = ", ".join(
-                f"({s!r}→{t!r})" for s, t in dropped_sample
-            ) or "<none captured>"
-            logger.warning(
-                "Bulk CREATE on %s: dropped %d pairs with unresolvable "
-                "endpoint labels (one or both endpoints are label-less "
-                "or missing nodes — typically legacy MERGE residue or "
-                "ancestor URNs not yet hydrated into the graph). These "
-                "pairs were NOT materialised; the rest of the run "
-                "completed successfully. Sample of dropped pairs (up to "
-                "10): %s. Action: query "
-                "``MATCH (n) WHERE size(labels(n)) = 0 RETURN count(n)`` "
-                "to confirm label-less node count; consider rebuilding "
-                "those nodes with their proper entity-type labels and "
-                "re-running aggregation to materialise the dropped "
-                "pairs.",
-                self._graph_name, dropped_pairs, sample_str,
-            )
-
-        return created
-
-    async def _rebuild_idempotency_state_from_pairs(
-        self,
-        pair_data: Dict[Tuple[str, str], Dict[str, Any]],
-        *,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> None:
-        """Repopulate the Redis SADD-based contributor tracking from the
-        in-memory pair set. Required so subsequent incremental writes
-        (``on_lineage_edge_written``) see correct existing-pair state and
-        don't double-count freshly-rebuilt edges.
-
-        Issued in batched pipelines (500 keys per pipeline) so a single
-        round-trip never carries an oversized payload on million-pair
-        rebuilds.
-        """
-        members_key_prefix = f"{self._graph_name}:agg_members"
-        pipe_size = 500
-        sent = 0
-
-        pipe = self._redis.pipeline(transaction=False)
-        pipe_count = 0
-        for (s, t), meta in pair_data.items():
-            if pipe_count == 0 and should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<bulk-idem-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-            contributors = meta.get("contributors") or []
-            if not contributors:
-                continue
-            member_key = f"{members_key_prefix}:{s}:{t}"
-            pipe.execute_command("SADD", member_key, *contributors)
-            pipe_count += 1
-            if pipe_count >= pipe_size:
-                try:
-                    await pipe.execute()
-                    sent += pipe_count
-                except Exception as exc:
-                    logger.warning(
-                        "Idempotency rebuild pipeline failed (continuing — "
-                        "incremental writes for these pairs will be treated "
-                        "as net-new): %s", exc,
-                    )
-                pipe = self._redis.pipeline(transaction=False)
-                pipe_count = 0
-        if pipe_count > 0:
-            try:
-                await pipe.execute()
-                sent += pipe_count
-            except Exception as exc:
-                logger.warning(
-                    "Idempotency rebuild pipeline (tail) failed: %s", exc,
-                )
-
-        logger.info(
-            "Idempotency rebuild on %s complete: %d pair member sets "
-            "written to Redis.",
-            self._graph_name, sent,
-        )
-
-    async def _materialize_aggregated_edges_bulk_rebuild(
-        self,
-        *,
-        batch_size: int,
-        containment_edge_types: Optional[List[str]],
-        lineage_edge_types: Optional[List[str]],
-        progress_callback: Optional[Any],
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
-        should_cancel: Optional[Callable[[], bool]],
-        last_cursor: Optional[str],
-        resume_processed: int = 0,
-        resume_created: int = 0,
-    ) -> Dict[str, Any]:
-        """Bulk-rebuild orchestrator — Phase 1 of aggregation hardening.
-
-        Replaces the MERGE-based ``_materialize_edges_batched`` path with
-        wipe → accumulate-pairs-in-memory → label-resolve → ensure-
-        indexes → grouped-bulk-CREATE → idempotency-rebuild. Eliminates
-        the MERGE-on-relationship O(out_degree) cost that pegs FalkorDB
-        at 200% CPU on high-degree ancestor nodes (Domains, Platforms,
-        top-level Containers).
-
-        Recovery semantics: bulk rebuild always starts from cursor=NULL.
-        ``last_cursor`` is logged but otherwise ignored — on crash mid-
-        rebuild, the next run wipes and restarts. The wipe-first
-        ordering means partial AGGREGATED writes from a failed prior
-        attempt are cleaned up automatically.
-
-        Memory cost: ~200 bytes per (src_anc, tgt_anc) pair held until
-        the bulk-CREATE phase. Estimated ~200MB for 1M pairs, which is
-        well within worker pod memory budgets. If a future graph
-        produces enough pairs to exhaust memory, Phase 1.5 stages
-        ``pair_data`` to Redis or Postgres.
-
-        Phase 2 of aggregation hardening: by default (
-        ``AGGREGATION_STREAMING_REBUILD_ENABLED`` defaults to "true";
-        set it to "false" to roll back), delegate to the constant-memory
-        streaming rebuild — an indexed ``ID(r)`` cursor paged per lineage
-        type, per-page flush via MERGE-on-aggKey, and epoch tagging with
-        an end-of-run stale-generation sweep instead of the destructive
-        wipe-first. The streaming path is crash-resumable from
-        ``last_cursor``, does not hold the whole pair set in memory, and
-        resumes from cursor on every retry — so a transient connection
-        reset mid-run no longer restarts from 0%. The accumulate-in-memory
-        body below is preserved as the rollback escape hatch (flag off).
-        """
-        _streaming_flag = os.getenv("AGGREGATION_STREAMING_REBUILD_ENABLED", "true")
-        if str(_streaming_flag).strip().lower() in ("1", "true", "yes", "on"):
-            return await self._materialize_aggregated_edges_streaming_rebuild(
-                batch_size=batch_size,
-                containment_edge_types=containment_edge_types,
-                lineage_edge_types=lineage_edge_types,
-                progress_callback=progress_callback,
-                intra_batch_callback=intra_batch_callback,
-                should_cancel=should_cancel,
-                last_cursor=last_cursor,
-                resume_processed=resume_processed,
-                resume_created=resume_created,
-            )
-
-        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
-            else list(self._get_containment_edge_types())
-        exclude_types = list(containment) + ["AGGREGATED"]
-
-        # Filter AGGREGATED out of any explicit lineage whitelist —
-        # feeding existing AGGREGATED edges back through aggregation
-        # produces second-order edges that compound on every re-run.
-        if lineage_edge_types:
-            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
-            if not effective_lineage_types:
-                logger.warning(
-                    "bulk_rebuild: lineage_edge_types contained only AGGREGATED "
-                    "after filtering; no leaf lineage edges to process.",
-                )
-                return {
-                    "processed": 0,
-                    "aggregated_edges_affected": 0,
-                    "input_edges_processed": 0,
-                    "errors": 0,
-                }
-            type_filter = "WHERE type(r) IN $lineageEdges"
-            type_params: Dict[str, Any] = {"lineageEdges": effective_lineage_types}
-        else:
-            type_filter = "WHERE NOT type(r) IN $excludeTypes"
-            type_params = {"excludeTypes": exclude_types}
-
-        if last_cursor:
-            logger.info(
-                "bulk_rebuild on %s: ignoring last_cursor=%s — bulk rebuild "
-                "always processes from start (wipe-first semantics).",
-                self._graph_name, last_cursor,
-            )
-
-        # Total count — informational, used by progress callback.
-        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._ro_query(count_cypher, params=type_params)
-        total = count_res.result_set[0][0] if count_res.result_set else 0
-        logger.info(
-            "bulk_rebuild on %s starting: %d lineage edges to scan.",
-            self._graph_name, total,
-        )
-
-        # Initialize scan-position state up front so the phase-emit
-        # helper (defined below) sees consistent values from its first
-        # call onward. These get mutated in the Phase B scan loop;
-        # closures capture by reference so phase emits after the scan
-        # see the final state.
-        processed = 0
-        current_cursor: Optional[str] = None
-        pair_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        level_digest = getattr(self, "_level_digest", None)
-
-        # Phase 1.7 — phase-emit helper. Calls the worker's
-        # progress_callback with the current scan-state values plus the
-        # phase ID. The worker's checkpoint() updates progress fields
-        # AND conditionally updates job.current_phase when ``phase`` is
-        # non-None. We always pass aggregated=0 here so a phase
-        # boundary signal can't accidentally regress job.created_edges
-        # — the worker only updates created_edges when aggregated > 0,
-        # so 0 is a safe "leave it alone" sentinel. Best-effort: a
-        # callback failure here must never abort the run.
-        async def _emit_phase(phase_id: str) -> None:
-            if progress_callback is None:
-                return
-            try:
-                await progress_callback(
-                    processed, total, current_cursor, 0, phase_id,
-                )
-            except Exception as cb_exc:
-                logger.warning(
-                    "Phase-emit callback failed for phase=%s on %s "
-                    "(continuing): %s",
-                    phase_id, self._graph_name, cb_exc,
-                )
-
-        # ===== PHASE A: Wipe + purge idempotency =====
-        await _emit_phase("wiping")
-        t_phase_a_start = time.monotonic()
-        deleted = await self._wipe_aggregated_edges(should_cancel=should_cancel)
-        await self._purge_aggregated_idempotency_namespace()
-        t_phase_a = (time.monotonic() - t_phase_a_start) * 1000
-        logger.info(
-            "bulk_rebuild phase A (wipe): %d AGGREGATED edges deleted in %.1fms",
-            deleted, t_phase_a,
-        )
-
-        # ===== PHASE B: Stream lineage, accumulate pair_data =====
-        await _emit_phase("scanning")
-        batch_num = 0
-        t_phase_b_start = time.monotonic()
-
-        while True:
-            batch_num += 1
-            if current_cursor:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"AND (s.urn + '|' + t.urn) > $cursor "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
-            else:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "limit": batch_size}
-
-            t0 = time.monotonic()
-            res = await self._ro_query(batch_cypher, params=batch_params)
-            rows = res.result_set or []
-            t_fetch = (time.monotonic() - t0) * 1000
-
-            if not rows:
-                break
-
-            if should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<bulk-rebuild-scan-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-
-            # Bulk ancestor fetch — uses WS1.1 single-Cypher bulk path.
-            t0 = time.monotonic()
-            all_urns: Set[str] = set()
-            for row in rows:
-                all_urns.add(row[0])
-                all_urns.add(row[1])
-            ancestors_cache = await self._compute_and_store_ancestors_bulk(
-                list(all_urns),
-            )
-            t_ancestors = (time.monotonic() - t0) * 1000
-
-            # Python-side Cartesian + accumulate. Per leaf edge, expand
-            # (s_chain × t_chain) excluding self-loops. Dict keying by
-            # (src_anc, tgt_anc) gives free deduplication across leaf
-            # edges that share the same ancestor pair — the bulk-CREATE
-            # phase then has a guaranteed-unique input.
-            for s_urn, t_urn, edge_type, edge_id in rows:
-                if not edge_id:
-                    edge_id = f"{s_urn}|{edge_type}|{t_urn}"
-                s_chain = [s_urn] + (ancestors_cache.get(s_urn, []) or [])
-                t_chain = [t_urn] + (ancestors_cache.get(t_urn, []) or [])
-                for sa in s_chain:
-                    for ta in t_chain:
-                        if sa == ta:
-                            continue
-                        pair = (sa, ta)
-                        meta = pair_data.get(pair)
-                        if meta is None:
-                            meta = {
-                                "weight": 0,
-                                "edge_types": set(),
-                                "contributors": [],
-                                "source_level": None,
-                                "target_level": None,
-                            }
-                            pair_data[pair] = meta
-                        meta["weight"] += 1
-                        meta["edge_types"].add(edge_type)
-                        meta["contributors"].append(edge_id)
-
-            processed += len(rows)
-            last_row = rows[-1]
-            current_cursor = f"{last_row[0]}|{last_row[1]}"
-
-            logger.info(
-                "bulk_rebuild scan batch %d: %d/%d edges | fetch=%.1fms "
-                "ancestors=%.1fms | pairs_accumulated=%d",
-                batch_num, processed, total, t_fetch, t_ancestors,
-                len(pair_data),
-            )
-
-            if progress_callback is not None:
-                try:
-                    # During Phase B no edges have been written to
-                    # FalkorDB yet — they're accumulating in worker
-                    # memory. Pass 0 for aggregated so "Materialized"
-                    # stays at 0 until Phase D actually starts writing.
-                    # Phase 1.7 — also pass phase="scanning" so the UI
-                    # status label reflects what's actually happening.
-                    await progress_callback(
-                        processed, total, current_cursor, 0, "scanning",
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "bulk_rebuild progress callback failed at batch %d: %s "
-                        "(continuing)", batch_num, cb_exc, exc_info=True,
-                    )
-
-            if len(rows) < batch_size:
-                break
-
-        t_phase_b = (time.monotonic() - t_phase_b_start) * 1000
-        logger.info(
-            "bulk_rebuild phase B (scan): %d lineage edges, %d unique pairs "
-            "in %.1fms",
-            processed, len(pair_data), t_phase_b,
-        )
-
-        if not pair_data:
-            logger.info("bulk_rebuild: no pairs to materialize, exiting early.")
-            return {
-                "processed": processed,
-                "aggregated_edges_affected": 0,
-                "input_edges_processed": processed,
-                "errors": 0,
-            }
-
-        # ===== PHASE C: Resolve URN labels + ensure indexes =====
-        # Phase 1.8: warm the URN→label cache via one labeled scan per
-        # label BEFORE running the per-URN resolver. This converts what
-        # was a single unlabeled-MATCH-with-large-IN ($urns) Cypher
-        # (slow / timeout-prone on multi-million-node graphs without an
-        # unlabeled URN index) into N small index-assisted labeled
-        # scans. URNs still unresolved after warmup are label-less /
-        # missing and their pairs get dropped at the CREATE step
-        # (Phase 1.8 drop-and-warn) rather than scanning forever.
-        await _emit_phase("resolving_labels")
-        t_phase_c_start = time.monotonic()
-        await self._warmup_urn_label_cache_for_aggregation()
-
-        pair_urns: Set[str] = set()
-        for s, t in pair_data:
-            pair_urns.add(s)
-            pair_urns.add(t)
-        urn_label_map = await self._resolve_urn_labels_bulk(list(pair_urns))
-
-        # Stamp source/target level on each pair from the entity-type level map.
-        if entity_levels:
-            for (s, t), meta in pair_data.items():
-                sl = urn_label_map.get(s)
-                tl = urn_label_map.get(t)
-                if sl is not None:
-                    meta["source_level"] = entity_levels.get(sl)
-                if tl is not None:
-                    meta["target_level"] = entity_levels.get(tl)
-
-        distinct_labels = {l for l in urn_label_map.values() if l}
-        await self._ensure_label_urn_indexes(distinct_labels)
-        t_phase_c = (time.monotonic() - t_phase_c_start) * 1000
-        logger.info(
-            "bulk_rebuild phase C (labels): %d distinct labels indexed in %.1fms",
-            len(distinct_labels), t_phase_c,
-        )
-
-        # ===== PHASE D: Bulk-CREATE =====
-        #
-        # Composite per-batch callback: drives BOTH the event-bus
-        # heartbeat (intra_batch_callback) AND the durable DB
-        # checkpoint (progress_callback). Without this, the UI's
-        # "Materialized" counter would jump from 0 → final count at
-        # the very end of Phase D — which is exactly the "nothing is
-        # ever written" feeling operators reported even though Phase
-        # D was, in fact, writing edges. With this in place, the UI
-        # climbs in real time as each 10k-row CREATE batch lands in
-        # FalkorDB.
-        #
-        # Note: progress_callback is fed (total, total, cursor, running_created)
-        # rather than (processed, ...) because Phase B has already
-        # completed at this point — processed == total. The cursor
-        # stays at Phase B's final value for resume-correctness even
-        # though resume from mid-Phase-D is not implemented yet.
-        async def _phase_d_progress(running_created: int) -> None:
-            if intra_batch_callback is not None:
-                try:
-                    await intra_batch_callback(running_created)
-                except Exception as cb_exc:
-                    logger.error(
-                        "Phase D intra_batch_callback failed (continuing): %s",
-                        cb_exc, exc_info=True,
-                    )
-            if progress_callback is not None:
-                try:
-                    # Phase 1.7 — emit phase="creating" so the UI shows
-                    # "Creating aggregated edges in graph" while CREATEs
-                    # are actively landing in FalkorDB.
-                    await progress_callback(
-                        total, total, current_cursor, running_created, "creating",
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "Phase D progress_callback failed (continuing): %s",
-                        cb_exc, exc_info=True,
-                    )
-
-        # Boundary emit at the very start of Phase D — even before the
-        # first batch lands, the UI label flips to "Creating aggregated
-        # edges in graph" so operators can correlate the "started writing"
-        # signal with the FalkorDB count starting to climb.
-        await _emit_phase("creating")
-        t_phase_d_start = time.monotonic()
-        created = await self._bulk_create_aggregated_edges_from_pairs(
-            pair_data=pair_data,
-            urn_label_map=urn_label_map,
-            level_digest=level_digest,
-            intra_batch_callback=_phase_d_progress,
-            baseline_aggregated=0,
-            should_cancel=should_cancel,
-        )
-        t_phase_d = (time.monotonic() - t_phase_d_start) * 1000
-        rate = (created * 1000.0 / max(t_phase_d, 1.0))
-        logger.info(
-            "bulk_rebuild phase D (CREATE): %d AGGREGATED edges in %.1fms "
-            "(%.0f edges/s)",
-            created, t_phase_d, rate,
-        )
-
-        # ===== PHASE E: Rebuild Redis idempotency state =====
-        await _emit_phase("finalizing")
-        t_phase_e_start = time.monotonic()
-        await self._rebuild_idempotency_state_from_pairs(
-            pair_data, should_cancel=should_cancel,
-        )
-        t_phase_e = (time.monotonic() - t_phase_e_start) * 1000
-        logger.info(
-            "bulk_rebuild phase E (idempotency): %.1fms",
-            t_phase_e,
-        )
-
-        # Final progress flush so the UI's created_edges counter lands
-        # at the true CREATE count. We keep ``phase="finalizing"`` —
-        # the worker transitions the row to status=completed in its
-        # outer ``finally`` block, which is what flips the UI off
-        # the phase label naturally.
-        if progress_callback is not None:
-            try:
-                await progress_callback(
-                    processed, total, current_cursor, created, "finalizing",
-                )
-            except Exception:
-                pass
-
-        try:
-            if self._redis is not None:
-                from datetime import datetime, timezone
-                await self._redis.set(
-                    self._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
-                )
-        except Exception as e:
-            logger.warning(
-                "Failed to stamp aggregated materialization timestamp: %s", e,
-            )
-
-        return {
-            "processed": processed,
-            "aggregated_edges_affected": created,
-            "input_edges_processed": processed,
-            "errors": 0,
-        }
-
-    # ================================================================== #
-    # Streaming bulk rebuild (Phase 2 hardening)                         #
-    #                                                                    #
-    # Constant-memory, crash-resumable alternative to the accumulate-    #
-    # all-in-memory rebuild above. Pages leaf edges per lineage type on  #
-    # an indexed internal-ID cursor, expands + flushes one page at a     #
-    # time via MERGE-on-aggKey, and tags every edge with a per-run       #
-    # ``aggEpoch`` so a single end-of-run sweep retires the previous     #
-    # generation — no destructive wipe-first that breaks resume.         #
-    # ================================================================== #
-
-    _STREAM_CURSOR_PREFIX = "v2"
-
-    def _parse_stream_cursor(
-        self, last_cursor: Optional[str],
-    ) -> Optional[Tuple[int, int, int]]:
-        """Parse a streaming resume cursor ``v2:<epoch>:<type_index>:<rid>``.
-
-        Returns ``(epoch, type_index, rid)`` or ``None`` when the cursor is
-        absent or not a streaming cursor (fresh start, or a legacy cursor
-        left by the accumulate-in-memory path — which we ignore and start a
-        fresh generation).
-        """
-        if not last_cursor:
-            return None
-        parts = str(last_cursor).split(":")
-        if len(parts) != 4 or parts[0] != self._STREAM_CURSOR_PREFIX:
-            return None
-        try:
-            return int(parts[1]), int(parts[2]), int(parts[3])
-        except (ValueError, TypeError):
-            return None
-
-    @classmethod
-    def _make_stream_cursor(cls, epoch: int, type_index: int, rid: int) -> str:
-        return f"{cls._STREAM_CURSOR_PREFIX}:{epoch}:{type_index}:{rid}"
-
     async def _estimate_lineage_edge_count(
         self, lineage_types: List[str],
     ) -> int:
@@ -4495,474 +3517,6 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             return []
 
-    async def _ensure_aggregation_streaming_indexes(self) -> None:
-        """Create the ``:AGGREGATED(aggKey)`` edge index used by
-        MERGE-on-aggKey so each MERGE is an index seek rather than an
-        O(out_degree) scan. Best-effort + idempotent — older FalkorDB
-        releases without edge-property indexes still MERGE correctly,
-        just slower.
-        """
-        _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
-        # The aggKey edge index is what keeps MERGE-on-aggKey an index seek
-        # rather than an O(out_degree) scan on high-fan-in hubs — a silently
-        # missing index is the difference between fast and quadratic, so log
-        # the outcome instead of swallowing it.
-        for stmt, what in (
-            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)", "aggKey"),
-            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggEpoch)", "aggEpoch"),
-        ):
-            try:
-                await asyncio.wait_for(
-                    self._proj.query(stmt), timeout=_init_timeout,
-                )
-                logger.info(
-                    "streaming_rebuild on %s: ensured AGGREGATED(%s) edge index.",
-                    self._graph_name, what,
-                )
-            except Exception as exc:
-                msg = str(exc).lower()
-                if "already" in msg or "exist" in msg:
-                    continue  # idempotent — fine
-                logger.warning(
-                    "streaming_rebuild on %s: could NOT create AGGREGATED(%s) "
-                    "edge index (%s). MERGE/sweep will be slower (O(out_degree) "
-                    "on hubs); upgrade FalkorDB if this persists.",
-                    self._graph_name, what, exc,
-                )
-
-    async def _materialize_aggregated_edges_streaming_rebuild(
-        self,
-        *,
-        batch_size: int,
-        containment_edge_types: Optional[List[str]],
-        lineage_edge_types: Optional[List[str]],
-        progress_callback: Optional[Any],
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
-        should_cancel: Optional[Callable[[], bool]],
-        last_cursor: Optional[str],
-        resume_processed: int = 0,
-        resume_created: int = 0,
-    ) -> Dict[str, Any]:
-        """Constant-memory, crash-resumable bulk rebuild.
-
-        Pages leaf lineage edges one type at a time on an indexed
-        ``ID(r)`` cursor (the engine's physical iteration order — no
-        property index needed and no full-graph re-scan per page). For
-        each page: compute ancestor chains, expand the Cartesian product
-        in a *page-local* dict, then flush via MERGE-on-aggKey and
-        discard. Memory is bounded by ``page_size × max_chain_depth²``,
-        independent of graph size.
-
-        Every edge is stamped ``aggEpoch = <run epoch>``; MERGE-on-aggKey
-        accumulates weight for the same ancestor pair across pages within
-        a generation and resets it when reusing an edge from a prior
-        generation. A single end-of-run sweep deletes edges not stamped
-        with the current epoch — the previous generation. A crash before
-        the sweep leaves the old generation intact and queryable; resume
-        continues from ``last_cursor`` and only swaps generations once the
-        full scan completes.
-        """
-        from backend.app.services.aggregation.cancel import JobCancelled
-        from datetime import datetime, timezone
-
-        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
-            else list(self._get_containment_edge_types())
-        if lineage_edge_types:
-            effective = self._alias_rel_types([t for t in lineage_edge_types if t and t != "AGGREGATED"])
-        else:
-            effective = await self._derive_lineage_types_from_cache(containment)
-        # Stable, sorted, de-duplicated order so the cursor's type_index
-        # component is deterministic across restarts.
-        effective = sorted({str(t) for t in effective if t})
-        if not effective:
-            logger.warning(
-                "streaming_rebuild on %s: no effective lineage types; nothing "
-                "to materialize.", self._graph_name,
-            )
-            return {
-                "processed": 0,
-                "aggregated_edges_affected": 0,
-                "input_edges_processed": 0,
-                "errors": 0,
-            }
-
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        level_digest = getattr(self, "_level_digest", None) or ""
-
-        resume = self._parse_stream_cursor(last_cursor)
-        if resume is not None:
-            epoch, start_type_index, start_rid = resume
-            logger.info(
-                "streaming_rebuild on %s: resuming epoch=%d type_index=%d rid=%d",
-                self._graph_name, epoch, start_type_index, start_rid,
-            )
-        else:
-            epoch = int(time.time() * 1000)
-            start_type_index, start_rid = 0, -1
-            if last_cursor:
-                logger.info(
-                    "streaming_rebuild on %s: ignoring non-streaming cursor %r "
-                    "— starting fresh generation epoch=%d",
-                    self._graph_name, last_cursor, epoch,
-                )
-
-        # One-time setup: cheap estimate (no scan), indexes, label warmup.
-        total_estimate = await self._estimate_lineage_edge_count(effective)
-        await self._ensure_aggregation_streaming_indexes()
-        await self._warmup_urn_label_cache_for_aggregation()
-
-        max_pairs_per_page = int(os.getenv("AGGREGATION_MAX_PAIRS_PER_PAGE", "200000"))
-
-        # Seed the per-run counters from the resume baseline so a resumed job
-        # reports CUMULATIVE progress instead of resetting the bar to 0%. The
-        # scan never re-walks edges <= rid and the epoch is reused, so
-        # baseline + this-run is the correct total. Fresh runs start at 0.
-        processed = resume_processed if resume is not None else 0
-        running_created = resume_created if resume is not None else 0
-        # Loud signal if a job that HAD progress resumes with an unparseable
-        # cursor — that's a genuine restart (new epoch), not a continuation.
-        if resume is None and resume_processed > 0 and last_cursor:
-            logger.warning(
-                "streaming_rebuild on %s: resume requested with processed=%d but "
-                "cursor %r did not parse — RESTARTING from 0 under a new epoch; "
-                "the prior generation will be swept at end.",
-                self._graph_name, resume_processed, last_cursor,
-            )
-        total = max(total_estimate, processed)
-        scanned = processed  # absolute edges scanned (seeded at the baseline)
-
-        if progress_callback is not None:
-            try:
-                await progress_callback(
-                    processed, max(total, processed),
-                    last_cursor if resume else None, running_created, "scanning",
-                )
-            except Exception:
-                pass
-
-        # Cross-page accumulator. High-fan-in hub pairs (a top domain→domain pair
-        # appears under most leaves) are MERGED once per FLUSH WINDOW instead of
-        # once per page — cutting MERGE volume, and the O(out_degree) hub MERGE
-        # cost, by 1–2 orders of magnitude on deep hierarchies. Bounded by
-        # AGGREGATION_MAX_PAIRS_PER_PAGE; the flush boundary is also the
-        # checkpoint boundary so processed + cursor advance together (sound
-        # resume).
-        pending_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        checkpoint_cursor = (
-            last_cursor if resume is not None
-            else self._make_stream_cursor(epoch, start_type_index, start_rid)
-        )
-
-        async def _flush_and_checkpoint(
-            flush_type_index: int, flush_rid: int, phase: str,
-        ) -> None:
-            nonlocal pending_pairs, processed, running_created, checkpoint_cursor
-            if pending_pairs:
-                running_created += await self._flush_streaming_pairs(
-                    page_pairs=pending_pairs, entity_levels=entity_levels,
-                    level_digest=level_digest, epoch=epoch,
-                    running_created=running_created,
-                    intra_batch_callback=intra_batch_callback,
-                    should_cancel=should_cancel,
-                )
-                pending_pairs = {}
-            # Everything scanned so far is now durably MERGED → advance the
-            # persisted cursor + processed together (consistent for resume).
-            processed = scanned
-            checkpoint_cursor = self._make_stream_cursor(
-                epoch, flush_type_index, flush_rid,
-            )
-            if progress_callback is not None:
-                try:
-                    await progress_callback(
-                        processed, max(total, processed), checkpoint_cursor,
-                        running_created, phase,
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "streaming_rebuild checkpoint callback failed "
-                        "(continuing): %s", cb_exc, exc_info=True,
-                    )
-
-        for type_index in range(start_type_index, len(effective)):
-            etype = effective[type_index]
-            safe_type = _sanitize_label(etype)
-            rid_cursor = start_rid if type_index == start_type_index else -1
-
-            while True:
-                if should_cancel is not None and should_cancel():
-                    # Resume from the last FLUSHED boundary; the unflushed tail
-                    # re-scans on resume (idempotent via MERGE).
-                    raise JobCancelled(
-                        job_id=checkpoint_cursor,
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-
-                # Indexed cursor: typed pattern iterated in internal-ID order.
-                page_cypher = (
-                    f"MATCH (s)-[r:`{safe_type}`]->(t) WHERE ID(r) > $rid "
-                    f"RETURN ID(r) AS rid, s.urn AS s, t.urn AS t "
-                    f"ORDER BY ID(r) LIMIT $limit"
-                )
-                res = await self._ro_query(
-                    page_cypher, params={"rid": rid_cursor, "limit": batch_size},
-                )
-                rows = res.result_set or []
-                if not rows:
-                    # End of this type — flush the accumulated tail + checkpoint.
-                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
-                    break
-
-                page_urns: Set[str] = set()
-                for row in rows:
-                    if row[1]:
-                        page_urns.add(row[1])
-                    if row[2]:
-                        page_urns.add(row[2])
-                ancestors_cache = await self._compute_and_store_ancestors_bulk(
-                    list(page_urns),
-                )
-
-                # Expand (s_chain × t_chain) into the CROSS-PAGE accumulator.
-                for _rid, s_urn, t_urn in rows:
-                    if not s_urn or not t_urn:
-                        continue
-                    s_chain = [s_urn] + (ancestors_cache.get(s_urn, []) or [])
-                    t_chain = [t_urn] + (ancestors_cache.get(t_urn, []) or [])
-                    for sa in s_chain:
-                        for ta in t_chain:
-                            if sa == ta:
-                                continue
-                            meta = pending_pairs.get((sa, ta))
-                            if meta is None:
-                                meta = {"weight": 0, "edge_types": set()}
-                                pending_pairs[(sa, ta)] = meta
-                            meta["weight"] += 1
-                            meta["edge_types"].add(etype)
-
-                scanned += len(rows)
-                rid_cursor = int(rows[-1][0])
-                if total < scanned:
-                    total = scanned  # keep % monotonic when estimate is low
-
-                # Flush when the accumulator hits its memory budget (this is the
-                # checkpoint boundary). Otherwise keep accumulating across pages.
-                if len(pending_pairs) >= max_pairs_per_page:
-                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
-
-                if len(rows) < batch_size:
-                    # End of this type — flush the accumulated tail + checkpoint.
-                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
-                    break
-
-        # End-of-run generation swap. Only a fully-scanned run reaches here.
-        final_cursor = self._make_stream_cursor(epoch, len(effective), -1)
-        if progress_callback is not None:
-            try:
-                await progress_callback(
-                    processed, max(total, processed), final_cursor,
-                    running_created, "finalizing",
-                )
-            except Exception:
-                pass
-        swept = await self._sweep_stale_aggregated_generation(
-            epoch, should_cancel=should_cancel,
-        )
-        final_count = await self._count_aggregated_for_epoch(epoch)
-        logger.info(
-            "streaming_rebuild on %s complete: processed=%d new_created>=%d "
-            "final_aggregated=%d swept_stale=%d (epoch=%d)",
-            self._graph_name, processed, running_created, final_count, swept, epoch,
-        )
-
-        try:
-            if self._redis is not None:
-                await self._redis.set(
-                    self._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
-                )
-        except Exception as e:
-            logger.warning(
-                "Failed to stamp aggregated materialization timestamp: %s", e,
-            )
-
-        return {
-            "processed": processed,
-            "aggregated_edges_affected": final_count,
-            "input_edges_processed": processed,
-            "errors": 0,
-        }
-
-    async def _flush_streaming_pairs(
-        self,
-        *,
-        page_pairs: Dict[Tuple[str, str], Dict[str, Any]],
-        entity_levels: Dict[str, int],
-        level_digest: str,
-        epoch: int,
-        running_created: int,
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """MERGE one page's pairs into AGGREGATED edges.
-
-        Keyed on a deterministic ``aggKey = src_urn|tgt_urn`` so the same
-        ancestor pair re-expanded on a later page accumulates weight on the
-        single existing edge (within the current generation). Edges reused
-        from a prior generation are reset (weight, edge-types, epoch).
-        Returns the number of NEW edges created in this flush (the running
-        live counter; the authoritative final count is taken once at the
-        end of the run).
-
-        Crash-resume note: MERGE-on-aggKey keeps the AGGREGATED *topology*
-        exact (one edge per ancestor pair, never duplicated). The ``weight``
-        counter, however, accumulates via ON MATCH within a generation, so a
-        crash between a page's flush and its checkpoint can re-add at most
-        one page's contributions on resume — a bounded over-count on a soft
-        ranking signal that fully self-heals on the next clean rebuild (a
-        fresh epoch resets weights via the ON MATCH ``ELSE`` branch).
-        """
-        from backend.app.services.aggregation.cancel import JobCancelled
-        from datetime import datetime, timezone
-
-        if not page_pairs:
-            return 0
-
-        urns: Set[str] = set()
-        for s, t in page_pairs:
-            urns.add(s)
-            urns.add(t)
-        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
-
-        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-        dropped = 0
-        for (s, t), meta in page_pairs.items():
-            sl = urn_label_map.get(s)
-            tl = urn_label_map.get(t)
-            if not (sl and tl):
-                dropped += 1
-                continue
-            grouped[(sl, tl)].append({
-                "s": s,
-                "t": t,
-                "k": f"{s}|{t}",
-                "w": int(meta.get("weight", 1)),
-                "et": list(meta.get("edge_types") or []),
-                "sl": entity_levels.get(sl) if entity_levels else None,
-                "tl": entity_levels.get(tl) if entity_levels else None,
-            })
-
-        if dropped:
-            logger.debug(
-                "streaming flush on %s: dropped %d pairs with unresolved "
-                "endpoint labels (label-less or missing nodes).",
-                self._graph_name, dropped,
-            )
-
-        digest_val = level_digest or ""
-        created = 0
-        for (sl_label, tl_label), items in grouped.items():
-            cypher = (
-                f"UNWIND $batch AS item "
-                f"MATCH (a:{sl_label} {{urn: item.s}}) "
-                f"MATCH (b:{tl_label} {{urn: item.t}}) "
-                f"MERGE (a)-[r:AGGREGATED {{aggKey: item.k}}]->(b) "
-                f"ON CREATE SET r.weight = item.w, r.aggEpoch = $epoch, "
-                f"r.sourceEdgeTypes = item.et, r.sourceLevel = item.sl, "
-                f"r.targetLevel = item.tl, r.levelDigest = $digest, "
-                f"r.latestUpdate = timestamp() "
-                f"ON MATCH SET r.weight = CASE WHEN r.aggEpoch = $epoch "
-                f"THEN r.weight + item.w ELSE item.w END, "
-                f"r.sourceEdgeTypes = item.et, r.sourceLevel = item.sl, "
-                f"r.targetLevel = item.tl, r.aggEpoch = $epoch, "
-                f"r.levelDigest = $digest, r.latestUpdate = timestamp()"
-            )
-            for i in range(0, len(items), self._bulk_create_batch_size):
-                if should_cancel is not None and should_cancel():
-                    raise JobCancelled(
-                        job_id="<streaming-flush-cancel>",
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-                chunk = items[i : i + self._bulk_create_batch_size]
-                result = await self._proj_query(
-                    cypher,
-                    params={"batch": chunk, "epoch": epoch, "digest": digest_val},
-                    timeout=self._bulk_create_timeout_s,
-                )
-                created += int(getattr(result, "relationships_created", 0) or 0)
-                if intra_batch_callback is not None:
-                    try:
-                        await intra_batch_callback(running_created + created)
-                    except Exception as cb_exc:
-                        logger.error(
-                            "streaming flush intra_batch_callback failed "
-                            "(continuing): %s", cb_exc, exc_info=True,
-                        )
-        return created
-
-    async def _sweep_stale_aggregated_generation(
-        self,
-        epoch: int,
-        *,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """Delete AGGREGATED edges not written by the current generation, in
-        cursored chunks bounded by ``_BULK_WIPE_BATCH_SIZE`` so a single
-        DELETE can't bust the write timeout. Replaces the destructive
-        wipe-first ordering.
-        """
-        from backend.app.services.aggregation.cancel import JobCancelled
-        from datetime import datetime, timezone
-
-        total_deleted = 0
-        while True:
-            if should_cancel is not None and should_cancel():
-                raise JobCancelled(
-                    job_id="<streaming-sweep-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-            res = await self._proj_query(
-                "MATCH ()-[r:AGGREGATED]->() "
-                "WHERE r.aggEpoch IS NULL OR r.aggEpoch <> $epoch "
-                f"WITH r LIMIT {self._BULK_WIPE_BATCH_SIZE} "
-                "DELETE r RETURN count(r) AS n",
-                params={"epoch": epoch},
-            )
-            n = 0
-            if res.result_set:
-                first = res.result_set[0]
-                n = (first[0] if first else 0) or 0
-            total_deleted += int(n)
-            if n == 0:
-                break
-            logger.info(
-                "streaming sweep on %s: chunk deleted %d stale AGGREGATED "
-                "edges (running total %d)",
-                self._graph_name, n, total_deleted,
-            )
-        return total_deleted
-
-    async def _count_aggregated_for_epoch(self, epoch: int) -> int:
-        """Authoritative count of AGGREGATED edges written by this run. One
-        scan at the very end (the result set, not the full graph) — far
-        cheaper than the per-page full-graph scans this rewrite eliminates.
-        """
-        try:
-            res = await self._proj_ro_query(
-                "MATCH ()-[r:AGGREGATED]->() WHERE r.aggEpoch = $epoch "
-                "RETURN count(r) AS n",
-                params={"epoch": epoch},
-                timeout=self._bulk_create_timeout_s,
-            )
-            if res.result_set:
-                first = res.result_set[0]
-                return int((first[0] if first else 0) or 0)
-        except Exception as exc:
-            logger.warning(
-                "streaming_rebuild epoch count failed on %s: %s",
-                self._graph_name, exc,
-            )
-        return 0
 
     async def on_lineage_edge_written(
         self,
@@ -4974,7 +3528,7 @@ class FalkorDBProvider(GraphDataProvider):
         """Materialize AGGREGATED edges when a lineage edge is written.
 
         Used for real-time per-edge materialization on individual writes.
-        For bulk aggregation, use ``_materialize_edges_batched`` instead.
+        For bulk aggregation, use ``materialize_aggregated_edges_batch`` instead.
 
         Uses pre-computed ancestor chains instead of Cypher variable-length
         paths, eliminating the Cartesian product explosion.
@@ -5398,247 +3952,32 @@ class FalkorDBProvider(GraphDataProvider):
         resume_processed: int = 0,
         resume_created: int = 0,
     ) -> Dict[str, Any]:
-        """Batch materialization using ancestor-chain approach with cursor-based pagination.
+        """Materialize :AGGREGATED rollup edges (single resumable pipeline).
 
-        ``resume_processed`` / ``resume_created`` are the job's already-committed
-        progress at resume time; the streaming rebuild seeds its per-run counters
-        from them (when the cursor parses) so a resumed job reports cumulative
-        progress instead of resetting the bar to 0%.
-
-        Instead of Cypher variable-length paths with Cartesian products,
-        this uses pre-computed ancestor chains stored in Redis Hashes.
-
-        CURSOR-BASED PAGINATION (CRIT-2):
-        - Uses stable cursor on sorted composite key (s.urn + '|' + t.urn)
-        - Eliminates O(n²) degradation from SKIP at large offsets
-        - Safe under concurrent graph mutations
-        - Resume from last_cursor after crash/restart
-
-        Args:
-            batch_size: Number of edges to process per batch
-            containment_edge_types: Structural edge types (from ontology)
-            lineage_edge_types: Functional edge types (from ontology)
-            last_cursor: Resume point — composite key of last processed edge
-            progress_callback: async fn(processed, total, cursor, created_count) for checkpointing
-            intra_batch_callback: async fn(running_aggregated_total) called after each
-                Cypher MERGE sub-batch within an outer batch. A single outer batch can
-                fan out to 100+ MERGE sub-batches running for several minutes; without
-                this hook the operator UI's ``last_checkpoint_at`` and ``created_edges``
-                would freeze for that whole window.
+        Delegates to ``backend.app.providers.falkordb_materialize`` — see
+        that module for the EXTRACT -> COMPUTE -> RECONCILE -> APPLY design,
+        the ``v3:`` cursor contract, and the tuning env vars. The legacy
+        wipe-first bulk rebuild, epoch-swept streaming rebuild, and
+        cursor-paged MERGE loop (with their AGGREGATION_BULK_REBUILD_ENABLED
+        / AGGREGATION_STREAMING_REBUILD_ENABLED flags) were removed — this
+        is the only strategy. Rollback is a version rollback.
         """
         await self._ensure_connected()
-
-        # Phase 1 of aggregation hardening: dispatch to bulk-rebuild
-        # (wipe + accumulate-in-memory + bulk-CREATE) when the env flag
-        # is set. Defaults to enabled. Operators can roll back to the
-        # legacy MERGE-per-batch path by setting
-        # AGGREGATION_BULK_REBUILD_ENABLED=false if a production
-        # regression surfaces. See plan at
-        # /Users/rkrumins/.claude/plans/i-want-you-to-merry-minsky.md.
-        _bulk_flag = os.getenv("AGGREGATION_BULK_REBUILD_ENABLED", "true")
-        if str(_bulk_flag).strip().lower() in ("1", "true", "yes", "on"):
-            return await self._materialize_aggregated_edges_bulk_rebuild(
-                batch_size=batch_size,
-                containment_edge_types=containment_edge_types,
-                lineage_edge_types=lineage_edge_types,
-                progress_callback=progress_callback,
-                intra_batch_callback=intra_batch_callback,
-                should_cancel=should_cancel,
-                last_cursor=last_cursor,
-                resume_processed=resume_processed,
-                resume_created=resume_created,
-            )
-
-        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
-            else list(self._get_containment_edge_types())
-        exclude_types = list(containment) + ["AGGREGATED"]
-
-        # Filter AGGREGATED out of any explicit lineage whitelist. The
-        # ontology can legitimately list AGGREGATED as a lineage-category
-        # relationship (it is the *result* of aggregation), but feeding
-        # existing AGGREGATED edges back into this loop produces new
-        # AGGREGATED edges from ancestor chains of the previously-
-        # aggregated pairs, compounding on every re-run. This was the
-        # cause of the API vs seed_falkordb count divergence: after the
-        # first materialization, each API run multiplied the AGGREGATED
-        # count whereas the seed-script fallback branch (``NOT IN
-        # exclude_types``) already excluded AGGREGATED correctly.
-        if lineage_edge_types:
-            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
-            if not effective_lineage_types:
-                logger.warning(
-                    "materialize_aggregated_edges_batch: lineage_edge_types contained "
-                    "only AGGREGATED after filtering; no leaf lineage edges to process. "
-                    "Check the ontology's is_lineage flags."
-                )
-                return {"processed": 0, "aggregated_edges_affected": 0, "errors": 0}
-            type_filter = "WHERE type(r) IN $lineageEdges"
-            type_params: Dict[str, Any] = {"lineageEdges": effective_lineage_types}
-        else:
-            type_filter = "WHERE NOT type(r) IN $excludeTypes"
-            type_params = {"excludeTypes": exclude_types}
-
-        # Count total lineage edges
-        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._ro_query(count_cypher, params=type_params)
-        total = count_res.result_set[0][0] if count_res.result_set else 0
-
-        logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
-
-        processed = 0
-        errors = 0
-        created_count = 0
-        current_cursor = last_cursor
-        batch_num = 0
-
-        while True:
-            batch_num += 1
-            # Cursor-based batch fetch — sorted composite key for stable ordering
-            if current_cursor:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"AND (s.urn + '|' + t.urn) > $cursor "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
-            else:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "limit": batch_size}
-
-            # Do NOT silently break on batch-fetch failure — that path
-            # lets a provider outage mid-aggregation flow through the
-            # worker as if the job completed successfully (the worker
-            # reads our ``stats`` dict, sees no exception, and marks
-            # status=completed with whatever ``processed`` count we
-            # managed before the failure). Re-raise so the worker's
-            # outer try/except transitions the job to ``failed`` and
-            # preserves ``last_cursor`` for crash-resume. The provider
-            # is either back (resume succeeds) or still down (breaker
-            # opens and triggers 503 upstream).
-            t0 = time.monotonic()
-            res = await self._ro_query(batch_cypher, params=batch_params)
-            rows = res.result_set or []
-            t_fetch = (time.monotonic() - t0) * 1000
-
-            if not rows:
-                break
-
-            # Pre-compute ancestor chains for all URNs in this batch.
-            # The returned dict maps URN → ancestor list (ordered parent
-            # to root). We pass this cache directly to the batched
-            # materializer to avoid per-edge Redis HGET round-trips.
-            t0 = time.monotonic()
-            all_urns = set()
-            for row in rows:
-                all_urns.add(row[0])
-                all_urns.add(row[1])
-            ancestors_cache = await self._compute_and_store_ancestors_bulk(list(all_urns))
-            t_ancestors = (time.monotonic() - t0) * 1000
-
-            # Batch-level materialization: all Redis pipelines + Cypher
-            # MERGE in 4 round-trips total, regardless of batch size.
-            # This replaces the previous per-edge loop that did 3 round-
-            # trips per edge (SADD + SCARD + MERGE × N edges).
-            # Cooperative cancel check at the start of each outer batch
-            # — cheap, predicate-only, no exception out of this provider
-            # if the worker hasn't asked us to bail. Inside
-            # ``_materialize_edges_batched`` the same predicate fires
-            # between MERGE sub-batches so a multi-minute outer batch
-            # can be aborted cleanly without orphaning a Cypher
-            # transaction. Importing locally keeps the provider free of
-            # an aggregation-package coupling at module load.
-            if should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id=last_cursor or "<no-cursor>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-
-            t0 = time.monotonic()
-            # Pass ``created_count`` as the baseline so the intra-batch
-            # callback always receives the cumulative aggregated total
-            # across the whole job, not just within the current outer
-            # batch. The worker uses this as ``job.created_edges``
-            # directly so the UI sees a monotonically rising counter.
-            batch_created, batch_errors = await self._materialize_edges_batched(
-                rows, ancestors_cache,
-                intra_batch_callback=intra_batch_callback,
-                baseline_aggregated=created_count,
-                should_cancel=should_cancel,
-            )
-            created_count += batch_created
-            errors += batch_errors
-
-            t_materialize = (time.monotonic() - t0) * 1000
-
-            processed += len(rows)
-            # Update cursor to last row's composite key
-            last_row = rows[-1]
-            current_cursor = f"{last_row[0]}|{last_row[1]}"
-
-            logger.info(
-                "Batch %d: %d/%d edges | fetch=%.1fms ancestors=%.1fms "
-                "materialize=%.1fms | created=%d errors=%d",
-                batch_num, processed, total,
-                t_fetch, t_ancestors, t_materialize,
-                created_count, errors,
-            )
-
-            # Checkpoint via callback (for worker DB persistence). The
-            # callback is the only path by which the running job's
-            # progress + cursor reach the operator UI; without ``exc_info``
-            # a silent failure here meant the user saw ``processed_edges =
-            # 0`` indefinitely while AGGREGATED edges accumulated in
-            # FalkorDB. Log the full traceback so the underlying cause is
-            # diagnosable, and continue the loop — the materialisation
-            # itself is independent of progress reporting.
-            if progress_callback:
-                try:
-                    await progress_callback(processed, total, current_cursor, created_count)
-                except Exception as e:
-                    logger.error(
-                        "Progress callback failed at batch %d (processed=%d/%d, "
-                        "created=%d): %s — continuing materialisation",
-                        batch_num, processed, total, created_count, e,
-                        exc_info=True,
-                    )
-
-            # If we got fewer rows than batch_size, we've reached the end
-            if len(rows) < batch_size:
-                break
-
-        stats = {
-            "processed": processed,
-            # Historical key name — kept for back-compat with
-            # aggregation_jobs.created_edges; now correctly counts the
-            # number of AGGREGATED graph edges created or updated, not
-            # the number of input lineage edges iterated.
-            "aggregated_edges_affected": created_count,
-            # New stat so callers + dashboards can distinguish
-            # "touched N input edges" from "wrote M aggregated edges".
-            # On a clean run these two are typically proportional; when
-            # they diverge the operator has a clear signal that the
-            # Redis idempotency sets are in a surprising state.
-            "input_edges_processed": processed,
-            "errors": errors,
-        }
-        try:
-            if self._redis is not None:
-                from datetime import datetime, timezone
-                await self._redis.set(
-                    self._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
-                )
-        except Exception as e:
-            logger.warning("Failed to stamp aggregated materialization timestamp: %s", e)
-        logger.info(f"Batch materialization complete: {stats}")
-        return stats
+        from backend.app.providers.falkordb_materialize import (
+            materialize_aggregated_edges,
+        )
+        return await materialize_aggregated_edges(
+            self,
+            batch_size=batch_size,
+            containment_edge_types=containment_edge_types,
+            lineage_edge_types=lineage_edge_types,
+            last_cursor=last_cursor,
+            progress_callback=progress_callback,
+            intra_batch_callback=intra_batch_callback,
+            should_cancel=should_cancel,
+            resume_processed=resume_processed,
+            resume_created=resume_created,
+        )
 
     async def get_aggregated_edges_between(
         self,
@@ -5721,6 +4060,22 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             rows = await _run_batch(source_urns)
 
+        # Same-node "mirror" pairs (an AGGREGATED edge duplicating a raw
+        # lineage edge 1:1) are no longer materialized by the pipeline —
+        # synthesize them from the raw lineage edges so browse-mode
+        # canvases (which only read /edges/aggregated) still render
+        # direct lineage between fully drilled-down nodes. Deduped in
+        # favor of a materialized row (covers graphs written before the
+        # pipeline change and AGGREGATION_MATERIALIZE_LEAF_PAIRS=true).
+        raw_rows = await self._synthesize_raw_lineage_pairs(
+            source_urns, target_urns, lineage_edges, timeout=timeout,
+        )
+        if raw_rows:
+            seen_pairs = {(row[0], row[1]) for row in rows}
+            rows = list(rows) + [
+                row for row in raw_rows if (row[0], row[1]) not in seen_pairs
+            ]
+
         last_materialized_at: Optional[str] = None
         try:
             if self._redis is not None:
@@ -5735,6 +4090,69 @@ class FalkorDBProvider(GraphDataProvider):
     # ------------------------------------------------------------------
     # Helpers for get_aggregated_edges_between
     # ------------------------------------------------------------------
+
+    async def _synthesize_raw_lineage_pairs(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        lineage_edges: Optional[List[str]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> list:
+        """Aggregate raw lineage edges between the requested URN sets into
+        the same row shape as the AGGREGATED read (sUrn, tUrn, weight,
+        types) — one row per (s, t) pair, weight = parallel-edge count.
+
+        This is the read-side replacement for the leaf↔leaf mirror pairs
+        the pipeline stopped materializing. Runs on the SOURCE graph
+        (raw lineage lives there even in dedicated projection mode) with
+        a URN-index-driven MATCH, grouped server-side.
+        """
+        from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
+
+        ltypes = self._alias_rel_types(
+            [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
+        )
+        if not ltypes:
+            return []
+
+        if target_urns:
+            cypher = (
+                "MATCH (s)-[r]->(t) "
+                "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "count(r) AS weight, collect(DISTINCT type(r)) AS types"
+            )
+        else:
+            cypher = (
+                "MATCH (s)-[r]->(t) "
+                "WHERE s.urn IN $sourceUrns "
+                "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "count(r) AS weight, collect(DISTINCT type(r)) AS types"
+            )
+
+        async def _run_batch(batch: List[str]) -> list:
+            params: Dict[str, Any] = {"sourceUrns": batch, "ltypes": list(ltypes)}
+            if target_urns:
+                params["targetUrns"] = target_urns
+            try:
+                result = await self._ro_query(cypher, params=params, timeout=timeout)
+                return result.result_set or []
+            except Exception as e:
+                logger.warning(f"Raw lineage pair synthesis failed: {e}")
+                return []
+
+        batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
+        if len(source_urns) <= batch_size:
+            return await _run_batch(source_urns)
+        batches = [
+            source_urns[i:i + batch_size]
+            for i in range(0, len(source_urns), batch_size)
+        ]
+        batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+        return [row for rows in batch_results for row in rows]
 
     def _rows_to_aggregated_result(
         self,
@@ -7773,9 +6191,17 @@ class FalkorDBProvider(GraphDataProvider):
         Groups nodes by label (entity type) so each UNWIND+MERGE targets
         a single label — enabling index-assisted lookups. Turns N individual
         queries into ceil(N/batch_size) queries per label.
+
+        ``FALKORDB_SAVE_BATCH_SIZE`` tunes the UNWIND batch size (default
+        2000, clamped 100-10000): larger batches amortize parse/plan
+        overhead on multi-million-row initial loads; smaller ones bound
+        single-query time on constrained instances.
         """
         await self._ensure_connected()
-        batch_size = 500
+        try:
+            batch_size = max(100, min(10000, int(os.getenv("FALKORDB_SAVE_BATCH_SIZE", "2000"))))
+        except ValueError:
+            batch_size = 2000
 
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
@@ -7800,6 +6226,20 @@ class FalkorDBProvider(GraphDataProvider):
                     node.description, native_props,
                 ),
             })
+
+        # Ensure per-label URN indexes BEFORE the writes: node MERGE and
+        # edge MATCH both look up by urn, and without the index each row
+        # is a label scan. Once per provider instance — CREATE INDEX is
+        # idempotent but there's no point re-issuing DDL per chunk.
+        if nodes_by_label and not getattr(self, "_save_indices_ensured", False):
+            try:
+                await self.ensure_indices(list(nodes_by_label.keys()))
+                self._save_indices_ensured = True
+            except Exception as exc:
+                logger.warning(
+                    "save_custom_graph: ensure_indices failed (continuing; "
+                    "writes will be slower without URN indexes): %s", exc,
+                )
 
         # Bulk-cache urn→label mappings
         label_mapping = {}

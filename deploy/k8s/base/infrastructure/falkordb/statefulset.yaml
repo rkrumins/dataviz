@@ -30,14 +30,14 @@ spec:
               name: falkordb-ui
           env:
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 4"
+              value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
           resources:
             requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
+              cpu: "1"
               memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
           readinessProbe:
             exec:
               command: ["redis-cli", "ping"]

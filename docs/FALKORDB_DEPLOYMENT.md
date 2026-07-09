@@ -162,3 +162,20 @@ the full-graph count, the non-indexable cursor, and the in-memory pair
 accumulation that previously timed out. `AGGREGATION_MAX_PAIRS_PER_PAGE`
 bounds high-fan-in hub pages.
 5. **DNS Cutover:** Update Multi-Cluster Ingress (MCI) or global load balancer to route application traffic to the secondary region.
+
+---
+
+## Sizing & protection parameters
+
+How the deployed `FALKORDB_ARGS` values are derived:
+
+- **`THREAD_COUNT`** = ceil(pod CPU limit). **`OMP_THREAD_COUNT` = 1** — per-query
+  OpenMP fan-out must not exceed the CPU limit; left unbounded, OMP sizes itself to
+  the *node's* cores, and on a big node that causes CFS throttling and CPU spikes.
+- **`TIMEOUT_MAX`** must be set for FalkorDB to honor per-query timeouts on WRITE
+  queries (`TIMEOUT_DEFAULT` alone only covers reads). Client-side query budgets
+  must stay below `TIMEOUT_MAX` or the server rejects the timeout.
+- **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
+  instead of building a doomed backlog behind a slow query.
+- **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling
+  before the kernel OOM-kills the whole pod.

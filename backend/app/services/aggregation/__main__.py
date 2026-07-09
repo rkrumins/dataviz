@@ -25,7 +25,14 @@ Environment variables:
     FALKORDB_SOCKET_TIMEOUT    Socket timeout in seconds (default: 60 for worker)
     WORKER_CONCURRENCY         Max parallel jobs (default: 4)
     MAX_CONCURRENT_PER_GRAPH   Max parallel jobs per graph (default: 2)
-    AGGREGATION_JOB_TIMEOUT_SECS  Per-job timeout (default: 7200)
+    AGGREGATION_STALL_TIMEOUT_SECS  Kill a job with NO forward progress
+                               for this long (default: 900). Replaces the
+                               old fixed per-job timeout — a progressing
+                               job is never killed by a timer.
+    AGGREGATION_JOB_MAX_WALL_SECS   Absolute wall-clock safety net
+                               (default: 86400)
+    FALKORDB_ENDPOINT_WRITE_SLOTS   Cross-pod concurrent aggregation write
+                               budget per FalkorDB endpoint (default: 2)
     WORKER_HEALTH_PORT         Health endpoint port (default: 8090)
     LOG_LEVEL                  Logging level (default: INFO)
 """

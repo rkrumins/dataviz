@@ -51,9 +51,9 @@ export interface AggregationJobResponse {
   durationSeconds?: number;
   edgeCoveragePct?: number;
   /**
-   * Phase 1.7 — short ID for the currently-active phase of the bulk-rebuild path.
-   * One of: 'wiping' | 'scanning' | 'resolving_labels' | 'creating' | 'finalizing'.
-   * Null on legacy paths (Neo4j / Spanner / legacy MERGE) — UI falls back to a generic label.
+   * Short ID for the currently-active phase of the materialization pipeline.
+   * One of: 'extracting' | 'computing' | 'reconciling' | 'applying'.
+   * Null on providers that don't emit phase signals — UI falls back to a generic label.
    */
   currentPhase?: string | null;
 }

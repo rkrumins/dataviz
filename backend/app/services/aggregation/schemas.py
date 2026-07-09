@@ -231,10 +231,11 @@ class AggregationJobResponse(BaseModel):
     duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
     edge_coverage_pct: Optional[float] = Field(None, alias="edgeCoveragePct")
 
-    # Phase 1.7 — UI phase visibility. Short ID identifying which phase
-    # of the bulk-rebuild path is currently running (see
+    # UI phase visibility. Short ID identifying which phase of the
+    # materialization pipeline is currently running — 'extracting' /
+    # 'computing' / 'reconciling' / 'applying' (see
     # ``backend/app/services/aggregation/models.py:current_phase``).
-    # NULL on legacy paths (Neo4j/Spanner/legacy MERGE) — the frontend
+    # NULL on providers that don't emit phase signals — the frontend
     # falls back to a generic label in that case.
     current_phase: Optional[str] = Field(None, alias="currentPhase")
 

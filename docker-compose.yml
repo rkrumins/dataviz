@@ -42,7 +42,7 @@ services:
       - "${FALKORDB_PORT:-6379}:6379"
       - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
     environment:
-      FALKORDB_ARGS: THREAD_COUNT 4
+      FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50
     volumes:
       # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
       # symlinks /data/data → there). Mounting the volume at /data would
