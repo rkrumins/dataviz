@@ -13,7 +13,7 @@ export interface AggregationTuning {
   writePacingRatio?: number;    // 0 .. 10
   extractConcurrency?: number;  // 1 .. 4
   materializeLeafPairs?: boolean;
-  /** Legacy full-cube mode: also materialize leaf-level pairs (edges x depth; can OOM FalkorDB). */
+  /** Legacy full-cube mode: materialize leaf-involving AND mixed-level pairs (scales with raw edges; can OOM FalkorDB). */
   materializeFinePairs?: boolean;
   /** Hard write budget: fail the job instead of writing more :AGGREGATED edges than this. */
   maxMaterializedEdges?: number; // 10,000 .. 50,000,000

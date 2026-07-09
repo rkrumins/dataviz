@@ -34,19 +34,24 @@ stamped from the ontology's entity-type levels. Containment and lineage
 edge types are the ontology-frozen sets carried on the job row. Ragged
 hierarchies and multi-parent nodes follow the legacy longest-chain rule.
 
-**Level-based materialization boundary (the scale contract):** only
-pairs where BOTH endpoints are non-leaf-LEVEL nodes are materialized —
-with COMPLETE weights (every lattice cell, including direct
-container-level lineage, contributes). This set is bounded by container
-counts, independent of leaf-edge count. Pairs involving leaf-level nodes
-(column→table, column→domain, column→column) scale as edges × depth —
-the full cube observed to OOM FalkorDB (1.17M edges → 5.6M pairs) — and
-are served ON DEMAND by ``get_aggregated_edges_between`` from raw
-lineage fan-out + upward containment walks, bounded by the requested
-visible set. Same answers, same response shape; the graph stops storing
-millions of precomputed answers. ``AGGREGATION_MATERIALIZE_FINE_PAIRS``
-restores the legacy full cube (guarded by the write budget); jobs
-without an ontology level map fall back to it automatically.
+**Level-based materialization boundary (the scale contract):** only the
+SAME-LEVEL diagonal is materialized — table→table, database→database,
+domain→domain — with COMPLETE weights, plus the direct base pair of any
+raw lineage edge whose endpoints are both non-leaf (the exact record of
+cross-level raw facts). Each raw edge contributes at most ONE pair per
+level, and the per-level sets shrink monotonically going up (a quotient
+graph per level) — the minimal spanning set. Everything else is served
+ON DEMAND by ``get_aggregated_edges_between``, bounded by the requested
+visible set: leaf-involving pairs (column→table, column→domain,
+column→column: edges × depth if stored — the 5.6M-pair OOM) from raw
+lineage fan-out + upward containment walks, and mixed-level container
+pairs (table→domain: edges × depth² level combinations if stored —
+still 2.33M pairs after only the leaf cut) from the finer endpoint's
+materialized same-level cells + a strict upward walk. Same answers,
+same response shape; the graph stops storing millions of precomputed
+answers. ``AGGREGATION_MATERIALIZE_FINE_PAIRS`` restores the legacy
+full cube (guarded by the write budget); jobs without an ontology level
+map fall back to it automatically.
 
 Cursor format
 -------------
@@ -151,15 +156,17 @@ def _materialize_leaf_pairs() -> bool:
 
 
 def _materialize_fine_pairs() -> bool:
-    """Legacy full-cube mode: also materialize pairs involving leaf-LEVEL
-    nodes (column→table, column→domain, …). These cells scale as
-    edges × hierarchy depth — the cube blow-up that can exceed the
-    FalkorDB instance's memory (observed: 1.17M edges → 5.6M pairs →
-    OOM). Default OFF: leaf-involving pairs are served on demand by
-    ``get_aggregated_edges_between`` from raw lineage + upward
-    containment walks, so the capability is unchanged while the
-    materialized set stays bounded by CONTAINER counts, independent of
-    edge count."""
+    """Legacy full-cube mode: materialize EVERY ancestor-pair combination,
+    including pairs involving leaf-LEVEL nodes (column→table,
+    column→domain, …) and mixed-level container pairs (table→domain).
+    The full cube scales as edges × depth² level combinations — the
+    blow-up that can exceed the FalkorDB instance's memory (observed:
+    1.17M edges → 5.6M pairs → OOM). Default OFF: only same-level
+    container pairs are materialized; leaf-involving and mixed-level
+    pairs are served on demand by ``get_aggregated_edges_between``, so
+    the capability is unchanged while the materialized set stays one
+    pair per level per raw edge, shrinking monotonically up the
+    hierarchy."""
     return os.getenv(
         "AGGREGATION_MATERIALIZE_FINE_PAIRS", "false"
     ).strip().lower() in ("1", "true", "yes", "on")
@@ -172,6 +179,13 @@ def _max_materialized_edges() -> int:
     FalkorDB's RAM at ~0.5KB/edge — exceeding the instance's memory
     kills it for every graph it hosts."""
     return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 2_000_000, 10_000, 50_000_000)
+
+
+class MaterializationBudgetExceeded(ValueError):
+    """The computed result is larger than ``max_materialized_edges``.
+
+    Deterministic: recomputing yields the same count, so the worker must
+    fail the job terminally instead of consuming its retry budget."""
 
 
 # ---------------------------------------------------------------------------
@@ -304,11 +318,11 @@ class AggregationPipeline:
         # replaces).
         self._node_dir: Optional[Dict[int, Tuple[str, str]]] = None
         self._indexed_labels: Set[str] = set()
-        # IDs of non-leaf-LEVEL nodes (labels whose ontology level is above
-        # the finest). Loaded via cheap per-label ID scans when the fine
-        # filter is active; the set is bounded by CONTAINER counts (small),
-        # never by edge or leaf counts. None = filter inactive.
-        self._nonleaf_ids: Optional[Set[int]] = None
+        # Non-leaf-LEVEL node ID → ontology level (labels whose level is
+        # above the finest). Loaded via cheap per-label ID scans when the
+        # fine filter is active; the map is bounded by CONTAINER counts
+        # (small), never by edge or leaf counts. None = filter inactive.
+        self._nonleaf_levels: Optional[Dict[int, int]] = None
         self._fine_merges_skipped = 0
 
         # Run state
@@ -779,23 +793,34 @@ class AggregationPipeline:
                 )
             return out
 
-        nonleaf = self._nonleaf_ids  # None = fine filter inactive
+        nonleaf = self._nonleaf_levels  # None = fine filter inactive
 
-        async def merge_cell(cell: Dict[int, int]) -> None:
+        async def merge_cell(
+            cell: Dict[int, int], *, require_same_level: bool = True,
+        ) -> None:
             acc = self._acc
             skipped = 0
             for key, val in cell.items():
                 sid, tid = _unpack(key)
                 if sid == tid:
                     continue
-                if nonleaf is not None and (
-                    sid not in nonleaf or tid not in nonleaf
-                ):
-                    # Leaf-involving pair: served on demand by the read
-                    # path — materializing these is the cube blow-up
-                    # (edges × depth) that exceeds FalkorDB memory.
-                    skipped += 1
-                    continue
+                if nonleaf is not None:
+                    ls = nonleaf.get(sid)
+                    lt = nonleaf.get(tid)
+                    if ls is None or lt is None or (
+                        require_same_level and ls != lt
+                    ):
+                        # Leaf-involving or mixed-level pair: served on
+                        # demand by the read path. Materializing either
+                        # class scales with raw-edge count (leaf pairs as
+                        # edges × depth, mixed-level pairs as edges ×
+                        # depth² level combinations) — the cube blow-up
+                        # that exceeds FalkorDB memory. Only the
+                        # same-level diagonal (one pair per level per raw
+                        # edge, shrinking monotonically up the hierarchy)
+                        # is stored.
+                        skipped += 1
+                        continue
                 cur = acc.get(key)
                 acc[key] = val if cur is None else values.merge(
                     cur, values.weight(val), values.mask(val),
@@ -803,9 +828,13 @@ class AggregationPipeline:
             self._fine_merges_skipped += skipped
             await self._maybe_overflow_flush()
 
-        if nonleaf is not None or self._knob_bool(
-            "materialize_leaf_pairs", _materialize_leaf_pairs,
-        ):
+        if nonleaf is not None:
+            # Base cells keep the DIRECT raw endpoint pair even across
+            # levels (e.g. a raw table→database lineage edge) — bounded by
+            # distinct non-leaf raw pairs, and the only exact record of
+            # cross-level raw facts.
+            await merge_cell(base, require_same_level=False)
+        elif self._knob_bool("materialize_leaf_pairs", _materialize_leaf_pairs):
             await merge_cell(base)
 
         row = base
@@ -901,21 +930,24 @@ class AggregationPipeline:
                     yield row
 
     async def _load_nonleaf_ids(self) -> None:
-        """Populate the non-leaf node-ID set used by the materialization
-        boundary. Bounded by container counts — cheap at any graph size."""
-        if self._nonleaf_ids is not None or not self._fine_filter_active():
+        """Populate the non-leaf node-ID → level map used by the
+        materialization boundary. Bounded by container counts — cheap at
+        any graph size."""
+        if self._nonleaf_levels is not None or not self._fine_filter_active():
             return
-        ids: Set[int] = set()
+        levels: Dict[int, int] = {}
         for label in self._nonleaf_labels():
+            level = self._entity_levels[label]
             async for row in self._scan_label_nodes(label, want_urn=False):
                 if row and row[0] is not None:
-                    ids.add(int(row[0]))
-        self._nonleaf_ids = ids
+                    levels[int(row[0])] = level
+        self._nonleaf_levels = levels
         logger.info(
             "aggregation pipeline on %s: materialization boundary loaded — "
-            "%d non-leaf nodes (pairs involving leaf-level nodes are served "
-            "on demand, not materialized).",
-            self.p._graph_name, len(ids),
+            "%d non-leaf nodes (only same-level container pairs are "
+            "materialized; leaf-involving and mixed-level pairs are served "
+            "on demand).",
+            self.p._graph_name, len(levels),
         )
 
     def _check_write_budget(self) -> None:
@@ -926,15 +958,36 @@ class AggregationPipeline:
         )
         projected = len(self._acc) + len(self._flushed)
         if projected > cap:
-            raise ValueError(
-                f"aggregation would materialize ~{projected} :AGGREGATED edges, "
-                f"exceeding max_materialized_edges={cap} for graph "
+            raise MaterializationBudgetExceeded(
+                f"aggregation would materialize ~{projected} :AGGREGATED edges "
+                f"({self._budget_composition()}), exceeding "
+                f"max_materialized_edges={cap} for graph "
                 f"'{self.p._graph_name}'. Writing this would risk exhausting the "
-                f"FalkorDB instance's memory. Fixes: keep the default "
-                f"level-based materialization (materialize_fine_pairs=false) so "
-                f"leaf-involving pairs are served on demand; raise the cap via "
+                f"FalkorDB instance's memory. This count is deterministic — the "
+                f"job is not retried. Fixes: keep the default level-based "
+                f"materialization (materialize_fine_pairs=false) so only "
+                f"same-level container pairs are stored; raise the cap via "
                 f"tuning only if the instance has headroom (~0.5KB per edge)."
             )
+
+    def _budget_composition(self) -> str:
+        """Per-level-pair histogram of the would-be result, so operators
+        can see WHAT exceeded the budget. Only computed on failure."""
+        nonleaf = self._nonleaf_levels
+        counts: Dict[Tuple[Optional[int], Optional[int]], int] = {}
+        for key in list(self._acc) + list(self._flushed):
+            sid, tid = _unpack(key)
+            lk = (
+                (nonleaf.get(sid), nonleaf.get(tid))
+                if nonleaf is not None else (None, None)
+            )
+            counts[lk] = counts.get(lk, 0) + 1
+        def _name(lv: Optional[int]) -> str:
+            return "leaf" if lv is None else f"L{lv}"
+        top = sorted(counts.items(), key=lambda kv: -kv[1])[:5]
+        return ", ".join(
+            f"{_name(ls)}→{_name(lt)}: {n}" for (ls, lt), n in top
+        )
 
     # -- node resolution -------------------------------------------------------
 

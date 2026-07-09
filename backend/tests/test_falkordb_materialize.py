@@ -226,18 +226,20 @@ def _seed_two_chain_graph(fake):
     return levels
 
 
-# Default (level-based boundary): only pairs where BOTH endpoints are
-# non-leaf-LEVEL nodes are materialized — bounded by container counts.
-# Leaf-involving pairs (column→table, column→domain, …) are served on
-# demand by the read path.
+# Default (level-based boundary): only the SAME-LEVEL diagonal is
+# materialized — table→table (2,12) and domain→domain (1,11). One pair
+# per level per raw edge, shrinking monotonically up the hierarchy.
+# Leaf-involving pairs (column→table, column→domain, …) AND mixed-level
+# pairs (table→domain (2,11), domain→table (1,12)) are served on demand
+# by the read path.
 _EXPECTED_PAIRS = {
-    (2, 12), (2, 11),
-    (1, 12), (1, 11),
+    (2, 12), (1, 11),
 }
 
 # Legacy full-cube mode (materialize_fine_pairs=true): the full ancestor
 # cross-product minus the leaf↔leaf mirror (col_a, col_b).
 _EXPECTED_FINE_PAIRS = _EXPECTED_PAIRS | {
+    (2, 11), (1, 12),
     (3, 12), (3, 11),
     (2, 13), (1, 13),
 }
@@ -577,11 +579,35 @@ def test_write_budget_guard_fails_loud_instead_of_oom(monkeypatch):
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
 
-    # Fine mode computes 8 pairs > budget of 4 — the guard fires before
-    # any write reaches the graph.
-    with pytest.raises(ValueError, match="max_materialized_edges"):
+    # Fine mode computes 8+ pairs > budget of 4 — the guard fires before
+    # any write reaches the graph, with the dedicated non-retryable
+    # exception type.
+    with pytest.raises(
+        mat.MaterializationBudgetExceeded, match="max_materialized_edges"
+    ):
         _run(_materialize(p))
     assert fake.agg == {}
+
+
+def test_cross_level_raw_edges_keep_direct_pair(monkeypatch):
+    """A raw lineage edge whose endpoints are non-leaf nodes at DIFFERENT
+    levels (table→domain) keeps its direct base pair — the only exact
+    record of the cross-level fact — while mixed-level ROLLUPS stay
+    excluded from the default diagonal."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    fake.add_edge("FLOWS", 12, 2, 11)   # raw table_a → domain_def
+
+    p = _make_provider(fake, levels)
+    _run(_materialize(p))
+
+    # Diagonal pairs from the leaf edges, plus: the direct cross-level
+    # base pair (2,11) w=1 and its same-level rollup (1,11) — which now
+    # carries the 2 leaf edges AND the cross-level edge.
+    assert set(fake.agg.keys()) == {(2, 12), (1, 11), (2, 11)}
+    assert fake.agg[(2, 11)]["weight"] == 1
+    assert fake.agg[(1, 11)]["weight"] == 3
+    assert fake.agg[(2, 12)]["weight"] == 2
 
 
 def test_run_stats_reports_boundary_effect():

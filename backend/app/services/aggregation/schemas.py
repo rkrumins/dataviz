@@ -84,9 +84,11 @@ class AggregationTuning(BaseModel):
     )
     materialize_fine_pairs: Optional[bool] = Field(
         None, alias="materializeFinePairs",
-        description="Legacy full-cube mode: also materialize pairs involving "
-                    "leaf-level nodes (scales as edges x depth; can exceed "
-                    "FalkorDB memory). Default false: served on demand.",
+        description="Legacy full-cube mode: materialize every ancestor-pair "
+                    "combination, including leaf-involving and mixed-level "
+                    "pairs (scales with raw-edge count; can exceed FalkorDB "
+                    "memory). Default false: only the same-level diagonal is "
+                    "stored; the rest is served on demand.",
     )
     max_materialized_edges: Optional[int] = Field(
         None, alias="maxMaterializedEdges", ge=10_000, le=50_000_000,

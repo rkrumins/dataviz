@@ -13,8 +13,11 @@ assert the questions the boundary must keep answering:
   ancestor 8 levels up (Q1, upward walk on the target side);
 * the reverse direction — non-leaf source, leaf target (Q2);
 * source-only fan-out for a leaf node (exact raw targets);
-* coarse (non-leaf × non-leaf) pairs are NOT produced here (they come
-  from the materialized cells — the two sources stay disjoint);
+* mixed-level non-leaf pairs (table→domain) derived from the
+  materialized same-level diagonal (Q3: anchor the finer endpoint's
+  :AGGREGATED cells, walk the coarser endpoint upward) — exact weights;
+* same-level pairs are NOT produced here (they come from the
+  materialized cells — the sources stay disjoint);
 * legacy fallback to exact raw synthesis when no level map is injected;
 * `get_aggregated_edges_between` merges materialized + on-demand rows,
   deduping in favor of the materialized row.
@@ -34,17 +37,22 @@ _CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
 _Q1_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*MATCH \(y\)-\[:")
 _Q2_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y:(\w+)\)")
 _SRC_ONLY_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*AND t\.urn <> x\.urn")
+_RESOLVE_UP_RE = re.compile(r"RETURN c\.urn, a\.urn")
+_AGG_FANOUT_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r:AGGREGATED\]->\(t2\)")
+_AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y:(\w+)\)")
 
 
 class _FakeGraph:
     """In-memory graph answering the reader's Cypher shapes: per-label
-    URN classification, and the leaf-anchored fan-out queries with
-    ``*0..k`` upward containment walks on the far endpoint."""
+    URN classification, leaf-anchored raw fan-out queries with ``*0..k``
+    upward containment walks, same-level :AGGREGATED anchor queries (the
+    materialized diagonal), and the strict upward resolution query."""
 
     def __init__(self):
         self.labels = {}       # urn -> label
         self.children = {}     # parent_urn -> set(child_urn)
         self.lineage = []      # (edge_id, src_urn, tgt_urn, type)
+        self.agg = []          # (src_urn, tgt_urn, weight, types) same-level cells
 
     def add_node(self, urn, label):
         self.labels[urn] = label
@@ -55,6 +63,9 @@ class _FakeGraph:
     def flow(self, eid, src, tgt, etype="FLOWS"):
         self.lineage.append((eid, src, tgt, etype))
 
+    def aggregated(self, src, tgt, weight, types=("FLOWS",)):
+        self.agg.append((src, tgt, weight, list(types)))
+
     def _descendants_or_self(self, urn):
         out, stack = {urn}, [urn]
         while stack:
@@ -64,12 +75,37 @@ class _FakeGraph:
                     stack.append(child)
         return out
 
+    async def proj_ro_query(self, cypher, params=None, timeout=None):
+        """Projection-graph reads: same-level :AGGREGATED anchors."""
+        params = params or {}
+        m = _AGG_FANOUT_RE.search(cypher)
+        if m:
+            lbl = m.group(1)
+            return _Result([
+                [s, t, w, list(tl)] for s, t, w, tl in self.agg
+                if s in params["xs"] and self.labels.get(s) == lbl
+            ])
+        m = _AGG_FANIN_RE.search(cypher)
+        if m:
+            lbl = m.group(1)
+            return _Result([
+                [t, s, w, list(tl)] for s, t, w, tl in self.agg
+                if t in params["ys"] and self.labels.get(t) == lbl
+            ])
+        raise AssertionError(f"unhandled proj_ro_query: {cypher}")
+
     async def ro_query(self, cypher, params=None, timeout=None):
         params = params or {}
         m = _CLASSIFY_RE.search(cypher)
         if m:
             lbl = m.group(1)
             return _Result([[u] for u in params["urns"] if self.labels.get(u) == lbl])
+        if _RESOLVE_UP_RE.search(cypher):
+            # strict upward resolution: c.urn IN $cs, a.urn IN $as_, a above c
+            return _Result([
+                [c, a] for c in params["cs"] for a in params["as_"]
+                if a != c and c in self._descendants_or_self(a)
+            ])
         m = _Q1_RE.search(cypher)
         if m:
             # leaf sources: raw fan-out, target resolved upward to any $ys
@@ -126,6 +162,7 @@ def _make_provider(fake, levels):
     p._entity_type_levels = levels
     p._redis = None
     p._ro_query = fake.ro_query
+    p._proj_ro_query = fake.proj_ro_query
     return p
 
 
@@ -194,16 +231,56 @@ def test_source_only_mode_returns_exact_raw_targets():
     assert rows == [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
 
 
-def test_nonleaf_pairs_are_not_produced_on_demand():
-    """Coarse cells come from materialized rows — the reader must not
-    duplicate them (disjointness of the two sources)."""
+def test_same_level_pairs_are_not_produced_on_demand():
+    """Same-level cells come from materialized rows — the reader must not
+    duplicate them (disjointness of the sources)."""
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)
     p = _make_provider(fake, levels)
     rows = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
+
+
+def test_mixed_level_pair_derived_from_materialized_diagonal():
+    """table→domain is no longer materialized (only the same-level
+    diagonal is) — it is derived by anchoring on the table's same-level
+    :AGGREGATED cells and walking the far endpoint upward. Exact weight."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)   # materialized table→table
+    p = _make_provider(fake, levels)
+    rows = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a1", "urn:b0", 2, ["FLOWS"]]]
+
+
+def test_mixed_level_pair_reverse_direction():
+    """domain→table via the finer target's same-level fan-in."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)
+    p = _make_provider(fake, levels)
+    rows = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a0"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a0", "urn:b1", 2, ["FLOWS"]]]
+
+
+def test_mixed_level_pair_deep_hierarchy():
+    """L6 container → L1 container across an 8-level hierarchy: the
+    anchor is the L6 same-level cell; the walk climbs five levels."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=8)
+    fake.aggregated("urn:a6", "urn:b6", 2)
+    p = _make_provider(fake, levels)
+    rows = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a6"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a6", "urn:b1", 2, ["FLOWS"]]]
 
 
 def test_missing_level_map_falls_back_to_raw_synthesis():
@@ -226,10 +303,11 @@ def test_missing_level_map_falls_back_to_raw_synthesis():
 
 
 def test_get_aggregated_edges_between_merges_and_dedupes():
-    """Materialized coarse rows + on-demand fine rows in one response;
+    """Materialized diagonal rows + on-demand rows in one response;
     a pair present in both keeps the materialized row's weight."""
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 5)   # materialized same-level cell
     p = _make_provider(fake, levels)
 
     async def noop_connect():
@@ -237,12 +315,15 @@ def test_get_aggregated_edges_between_merges_and_dedupes():
 
     async def proj_ro_query(cypher, params=None, timeout=None):
         assert "AGGREGATED" in cypher
-        # coarse cell lvl1→lvl1 plus a stale pre-boundary fine cell that
-        # must win over the freshly-synthesized duplicate
-        return _Result([
-            ["urn:a1", "urn:b1", 5, ["FLOWS"]],
-            ["urn:a2", "urn:b2", 9, ["FLOWS"]],
-        ])
+        if params and "sourceUrns" in params:
+            # The main materialized read: the diagonal cell plus a stale
+            # pre-boundary fine cell that must win over the
+            # freshly-synthesized duplicate.
+            return _Result([
+                ["urn:a1", "urn:b1", 5, ["FLOWS"]],
+                ["urn:a2", "urn:b2", 9, ["FLOWS"]],
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
 
     p._ensure_connected = noop_connect
     p._proj_ro_query = proj_ro_query
@@ -257,9 +338,10 @@ def test_get_aggregated_edges_between_merges_and_dedupes():
         for e in result.aggregated_edges
     }
     assert got == {
-        ("urn:a1", "urn:b1"): 5,   # materialized coarse cell
+        ("urn:a1", "urn:b1"): 5,   # materialized same-level cell
         ("urn:a2", "urn:b2"): 9,   # materialized wins over on-demand (weight 2)
         ("urn:a2", "urn:b1"): 2,   # on-demand: column → parent table
         ("urn:a2", "urn:b0"): 2,   # on-demand: column → grandparent domain
         ("urn:a1", "urn:b2"): 2,   # on-demand: parent table → column
+        ("urn:a1", "urn:b0"): 5,   # on-demand mixed level, from the diagonal
     }

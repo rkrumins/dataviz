@@ -164,7 +164,7 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
                                 checked={tuning.materializeFinePairs === true}
                                 onChange={e => setTuning(prev => ({ ...prev, materializeFinePairs: e.target.checked || undefined }))}
                             />
-                            Materialize fine (leaf-level) pairs — legacy full cube; scales with edges × depth and can exceed FalkorDB memory
+                            Materialize fine pairs (legacy full cube: leaf-involving + mixed-level) — scales with raw edges and can exceed FalkorDB memory
                         </label>
                         {message && (
                             <p className="text-[11px] font-medium text-ink-muted">{message}</p>

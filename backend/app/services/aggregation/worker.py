@@ -38,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.adapters import ProviderUnavailable, ProviderBusy
+from backend.app.providers.falkordb_materialize import MaterializationBudgetExceeded
 
 from backend.app.jobs import (
     JobScope as PlatformJobScope,
@@ -700,6 +701,12 @@ class AggregationWorker:
                 # failure. Skip the retry mill and bubble straight up to the
                 # outer run() handler, which marks the job 'cancelled' and
                 # emits the terminal event with last_cursor preserved.
+                raise
+            except MaterializationBudgetExceeded:
+                # The computed result size is deterministic — every retry
+                # recomputes the same count and burns another full
+                # EXTRACT+COMPUTE pass. Fail terminally with the guidance
+                # message intact.
                 raise
             except ProviderBusy as e:
                 # Phase 2 — park-and-resume on quiesce. NOT a retry:
