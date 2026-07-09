@@ -4171,24 +4171,28 @@ class FalkorDBProvider(GraphDataProvider):
         async def _classify(
             urns: List[str], labels: List[str],
         ) -> Dict[str, List[str]]:
-            """label → member urns, via per-label indexed IN lookups."""
+            """ontology label → member urns, via per-label indexed IN
+            lookups. Each declared label is matched under every observed
+            spelling this source uses (``_alias_entity_types``), so
+            alias-variant graphs classify correctly."""
             out: Dict[str, List[str]] = {}
             for lbl in labels:
-                safe = _sanitize_label(lbl)
                 members: List[str] = []
-                for i in range(0, len(urns), batch):
-                    chunk = urns[i:i + batch]
-                    try:
-                        res = await self._ro_query(
-                            f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
-                            params={"urns": chunk},
-                            timeout=timeout,
-                        )
-                        members.extend(r[0] for r in (res.result_set or []) if r and r[0])
-                    except Exception as e:
-                        logger.warning("On-demand pair classification failed: %s", e)
+                for spelled in self._alias_entity_types([lbl]):
+                    safe = _sanitize_label(spelled)
+                    for i in range(0, len(urns), batch):
+                        chunk = urns[i:i + batch]
+                        try:
+                            res = await self._ro_query(
+                                f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
+                                params={"urns": chunk},
+                                timeout=timeout,
+                            )
+                            members.extend(r[0] for r in (res.result_set or []) if r and r[0])
+                        except Exception as e:
+                            logger.warning("On-demand pair classification failed: %s", e)
                 if members:
-                    out[lbl] = members
+                    out[lbl] = list(dict.fromkeys(members))
             return out
 
         async def _run(cypher: str, params: Dict[str, Any]) -> list:
@@ -4213,20 +4217,23 @@ class FalkorDBProvider(GraphDataProvider):
 
         if target_urns:
             # Q1 — requested LEAF sources: their raw fan-out, targets resolved
-            # exactly or upward to any requested ancestor.
+            # exactly or upward to any requested ancestor. Anchors iterate
+            # the source's observed label spellings (identity on governed
+            # graphs) so alias-variant graphs still index-seek.
             for lbl, members in src_leaf_by_label.items():
-                safe = _sanitize_label(lbl)
-                for i in range(0, len(members), batch):
-                    rows.extend(await _run(
-                        f"MATCH (x:{safe})-[r]->(t) "
-                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                        f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
-                        f"WHERE y.urn IN $ys AND x.urn <> y.urn "
-                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                        f"count(DISTINCT r) AS weight, "
-                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"xs": members[i:i + batch], "ys": target_urns, "lt": lt_list},
-                    ))
+                for spelled in self._alias_entity_types([lbl]):
+                    safe = _sanitize_label(spelled)
+                    for i in range(0, len(members), batch):
+                        rows.extend(await _run(
+                            f"MATCH (x:{safe})-[r]->(t) "
+                            f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                            f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
+                            f"WHERE y.urn IN $ys AND x.urn <> y.urn "
+                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                            f"count(DISTINCT r) AS weight, "
+                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                            {"xs": members[i:i + batch], "ys": target_urns, "lt": lt_list},
+                        ))
             # Q2 — requested LEAF targets: their raw fan-in, sources resolved
             # exactly or upward to any requested NON-leaf node (leaf sources
             # were fully covered by Q1 — the two are disjoint).
@@ -4235,18 +4242,19 @@ class FalkorDBProvider(GraphDataProvider):
             src_nonleaf = [u for u in source_urns if u not in src_leaf_set]
             if src_nonleaf:
                 for lbl, members in tgt_leaf_by_label.items():
-                    safe = _sanitize_label(lbl)
-                    for i in range(0, len(members), batch):
-                        rows.extend(await _run(
-                            f"MATCH (s)-[r]->(y:{safe}) "
-                            f"WHERE y.urn IN $ys AND type(r) IN $lt "
-                            f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
-                            f"WHERE x.urn IN $xs AND x.urn <> y.urn "
-                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                            f"count(DISTINCT r) AS weight, "
-                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                            {"ys": members[i:i + batch], "xs": src_nonleaf, "lt": lt_list},
-                        ))
+                    for spelled in self._alias_entity_types([lbl]):
+                        safe = _sanitize_label(spelled)
+                        for i in range(0, len(members), batch):
+                            rows.extend(await _run(
+                                f"MATCH (s)-[r]->(y:{safe}) "
+                                f"WHERE y.urn IN $ys AND type(r) IN $lt "
+                                f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
+                                f"WHERE x.urn IN $xs AND x.urn <> y.urn "
+                                f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                                f"count(DISTINCT r) AS weight, "
+                                f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                                {"ys": members[i:i + batch], "xs": src_nonleaf, "lt": lt_list},
+                            ))
             # Q3 — mixed-level NON-leaf pairs (table→domain, domain→table):
             # only the same-level diagonal is materialized, so these are
             # derived by anchoring on the FINER endpoint's same-level
@@ -4268,17 +4276,18 @@ class FalkorDBProvider(GraphDataProvider):
             # requested leaf sources. Upward resolution is skipped — with no
             # target set to bound it, it would enumerate every ancestor.
             for lbl, members in src_leaf_by_label.items():
-                safe = _sanitize_label(lbl)
-                for i in range(0, len(members), batch):
-                    rows.extend(await _run(
-                        f"MATCH (x:{safe})-[r]->(t) "
-                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                        f"AND t.urn <> x.urn "
-                        f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
-                        f"count(r) AS weight, "
-                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"xs": members[i:i + batch], "lt": lt_list},
-                    ))
+                for spelled in self._alias_entity_types([lbl]):
+                    safe = _sanitize_label(spelled)
+                    for i in range(0, len(members), batch):
+                        rows.extend(await _run(
+                            f"MATCH (x:{safe})-[r]->(t) "
+                            f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                            f"AND t.urn <> x.urn "
+                            f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
+                            f"count(r) AS weight, "
+                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                            {"xs": members[i:i + batch], "lt": lt_list},
+                        ))
         return rows
 
     async def _mixed_level_pairs(
@@ -4340,16 +4349,17 @@ class FalkorDBProvider(GraphDataProvider):
             ]
             if not ys:
                 continue
-            safe = _sanitize_label(s_lbl)
             fanout = []
-            for i in range(0, len(xs), batch):
-                fanout.extend(await run_proj(
-                    f"MATCH (x:{safe})-[r:AGGREGATED]->(t2) "
-                    f"WHERE x.urn IN $xs AND r.sourceLevel = r.targetLevel "
-                    f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
-                    f"LIMIT {cap}",
-                    {"xs": xs[i:i + batch]},
-                ))
+            for spelled in self._alias_entity_types([s_lbl]):
+                safe = _sanitize_label(spelled)
+                for i in range(0, len(xs), batch):
+                    fanout.extend(await run_proj(
+                        f"MATCH (x:{safe})-[r:AGGREGATED]->(t2) "
+                        f"WHERE x.urn IN $xs AND r.sourceLevel = r.targetLevel "
+                        f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
+                        f"LIMIT {cap}",
+                        {"xs": xs[i:i + batch]},
+                    ))
             up = await _resolve_up([row[1] for row in fanout if row and row[1]], ys)
             for row in fanout:
                 for y in up.get(row[1], ()):
@@ -4363,16 +4373,17 @@ class FalkorDBProvider(GraphDataProvider):
             ]
             if not xs:
                 continue
-            safe = _sanitize_label(t_lbl)
             fanin = []
-            for i in range(0, len(ys), batch):
-                fanin.extend(await run_proj(
-                    f"MATCH (s2)-[r:AGGREGATED]->(y:{safe}) "
-                    f"WHERE y.urn IN $ys AND r.sourceLevel = r.targetLevel "
-                    f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
-                    f"LIMIT {cap}",
-                    {"ys": ys[i:i + batch]},
-                ))
+            for spelled in self._alias_entity_types([t_lbl]):
+                safe = _sanitize_label(spelled)
+                for i in range(0, len(ys), batch):
+                    fanin.extend(await run_proj(
+                        f"MATCH (s2)-[r:AGGREGATED]->(y:{safe}) "
+                        f"WHERE y.urn IN $ys AND r.sourceLevel = r.targetLevel "
+                        f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
+                        f"LIMIT {cap}",
+                        {"ys": ys[i:i + batch]},
+                    ))
             up = await _resolve_up([row[1] for row in fanin if row and row[1]], xs)
             for row in fanin:
                 for x in up.get(row[1], ()):
@@ -5850,6 +5861,27 @@ class FalkorDBProvider(GraphDataProvider):
         if not s_urns or not t_urns:
             return []
 
+        edges = await self._edges_between_sets_once(
+            s_urns, t_urns, ltypes, use_raw=use_raw, limit=limit,
+        )
+        if not edges and not use_raw and ltypes:
+            # The AGGREGATED read found nothing between these sets. Under
+            # the same-level materialization boundary, leaf-adjacent
+            # levels have NO stored cells — and the ``use_raw`` decision
+            # upstream compares against the ontology-wide finest level,
+            # which misclassifies when the resolved ontology mixes
+            # entity families of different depths. Raw lineage is the
+            # ground truth at fine grain; falling back costs one indexed
+            # query and only ever fires on an empty result.
+            edges = await self._edges_between_sets_once(
+                s_urns, t_urns, ltypes, use_raw=True, limit=limit,
+            )
+        return edges
+
+    async def _edges_between_sets_once(
+        self, s_urns: List[str], t_urns: List[str],
+        ltypes: Optional[List[str]], use_raw: bool, limit: int,
+    ) -> List[GraphEdge]:
         # Rewritten away from ``UNWIND $sUrns AS srcUrn MATCH (s {urn:
         # srcUrn})`` because the inner unlabeled MATCH does a node scan
         # PER UNWIND iteration when the unlabeled URN index is absent —

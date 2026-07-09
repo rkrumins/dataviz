@@ -283,6 +283,30 @@ def test_mixed_level_pair_deep_hierarchy():
     assert rows == [["urn:a6", "urn:b1", 2, ["FLOWS"]]]
 
 
+def test_alias_variant_labels_still_classify_and_anchor():
+    """Solidatus-style sources spell labels differently than the ontology
+    declares (declared 'lvl2' observed as 'LVL2_OBS'). The reader must
+    translate through the entity alias map or it silently classifies
+    nothing and mixed-granularity views lose all leaf lineage."""
+    fake = _FakeGraph()
+    levels = {"lvl0": 0, "lvl1": 1, "lvl2": 2}
+    for chain in ("a", "b"):
+        for i in range(3):
+            # Graph labels use the OBSERVED spelling for the leaf level.
+            observed = f"LVL{i}_OBS" if i == 2 else f"lvl{i}"
+            fake.add_node(f"urn:{chain}{i}", observed)
+            if i:
+                fake.contain(f"urn:{chain}{i-1}", f"urn:{chain}{i}")
+    fake.flow(1, "urn:a2", "urn:b2")
+    fake.flow(2, "urn:a2", "urn:b2")
+    p = _make_provider(fake, levels)
+    p._source_entity_aliases = {"LVL2": ["LVL2_OBS"]}
+    rows = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
+
+
 def test_missing_level_map_falls_back_to_raw_synthesis():
     fake = _FakeGraph()
     _seed_deep_chains(fake, depth=3)
@@ -300,6 +324,42 @@ def test_missing_level_map_falls_back_to_raw_synthesis():
     ))
     assert rows == sentinel
     assert seen["args"] == (["urn:a2"], ["urn:b2"], ["FLOWS"])
+
+
+def test_trace_drilldown_falls_back_to_raw_when_aggregated_empty():
+    """The trace drill (expand Object→Object edge to attribute grain)
+    reads :AGGREGATED between the two descendant sets when the requested
+    level is not classified as finest. Post-boundary those cells don't
+    exist — the read must fall back to RAW lineage instead of silently
+    returning an empty drill (the 'trace stops at Object' regression)."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
+
+    async def proj_ro_query(cypher, params=None, timeout=None):
+        return _Result([])   # no fine AGGREGATED cells materialized
+
+    async def ro_query(cypher, params=None, timeout=None):
+        # the raw-edge branch of _edges_between_sets_once
+        assert "type(r) IN $ltypes" in cypher
+        rows = [
+            [s, t, et, eid, {}]
+            for eid, s, t, et in fake.lineage
+            if s in params["sUrns"] and t in params["tUrns"]
+            and et in params["ltypes"]
+        ]
+        return _Result(rows)
+
+    p._proj_ro_query = proj_ro_query
+    p._ro_query = ro_query
+    edges = _run(p._edges_between_sets(
+        ["urn:a2"], ["urn:b2"], level=2, ltypes=["FLOWS"],
+        use_raw=False, limit=100,
+    ))
+    assert [(e.source_urn, e.target_urn) for e in edges] == [
+        ("urn:a2", "urn:b2"), ("urn:a2", "urn:b2"),
+    ]
+    assert all(e.edge_type == "FLOWS" for e in edges)
 
 
 def test_get_aggregated_edges_between_merges_and_dedupes():

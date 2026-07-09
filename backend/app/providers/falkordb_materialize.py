@@ -938,9 +938,15 @@ class AggregationPipeline:
         levels: Dict[int, int] = {}
         for label in self._nonleaf_labels():
             level = self._entity_levels[label]
-            async for row in self._scan_label_nodes(label, want_urn=False):
-                if row and row[0] is not None:
-                    levels[int(row[0])] = level
+            # Scan under every observed spelling of the declared label
+            # (identity on governed graphs) — an alias-variant source
+            # must not silently produce an empty boundary map, which
+            # would filter EVERY pair and materialize nothing.
+            spellings = getattr(self.p, "_alias_entity_types", lambda t: t)([label])
+            for spelled in spellings:
+                async for row in self._scan_label_nodes(spelled, want_urn=False):
+                    if row and row[0] is not None:
+                        levels[int(row[0])] = level
         self._nonleaf_levels = levels
         logger.info(
             "aggregation pipeline on %s: materialization boundary loaded — "
@@ -1007,10 +1013,15 @@ class AggregationPipeline:
         if self._fine_filter_active():
             directory: Dict[int, Tuple[str, str]] = {}
             for label in self._nonleaf_labels():
-                interned = sys.intern(str(label))
-                async for row in self._scan_label_nodes(label, want_urn=True):
-                    if row and row[0] is not None and row[1]:
-                        directory[int(row[0])] = (row[1], interned)
+                # Scan and record the OBSERVED spelling — the directory's
+                # label feeds the label+urn MERGE writes, which must match
+                # the graph's actual labels on alias-variant sources.
+                spellings = getattr(self.p, "_alias_entity_types", lambda t: t)([label])
+                for spelled in spellings:
+                    interned = sys.intern(str(spelled))
+                    async for row in self._scan_label_nodes(spelled, want_urn=True):
+                        if row and row[0] is not None and row[1]:
+                            directory[int(row[0])] = (row[1], interned)
             self._node_dir = directory
             logger.info(
                 "aggregation pipeline on %s: node directory loaded — %d "
