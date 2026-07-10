@@ -80,7 +80,7 @@ services:
 
   # ── PostgreSQL (Management Database) ──────────────────────────────
   postgres:
-    image: postgres:16.4-alpine
+    image: postgres:16.14-alpine
     restart: unless-stopped
     # max_connections must cover the sum of every service's SQLAlchemy
     # pool ceilings (db/engine.py ROLE_POOL_DEFAULTS: 65 potential

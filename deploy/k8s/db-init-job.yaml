@@ -28,7 +28,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: db-init
-          image: postgres:16.4-alpine
+          image: postgres:16.14-alpine
           command:
             - /bin/sh
             - -c

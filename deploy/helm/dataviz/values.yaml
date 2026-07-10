@@ -92,7 +92,7 @@ stores:
       limits: { cpu: 500m, memory: 512Mi }
   postgres:
     enabled: false
-    image: postgres:16.4-alpine
+    image: postgres:16.14-alpine
     storage: 20Gi
     resources:
       requests: { cpu: 250m, memory: 512Mi }
@@ -103,7 +103,7 @@ stores:
 # runs Alembic. Runs as a Helm pre-install/pre-upgrade hook (weight 0).
 dbInit:
   enabled: true
-  image: postgres:16.4-alpine
+  image: postgres:16.14-alpine
 
 # ── Schema upgrade Job (synodic-upgrade) ──────────────────────────────
 # Standalone image that owns every Alembic operation. Runs as a Helm
