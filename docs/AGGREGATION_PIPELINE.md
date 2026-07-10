@@ -142,8 +142,13 @@ the **first checkpoint**, before any graph work. Resume rules:
   time resume as clean fresh runs **without wiping** existing edges; the
   first RECONCILE also cleans up any stale generations left by the old
   epoch machinery.
-* `reconcile` / `apply`: EXTRACT+COMPUTE re-run (deterministic), then the
-  phase continues from its recorded position. All writes are idempotent.
+* `reconcile`: EXTRACT+COMPUTE re-run (deterministic), then the scan
+  continues from its recorded range lower bound.
+* `apply`: EXTRACT+COMPUTE and the full RECONCILE re-run; the rebuilt
+  `existing` set already excludes everything the prior attempt wrote, so
+  apply writes exactly the still-missing pairs. The recorded position is
+  progress display only — fast-forwarding past it would skip pairs that
+  are new since the crashed attempt. All writes are idempotent.
 
 ## Provider protection
 
@@ -191,6 +196,7 @@ pipeline).
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 0.5 | Sleep-after-write ratio |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
+| `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink-on-timeout ladder descends to (a floor-width timeout is an outage and fails the run) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | false | Legacy full cube (leaf-involving + mixed-level pairs) |
 | `AGGREGATION_MAX_MATERIALIZED_EDGES` | 2000000 | Hard write budget (fail loud, never OOM) |
@@ -223,6 +229,150 @@ Every job records `worker_id`, and completed jobs persist `run_stats`
 Memory budget per large job at 2M nodes / 5M edges: child→parent map
 ~200MB + accumulator (capped) ~250MB + ID cache ~125MB ≈ under 1GB;
 worker pods ship with a 4Gi limit.
+
+## Hardening wave (2026-07-10): what changed, why, and the impact
+
+A full audit of this pipeline (old implementation vs the rewrite, plus
+every integration edge) confirmed the EXTRACT→COMPUTE→RECONCILE→APPLY
+core sound and found a ring of defects around it that kept production
+failing. Each fix below records the SYMPTOM it removes, the root cause,
+and the operational impact. All are covered by unit tests that failed
+before the fix, plus the live suite (see Validation).
+
+**1. Automatic re-aggregation was dead (trigger sources).** After every
+purge — which deletes ALL `:AGGREGATED` edges — the promised rebuild
+500'd against the jobs-table CHECK constraint (`post_purge` wasn't an
+allowed `trigger_source`); the read-path backfill's `auto` died the
+same way, silently. Container-level lineage stayed blank until someone
+manually re-aggregated. Both values are now first-class
+(`TRIGGER_SOURCES` in `models.py` builds the constraint; migration
+`20260711_1200_agg_job_guards`), unknown sources 422 instead of 500,
+and caller-minted `purge` rows are rejected (they mark the purge
+lifecycle itself and are excluded from recovery). *Impact: purge and
+empty-read backfill heal without operator action.*
+
+**2. Crash recovery existed only in the monolith (topology).** The
+lock-aware reconciler (exec-lock absent ⇒ auto-resume from
+`last_cursor`) never started in the split topology: the dedicated
+control plane didn't run it, and workers ACK stream messages BEFORE
+executing by design. A worker crash mid-job sat `running` until the
+scheduler's ~4h sweep marked it FAILED — the reported "jobs keep
+breaking and I resume manually". The control plane now runs the
+reconciler (advisory-lock guarded for replicas), the scheduler's
+mark-failed sweep stands down whenever the job bus is available, and
+the fallback sweep excludes purge rows (their progress is Redis-only,
+so every >4h purge was being hijacked to failed). *Impact: worker
+death → automatic resume from the last checkpoint in ~90s (lock TTL +
+sweep interval), capped at 5 attempts; zero manual resumes for
+transient crashes; purges can run long safely.*
+
+**3. The load path used the banned scan-per-row pattern — with no
+timeouts.** The versioning projector matched every edge endpoint with
+unlabeled `MATCH (a {urn})` under UNWIND — a full node scan per row,
+for EVERY edge of a full seed — as did its rollup upserts and deletes
+(`MATCH ()-[r {id}]->()` was untyped and unindexed), and no projector
+query carried a timeout, so the fleet's new `TIMEOUT_DEFAULT 30000`
+killed big seed batches mid-load. All node lookups are now label+urn
+index seeks (labels resolved from committed `entityType`s), edge
+deletes are typed and endpoint-anchored, and every query carries
+`PROJECTION_FALKOR_{WRITE,READ}_TIMEOUT_S`. The same fix on
+`save_custom_graph`'s bulk path measured **~2000× (17min → 4s per 100k
+edges)**. The lint test now scans `projection.py` and catches the
+f-string brace form that had let `save_custom_graph` evade it.
+*Impact: seeds and incremental projections scale as E·log N instead of
+N·E, and a degraded write is killed by the server instead of outliving
+the client.*
+
+**4. The lineage-delete hook could destroy pipeline-written cells
+(data loss).** `on_lineage_edge_deleted` overwrote `r.weight` from a
+Redis SCARD — an accounting system the batch pipeline never populates —
+and DELETED any pair whose members-set was empty, i.e. every
+batch-written cell (the observed "12,000 → 1" class). It also built the
+full ancestor cross-product instead of the canonical selection. It now
+mirrors the write hook (shared chain/level resolution + canonical
+pairs) and only ever DECREMENTS, gated on SREM proving this edge's
+tracked contribution, via the `AGGREGATED(aggKey)` index seek; weight 0
+deletes the cell in the same query. Untracked pairs are left for the
+next reconcile. *Impact: a raw-edge deletion can never collapse or
+delete a rollup it didn't contribute to; worst case is a briefly
+stale-high weight that the next run reconciles.*
+
+**5. One slow range scan failed the whole run.** Scan timeouts are
+deliberately never retried at the connection layer (a slow query must
+not be multiplied), so a briefly-busy server or one dense ID range sent
+a multi-hour job back through worker retry into a full EXTRACT re-run.
+`_fetch_range` now halves the failing range down to
+`AGGREGATION_SCAN_SHRINK_FLOOR` (sticky for the rest of the run,
+re-growing after sustained health); only a floor-width timeout — an
+outage, not payload size — still fails the run. *Impact: multi-hour
+jobs absorb transient provider slowness instead of restarting; a
+partial scan is never silently treated as complete.*
+
+**6. Apply-resume could skip pairs (completeness).** The apply-phase
+cursor fast-forward bisected past every key ≤ the recorded position —
+including pairs NEW since the crashed attempt that happened to sort
+before it. RECONCILE re-runs fully on resume and already excludes
+everything the prior attempt wrote, so the bisect was a redundant
+optimization with a correctness hole; it is removed and the recorded
+position is progress display only. *Impact: resume is exactly
+complete — proven live by resuming past every computed key.*
+
+**7. Keyed deletes could run as full scans (index readiness).**
+FalkorDB builds indexes in the background; nothing waited for
+`AGGREGATED(aggKey)` readiness, so a first run against a large existing
+set executed every keyed delete as a full relation scan. The reconcile
+phase now polls `db.indexes()` (bounded 60s, version-tolerant,
+WARN-and-proceed — an optimization gate, never a correctness one).
+
+**8. Case-sensitivity could silently skip whole types (completeness).**
+FalkorDB matching is case-sensitive and the alias map was the only
+spelling seam — a casing present in the graph but absent from the map
+scanned zero edges, and worker-run jobs inject no entity aliases at
+all. The pipeline now probes `db.relationshipTypes()`/`db.labels()`
+once per run and unions case-fold variants for every declared spelling
+(including graphs holding SEVERAL casings of one type, where
+half-scanned containment breaks ancestor chains); a declared type that
+matches NOTHING observed warns loudly instead of aggregating nothing in
+silence. *Impact: onboarded graphs aggregate correctly whether or not
+their casing matches the ontology, and vocabulary mismatches are
+diagnosable from the job log.*
+
+**9. Idempotency-key reuse 500'd.** `ix_agg_jobs_idem_active` was
+unique forever despite its name while the replay window is 60 minutes,
+so a key reused later collided with a completed row's tombstone. The
+index now covers only ACTIVE rows (same migration as #1) and a
+concurrent-trigger race replays the winner's job instead of surfacing
+an IntegrityError.
+
+**10. Unbounded read sorts.** The `get_aggregated_edges_between` main
+queries carried `ORDER BY r.weight DESC` with no LIMIT — every 5k-urn
+batch materialized and sorted its full match set server-side before
+Python truncated. The existing `AGGREGATED_EDGE_RESULT_CAP` now rides
+in the Cypher; response semantics are unchanged (top-N by weight).
+
+**11. The instance itself had no memory ceiling.** `QUERY_MEM_CAPACITY`
+bounds one query; nothing bounded the dataset, so graph growth still
+OOM-killed the pod — the incident class the write budget guards
+against, from the OS side. Every manifest now passes `REDIS_ARGS`
+`--maxmemory` (75% of the container limit; `FALKORDB_MAXMEMORY` in
+compose) with `noeviction`, verified against `falkordb/falkordb:v4.16.0`.
+*Impact: two-layer protection — the write budget fails a job loudly
+before writing an oversized result, and maxmemory fails writes loudly
+if anything else grows the instance — the pod is never OOM-killed into
+a LOADING/replay cycle.*
+
+**Completeness contract (what the caps do and do NOT do).** No cap in
+this pipeline silently drops aggregations: EXTRACT tiles the full ID
+space (a floor-width timeout fails the run rather than passing a
+partial scan off as complete); the pending-pairs cap is a flush
+trigger with exact weight semantics; the write budget fails terminally
+and loudly with a per-level composition breakdown (raise it via tuning
+when the instance has headroom); endpoints deleted mid-run are dropped
+WITH a warning and recomputed next run; read-path caps are response
+top-N contracts over complete stored data. The live suite pins the
+observable contract: exact cells/weights/level stamps under mixed
+casing, exact deltas on re-run, zero-touch no-op runs, and complete
+apply after resume.
 
 ## Removed (release notes)
 

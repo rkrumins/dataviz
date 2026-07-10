@@ -65,12 +65,16 @@ after `_state_as_of`/`_kind_map_multi` were fixed — it makes a one-entity chec
 > **Limitation.** A checkpoint on a draft of a multi-million-entity graph pays a full-graph hash walk.
 > Fine at current scale; a keyset/CoW upgrade is the fix (§7).
 
-### 4.2 The FalkorDB full seed is `O(N·E)` and not streamed
-A full seed composes the **entire live state in memory** via `_state_as_of`, then applies per-edge
-`MATCH (a {urn}) MATCH (b {urn}) MERGE …`. The drift **reconciler** already streams in bounded batches
-(`reconcile._stream_pg_nodes`), but the projector's seed path does not. Its own comment flags the
-SKIP/LIMIT scan as "`O(n²/batch)` — acceptable at current scale; upgrade to keyset if a graph outgrows
-it." See [04](04-projection-and-cache.md).
+### 4.2 The FalkorDB full seed is in-memory (write cost fixed 2026-07)
+A full seed composes the **entire live state in memory** via `_state_as_of`. Its per-edge endpoint
+lookup was `MATCH (a {urn}) MATCH (b {urn}) MERGE …` — unlabeled, a full node scan per row and
+`O(N·E)` overall; since 2026-07 every endpoint MATCH is label-anchored (a per-label URN index seek,
+labels resolved from committed `entityType`s) and every projector query carries an explicit
+server-side timeout, so the WRITE side now scales with `E·log N`. The remaining limitation is the
+in-memory composition itself: the drift **reconciler** already streams in bounded batches
+(`reconcile._stream_pg_nodes`), but the projector's seed path does not, and its own comment flags the
+SKIP/LIMIT scan as "`O(n²/batch)` — acceptable at current scale; upgrade to keyset if a graph
+outgrows it." See [04](04-projection-and-cache.md).
 
 ## 5. Wired-but-dormant machinery
 

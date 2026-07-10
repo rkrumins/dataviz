@@ -56,11 +56,21 @@ through the projector automatically.
   `_node_item` (`projection.py:109-128`), which splits `properties` into native vs residual and
   computes `searchableText`.
 - **Edges** are typed by `edgeType` and keyed by `r.id == entity_id`. The MERGE (`_edge_merge_cypher`,
-  `projection.py:70-75`) `MATCH`es both endpoints by `urn`, then sets `id`, `confidence`, and a
-  JSON-stringified `properties`.
-- **Deletes** use `_DELETE_NODES` (by urn, `DETACH DELETE`, `projection.py:78`), `_DELETE_EDGES`
-  (by `r.id`, `:79`), and a heal-only `_DELETE_NODES_BY_PAIR` that matches by indexed `urn` **and
-  confirms `entityId`** so a reused urn is never wrongly deleted (`:83-85`).
+  `projection.py:95-103`) `MATCH`es both endpoints by **label + urn** — endpoint labels ride on each
+  `EdgeUpsert`, resolved from the committed `entityType` (window nodes first, then `_urn_label_for`,
+  `:965`, fork-aware) — so every endpoint lookup is a per-label URN **index seek** instead of the
+  pre-2026-07 unlabeled full-node-scan-per-row; then sets `id`, `confidence`, and a JSON-stringified
+  `properties`.
+- **Deletes** are label-anchored too: `_delete_nodes_cypher` (label + urn, `DETACH DELETE`,
+  `projection.py:105`), `_delete_edges_cypher` (typed + endpoint-anchored, `r.id` matched inside the
+  `(a)->(b)` adjacency, `:109`; ids whose before-state can't be resolved fall back to the legacy
+  per-id scan `_DELETE_EDGES_FALLBACK`, `:123`, WARN-logged), and a heal-only
+  `_delete_nodes_by_pair_cypher` that matches by (label, indexed `urn`) **and confirms `entityId`**
+  so a reused urn is never wrongly deleted (`:127`).
+- **Every projector query carries a server-side budget** via `_q` (`projection.py:69`):
+  `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
+  `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
+  budget the FalkorDB fleet's `TIMEOUT_DEFAULT 30000` killed un-budgeted seed batches mid-load.
 
 > **Limitation (phantom keys).** A node with no `urn` in its payload is keyed as `gv:<entity_id>` and
 > logs a WARN (`_node_urn`, `projection.py:93-106`; `_urn_for`, `:701-718`). This is a deliberate
@@ -89,14 +99,18 @@ edge_deletes)` two ways:
   clobber each other (`projection.py:460-493`). Last op per entity wins; `delete` → a delete list,
   else an upsert.
 
-`_apply` (`projection.py:887-919`) writes in a fixed order — nodes-in (grouped by label), edges-in
-(grouped by type), edges-out, nodes-out — each chunked by `PROJECTION_BATCH_SIZE` (default 5000,
-`config.py:110`), firing the optional progress callback per chunk.
+`_apply` (`projection.py:1217`) writes in a fixed order — nodes-in (grouped by label), edges-in
+(grouped by **(type, srcLabel, tgtLabel)** so the endpoint MATCH stays index-eligible), edges-out
+(typed + anchored via `_run_edge_deletes`, `:1258`), nodes-out (grouped by label) — each chunked by
+`PROJECTION_BATCH_SIZE` (default 5000, `config.py:110`), firing the optional progress callback per
+chunk.
 
-> **Limitation (full-seed cost).** A full seed composes the whole live state **in memory** (not
-> streamed) and the edge MERGE does a per-edge `MATCH (a {urn}) MATCH (b {urn})`. This is O(N·E) with
-> the urn index and is acceptable at current scale; a keyset-streaming rebuild is the documented
-> upgrade path (see [09 · Scale & Limits](09-scale-limits-and-roadmap.md)).
+> **Limitation (full-seed cost).** A full seed still composes the whole live state **in memory** (not
+> streamed). The per-edge endpoint lookup is no longer the bottleneck — since 2026-07 it is a
+> label+urn index seek (the unlabeled form was a full node scan per row, O(N·E) overall; the same
+> pattern measured ~2000× slower on `save_custom_graph`'s bulk path) — so the remaining cost is the
+> in-memory composition; a keyset-streaming rebuild is the documented upgrade path (see
+> [09 · Scale & Limits](09-scale-limits-and-roadmap.md)).
 
 ---
 
