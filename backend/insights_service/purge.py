@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,13 +70,23 @@ async def collect(envelope: PurgeJobEnvelope) -> None:
     deleted edges are no-ops, and the data_source_state reset only
     needs to land once.
     """
+    reagg_job = None
     async with get_jobs_session() as session:
-        await _collect_in_session(session, envelope)
+        reagg_job = await _collect_in_session(session, envelope)
+    # Post-purge re-aggregation fires only AFTER the outer commit above
+    # has landed the purge row's ``completed`` status. Firing inside the
+    # transaction made the control plane's active-job guard see the
+    # still-``running`` purge row → 409 → the auto re-aggregation
+    # silently never happened.
+    if reagg_job is not None:
+        await _maybe_trigger_reaggregation(reagg_job)
 
 
 async def _collect_in_session(
     session: AsyncSession, envelope: PurgeJobEnvelope,
-) -> None:
+) -> "SimpleNamespace | None":
+    """Returns a detached post-purge re-aggregation payload on successful
+    completion (fired by the caller AFTER the outer commit), else None."""
     job = await session.get(AggregationJobORM, envelope.job_id)
     if job is None:
         # Producer raced a job-deletion. Nothing to update; let the
@@ -272,10 +283,15 @@ async def _collect_in_session(
         # Post-purge re-aggregation (default ON, opt-out rides the job
         # row): container-level lineage is BLIND until the canonical
         # cells are rebuilt — same-level container pairs cannot be
-        # derived on demand at scale. Trigger a normal, UI-visible
-        # aggregation job through the control plane. Best-effort: a
-        # trigger failure never fails the completed purge.
-        await _maybe_trigger_reaggregation(job)
+        # derived on demand at scale. The caller fires the trigger AFTER
+        # the outer commit; hand it a detached snapshot of the fields it
+        # needs (the ORM row is unusable once the session closes).
+        return SimpleNamespace(
+            id=job.id,
+            data_source_id=job.data_source_id,
+            projection_mode=job.projection_mode,
+            tuning_json=getattr(job, "tuning_json", None),
+        )
 
     except JobCancelled as cancel_exc:
         # Cooperative cancel observed between DELETE batches. The
