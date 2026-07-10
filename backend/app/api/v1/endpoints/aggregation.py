@@ -860,6 +860,7 @@ async def purge_aggregation(
     response: Response,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
+    skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
 ):
     """Queue a purge job. Returns 202 with the job row immediately; the
     actual ``MATCH ... DELETE`` runs as a regular insights-service
@@ -877,7 +878,9 @@ async def purge_aggregation(
 
     _, _, _, ConflictError, NotFoundError = _direct_imports()
     try:
-        job = await svc.claim_purge_job(ds_id, session)
+        job = await svc.claim_purge_job(
+            ds_id, session, skip_reaggregate=skip_reaggregate,
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:

@@ -421,6 +421,7 @@ async def purge_aggregation(
     response: Response,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
+    skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
 ):
     """Claim a purge slot and hand off to the insights-service worker.
     The provider DELETE runs as a Redis Streams job with retry, DLQ,
@@ -428,7 +429,9 @@ async def purge_aggregation(
     from backend.insights_service.enqueue import enqueue_purge_job_safe
 
     try:
-        job = await svc.claim_purge_job(ds_id, session)
+        job = await svc.claim_purge_job(
+            ds_id, session, skip_reaggregate=skip_reaggregate,
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:

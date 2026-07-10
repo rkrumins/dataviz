@@ -248,15 +248,24 @@ class AggregationService {
    * populated once the background task finishes. Frontend should
    * monitor progress via the standard aggregation-jobs endpoints
    * (Job History UI handles this automatically).
+   *
+   * By default a fresh aggregation job is triggered automatically when
+   * the purge completes (container-level lineage is blind until the
+   * canonical cells are rebuilt); pass `skipReaggregate: true` for a
+   * purge-and-stay-empty.
    */
-  async purgeAggregation(dataSourceId: string): Promise<{
+  async purgeAggregation(
+    dataSourceId: string,
+    opts?: { skipReaggregate?: boolean },
+  ): Promise<{
     deletedEdges: number
     dataSourceId: string
     jobId: string
     status: 'running' | 'completed' | 'failed'
   }> {
+    const qs = opts?.skipReaggregate ? '?skipReaggregate=true' : '';
     return authFetch(
-      `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation`,
+      `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation${qs}`,
       { method: 'POST' }
     );
   }

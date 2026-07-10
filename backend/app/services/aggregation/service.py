@@ -892,6 +892,7 @@ class AggregationService:
 
     async def claim_purge_job(
         self, ds_id: str, session: AsyncSession,
+        *, skip_reaggregate: bool = False,
     ) -> AggregationJobORM:
         """Reserve a ``pending`` purge slot in ``aggregation_jobs``.
 
@@ -971,6 +972,14 @@ class AggregationService:
             batch_size=5000,
             retry_count=0,
             max_retries=0,
+            # Post-purge behavior rides the row so redelivery keeps it:
+            # by default the purge worker triggers a fresh aggregation
+            # job on completion (container-level lineage is blind until
+            # the canonical cells are rebuilt); the UI can opt out.
+            tuning_json=(
+                json.dumps({"skip_reaggregate": True})
+                if skip_reaggregate else None
+            ),
             created_at=now,
             updated_at=now,
         )

@@ -269,6 +269,14 @@ async def _collect_in_session(
         from .enqueue import mark_stats_changed
         await mark_stats_changed(envelope.data_source_id, envelope.workspace_id)
 
+        # Post-purge re-aggregation (default ON, opt-out rides the job
+        # row): container-level lineage is BLIND until the canonical
+        # cells are rebuilt — same-level container pairs cannot be
+        # derived on demand at scale. Trigger a normal, UI-visible
+        # aggregation job through the control plane. Best-effort: a
+        # trigger failure never fails the completed purge.
+        await _maybe_trigger_reaggregation(job)
+
     except JobCancelled as cancel_exc:
         # Cooperative cancel observed between DELETE batches. The
         # previous batch's MATCH ... DELETE landed cleanly in
@@ -349,6 +357,61 @@ async def record_failure(
         job.error_message = error[:2000]
         job.completed_at = _now()
         job.updated_at = _now()
+
+
+async def _maybe_trigger_reaggregation(job: AggregationJobORM) -> None:
+    """Fire a normal aggregation job after a successful purge unless the
+    row carries ``{"skip_reaggregate": true}`` (the UI opt-out). Routed
+    through the control plane so the run is a first-class job — visible
+    in the jobs UI, on the worker fleet, holding the graph lease under
+    its own name. Never raises."""
+    import json as _json
+    import os as _os
+    try:
+        opts = _json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+    except (TypeError, ValueError):
+        opts = {}
+    if opts.get("skip_reaggregate"):
+        logger.info(
+            "purge.reaggregate_skipped job_id=%s ds=%s (user opt-out)",
+            job.id, job.data_source_id,
+        )
+        return
+    base = _os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
+    try:
+        import httpx
+        async with httpx.AsyncClient(
+            base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
+        ) as client:
+            resp = await client.post(
+                f"/aggregation/data-sources/{job.data_source_id}/jobs",
+                params={"triggerSource": "post_purge"},
+                json={
+                    "projectionMode": job.projection_mode or "in_source",
+                    "batchSize": 1000,
+                },
+            )
+        if resp.status_code in (200, 202):
+            logger.info(
+                "purge.reaggregate_triggered job_id=%s ds=%s",
+                job.id, job.data_source_id,
+            )
+        elif resp.status_code == 409:
+            logger.info(
+                "purge.reaggregate_already_active job_id=%s ds=%s",
+                job.id, job.data_source_id,
+            )
+        else:
+            logger.warning(
+                "purge.reaggregate_rejected job_id=%s ds=%s status=%s body=%s",
+                job.id, job.data_source_id, resp.status_code, resp.text[:300],
+            )
+    except Exception as exc:
+        logger.warning(
+            "purge.reaggregate_failed job_id=%s ds=%s: %s — trigger "
+            "aggregation manually to restore container-level lineage",
+            job.id, job.data_source_id, exc,
+        )
 
 
 # Self-register with the dispatcher.
