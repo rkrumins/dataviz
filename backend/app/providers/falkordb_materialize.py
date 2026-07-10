@@ -188,6 +188,13 @@ class MaterializationBudgetExceeded(ValueError):
     fail the job terminally instead of consuming its retry budget."""
 
 
+class MaterializationPreconditionFailed(ValueError):
+    """Graph/ontology state makes materialization impossible in a way a
+    retry cannot fix (e.g. the graph has content but no node matches any
+    non-leaf ontology label). Deterministic: the worker fails the job
+    terminally instead of re-running EXTRACT once per retry."""
+
+
 # ---------------------------------------------------------------------------
 # Pair-key packing.
 #
@@ -329,6 +336,10 @@ class AggregationPipeline:
         # — bounded by container count; reset when the parent map reloads.
         self._rep_chain_cache: Dict[int, Tuple[Tuple[int, int], ...]] = {}
         self._fine_merges_skipped = 0
+        # Level map re-keyed by observed label spellings, built lazily —
+        # see _levels_by_observed_label.
+        self._levels_by_spelling: Optional[Dict[str, int]] = None
+        self._single_level_logged = False
 
         # Run state
         self._run_start_ms: int = 0
@@ -1020,6 +1031,21 @@ class AggregationPipeline:
         legacy jobs without it fall back to full-cube behavior."""
         if not self._entity_levels:
             return False
+        if not self._nonleaf_labels():
+            # Single-level ontology: every declared type sits at the finest
+            # level, so there IS no container boundary — the only content
+            # the original full cube stored was the leaf mirror set. Fall
+            # back to full-cube behavior (still bounded by the write
+            # budget) instead of failing on an empty boundary map.
+            if not self._single_level_logged:
+                self._single_level_logged = True
+                logger.info(
+                    "aggregation pipeline on %s: ontology is single-level "
+                    "(no non-leaf entity types) — materializing exact "
+                    "leaf-to-leaf pairs (full-cube fallback).",
+                    self.p._graph_name,
+                )
+            return False
         return not self._knob_bool("materialize_fine_pairs", _materialize_fine_pairs)
 
     def _nonleaf_labels(self) -> List[str]:
@@ -1076,16 +1102,27 @@ class AggregationPipeline:
                     if row and row[0] is not None:
                         levels[int(row[0])] = level
         if not levels:
-            raise ValueError(
-                "materialization boundary is EMPTY: no graph node matched "
-                "any non-leaf ontology label. Continuing would materialize "
-                "nothing and the reconcile pass would then delete every "
-                "existing :AGGREGATED edge as stale — refusing. Check that "
-                "the ontology declares more than one hierarchy level and "
-                "that its entity-type labels (or their source aliases) "
-                "match the graph's labels; set "
-                "AGGREGATION_MATERIALIZE_FINE_PAIRS=true only if the "
-                "ontology is genuinely single-level."
+            probe = await self.p._ro_query(
+                "MATCH (n) RETURN 1 LIMIT 1", timeout=_scan_timeout_s(),
+            )
+            if not (probe.result_set or []):
+                # The graph has no nodes at all (pre-ingest, onboarding):
+                # nothing to materialize and nothing to wipe — an empty
+                # boundary map is safe here and the run completes as a
+                # clean no-op instead of a failed job.
+                logger.info(
+                    "aggregation pipeline on %s: graph is empty — nothing "
+                    "to materialize (no-op run).", self.p._graph_name,
+                )
+                self._nonleaf_levels = {}
+                return
+            raise MaterializationPreconditionFailed(
+                "materialization boundary is EMPTY: the graph has nodes "
+                "but none matched any non-leaf ontology label. Continuing "
+                "would materialize nothing and the reconcile pass would "
+                "then delete every existing :AGGREGATED edge as stale — "
+                "refusing. Check that the ontology's entity-type labels "
+                "(or their source aliases) match the graph's labels."
             )
         self._nonleaf_levels = levels
         by_level: Dict[int, int] = {}
@@ -1228,12 +1265,30 @@ class AggregationPipeline:
 
     # -- writes ------------------------------------------------------------------
 
+    def _levels_by_observed_label(self) -> Dict[str, int]:
+        """The entity-type level map re-keyed by every OBSERVED label
+        spelling this source uses (identity on governed graphs). The node
+        directory records observed spellings; looking those up in the
+        declared-key map stamps NULL levels on alias-variant sources —
+        and the on-demand mixed-level reader filters on those stamps
+        (``r.targetLevel <= $l``), so NULL stamps blind every mixed-level
+        drill-down on such graphs."""
+        if self._levels_by_spelling is None:
+            expand = getattr(self.p, "_alias_entity_types", lambda t: t)
+            out: Dict[str, int] = {}
+            for lbl, lv in self._entity_levels.items():
+                for spelled in expand([lbl]):
+                    out[str(spelled)] = lv
+                out[lbl] = lv
+            self._levels_by_spelling = out
+        return self._levels_by_spelling
+
     def _build_items(
         self, source: Dict[int, int], keys: List[int],
         resolved: Dict[int, Tuple[str, str]],
     ) -> List[Dict[str, Any]]:
         values = self._values
-        levels = self._entity_levels
+        levels = self._levels_by_observed_label()
         types = self._effective_types
         items: List[Dict[str, Any]] = []
         dropped = 0
@@ -1420,14 +1475,37 @@ class AggregationPipeline:
                     timeout=_scan_timeout_s(),
                 )
                 if probe.result_set:
-                    await self._paced_write(lambda: self.p._proj_query(
-                        "MATCH ()-[r:AGGREGATED]->() "
-                        "WHERE r.aggKey IS NULL "
-                        "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
-                        "DELETE r",
-                        params={"runStart": self._run_start_ms},
-                        timeout=self.p._bulk_create_timeout_s,
-                    ))
+                    # Chunked: a legacy generation can hold millions of
+                    # NULL-aggKey edges, and one unbounded DELETE times out
+                    # on every run — leaving the legacy cube double-serving
+                    # pairs forever. LIMIT-bounded passes make progress
+                    # each run even if a later pass fails.
+                    chunk = self._knob_int("delete_chunk", _delete_chunk, 100, 50_000)
+                    while True:
+                        self._cancel_check()
+                        _, res = await self._paced_write(lambda: self.p._proj_query(
+                            "MATCH ()-[r:AGGREGATED]->() "
+                            "WHERE r.aggKey IS NULL "
+                            "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
+                            f"WITH r LIMIT {chunk} DELETE r",
+                            params={"runStart": self._run_start_ms},
+                            timeout=self.p._bulk_create_timeout_s,
+                        ))
+                        removed = getattr(res, "relationships_deleted", None)
+                        if removed is not None:
+                            if int(removed) < chunk:
+                                break
+                            continue
+                        # Client didn't report a delete count — re-probe.
+                        reprobe = await self.p._proj_ro_query(
+                            "MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL "
+                            "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
+                            "RETURN 1 LIMIT 1",
+                            params={"runStart": self._run_start_ms},
+                            timeout=_scan_timeout_s(),
+                        )
+                        if not reprobe.result_set:
+                            break
             except Exception as exc:
                 logger.warning(
                     "aggregation pipeline on %s: legacy (NULL-aggKey) edge "
@@ -1471,7 +1549,8 @@ class AggregationPipeline:
                     "MATCH (a)-[r:AGGREGATED]->(b) "
                     "WHERE ID(r) >= $lo AND ID(r) < $hi "
                     "RETURN ID(a), ID(b), r.aggKey, r.weight, r.levelDigest, "
-                    "r.latestUpdate",
+                    "r.latestUpdate, r.sourceEdgeTypes, r.sourceLevel, "
+                    "r.targetLevel",
                     params={"lo": lo, "hi": hi},
                     timeout=_scan_timeout_s(),
                 )
@@ -1479,7 +1558,8 @@ class AggregationPipeline:
                 res = await runner(
                     "MATCH (a)-[r:AGGREGATED]->(b) "
                     "WHERE ID(r) >= $lo AND ID(r) < $hi "
-                    "RETURN r.aggKey, r.weight, r.levelDigest, r.latestUpdate",
+                    "RETURN r.aggKey, r.weight, r.levelDigest, r.latestUpdate, "
+                    "r.sourceEdgeTypes, r.sourceLevel, r.targetLevel",
                     params={"lo": lo, "hi": hi},
                     timeout=_scan_timeout_s(),
                 )
@@ -1488,12 +1568,14 @@ class AggregationPipeline:
             to_add: List[int] = []
             for row in (res.result_set or []):
                 if not dedicated:
-                    aid, bid, agg_key, weight, row_digest, latest = row
+                    (aid, bid, agg_key, weight, row_digest, latest,
+                     row_et, row_sl, row_tl) = row
                     if aid is None or bid is None:
                         continue
                     key: Optional[int] = _pack(int(aid), int(bid))
                 else:
-                    agg_key, weight, row_digest, latest = row
+                    (agg_key, weight, row_digest, latest,
+                     row_et, row_sl, row_tl) = row
                     key = key_by_aggkey.get(agg_key) if agg_key else None
                 val = self._acc.get(key) if key is not None else None
                 if val is None or key in existing:
@@ -1530,6 +1612,7 @@ class AggregationPipeline:
                 elif (
                     int(weight or 0) != values.weight(val)
                     or (row_digest or "") != digest
+                    or self._row_meta_stale(val, row_et, row_sl, row_tl, key)
                 ):
                     to_overwrite.append(key)
 
@@ -1546,6 +1629,37 @@ class AggregationPipeline:
 
         self._progress_pct = 75
         return existing
+
+    def _row_meta_stale(
+        self, val: int, row_et: Any, row_sl: Any, row_tl: Any, key: int,
+    ) -> bool:
+        """Weight-preserving drift the weight/digest comparison can't see:
+        ``sourceEdgeTypes`` replaced type-for-type (same count, different
+        types — a TRANSFORMS-filtered trace would silently drop the edge)
+        or level stamps written by a pre-alias-fix build (NULL on
+        alias-variant sources, which blinds the mixed-level reader)."""
+        mask = self._values.mask(val)
+        desired_et = {
+            t for i, t in enumerate(self._effective_types) if mask & (1 << i)
+        }
+        stored_et = set(row_et) if isinstance(row_et, list) else (
+            {row_et} if row_et else set()
+        )
+        if stored_et != desired_et:
+            return True
+        nonleaf = self._nonleaf_levels
+        if nonleaf:
+            sid, tid = _unpack(key)
+            desired_sl, desired_tl = nonleaf.get(sid), nonleaf.get(tid)
+            if desired_sl is not None and (
+                row_sl is None or int(row_sl) != desired_sl
+            ):
+                return True
+            if desired_tl is not None and (
+                row_tl is None or int(row_tl) != desired_tl
+            ):
+                return True
+        return False
 
     async def _ensure_agg_index(self) -> None:
         """Idempotently ensure the AGGREGATED(aggKey) edge index that keeps
@@ -1630,6 +1744,17 @@ class AggregationPipeline:
                     self.p._agg_last_materialized_key(),
                     datetime.now(timezone.utc).isoformat(),
                 )
+                # Storage-regime marker for the read path: the mixed-level
+                # on-demand derivation (Q3) is only exact against CANONICAL
+                # stored cells — running it on a legacy/fine full cube
+                # double-counts every mixed-level weight. The reader gates
+                # Q3 on this marker (falling back to a graph probe when it
+                # is absent).
+                if hasattr(self.p, "_agg_regime_key"):
+                    await self.p._redis.set(
+                        self.p._agg_regime_key(),
+                        "boundary" if self._fine_filter_active() else "fine",
+                    )
         except Exception as exc:
             logger.warning(
                 "Failed to stamp aggregated materialization timestamp: %s", exc,

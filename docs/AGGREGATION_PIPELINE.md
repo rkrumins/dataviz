@@ -59,14 +59,34 @@ default 2M) fails a job loudly — terminally, no retries, with a
 per-level composition breakdown in the error — rather than ever letting
 a result OOM the shared instance. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
-ontology level map fall back to it automatically. Coverage is verified
-by an exhaustive cross-product matrix test
-(`test_full_cross_product_matrix_six_levels`): every source-level ×
-target-level combination on a 6-level hierarchy answers exactly from
-canonical cells + on-demand derivation. Known transitional edge: a
-graph still carrying pre-boundary full-cube cells (not yet
-re-aggregated) may over/undercount mixed-level pairs until its first
-run on the new pipeline reconciles the stale cells away.
+ontology level map — or with a SINGLE-LEVEL map (no container types) —
+fall back to it automatically. An empty graph completes as a clean
+no-op; a non-empty graph whose labels match no non-leaf ontology label
+fails terminally (`MaterializationPreconditionFailed`, no retry burn)
+instead of wiping. Coverage is verified by an exhaustive cross-product
+matrix test (`test_full_cross_product_matrix_six_levels`): every
+source-level × target-level combination on a 6-level hierarchy answers
+exactly from canonical cells + on-demand derivation.
+
+**Storage-regime gate.** The mixed-level derivation is exact ONLY
+against canonical cells — run against a legacy/fine full cube it would
+double-count every mixed weight. The pipeline stamps the regime
+(`{graph}:agg:regime` = `boundary`/`fine`) into Redis on completion;
+the reader gates the derivation on it, falling back to a cached graph
+probe for non-conforming rows (NULL `aggKey`/`sourceLevel`). Unknown or
+legacy state degrades to stored-only mixed answers (the original
+behavior) — so the post-upgrade transition window and the fine-pairs
+escape hatch can never inflate weights; they heal at the first
+boundary-mode run. Incremental writers stay canonical too: the
+versioning projector derives the same canonical selection from the
+ontology level map (level-stamped, digest-stamped), and the write hook
+alias-translates observed label spellings before level lookup.
+
+Endpoints whose label is OUTSIDE the ontology (messy ingests) are
+served as raw anchors (exact edges + upward rollups) rather than
+dropped. Residual known gap: a mapped→unmapped pair whose raw edge
+lands strictly BELOW the unmapped node is not derivable without
+enumerating the unmapped subtree.
 
 ## Phases
 
@@ -173,6 +193,8 @@ pipeline).
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
 | `AGGREGATION_LARGE_JOB_EDGE_THRESHOLD` | 500000 | Edge count classifying a job as "large" |
 | `AGGREGATION_MAX_LARGE_JOBS_PER_WORKER` | 1 | Large jobs one worker may hold concurrently |
+| `AGGREGATION_PENDING_NO_WORKER_SECS` | 900 | Reconciler fails pending rows this old when NO worker is registered (worker-less config detector) |
+| `AGGREGATION_PENDING_TIMEOUT_SECS` | 21600 | Reconciler backstop for pending rows never picked up (lost dispatch) |
 
 ## Worker fleet
 

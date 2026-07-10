@@ -37,7 +37,9 @@ _CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
 _Q1_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*MATCH \(y\)-\[:")
 _Q2_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y:(\w+)\)")
 _SRC_ONLY_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*AND t\.urn <> x\.urn")
-_RESOLVE_UP_RE = re.compile(r"RETURN c\.urn, a\.urn")
+_RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.urn, a\.urn")
+_QU_OUT_RE = re.compile(r"MATCH \(x\)-\[r\]->\(t\) WHERE x\.urn IN \$xs")
+_QU_IN_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y\) WHERE y\.urn IN \$ys")
 _CHAIN_RE = re.compile(r"MATCH \(child(?::(\w+))?\) WHERE child\.urn IN \$urns")
 _AGG_FANOUT_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r:AGGREGATED\]->\(t2\)")
 _AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y:(\w+)\)")
@@ -79,9 +81,15 @@ class _FakeGraph:
                     stack.append(child)
         return out
 
+    legacy_rows = False  # True simulates NULL-aggKey / NULL-stamp rows
+
     async def proj_ro_query(self, cypher, params=None, timeout=None):
         """Projection-graph reads: same-level :AGGREGATED anchors."""
         params = params or {}
+        if "r.aggKey IS NULL" in cypher:
+            # Storage-regime probe: canonical fake cells always conform
+            # unless a test explicitly simulates a legacy generation.
+            return _Result([[1]] if self.legacy_rows else [])
         m = _AGG_FANOUT_RE.search(cypher)
         if m:
             lbl = m.group(1)
@@ -182,6 +190,36 @@ class _FakeGraph:
                     if et not in types:
                         types.append(et)
             return _Result([[x, t, len(e), ty] for (x, t), (e, ty) in cells.items()])
+        if _QU_OUT_RE.search(cypher):
+            # Unmapped-label sources: unlabeled anchor, raw fan-out with
+            # the target resolved upward to any $ys (same shape as Q1).
+            cells = {}
+            for x in params["xs"]:
+                for eid, s, t, et in self.lineage:
+                    if s != x or et not in params["lt"]:
+                        continue
+                    for y in params["ys"]:
+                        if x != y and t in self._descendants_or_self(y):
+                            eids, types = cells.setdefault((x, y), (set(), []))
+                            eids.add(eid)
+                            if et not in types:
+                                types.append(et)
+            return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
+        if _QU_IN_RE.search(cypher):
+            # Unmapped-label targets: unlabeled anchor, raw fan-in with
+            # the source resolved upward to any $xs (same shape as Q2).
+            cells = {}
+            for y in params["ys"]:
+                for eid, s, t, et in self.lineage:
+                    if t != y or et not in params["lt"]:
+                        continue
+                    for x in params["xs"]:
+                        if x != y and s in self._descendants_or_self(x):
+                            eids, types = cells.setdefault((x, y), (set(), []))
+                            eids.add(eid)
+                            if et not in types:
+                                types.append(et)
+            return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
 
@@ -219,7 +257,7 @@ def test_leaf_source_resolves_ancestor_eight_levels_up():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a7"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a7", "urn:b0", 2, ["FLOWS"]]]
@@ -230,7 +268,7 @@ def test_leaf_source_resolves_every_requested_ancestor_level():
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
     targets = [f"urn:b{i}" for i in range(8)]
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a7"], targets, ["CONTAINS"], ["FLOWS"],
     ))
     assert {(r[0], r[1], r[2]) for r in rows} == {
@@ -243,7 +281,7 @@ def test_nonleaf_source_to_leaf_target_uses_reverse_walk():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b7"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a0", "urn:b7", 2, ["FLOWS"]]]
@@ -253,7 +291,7 @@ def test_source_only_mode_returns_exact_raw_targets():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], None, ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
@@ -266,7 +304,7 @@ def test_same_level_pairs_are_not_produced_on_demand():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -280,7 +318,7 @@ def test_mixed_level_pair_derived_from_materialized_diagonal():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)   # materialized table→table
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -293,7 +331,7 @@ def test_mixed_level_pair_reverse_direction():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -307,7 +345,7 @@ def test_mixed_level_pair_deep_hierarchy():
     levels = _seed_deep_chains(fake, depth=8)
     fake.aggregated("urn:a6", "urn:b6", 2)
     p = _make_provider(fake, levels)
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a6"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -332,7 +370,7 @@ def test_alias_variant_labels_still_classify_and_anchor():
     fake.flow(2, "urn:a2", "urn:b2")
     p = _make_provider(fake, levels)
     p._source_entity_aliases = {"LVL2": ["LVL2_OBS"]}
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
@@ -350,7 +388,7 @@ def test_missing_level_map_falls_back_to_raw_synthesis():
         return sentinel
 
     p._synthesize_raw_lineage_pairs = fake_raw
-    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b2"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == sentinel
@@ -690,3 +728,133 @@ def test_get_aggregated_edges_between_merges_and_dedupes():
         ("urn:a1", "urn:b2"): 2,   # on-demand: parent table → column
         ("urn:a1", "urn:b0"): 5,   # on-demand mixed level, from the diagonal
     }
+
+
+def test_unmapped_label_endpoints_still_visible():
+    """Nodes whose label is OUTSIDE the ontology (messy ingests) lost all
+    aggregated visibility except the leaf-target direction — the original
+    full cube stored their pairs label-agnostically. The QU raw anchors
+    must serve: unmapped→unmapped (exact raw edge), unmapped→container
+    (rolled up), and container→unmapped (exact raw fan-in)."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)          # lvl0 ⊃ lvl1 ⊃ lvl2
+    fake.add_node("urn:m1", "Metric")                  # label not in levels
+    fake.add_node("urn:m2", "Metric")
+    fake.contain("urn:a1", "urn:m1")                   # metrics under tables
+    fake.contain("urn:b1", "urn:m2")
+    fake.flow(10, "urn:m1", "urn:m2")                  # metric → metric
+    fake.flow(11, "urn:a2", "urn:m2")                  # column → metric
+    fake.flow(12, "urn:m1", "urn:b2")                  # metric → column
+    p = _make_provider(fake, levels)
+
+    # unmapped → unmapped: the exact raw edge.
+    rows, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:m1"], ["urn:m2"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:m1", "urn:m2", 1, ["FLOWS"]]]
+
+    # unmapped → mapped container: raw fan-out rolled up to the domain
+    # (edges m1→m2 under b1⊂b0 and m1→b2 under b0 both resolve to b0).
+    rows, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:m1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:m1", "urn:b0", 2, ["FLOWS"]]]
+
+    # mapped container → unmapped: exact raw fan-in resolved upward.
+    rows, _, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a1"], ["urn:m2"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert {(r[0], r[1], r[2]) for r in rows} == {("urn:a1", "urn:m2", 2)}
+
+
+def test_full_cube_regime_skips_mixed_derivation():
+    """Against a legacy / fine full cube the stored mixed rows already
+    carry every contribution — deriving Q3 on top double-counts (2-6x
+    observed). Non-conforming rows (NULL aggKey/stamps) must flip the
+    reader to stored-only mixed answers."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)    # diagonal
+    fake.aggregated("urn:a1", "urn:b0", 2)    # full-cube mixed cell
+    fake.legacy_rows = True                   # probe sees NULL-aggKey rows
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None):
+        if params and "sourceUrns" in params:
+            return _Result([
+                [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
+                if s in params["sourceUrns"]
+                and t in (params.get("targetUrns") or [])
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a1"], ["urn:b0"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=["FLOWS"],
+    ))
+    got = {(e.source_urn, e.target_urn): e.edge_count
+           for e in result.aggregated_edges}
+    # Stored full-cube answer only — NOT 2 (stored) + 2 (derived) = 4.
+    assert got == {("urn:a1", "urn:b0"): 2}
+
+
+def test_fine_regime_marker_skips_mixed_derivation():
+    """The pipeline stamps the storage regime into Redis; a 'fine' marker
+    (AGGREGATION_MATERIALIZE_FINE_PAIRS runs) must gate Q3 off even when
+    every stored row is well-formed."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)
+    fake.aggregated("urn:a1", "urn:b0", 2)    # fine-mode mixed cell
+    p = _make_provider(fake, levels)
+
+    class _MarkerRedis:
+        async def get(self, key):
+            return b"fine" if key.endswith(":agg:regime") else None
+
+    p._redis = _MarkerRedis()
+
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert mixed == []
+
+
+def test_failed_subquery_marks_result_truncated():
+    """A timed-out on-demand sub-query used to silently drop a whole
+    class of edges from the canvas — the result must be flagged as
+    partial (truncated) instead of presenting as complete."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def failing_ro_query(cypher, params=None, timeout=None):
+        raise TimeoutError("classification timed out")
+
+    async def proj_ro_query(cypher, params=None, timeout=None):
+        if params and "sourceUrns" in params:
+            return _Result([])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._ro_query = failing_ro_query
+    p._proj_ro_query = proj_ro_query
+
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a2"], ["urn:b0"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=["FLOWS"],
+    ))
+    assert result.truncated is True

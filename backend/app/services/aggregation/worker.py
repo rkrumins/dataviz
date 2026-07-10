@@ -38,7 +38,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.adapters import ProviderUnavailable, ProviderBusy
-from backend.app.providers.falkordb_materialize import MaterializationBudgetExceeded
+from backend.app.providers.falkordb_materialize import (
+    MaterializationBudgetExceeded,
+    MaterializationPreconditionFailed,
+)
 
 from backend.app.jobs import (
     JobScope as PlatformJobScope,
@@ -849,11 +852,10 @@ class AggregationWorker:
                 # outer run() handler, which marks the job 'cancelled' and
                 # emits the terminal event with last_cursor preserved.
                 raise
-            except MaterializationBudgetExceeded:
-                # The computed result size is deterministic — every retry
-                # recomputes the same count and burns another full
-                # EXTRACT+COMPUTE pass. Fail terminally with the guidance
-                # message intact.
+            except (MaterializationBudgetExceeded, MaterializationPreconditionFailed):
+                # Both are deterministic — every retry recomputes the same
+                # outcome and burns another full EXTRACT+COMPUTE pass. Fail
+                # terminally with the guidance message intact.
                 raise
             except ProviderBusy as e:
                 # ZOMBIE-LEASE takeover: if the park is a graph-lease

@@ -52,18 +52,21 @@ class _FakeFalkor:
     def add_edge(self, etype, rid, sid, tid):
         self.typed_edges.setdefault(etype, []).append((rid, sid, tid))
 
-    def seed_aggregated(self, aid, bid, *, weight, digest="", latest=1000):
+    def seed_aggregated(
+        self, aid, bid, *, weight, digest="", latest=1000,
+        types=("FLOWS",), sl=None, tl=None, agg_key=...,
+    ):
         s_urn = self.nodes[aid][0]
         t_urn = self.nodes[bid][0]
         self.agg[(aid, bid)] = {
             "rid": self._alloc_rid(),
-            "aggKey": f"{s_urn}|{t_urn}",
+            "aggKey": f"{s_urn}|{t_urn}" if agg_key is ... else agg_key,
             "weight": weight,
             "digest": digest,
             "latest": latest,
-            "types": [],
-            "sl": None,
-            "tl": None,
+            "types": list(types),
+            "sl": sl,
+            "tl": tl,
         }
 
     def _alloc_rid(self):
@@ -108,6 +111,8 @@ class _FakeFalkor:
             ])
         if cypher.strip() == "RETURN timestamp()":
             return _Result([[int(time.time() * 1000)]])
+        if cypher.strip() == "MATCH (n) RETURN 1 LIMIT 1":
+            return _Result([[1]] if self.nodes else [])
         if "r.aggKey IS NULL" in cypher and "RETURN 1 LIMIT 1" in cypher:
             # Legacy-generation probe: fake edges always carry aggKey
             # unless a test explicitly clears it.
@@ -136,7 +141,8 @@ class _FakeFalkor:
                 if lo <= v["rid"] < hi:
                     rows.append([
                         aid, bid, v["aggKey"], v["weight"], v["digest"],
-                        v["latest"],
+                        v["latest"], v.get("types") or [], v.get("sl"),
+                        v.get("tl"),
                     ])
             return _Result(rows)
         raise AssertionError(f"unhandled agg read: {cypher}")
@@ -167,6 +173,19 @@ class _FakeFalkor:
                 edge["digest"] = params["digest"]
                 edge["latest"] = now_ms
             return _Result()
+        if "r.aggKey IS NULL" in cypher and "DELETE r" in cypher:
+            # Chunked legacy-generation healing pass.
+            run_start = params["runStart"]
+            victims = [
+                k for k, e in self.agg.items()
+                if not e.get("aggKey") and e.get("latest", 0) < run_start
+            ]
+            for k in victims:
+                self.deleted_pairs.append(k)
+                del self.agg[k]
+            res = _Result()
+            res.relationships_deleted = len(victims)
+            return res
         if "DELETE r" in cypher:
             run_start = params["runStart"]
             for agg_key in params["keys"]:
@@ -526,26 +545,138 @@ def test_write_budget_counts_flushed_and_pending_as_union(monkeypatch):
     assert result["aggregated_edges_affected"] == n_pairs + 1
 
 
-def test_empty_boundary_map_fails_loud_instead_of_wiping(monkeypatch):
-    """A boundary map that matches NOTHING (single-level ontology, or
-    labels that don't match the graph) must fail the run — continuing
-    would materialize nothing and reconcile would delete every existing
-    :AGGREGATED edge as stale."""
+def test_empty_boundary_map_fails_loud_instead_of_wiping():
+    """A multi-level ontology whose labels match NOTHING in a non-empty
+    graph must fail the run — continuing would materialize nothing and
+    reconcile would delete every existing :AGGREGATED edge as stale.
+    Terminal (MaterializationPreconditionFailed): deterministic, so the
+    worker must not burn its retry budget re-running EXTRACT."""
     fake = _FakeFalkor()
-    # Single level: every label is at the finest level → no non-leaf
-    # labels → empty boundary.
-    levels = {"column": 0}
-    fake.add_node(3, "urn:col_a", "column")
-    fake.add_node(13, "urn:col_b", "column")
+    levels = {"domain": 0, "column": 1}
+    fake.add_node(3, "urn:col_a", "weird_label")
+    fake.add_node(13, "urn:col_b", "weird_label")
     fake.add_edge("FLOWS", 10, 3, 13)
     fake.seed_aggregated(3, 13, weight=7, latest=1000)
     p = _make_provider(fake, levels)
 
-    with pytest.raises(ValueError, match="boundary is EMPTY"):
+    with pytest.raises(
+        mat.MaterializationPreconditionFailed, match="boundary is EMPTY"
+    ):
         _run(_materialize(p))
     # The pre-existing edge survives untouched.
     assert fake.agg[(3, 13)]["weight"] == 7
     assert fake.deleted_pairs == []
+
+
+def test_single_level_ontology_run_succeeds_not_fails():
+    """A single-level level map has no container boundary — the run must
+    fall back to the legacy lattice (original behavior) instead of
+    failing on an empty boundary map. Flat graphs succeed as a no-op
+    (exact leaf pairs are served on demand by the read path); a
+    SELF-NESTING single-label graph (Folder⊃Folder) still materializes
+    the rolled-up ancestor pairs the original cube stored."""
+    fake = _FakeFalkor()
+    levels = {"column": 0}
+    fake.add_node(3, "urn:col_a", "column")
+    fake.add_node(13, "urn:col_b", "column")
+    fake.add_edge("FLOWS", 10, 3, 13)
+    p = _make_provider(fake, levels)
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+
+    fake2 = _FakeFalkor()
+    fake2.add_node(1, "urn:folder_a", "folder")
+    fake2.add_node(2, "urn:folder_b", "folder")
+    fake2.add_node(3, "urn:folder_c", "folder")
+    fake2.add_node(4, "urn:folder_d", "folder")
+    fake2.add_edge("CONTAINS", 0, 1, 3)   # a ⊃ c
+    fake2.add_edge("CONTAINS", 1, 2, 4)   # b ⊃ d
+    fake2.add_edge("FLOWS", 10, 3, 4)     # c → d
+    p2 = _make_provider(fake2, {"folder": 0})
+    _run(_materialize(p2))
+    assert set(fake2.agg.keys()) == {(3, 2), (1, 4), (1, 2)}
+
+
+def test_empty_graph_is_a_clean_noop():
+    """Aggregation triggered before ingest (onboarding) must complete as
+    a no-op, not surface as a FAILED job after burning retries."""
+    fake = _FakeFalkor()
+    levels = {"domain": 0, "column": 1}
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p))
+
+    assert result["aggregated_edges_affected"] == 0
+    assert result["errors"] == 0
+    assert fake.deleted_pairs == []
+
+
+def test_alias_variant_nonleaf_labels_get_integer_level_stamps():
+    """The node directory records the graph's OBSERVED label spellings;
+    the level map is keyed by DECLARED ids. On alias-variant sources the
+    stamps must still resolve — NULL sourceLevel/targetLevel blinds the
+    mixed-level on-demand reader, which filters on them."""
+    fake = _FakeFalkor()
+    levels = {"domain": 0, "table": 1, "column": 2}
+    fake.add_node(1, "urn:domain_abc", "DOM_OBS")
+    fake.add_node(2, "urn:table_a", "TBL_OBS")
+    fake.add_node(3, "urn:col_a", "COL_OBS")
+    fake.add_node(11, "urn:domain_def", "DOM_OBS")
+    fake.add_node(12, "urn:table_b", "TBL_OBS")
+    fake.add_node(13, "urn:col_b", "COL_OBS")
+    fake.add_edge("CONTAINS", 0, 1, 2)
+    fake.add_edge("CONTAINS", 1, 2, 3)
+    fake.add_edge("CONTAINS", 2, 11, 12)
+    fake.add_edge("CONTAINS", 3, 12, 13)
+    fake.add_edge("FLOWS", 10, 3, 13)
+    p = _make_provider(fake, levels)
+    p._source_entity_aliases = {
+        "DOMAIN": ["DOM_OBS"], "TABLE": ["TBL_OBS"], "COLUMN": ["COL_OBS"],
+    }
+
+    _run(_materialize(p))
+
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    assert fake.agg[(2, 12)]["sl"] == 1 and fake.agg[(2, 12)]["tl"] == 1
+    assert fake.agg[(1, 11)]["sl"] == 0 and fake.agg[(1, 11)]["tl"] == 0
+
+
+def test_reconcile_heals_stale_source_edge_types_and_level_stamps():
+    """Weight-preserving drift: a pair whose weight and digest match but
+    whose sourceEdgeTypes were replaced type-for-type (or whose level
+    stamps are NULL from a pre-alias-fix build) must be re-written —
+    otherwise a type-filtered trace drops the edge forever."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    # Same weight (2) and digest as the run will compute, but wrong type
+    # list and NULL level stamps.
+    fake.seed_aggregated(
+        1, 11, weight=2, digest="digest-1", latest=1000,
+        types=("TRANSFORMS",), sl=None, tl=None,
+    )
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p))
+
+    assert fake.agg[(1, 11)]["types"] == ["FLOWS"]
+    assert fake.agg[(1, 11)]["sl"] == 0 and fake.agg[(1, 11)]["tl"] == 0
+
+
+def test_legacy_null_aggkey_edges_healed_in_chunks():
+    """Edges from generations that predate the aggKey contract can never
+    be reconciled by the keyed delete — the healing pass must remove
+    them (in bounded chunks) so they don't double-serve pairs forever."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    fake.seed_aggregated(2, 12, weight=9, latest=1000, agg_key=None)
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p))
+
+    # The legacy edge was removed and the canonical pair re-created with
+    # the exact recomputed weight.
+    assert fake.agg[(2, 12)]["aggKey"] == "urn:table_a|urn:table_b"
+    assert fake.agg[(2, 12)]["weight"] == 2
 
 
 # ── resume ──────────────────────────────────────────────────────────────

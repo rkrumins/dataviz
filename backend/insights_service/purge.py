@@ -418,15 +418,20 @@ async def _maybe_trigger_reaggregation(job: AggregationJobORM) -> None:
                 job.id, job.data_source_id,
             )
         else:
-            logger.warning(
-                "purge.reaggregate_rejected job_id=%s ds=%s status=%s body=%s",
+            logger.error(
+                "purge.reaggregate_rejected job_id=%s ds=%s status=%s body=%s "
+                "— the promised post-purge re-aggregation did NOT run; "
+                "trigger aggregation manually to restore container-level "
+                "lineage",
                 job.id, job.data_source_id, resp.status_code, resp.text[:300],
             )
     except Exception as exc:
-        logger.warning(
-            "purge.reaggregate_failed job_id=%s ds=%s: %s — trigger "
-            "aggregation manually to restore container-level lineage",
-            job.id, job.data_source_id, exc,
+        logger.error(
+            "purge.reaggregate_failed job_id=%s ds=%s: %s — the promised "
+            "post-purge re-aggregation did NOT run (is AGGREGATION_SERVICE_URL "
+            "set for this service? base=%s); trigger aggregation manually to "
+            "restore container-level lineage",
+            job.id, job.data_source_id, exc, base,
         )
 
 

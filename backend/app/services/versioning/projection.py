@@ -600,6 +600,18 @@ class FalkorProjector:
         lineage_types = {t.upper() for t in (sets[1] or [])}
         if not lineage_types:
             return None
+        level_map: Dict[str, int] = dict(sets[2]) if len(sets) > 2 and sets[2] else {}
+        finest = max(level_map.values()) if level_map else None
+        # Canonical mode: the aggregation worker materializes only the
+        # canonical level-bridged selection (per level L, each side's
+        # deepest NON-leaf ancestor at level <= L). The projector must
+        # emit the SAME selection — its old full ancestor cross-product
+        # writes leaf/mixed cells the boundary excludes, which the
+        # on-demand reader then double-counts until the next batch run.
+        # A level map whose every type sits on one level has no container
+        # boundary (single-level ontology): the worker falls back to the
+        # full cube there, and so does this.
+        use_canonical = bool(level_map) and any(v < finest for v in level_map.values())
 
         def _etype(p) -> str:
             return str((p or {}).get("edgeType") or "").upper()
@@ -652,6 +664,7 @@ class FalkorProjector:
             return None
 
         anc_cache: Dict[Tuple[str, Optional[int]], List[str]] = {}
+        lvl_cache: Dict[Tuple[str, Optional[int]], Optional[int]] = {}
 
         async def chain(node_id: str, as_of: Optional[int]) -> List[str]:
             key = (node_id, as_of)
@@ -661,6 +674,47 @@ class FalkorProjector:
                 anc_cache[key] = list(seen)              # ancestors-or-self
             return anc_cache[key]
 
+        async def levels_of(ids, as_of: Optional[int]) -> Dict[str, Optional[int]]:
+            need = [i for i in ids if (i, as_of) not in lvl_cache]
+            if need:
+                vals = await self._svc._values_at(s, graph.id, main_id, need, as_of)
+                for i in need:
+                    et_id = ((vals.get(i) or {}).get("entityType")) or None
+                    lvl_cache[(i, as_of)] = level_map.get(et_id) if et_id else None
+            return {i: lvl_cache[(i, as_of)] for i in ids}
+
+        async def canonical_pairs(cs: List[str], ct: List[str], as_of: Optional[int]):
+            """Mirror of the worker's _merge_canonical_pairs / the write
+            hook's _reps: per level L, each side's deepest NON-leaf member
+            at level <= L, with (level, id) tuples carried so the caller
+            can stamp sourceLevel/targetLevel. Chains here are ancestor
+            SETS (not the pipeline's longest-chain walk): a multi-parent
+            tie may attribute a delta to the other parent — deltas stay
+            self-consistent (create/delete use the same deterministic
+            min-id tie-break) and the next batch run reconciles exact
+            weights."""
+            lv = await levels_of(set(cs) | set(ct), as_of)
+
+            def reps(ids: List[str]):
+                return sorted(
+                    ((lv[i], i) for i in ids
+                     if lv.get(i) is not None and lv[i] < finest),
+                    key=lambda t: (-t[0], t[1]),
+                )
+
+            cs_r, ct_r = reps(cs), reps(ct)
+            out, seen = [], set()
+            for level in {l for l, _ in cs_r} | {l for l, _ in ct_r}:
+                sp = next(((l, i) for l, i in cs_r if l <= level), None)
+                tp = next(((l, i) for l, i in ct_r if l <= level), None)
+                if sp is None or tp is None or sp[1] == tp[1]:
+                    continue
+                if (sp[1], tp[1]) in seen:
+                    continue
+                seen.add((sp[1], tp[1]))
+                out.append((sp, tp))
+            return out
+
         pairs: Dict[Tuple[str, str], Dict[str, object]] = {}
 
         async def contribute(p: dict, sign: int, as_of: Optional[int]) -> None:
@@ -668,8 +722,17 @@ class FalkorProjector:
             if not src or not tgt:
                 return
             et = _etype(p)
-            for sx in await chain(src, as_of):
-                for tx in await chain(tgt, as_of):
+            cs, ct = await chain(src, as_of), await chain(tgt, as_of)
+            if use_canonical:
+                for (sl, sx), (tl, tx) in await canonical_pairs(cs, ct, as_of):
+                    e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
+                    e["dw"] += sign
+                    e["sl"], e["tl"] = sl, tl
+                    if sign > 0 and et:
+                        e["types"].add(et)
+                return
+            for sx in cs:
+                for tx in ct:
                     if sx == tx:
                         continue
                     e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
@@ -711,11 +774,19 @@ class FalkorProjector:
         ids = {i for k in pairs for i in k}
         vals = await self._svc._values_at(s, graph.id, main_id, ids, to_seq)
         urn_of = {i: ((vals.get(i) or {}).get("urn") or f"gv:{i}") for i in ids}
+        digest = None
+        if use_canonical:
+            from backend.app.services.ontology_levels import compute_level_digest
+            digest = compute_level_digest(level_map)
         out: Dict[Tuple[str, str], Dict[str, object]] = {}
         for (sx, tx), v in pairs.items():                # distinct ids can share a urn — SUM, don't overwrite
             e = out.setdefault((urn_of[sx], urn_of[tx]), {"dw": 0, "types": set()})
             e["dw"] += v["dw"]
             e["types"] |= v["types"]
+            if "sl" in v:
+                e["sl"], e["tl"] = v["sl"], v["tl"]
+            if digest is not None:
+                e["dg"] = digest
         out = {k: v for k, v in out.items() if v["dw"] != 0}
         return out or None
 
@@ -739,7 +810,9 @@ class FalkorProjector:
             return False                                 # partial/foreign overlap — rebuild, don't guess
 
         items = [{"s": s_, "t": t_, "dw": int(v["dw"]), "et": sorted(v["types"]),
-                  "key": f"{s_}|{t_}", "seq": to_seq} for (s_, t_), v in pairs.items()]
+                  "key": f"{s_}|{t_}", "seq": to_seq,
+                  "sl": v.get("sl"), "tl": v.get("tl"), "dg": v.get("dg")}
+                 for (s_, t_), v in pairs.items()]
         for chunk in _batches(items, self._batch):
             res = await client.query(
                 "UNWIND $batch AS item "
@@ -763,12 +836,23 @@ class FalkorProjector:
                         deletes.append({"s": item["s"], "t": item["t"]})
                     continue
                 upserts.append({"s": item["s"], "t": item["t"], "w": w1, "key": item["key"],
-                                "et": sorted(set(types0) | set(item["et"])), "seq": item["seq"]})
+                                "et": sorted(set(types0) | set(item["et"])), "seq": item["seq"],
+                                "sl": item.get("sl"), "tl": item.get("tl"),
+                                "dg": item.get("dg")})
             if upserts:
+                # Level stamps coalesce so the legacy (level-less) mode
+                # never NULLs stamps a backfill wrote; canonical mode
+                # always provides them — and stamped rows keep the read
+                # path's storage-regime probe clean (a NULL sourceLevel
+                # row makes every reader fall back to stored-only answers
+                # for up to 5 minutes).
                 await client.query(
                     "UNWIND $batch AS item MATCH (a {urn: item.s}) MATCH (b {urn: item.t}) "
                     "MERGE (a)-[r:AGGREGATED]->(b) "
                     "SET r.weight = item.w, r.sourceEdgeTypes = item.et, r.aggKey = item.key, "
+                    "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
+                    "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+                    "    r.levelDigest = coalesce(item.dg, r.levelDigest), "
                     "    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
                     params={"batch": upserts})
             if deletes:

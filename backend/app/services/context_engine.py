@@ -1752,6 +1752,19 @@ class ContextEngine:
                 )
                 return False
 
+        async def _shorten_damping() -> None:
+            # The TRIGGER itself failed — no job exists, so the full
+            # 15-minute damping window would black out backfill over a
+            # possibly transient error (control plane restarting, DB
+            # blip). Shrink the claim to a short cool-down; the damping
+            # window at full length is only for jobs that actually ran.
+            if redis is None:
+                return
+            try:
+                await redis.expire(dedupe_key, 60)
+            except Exception:
+                pass
+
         from backend.app.services.aggregation.service import get_active_service
         from backend.app.services.aggregation.schemas import (
             AggregationTriggerRequest,
@@ -1777,7 +1790,10 @@ class ContextEngine:
                     "Read-path backfill trigger for %s not scheduled: %s",
                     ds_id, e,
                 )
-                return type(e).__name__ == "ConflictError"
+                if type(e).__name__ == "ConflictError":
+                    return True
+                await _shorten_damping()
+                return False
 
         # Proxy deployment: this process has no aggregation service —
         # POST to the control plane's trigger endpoint instead.
@@ -1806,18 +1822,21 @@ class ContextEngine:
                     "Read-path backfill trigger for %s rejected by control "
                     "plane (%s): %s", ds_id, resp.status_code, resp.text[:300],
                 )
+                await _shorten_damping()
                 return False
             except Exception as e:
                 logger.warning(
                     "Read-path backfill trigger for %s failed to reach the "
                     "control plane: %s", ds_id, e,
                 )
+                await _shorten_damping()
                 return False
 
         logger.info(
             "Read-path backfill for %s skipped: no aggregation service in "
             "this process and proxy mode is disabled.", ds_id,
         )
+        await _shorten_damping()
         return False
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
