@@ -616,18 +616,89 @@ class AggregationPipeline:
 
     # -- type resolution -----------------------------------------------------
 
+    async def _observed_vocabulary(self) -> None:
+        """Fetch the graph's OBSERVED relationship types and labels once
+        per run. FalkorDB matching is case-SENSITIVE and the alias map is
+        the only other spelling seam — a casing present in the graph but
+        missing from the map was silently not scanned (and the worker
+        injects no entity aliases at all). Probe failure ⇒ empty sets ⇒
+        alias-only behavior."""
+        rels: Set[str] = set()
+        labels: Set[str] = set()
+        try:
+            res = await self.p._ro_query(
+                "CALL db.relationshipTypes()", timeout=_scan_timeout_s(),
+            )
+            rels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
+            res = await self.p._ro_query(
+                "CALL db.labels()", timeout=_scan_timeout_s(),
+            )
+            labels = {str(r[0]) for r in (res.result_set or []) if r and r[0]}
+        except Exception as exc:
+            logger.info(
+                "aggregation pipeline on %s: vocabulary probe failed (%s) "
+                "— alias-map-only spelling matching this run.",
+                self.p._graph_name, exc,
+            )
+        self._observed_rels = rels
+        self._observed_labels = labels
+
+    @staticmethod
+    def _fold_expand(declared: List[str], observed: Set[str], *, kind: str) -> List[str]:
+        """Union every observed case-fold variant of each declared
+        spelling (a graph can hold SEVERAL casings of one type — scanning
+        only one leaves broken containment chains / missing weights).
+        Exact-case graphs are a no-op."""
+        by_fold: Dict[str, List[str]] = {}
+        for o in observed:
+            by_fold.setdefault(o.casefold(), []).append(o)
+        out = [str(d) for d in declared if d]
+        have = set(out)
+        for d in list(out):
+            for variant in by_fold.get(d.casefold(), []):
+                if variant not in have and variant != "AGGREGATED":
+                    have.add(variant)
+                    out.append(variant)
+                    logger.info(
+                        "aggregation pipeline: case-fold matched declared "
+                        "%s type %r to observed %r", kind, d, variant,
+                    )
+        return out
+
+    def _spellings_for_label(self, label: str) -> List[str]:
+        """Every spelling to scan for one declared label: alias-map
+        translations ∪ observed case-fold variants."""
+        spellings = [
+            str(s) for s in
+            getattr(self.p, "_alias_entity_types", lambda t: t)([label])
+        ]
+        have = set(spellings)
+        fold = str(label).casefold()
+        for o in getattr(self, "_observed_labels", None) or ():
+            if o.casefold() == fold and o not in have:
+                have.add(o)
+                spellings.append(o)
+        return spellings
+
     async def _resolve_types(self) -> None:
         p = self.p
+        await self._observed_vocabulary()
         if self._containment_arg:
             self._containment = list(p._alias_rel_types(list(self._containment_arg)))
         else:
             self._containment = list(p._get_containment_edge_types())
+        self._containment = self._fold_expand(
+            self._containment, self._observed_rels, kind="containment",
+        )
         if self._lineage_arg:
             effective = p._alias_rel_types(
                 [t for t in self._lineage_arg if t and t != "AGGREGATED"]
             )
         else:
             effective = await p._derive_lineage_types_from_cache(self._containment)
+        effective = self._fold_expand(
+            [str(t) for t in effective if t], self._observed_rels, kind="lineage",
+        )
         # Sorted + deduped so edge-type bitmask indices are deterministic
         # across restarts of the same run.
         self._effective_types = sorted({str(t) for t in effective if t})
@@ -1173,12 +1244,12 @@ class AggregationPipeline:
         levels: Dict[int, int] = {}
         for label in self._nonleaf_labels():
             level = self._entity_levels[label]
-            # Scan under every observed spelling of the declared label
-            # (identity on governed graphs) — an alias-variant source
-            # must not silently produce an empty boundary map, which
-            # would filter EVERY pair and materialize nothing.
-            spellings = getattr(self.p, "_alias_entity_types", lambda t: t)([label])
-            for spelled in spellings:
+            # Scan under every spelling of the declared label — alias
+            # translations plus observed case-fold variants (identity on
+            # governed graphs). An alias/case-variant source must not
+            # silently produce an empty boundary map, which would filter
+            # EVERY pair and materialize nothing.
+            for spelled in self._spellings_for_label(label):
                 async for row in self._scan_label_nodes(spelled, want_urn=False):
                     if row and row[0] is not None:
                         levels[int(row[0])] = level
@@ -1282,9 +1353,8 @@ class AggregationPipeline:
             for label in self._nonleaf_labels():
                 # Scan and record the OBSERVED spelling — the directory's
                 # label feeds the label+urn MERGE writes, which must match
-                # the graph's actual labels on alias-variant sources.
-                spellings = getattr(self.p, "_alias_entity_types", lambda t: t)([label])
-                for spelled in spellings:
+                # the graph's actual labels on alias/case-variant sources.
+                for spelled in self._spellings_for_label(label):
                     interned = sys.intern(str(spelled))
                     async for row in self._scan_label_nodes(spelled, want_urn=True):
                         if row and row[0] is not None and row[1]:
@@ -1359,10 +1429,9 @@ class AggregationPipeline:
         (``r.targetLevel <= $l``), so NULL stamps blind every mixed-level
         drill-down on such graphs."""
         if self._levels_by_spelling is None:
-            expand = getattr(self.p, "_alias_entity_types", lambda t: t)
             out: Dict[str, int] = {}
             for lbl, lv in self._entity_levels.items():
-                for spelled in expand([lbl]):
+                for spelled in self._spellings_for_label(lbl):
                     out[str(spelled)] = lv
                 out[lbl] = lv
             self._levels_by_spelling = out
