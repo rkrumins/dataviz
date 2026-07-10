@@ -370,6 +370,148 @@ def test_trace_drilldown_falls_back_to_raw_when_aggregated_empty():
     assert all(e.edge_type == "FLOWS" for e in edges)
 
 
+def test_progressive_topdown_drilldown_journey():
+    """The canvas journey: lineage exists ONLY at the most granular level
+    (column→column), yet every step of a top-down drill must show the
+    relationship — domains related at the top, then expanding one side a
+    level at a time (visible set = expanded side's children + the other
+    side still collapsed) down to the exact columns. Materialized state
+    is only what the pipeline writes (the canonical diagonal)."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=4)   # domain(0) ⊃ app(1) ⊃ table(2) ⊃ column(3)
+    for i in range(3):
+        fake.aggregated(f"urn:a{i}", f"urn:b{i}", 2)   # pipeline diagonal
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None):
+        if params and "sourceUrns" in params:
+            return _Result([
+                [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
+                if s in params["sourceUrns"]
+                and t in (params.get("targetUrns") or [])
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+
+    def edges_between(visible):
+        result = _run(p.get_aggregated_edges_between(
+            list(visible), list(visible),
+            granularity=None,
+            containment_edges=["CONTAINS"],
+            lineage_edges=["FLOWS"],
+        ))
+        return {
+            (e.source_urn, e.target_urn): e.edge_count
+            for e in result.aggregated_edges
+        }
+
+    # Step 1 — everything collapsed: which domains relate to each other?
+    assert edges_between(["urn:a0", "urn:b0"]) == {("urn:a0", "urn:b0"): 2}
+    # Step 2 — expand domain A: its application ↔ the collapsed domain B.
+    assert edges_between(["urn:a1", "urn:b0"]) == {("urn:a1", "urn:b0"): 2}
+    # Step 3 — expand domain B too: application ↔ application (diagonal).
+    assert edges_between(["urn:a1", "urn:b1"]) == {("urn:a1", "urn:b1"): 2}
+    # Step 4 — drill A to tables while B stays at application level.
+    assert edges_between(["urn:a2", "urn:b1"]) == {("urn:a2", "urn:b1"): 2}
+    # Step 5 — drill A to the column itself, B still a container.
+    assert edges_between(["urn:a3", "urn:b1"]) == {("urn:a3", "urn:b1"): 2}
+    # Step 6 — both sides at the most granular level: the raw truth.
+    assert edges_between(["urn:a3", "urn:b3"]) == {("urn:a3", "urn:b3"): 2}
+
+
+class _FakePipeline:
+    def __init__(self, redis):
+        self._redis = redis
+        self._ops = []
+
+    def execute_command(self, cmd, key, *args):
+        self._ops.append((cmd, key, args))
+
+    def hget(self, key, field):
+        self._ops.append(("HGET", key, (field,)))
+
+    async def execute(self):
+        out = []
+        for cmd, key, args in self._ops:
+            if cmd == "SADD":
+                members = self._redis.sets.setdefault(key, set())
+                new = args[0] not in members
+                members.add(args[0])
+                out.append(1 if new else 0)
+            elif cmd == "SCARD":
+                out.append(len(self._redis.sets.get(key, set())))
+            elif cmd == "HGET":
+                out.append(self._redis.hashes.get(key, {}).get(args[0]))
+        self._ops = []
+        return out
+
+
+class _FakeWriteRedis:
+    def __init__(self):
+        self.sets = {}
+        self.hashes = {}
+
+    def pipeline(self, transaction=False):
+        return _FakePipeline(self)
+
+
+def test_write_path_hook_emits_only_canonical_pairs():
+    """on_lineage_edge_written (interactive lineage writes) must produce
+    EXACTLY the canonical level-bridged pairs the batch pipeline stores.
+    The old full ancestor cross-product polluted the boundary with
+    leaf-involving and mixed-level cells — masking the on-demand
+    reader's exact answers until the next full run reconciled."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=4)   # lvl0..lvl3, leaf=3
+    p = _make_provider(fake, levels)
+
+    redis = _FakeWriteRedis()
+    redis.hashes["labels"] = {
+        f"urn:{c}{i}": f"lvl{i}" for c in ("a", "b") for i in range(4)
+    }
+    merged = []
+
+    async def noop():
+        return None
+
+    async def ancestors(urn):
+        # urn:a3 -> [urn:a2, urn:a1, urn:a0]
+        chain, idx = urn[4], int(urn[5])
+        return [f"urn:{chain}{i}" for i in range(idx - 1, -1, -1)]
+
+    async def proj_query(cypher, params=None, timeout=None):
+        merged.extend(params["batch"])
+
+    p._ensure_connected = noop
+    p._get_ancestor_chain = ancestors
+    p._redis = redis
+    p._urn_label_key = lambda: "labels"
+    p._level_digest = "digest-1"
+    p._proj_query = proj_query
+
+    n = _run(p.on_lineage_edge_written("urn:a3", "urn:b3", "edge-1", "FLOWS"))
+
+    got = {(m["s"], m["t"]) for m in merged}
+    # Canonical pairs only: the same-level diagonal for the three
+    # non-leaf levels — no leaf-involving pairs, no mixed-level cells.
+    assert got == {
+        ("urn:a2", "urn:b2"), ("urn:a1", "urn:b1"), ("urn:a0", "urn:b0"),
+    }
+    assert n == 3
+    for m in merged:
+        assert m["sl"] == m["tl"]   # aligned chains → diagonal stamps
+
+    # Idempotent replay of the same raw edge writes nothing new.
+    merged.clear()
+    n2 = _run(p.on_lineage_edge_written("urn:a3", "urn:b3", "edge-1", "FLOWS"))
+    assert n2 == 0 and merged == []
+
+
 def test_full_cross_product_matrix_six_levels():
     """The audit contract: on a 6-level hierarchy (domain ⊃ application ⊃
     container ⊃ schema ⊃ table ⊃ column) with column→column lineage,

@@ -621,8 +621,14 @@ async def lifespan(_app: FastAPI):
                 agg_dispatcher = PostgresDispatcher(get_jobs_session)
                 logger.info("Aggregation dispatch: PostgresDispatcher (legacy standalone worker)")
             elif dispatch_mode == "auto":
-                # Auto-detect: if REDIS_URL is set and role is not worker, use Redis
-                if os.getenv("REDIS_URL") and not runs_worker():
+                # Auto-detect. Aggregation EXECUTION belongs to the
+                # dedicated worker service — whenever a job bus exists
+                # (REDIS_URL), dispatch to the stream regardless of this
+                # process's role. The previous role-based branch put
+                # dev-role processes on InProcessDispatcher even when a
+                # worker fleet was consuming the stream, so UI-triggered
+                # jobs silently executed inside the viz-service.
+                if os.getenv("REDIS_URL"):
                     from .services.aggregation.redis_client import get_redis
                     from .services.aggregation.dispatcher import RedisStreamDispatcher
                     agg_dispatcher = RedisStreamDispatcher(get_redis())

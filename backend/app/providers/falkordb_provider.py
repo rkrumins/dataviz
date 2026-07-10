@@ -3556,12 +3556,81 @@ class FalkorDBProvider(GraphDataProvider):
 
         members_key_prefix = f"{self._graph_name}:agg_members"
 
-        # Phase 1: Redis SADD pipeline to check idempotency for all pairs at once
+        # Resolve ontology levels for every chain member up front (one
+        # urn→label cache pipeline) — needed both to select CANONICAL
+        # pairs and to stamp sourceLevel/targetLevel on the merge.
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        chain_urns = list(dict.fromkeys(s_chain + t_chain))
+        urn_levels: Dict[str, int] = {}
+        if entity_levels:
+            try:
+                label_key = self._urn_label_key()
+                label_pipe = self._redis.pipeline(transaction=False)
+                for u in chain_urns:
+                    label_pipe.hget(label_key, u)
+                rows = await label_pipe.execute()
+                for u, raw in zip(chain_urns, rows):
+                    if not raw:
+                        continue
+                    lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                    lvl = entity_levels.get(lbl)
+                    if lvl is not None:
+                        urn_levels[u] = lvl
+            except Exception as exc:
+                logger.warning(
+                    "on_lineage_edge_written: level lookup failed: %s", exc,
+                )
+
+        # Pair selection MUST mirror the batch pipeline's
+        # _merge_canonical_pairs: only canonical level-bridged pairs
+        # (each side's deepest NON-leaf ancestor at level <= L, per
+        # level L). Writing the full ancestor cross-product here would
+        # pollute the canonical set with leaf-involving and mixed-level
+        # cells the boundary deliberately excludes — masking the
+        # on-demand reader's exact answers and double-counting its
+        # additive mixed-level sums until the next full run reconciles.
         pairs_to_check = []
-        for s_urn in s_chain:
-            for t_urn in t_chain:
-                if s_urn != t_urn:
-                    pairs_to_check.append((s_urn, t_urn))
+        if entity_levels:
+            if not urn_levels:
+                # Level map exists but no chain member resolved (cold
+                # urn→label cache). Writing anything risks pollution;
+                # skipping only delays visibility until the next batch
+                # run reconciles.
+                logger.debug(
+                    "on_lineage_edge_written: no chain levels resolved "
+                    "for %s -> %s — deferring to the batch pipeline",
+                    source_urn, target_urn,
+                )
+                return 0
+            finest = max(entity_levels.values())
+
+            def _reps(chain: List[str]) -> List[tuple]:
+                reps = [
+                    (urn_levels[u], u) for u in chain
+                    if u in urn_levels and urn_levels[u] < finest
+                ]
+                reps.sort(key=lambda lu: -lu[0])   # deepest first
+                return reps
+
+            cs, ct = _reps(s_chain), _reps(t_chain)
+            seen_pairs = set()
+            for level in {l for l, _ in cs} | {l for l, _ in ct}:
+                sp = next((u for l, u in cs if l <= level), None)
+                tp = next((u for l, u in ct if l <= level), None)
+                if sp is None or tp is None or sp == tp:
+                    continue
+                if (sp, tp) in seen_pairs:
+                    continue
+                seen_pairs.add((sp, tp))
+                pairs_to_check.append((sp, tp))
+        else:
+            # Legacy graphs without an ontology level map: full ancestor
+            # cross-product (parity with the pipeline's full-cube
+            # fallback for level-less ontologies).
+            for s_urn in s_chain:
+                for t_urn in t_chain:
+                    if s_urn != t_urn:
+                        pairs_to_check.append((s_urn, t_urn))
 
         if not pairs_to_check:
             return 0
@@ -3592,35 +3661,10 @@ class FalkorDBProvider(GraphDataProvider):
             pipe.execute_command("SCARD", member_key)
         scard_results = await pipe.execute()
 
-        # Phase 3: resolve s/t levels for the level-pair fast path (best-
-        # effort via the URN→label cache + entity-type level map), then
-        # single UNWIND+MERGE for all new pairs. Same rationale as the
-        # batched materializer: coalesce in the Cypher SET preserves
-        # backfilled level values when a fresh resolution misses.
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        url_levels: Dict[str, Optional[int]] = {}
-        if entity_levels:
-            urn_set = {p[0] for p, _ in new_pairs} | {p[1] for p, _ in new_pairs}
-            if urn_set:
-                try:
-                    label_key = self._urn_label_key()
-                    label_pipe = self._redis.pipeline(transaction=False)
-                    ordered = list(urn_set)
-                    for u in ordered:
-                        label_pipe.hget(label_key, u)
-                    rows = await label_pipe.execute()
-                    for u, raw in zip(ordered, rows):
-                        if not raw:
-                            continue
-                        lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                        lvl = entity_levels.get(lbl)
-                        if lvl is not None:
-                            url_levels[u] = lvl
-                except Exception as exc:
-                    logger.warning(
-                        "on_lineage_edge_written: level lookup failed: %s", exc,
-                    )
-
+        # Phase 3: single UNWIND+MERGE for all new pairs, stamped with
+        # the levels resolved up front. Coalesce in the Cypher SET
+        # preserves backfilled level values when a fresh resolution
+        # misses (same rationale as the batched materializer).
         # UNKNOWN_LEVEL sentinel for endpoints whose label has no declared
         # level. Stamping -1 (instead of leaving sourceLevel NULL) keeps
         # the backfill convergent: the digest WHERE filter sees the edge
@@ -3632,8 +3676,8 @@ class FalkorDBProvider(GraphDataProvider):
             weight = scard_results[i] if scard_results[i] else 1
             merge_batch.append({
                 "s": s_urn, "t": t_urn, "w": int(weight),
-                "sl": url_levels.get(s_urn, UNKNOWN_LEVEL),
-                "tl": url_levels.get(t_urn, UNKNOWN_LEVEL),
+                "sl": urn_levels.get(s_urn, UNKNOWN_LEVEL),
+                "tl": urn_levels.get(t_urn, UNKNOWN_LEVEL),
             })
 
         # Stamp the current levelDigest so the cold-start probe doesn't
