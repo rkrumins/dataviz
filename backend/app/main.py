@@ -726,8 +726,20 @@ async def lifespan(_app: FastAPI):
                 if recovered:
                     logger.info("Recovered %d interrupted aggregation jobs", recovered)
 
+            from .services.aggregation.redis_client import get_redis as _get_redis_for_recon
+            try:
+                _recon_redis = _get_redis_for_recon()
+            except Exception:
+                _recon_redis = None
+
             if runs_scheduler():
-                agg_scheduler = AggregationScheduler(get_jobs_session, provider_manager)
+                # With the job-bus Redis in hand the scheduler's coarse
+                # mark-failed watchdog stands down — the lock-aware
+                # reconciler below owns liveness.
+                agg_scheduler = AggregationScheduler(
+                    get_jobs_session, provider_manager,
+                    redis_client=_recon_redis,
+                )
                 asyncio.create_task(agg_scheduler.start())
                 logger.info("Aggregation scheduler started")
 
@@ -739,11 +751,6 @@ async def lifespan(_app: FastAPI):
             # marked cancelled. Falls back to staleness→failed if Redis is
             # unavailable.
             from .services.aggregation.reconciler import run_reconciler
-            from .services.aggregation.redis_client import get_redis as _get_redis_for_recon
-            try:
-                _recon_redis = _get_redis_for_recon()
-            except Exception:
-                _recon_redis = None
             _app.state._reconciler_shutdown = asyncio.Event()
             _app.state._reconciler_task = asyncio.create_task(
                 run_reconciler(

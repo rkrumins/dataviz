@@ -28,9 +28,15 @@ class AggregationScheduler:
     Checks are non-blocking — drift detection never auto-triggers re-aggregation.
     """
 
-    def __init__(self, session_factory: Any, registry: Any) -> None:
+    def __init__(
+        self, session_factory: Any, registry: Any, redis_client: Any = None,
+    ) -> None:
         self._session_factory = session_factory
         self._registry = registry
+        # Job-bus Redis handle. Its presence means the lock-aware
+        # reconciler is the liveness authority, so this scheduler's
+        # coarse mark-failed watchdog stands down (see _tick).
+        self._redis = redis_client
         self._running = False
 
     async def start(self) -> None:
@@ -104,7 +110,14 @@ class AggregationScheduler:
                     )
 
             # Stale-job watchdog — catch jobs stuck in 'running' with no
-            # checkpoint update (e.g. worker died silently).
+            # checkpoint update (e.g. worker died silently). NO-REDIS
+            # FALLBACK ONLY: with a job-bus Redis the lock-aware
+            # reconciler owns liveness (exec-lock absent ⇒ auto-RESUME
+            # from last_cursor), and the worker's stall watchdog kills
+            # wedged-but-locked jobs — this coarse sweep would only turn
+            # a resumable crash into a terminal 'failed'.
+            if self._redis is not None:
+                return
             job_timeout = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
             watchdog_cutoff = datetime.now(tz=timezone.utc) - timedelta(seconds=job_timeout * 2)
 
@@ -112,6 +125,10 @@ class AggregationScheduler:
                 and_(
                     AggregationJobORM.status == "running",
                     AggregationJobORM.updated_at < watchdog_cutoff.isoformat(),
+                    # Purge rows checkpoint via Redis only (their PG row
+                    # moves at start/end) — sweeping them here hijacked
+                    # every >4h purge to 'failed' mid-flight.
+                    AggregationJobORM.trigger_source != "purge",
                 )
             )
             stale_result = await session.execute(stale_stmt)

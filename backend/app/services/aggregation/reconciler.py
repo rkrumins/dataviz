@@ -102,6 +102,26 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
 
     reconciled = 0
     async with session_factory() as session:
+        # Cross-replica guard: the control plane, a dev-role monolith and
+        # any HA replica may all run this loop. The xact-scoped advisory
+        # lock (held until this session's commit/close) makes each tick
+        # single-writer without coordination; the sweep itself is
+        # idempotent (INCR cap + exec-lock dedupe), so the lock only
+        # removes duplicate re-dispatch noise. Non-Postgres backends
+        # (unit fakes) simply proceed — single-instance semantics.
+        try:
+            from sqlalchemy import text as _text
+            got = (await session.execute(_text(
+                "SELECT pg_try_advisory_xact_lock("
+                "hashtextextended('agg:reconciler', 0))"
+            ))).scalar()
+            if got in (False, 0):
+                return 0
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
         running = (
             await session.execute(
                 select(AggregationJobORM).where(

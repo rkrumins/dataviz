@@ -123,10 +123,27 @@ async def lifespan(app: FastAPI):
 
     recovery_task = asyncio.create_task(_run_crash_recovery())
 
-    # 7. Start scheduler (drift detection)
-    scheduler = AggregationScheduler(get_jobs_session, registry)
+    # 7. Start scheduler (drift detection). With the job-bus Redis in
+    # hand its stale-job watchdog stands down in favor of the reconciler.
+    scheduler = AggregationScheduler(
+        get_jobs_session, registry, redis_client=redis_client,
+    )
     scheduler_task = asyncio.create_task(scheduler.start())
     logger.info("Aggregation scheduler started")
+
+    # 8. Stuck-job reconciler — the control plane is its home in the
+    # split topology. Workers ACK stream messages BEFORE executing
+    # (crash recovery is THIS loop's lock-aware re-dispatch, not stream
+    # redelivery), so without it a dead worker's job stayed 'running'
+    # forever with no auto-resume. The sweep's advisory lock keeps a
+    # dev-role monolith or HA replicas from double-running it.
+    from .reconciler import run_reconciler
+    reconciler_shutdown = asyncio.Event()
+    reconciler_task = asyncio.create_task(
+        run_reconciler(get_jobs_session, reconciler_shutdown, redis_client),
+        name="aggregation-stuck-job-reconciler",
+    )
+    logger.info("Stuck-job reconciler started")
 
     # Store in app state
     app.state.aggregation_service = svc
@@ -138,6 +155,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    reconciler_shutdown.set()
+    if not reconciler_task.done():
+        try:
+            await asyncio.wait_for(reconciler_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            reconciler_task.cancel()
     await scheduler.stop()
     scheduler_task.cancel()
     recovery_task.cancel()
