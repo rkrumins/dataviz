@@ -22,6 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .defaults import with_system_edge_types
 from .models import EntityTypeDefEntry, RelationshipTypeDefEntry
 from .resolver import (
     parse_entity_definitions,
@@ -126,7 +127,21 @@ def check_resolution(
     entity_defs: Dict[str, EntityTypeDefEntry] = parse_entity_definitions(
         entity_type_definitions_raw or {}
     )
+    # Every ontology implicitly includes the platform's built-in edge types (e.g. the
+    # aggregation worker's :AGGREGATED rollup). Merge them in before evaluating the
+    # criteria so the gate never blocks re-aggregation on an edge the platform itself
+    # emitted — an edge that, once written, would otherwise show up as "introspected but
+    # undeclared" and dead-lock the pipeline. User definitions win on any id collision.
+    rel_defs_raw = with_system_edge_types(relationship_type_definitions_raw)
     rel_defs: Dict[str, RelationshipTypeDefEntry] = parse_relationship_definitions(
+        rel_defs_raw
+    )
+    # The USER's own relationships only — the ontology's authored capability to express
+    # lineage/containment (criterion 4 + advisory) must NOT be satisfied by the platform's
+    # injected :AGGREGATED, which is aggregation's OUTPUT, not a lineage source the user
+    # declared. Coverage checks (criteria 2/3) use the merged set above; capability checks
+    # use this one.
+    user_rel_defs: Dict[str, RelationshipTypeDefEntry] = parse_relationship_definitions(
         relationship_type_definitions_raw or {}
     )
 
@@ -158,7 +173,7 @@ def check_resolution(
     # from "not set".
     introspected_edge_keys_upper = {e.upper() for e in introspected_edge_ids}
     unclassified: List[RelGap] = []
-    for rid, raw in (relationship_type_definitions_raw or {}).items():
+    for rid, raw in rel_defs_raw.items():
         if rid.upper() not in introspected_edge_keys_upper:
             continue
         if not isinstance(raw, dict):
@@ -183,7 +198,7 @@ def check_resolution(
     # lineage is independent of any specific graph's current contents.
     # Without this, a stats-cache miss (which produces empty
     # introspected_edge_ids) would spuriously block re-triggers.
-    has_lineage = any(rel_def.is_lineage for rel_def in rel_defs.values())
+    has_lineage = any(rel_def.is_lineage for rel_def in user_rel_defs.values())
     if not has_lineage:
         blocking_reasons.append("no_lineage")
 
@@ -193,7 +208,7 @@ def check_resolution(
     # endpoints (no ancestor-to-ancestor propagation). Aggregation will
     # technically run, but the user won't see the cross-tier roll-up
     # they expect.
-    has_containment = any(rel_def.is_containment for rel_def in rel_defs.values())
+    has_containment = any(rel_def.is_containment for rel_def in user_rel_defs.values())
     advisory_warnings: List[str] = []
     if not has_containment:
         advisory_warnings.append("no_containment_edges")

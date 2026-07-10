@@ -347,3 +347,36 @@ def test_compute_fingerprint_from_ontology_orm_matches_check_resolution():
         introspected_edge_ids=[],
     ).fingerprint
     assert via_helper == via_check
+
+
+# ── System-internal edge types (AGGREGATED) never block the gate ─────────────
+
+def test_aggregated_edge_does_not_block_resolution():
+    """After aggregation writes :AGGREGATED rollups into the graph, re-triggering
+    must not dead-lock: the platform's own edge is implicitly declared, so an ontology
+    that only declares HAS/FLOWS_TO still resolves even though AGGREGATED is introspected."""
+    report = check_resolution(**_kwargs(
+        entity_type_definitions_raw={"Roots": _make_entity(level=0), "Node": _make_entity(level=1)},
+        relationship_type_definitions_raw={
+            "HAS": _make_relationship(is_containment=True, is_lineage=False),
+            "FLOWS_TO": _make_relationship(is_containment=False, is_lineage=True),
+        },
+        introspected_entity_ids=["Roots", "Node"],
+        introspected_edge_ids=["HAS", "FLOWS_TO", "AGGREGATED"],
+    ))
+    assert "AGGREGATED" not in report.missing_edge_types
+    assert "missing_edge_types" not in report.blocking_reasons
+    assert report.resolved, report.blocking_reasons
+
+
+def test_aggregated_only_graph_still_resolves():
+    """Even a graph whose only introspected edge is the platform's AGGREGATED resolves,
+    as long as the ontology can express lineage (criterion 4)."""
+    report = check_resolution(**_kwargs(
+        relationship_type_definitions_raw={
+            "FLOWS_TO": _make_relationship(is_containment=False, is_lineage=True),
+        },
+        introspected_edge_ids=["AGGREGATED"],
+    ))
+    assert report.missing_edge_types == []
+    assert report.resolved, report.blocking_reasons

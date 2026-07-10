@@ -35,3 +35,28 @@ SYSTEM_DEFAULT_ONTOLOGY_NAME: str = _DATA.get("name", "Synodic Default Ontology"
 SYSTEM_DEFAULT_ONTOLOGY_VERSION: int = _DATA.get("version", 1)
 SYSTEM_ENTITY_TYPES: Dict[str, Dict[str, Any]] = _DATA.get("entity_types", {})
 SYSTEM_RELATIONSHIP_TYPES: Dict[str, Dict[str, Any]] = _DATA.get("relationship_types", {})
+
+# ---------------------------------------------------------------------------
+# System-internal (built-in) edge types
+# ---------------------------------------------------------------------------
+# Edge types the PLATFORM produces, not user data: the aggregation worker writes
+# ``:AGGREGATED`` rollup edges into the graph. Every ontology implicitly includes these
+# so (a) the resolution gate never blocks aggregation on an edge the platform itself
+# emitted, and (b) the UI can always show them, marked built-in, without the user having
+# to declare an implementation detail. Keyed UPPERCASE (the case-insensitive contract).
+SYSTEM_INTERNAL_EDGE_TYPES: frozenset = frozenset({"AGGREGATED"})
+
+# The full definitions for those types, sourced from the system ontology so there is one
+# source of truth for their classification/visuals. Marked ``is_system`` for the UI.
+SYSTEM_INTERNAL_RELATIONSHIP_TYPES: Dict[str, Dict[str, Any]] = {
+    rid: {**rdef, "is_system": True}
+    for rid, rdef in SYSTEM_RELATIONSHIP_TYPES.items()
+    if rid.upper() in SYSTEM_INTERNAL_EDGE_TYPES
+}
+
+
+def with_system_edge_types(rel_defs_raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``rel_defs_raw`` with the system-internal edge types merged in (user
+    definitions win on an id collision). Used to make every ontology implicitly include
+    the platform's built-in edges — for the resolution gate and for display."""
+    return {**SYSTEM_INTERNAL_RELATIONSHIP_TYPES, **(rel_defs_raw or {})}
