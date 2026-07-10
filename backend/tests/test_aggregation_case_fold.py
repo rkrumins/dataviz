@@ -93,3 +93,29 @@ def test_vocab_probe_failure_degrades_to_alias_only():
     assert result["errors"] == 0
     agg = {k: v["weight"] for k, v in fake.agg.items()}
     assert agg == {(2, 12): 2, (1, 11): 2}
+
+
+def test_declared_types_matching_nothing_observed_warn_loudly(caplog):
+    """Completeness diagnosability: a declared type whose spelling matches
+    NOTHING in the graph (not exact, not alias, not case-fold) scans zero
+    edges — that must be loud, not silent, or missing aggregations look
+    like an empty source."""
+    import logging
+
+    fake = _VocabFake()
+    levels = _seed_lowercase_graph(fake)
+    p = base._make_provider(fake, levels)
+
+    with caplog.at_level(logging.WARNING):
+        result = _run(mat.materialize_aggregated_edges(
+            p,
+            containment_edge_types=["CONTAINS"],
+            lineage_edge_types=["FLOWS", "TRANSFORMS"],   # TRANSFORMS: nowhere
+        ))
+
+    assert result["errors"] == 0
+    joined = " ".join(r.message for r in caplog.records)
+    assert "TRANSFORMS" in joined, "zero-match declared type must be warned about"
+    assert "FLOWS" not in joined.replace("TRANSFORMS", ""), (
+        "fold-matched types are scanned — they must not be reported as unmatched"
+    )

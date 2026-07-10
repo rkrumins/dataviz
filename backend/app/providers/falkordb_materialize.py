@@ -708,6 +708,26 @@ class AggregationPipeline:
         # across restarts of the same run.
         self._effective_types = sorted({str(t) for t in effective if t})
         self._type_bit = {t: 1 << i for i, t in enumerate(self._effective_types)}
+        # Completeness diagnosability: a declared/derived spelling that
+        # matches NOTHING observed (not exact, not alias, not case-fold)
+        # scans zero edges — silently missing aggregations would look
+        # like an empty source. WARN with the leftovers.
+        if self._observed_rels:
+            observed_folds = {o.casefold() for o in self._observed_rels}
+            unmatched = sorted(
+                t for t in {*self._containment, *self._effective_types}
+                if t not in self._observed_rels
+                and t.casefold() not in observed_folds
+            )
+            if unmatched:
+                logger.warning(
+                    "aggregation pipeline on %s: %d edge-type spelling(s) "
+                    "match NOTHING in the graph's observed vocabulary and "
+                    "will scan zero edges: %s. Check the ontology's edge "
+                    "types / source aliases.",
+                    self.p._graph_name, len(unmatched),
+                    ", ".join(unmatched[:8]),
+                )
 
     # -- EXTRACT + COMPUTE -----------------------------------------------------
 
