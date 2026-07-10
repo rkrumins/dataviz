@@ -154,13 +154,11 @@ client automatically.
 
 ### 7.4 Aggregation at scale
 
-For graphs with millions of nodes/edges, enable the constant-memory
-streaming rebuild: `AGGREGATION_STREAMING_REBUILD_ENABLED=true`. It pages
-leaf lineage edges on an indexed `ID(r)` cursor, flushes per page via
-MERGE-on-`aggKey`, and is crash-resumable from `last_cursor` — eliminating
-the full-graph count, the non-indexable cursor, and the in-memory pair
-accumulation that previously timed out. `AGGREGATION_MAX_PAIRS_PER_PAGE`
-bounds high-fan-in hub pages.
+The single resumable EXTRACT → COMPUTE → RECONCILE → APPLY pipeline is
+always on (the legacy bulk/streaming strategies and their
+`AGGREGATION_*_REBUILD_ENABLED` flags were removed; rollback is a version
+rollback). Sizing, tuning knobs and provider-protection parameters live in
+`docs/AGGREGATION_PIPELINE.md`.
 5. **DNS Cutover:** Update Multi-Cluster Ingress (MCI) or global load balancer to route application traffic to the secondary region.
 
 ---

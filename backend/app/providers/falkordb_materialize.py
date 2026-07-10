@@ -34,24 +34,29 @@ stamped from the ontology's entity-type levels. Containment and lineage
 edge types are the ontology-frozen sets carried on the job row. Ragged
 hierarchies and multi-parent nodes follow the legacy longest-chain rule.
 
-**Level-based materialization boundary (the scale contract):** only the
-SAME-LEVEL diagonal is materialized — table→table, database→database,
-domain→domain — with COMPLETE weights, plus the direct base pair of any
-raw lineage edge whose endpoints are both non-leaf (the exact record of
-cross-level raw facts). Each raw edge contributes at most ONE pair per
-level, and the per-level sets shrink monotonically going up (a quotient
-graph per level) — the minimal spanning set. Everything else is served
-ON DEMAND by ``get_aggregated_edges_between``, bounded by the requested
-visible set: leaf-involving pairs (column→table, column→domain,
-column→column: edges × depth if stored — the 5.6M-pair OOM) from raw
-lineage fan-out + upward containment walks, and mixed-level container
-pairs (table→domain: edges × depth² level combinations if stored —
-still 2.33M pairs after only the leaf cut) from the finer endpoint's
-materialized same-level cells + a strict upward walk. Same answers,
-same response shape; the graph stops storing millions of precomputed
-answers. ``AGGREGATION_MATERIALIZE_FINE_PAIRS`` restores the legacy
-full cube (guarded by the write budget); jobs without an ontology level
-map fall back to it automatically.
+**Level-based materialization boundary (the scale contract):** only
+CANONICAL LEVEL-BRIDGED pairs are materialized: for each raw lineage
+edge and each ontology level L, the pair of each side's deepest
+non-leaf ancestor at level ≤ L. On aligned chains that is exactly the
+same-level diagonal (table→table, database→database, domain→domain);
+on RAGGED chains (a column hanging directly under a domain, skipping
+levels) it is the mixed-level cell the canvas shows at that granularity
+(table→domain) — the cell a pure level-equality filter would silently
+drop. Cross-level raw lineage falls out of the same rule. Each raw
+edge contributes at most ONE pair per level, and the per-level sets
+shrink monotonically going up (a quotient graph per level) — the
+minimal spanning set. Everything else is served ON DEMAND by
+``get_aggregated_edges_between``, bounded by the requested visible set:
+leaf-involving pairs (column→table, column→domain, column→column:
+edges × depth if stored — the 5.6M-pair OOM) from raw lineage fan-out
++ upward containment walks, and mixed-level container pairs whose cell
+is not directly canonical from the finer endpoint's materialized cells
++ a strict upward walk (the read path ADDS the disjoint stored and
+derived portions — exact weights even on doubly-ragged graphs). Same
+answers, same response shape; the graph stops storing millions of
+precomputed answers. ``AGGREGATION_MATERIALIZE_FINE_PAIRS`` restores
+the legacy full cube (guarded by the write budget); jobs without an
+ontology level map fall back to it automatically.
 
 Cursor format
 -------------

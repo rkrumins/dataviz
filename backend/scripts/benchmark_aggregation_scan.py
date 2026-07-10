@@ -8,9 +8,11 @@ write-kill behavior:
       ORDER BY/LIMIT) vs the legacy sorted-page scan
       (``WHERE ID(r) > rid ORDER BY ID(r) LIMIT n``) — the legacy form is
       O(E²) across a full scan; the range form should be near-linear.
-  (b) **ID-seek MERGE** (``UNWIND … MATCH (a) WHERE ID(a) = item.aid``)
-      vs label+urn MERGE — NodeByIdSeek should be at least as fast as an
-      index seek.
+  (b) **label+urn MERGE** (the pipeline's hard rule) vs ID-seek MERGE
+      (``UNWIND … MATCH (a) WHERE ID(a) = item.aid``) — the ID-seek arm
+      demonstrates the BANNED pattern's cost: FalkorDB does not drive
+      ``WHERE ID(a) = x`` from a NodeByIdSeek under UNWIND, so it scans
+      all nodes per row. "ID-seek slower" is the expected outcome.
   (c) **Write-query kill**: a deliberately pathological write issued with
       a per-query timeout must be killed server-side. This only works when
       the server is started with ``TIMEOUT_MAX`` configured (see
@@ -162,8 +164,14 @@ async def bench_merge(g, *, items: int = 5000) -> None:
     print(f"ID-seek MERGE   : {len(pairs)} pairs in {id_seek*1000:.0f}ms")
     print(f"label+urn MERGE : {len(pairs)} pairs in {urn_seek*1000:.0f}ms")
     if id_seek > urn_seek * 1.5:
-        print("!! ID-seek slower than label+urn — flip the pipeline's write "
-              "form to label+urn (see falkordb_materialize._write_items).")
+        print("OK — ID-seek slower, as expected: FalkorDB scans all nodes "
+              "per UNWIND row for ID equality. label+urn (the pipeline's "
+              "write form, falkordb_materialize._write_items) is correct.")
+    else:
+        print("?? ID-seek kept pace with label+urn on this build — the "
+              "pipeline still uses label+urn (index seeks scale with the "
+              "graph); re-measure at higher --nodes before drawing "
+              "conclusions.")
 
 
 async def bench_write_kill(g) -> None:
