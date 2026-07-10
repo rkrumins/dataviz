@@ -6842,12 +6842,25 @@ class FalkorDBProvider(GraphDataProvider):
         )
         return [self._extract_node_from_result(row) for row in (result.result_set or []) if self._extract_node_from_result(row)]
 
-    async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+    async def save_custom_graph(
+        self, nodes: List[GraphNode], edges: List[GraphEdge],
+        endpoint_labels: Optional[Dict[str, str]] = None,
+    ) -> bool:
         """Batch-save nodes and edges using UNWIND for bulk writes.
 
         Groups nodes by label (entity type) so each UNWIND+MERGE targets
         a single label — enabling index-assisted lookups. Turns N individual
         queries into ceil(N/batch_size) queries per label.
+
+        Edges are likewise grouped by (relationship type, source label, target
+        label) so the endpoint MATCH carries a label and hits the per-label urn
+        index (``Node By Index Scan``) instead of an ``All Node Scan`` — the
+        difference between ~180k and ~90 edges/s on a large graph. Endpoint
+        labels are resolved from the nodes saved in THIS call plus the optional
+        ``endpoint_labels`` (urn→entityType) the caller supplies for edges whose
+        endpoints were saved in a previous call (the importer's separate node/
+        edge passes). An endpoint with no known label falls back to a label-less
+        MATCH (correct, just unindexed) — never a dropped edge.
 
         ``FALKORDB_SAVE_BATCH_SIZE`` tunes the UNWIND batch size (default
         2000, clamped 100-10000): larger batches amortize parse/plan
@@ -6944,11 +6957,21 @@ class FalkorDBProvider(GraphDataProvider):
                     logger.warning(f"Batch node merge failed for label {label}: {e}")
         await self._cache_urn_labels_bulk(label_mapping)
 
-        # Group edges by relationship type for type-specific MERGE
-        edges_by_type: Dict[str, list] = defaultdict(list)
+        # urn → label for endpoint MATCH: same-call nodes (authoritative) over
+        # the caller-supplied map (endpoints saved in a prior call).
+        urn_label: Dict[str, str] = {}
+        for urn, sl in (endpoint_labels or {}).items():
+            urn_label[urn] = _sanitize_label(str(sl))
+        urn_label.update(label_mapping)  # same-call node labels win
+
+        # Group edges by (relationship type, source label, target label) so each
+        # UNWIND's endpoint MATCH is label-qualified (index-eligible). A None label
+        # means "unknown endpoint" → label-less MATCH (correct, unindexed fallback).
+        edges_grouped: Dict[tuple, list] = defaultdict(list)
         for edge in edges:
             rel_type = _sanitize_label(str(edge.edge_type))
-            edges_by_type[rel_type].append({
+            key = (rel_type, urn_label.get(edge.source_urn), urn_label.get(edge.target_urn))
+            edges_grouped[key].append({
                 "src": edge.source_urn,
                 "tgt": edge.target_urn,
                 "eid": edge.id,
@@ -6956,14 +6979,16 @@ class FalkorDBProvider(GraphDataProvider):
                 "props": json.dumps(edge.properties),
             })
 
-        for rel_type, items in edges_by_type.items():
+        for (rel_type, src_label, tgt_label), items in edges_grouped.items():
+            a_pat = f"(a:{src_label} {{urn: item.src}})" if src_label else "(a {urn: item.src})"
+            b_pat = f"(b:{tgt_label} {{urn: item.tgt}})" if tgt_label else "(b {urn: item.tgt})"
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
                 try:
                     await self._query(
                         f"UNWIND $batch AS item "
-                        f"MATCH (a {{urn: item.src}}) "
-                        f"MATCH (b {{urn: item.tgt}}) "
+                        f"MATCH {a_pat} "
+                        f"MATCH {b_pat} "
                         f"MERGE (a)-[r:{rel_type}]->(b) "
                         f"SET r.id = item.eid, r.confidence = item.conf, "
                         f"r.properties = item.props",

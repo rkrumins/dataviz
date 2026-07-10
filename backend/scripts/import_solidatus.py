@@ -286,9 +286,12 @@ async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
         await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
         logger.info(f"  Nodes: {min(i + CHUNK, len(builder.nodes))}/{len(builder.nodes)}")
 
+    # Endpoint urn→label so the edge MATCH is label-qualified (uses the per-label
+    # urn index instead of a full node scan — orders of magnitude faster at scale).
+    endpoint_labels = {n.urn: n.entity_type for n in builder.nodes}
     logger.info(f"Pushing {len(builder.edges)} edges...")
     for i in range(0, len(builder.edges), CHUNK):
-        await provider.save_custom_graph([], builder.edges[i:i + CHUNK])
+        await provider.save_custom_graph([], builder.edges[i:i + CHUNK], endpoint_labels=endpoint_labels)
         logger.info(f"  Edges: {min(i + CHUNK, len(builder.edges))}/{len(builder.edges)}")
 
     await provider.ensure_indices()
