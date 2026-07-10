@@ -22,6 +22,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -49,8 +50,32 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-NodeUpsert = Tuple[str, str, dict]          # (entity_id, urn, payload)
-EdgeUpsert = Tuple[str, str, str, dict]     # (entity_id, src_urn, tgt_urn, payload)
+NodeUpsert = Tuple[str, str, dict]                     # (entity_id, urn, payload)
+# (entity_id, src_urn, tgt_urn, payload, src_label, tgt_label) — endpoint
+# labels resolved from committed entityTypes so every edge merge anchors on
+# the per-label URN indexes instead of scanning all nodes per UNWIND row.
+EdgeUpsert = Tuple[str, str, str, dict, str, str]
+
+# Server-side query budgets (ms). FalkorDB now runs with TIMEOUT_DEFAULT /
+# TIMEOUT_MAX set, so an un-budgeted projector write inherits the 30s
+# default and dies mid-seed; every projector query passes an explicit
+# budget below TIMEOUT_MAX (mirroring the aggregation pipeline's clamp).
+_WRITE_TIMEOUT_MS = int(1000 * min(170.0, max(
+    5.0, float(os.getenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "60")))))
+_READ_TIMEOUT_MS = int(1000 * min(170.0, max(
+    2.0, float(os.getenv("PROJECTION_FALKOR_READ_TIMEOUT_S", "30")))))
+
+
+async def _q(client, cypher: str, params: Optional[dict] = None,
+             *, timeout_ms: int = _WRITE_TIMEOUT_MS):
+    """Run one query with a server-side kill budget AND a client-side hang
+    net (the registry pools set no socket timeout). Falls back to the
+    timeout-less call for client fakes/libs without the kwarg."""
+    try:
+        coro = client.query(cypher, params=params, timeout=timeout_ms)
+    except TypeError:
+        coro = client.query(cypher, params=params)
+    return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
 
 
 # --- Cypher (mirrors falkordb_provider.save_custom_graph; reader-compatible) --- #
@@ -67,22 +92,43 @@ def _node_merge_cypher(label: str) -> str:
     )
 
 
-def _edge_merge_cypher(rel_type: str) -> str:
+def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     return (
-        f"UNWIND $batch AS item MATCH (a {{urn: item.src}}) MATCH (b {{urn: item.tgt}}) "
+        f"UNWIND $batch AS item "
+        f"MATCH (a:{src_label} {{urn: item.src}}) "
+        f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
         f"MERGE (a)-[r:{rel_type}]->(b) "
         f"SET r.id = item.eid, r.confidence = item.conf, r.properties = item.props"
     )
 
 
-_DELETE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) DETACH DELETE n"
-_DELETE_EDGES = "UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r"
-# Heal-path sweep: match the deleted node by its committed urn (the indexed key, so this stays
-# fast on a million-node graph) and confirm entityId, so a live entity that reused the urn is
-# never deleted by mistake.
-_DELETE_NODES_BY_PAIR = (
-    "UNWIND $pairs AS p MATCH (n {urn: p.urn}) WHERE n.entityId = p.eid DETACH DELETE n"
-)
+def _delete_nodes_cypher(label: str) -> str:
+    return f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) DETACH DELETE n"
+
+
+def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
+    # Anchored + typed: both endpoints seek their per-label URN index and
+    # the relationship match is bounded by the (a)->(b) adjacency.
+    return (
+        f"UNWIND $batch AS item "
+        f"MATCH (a:{src_label} {{urn: item.src}})"
+        f"-[r:{rel_type} {{id: item.eid}}]->"
+        f"(b:{tgt_label} {{urn: item.tgt}}) DELETE r"
+    )
+
+
+# Legacy fallback for edge ids whose before-state cannot be resolved from
+# the version rows (no payload survives): an untyped unindexed scan per id.
+# Logged whenever used; bounded by the (rare) unresolvable-delete count.
+_DELETE_EDGES_FALLBACK = "UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r"
+# Heal-path sweep: match the deleted node by (label, committed urn) — the
+# per-label URN index — and confirm entityId, so a live entity that reused
+# the urn is never deleted by mistake.
+def _delete_nodes_by_pair_cypher(label: str) -> str:
+    return (
+        f"UNWIND $pairs AS p MATCH (n:{label} {{urn: p.urn}}) "
+        f"WHERE n.entityId = p.eid DETACH DELETE n"
+    )
 
 
 def _batches(seq, n):
@@ -303,7 +349,7 @@ class FalkorProjector:
                 # resolved client is reachable; if it is not, the error propagates to the outer handler
                 # (records last_error, resets status, re-raises) with NOTHING dropped — reads keep
                 # falling back to Postgres and the existing cache is left intact.
-                await client.query("RETURN 1")
+                await _q(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
                 # committed main exactly. The seed only MERGEs the live state, so without this an entity
                 # a merged draft DELETED (or stale rows on a just-re-pointed graph) would survive — the
@@ -460,12 +506,13 @@ class FalkorProjector:
 
     async def _compute_changes(
         self, s, graph: GraphORM, main_id: str, from_seq: int, to_seq: int
-    ) -> Tuple[List[NodeUpsert], List[EdgeUpsert], List[str], List[str]]:
+    ) -> Tuple[List[NodeUpsert], List[EdgeUpsert], List[Tuple[str, str]], List[object]]:
         node_upserts: List[NodeUpsert] = []
         edge_upserts: List[EdgeUpsert] = []
-        node_deletes: List[str] = []      # urns
-        edge_deletes: List[str] = []      # entity_ids
+        node_deletes: List[Tuple[str, str]] = []   # (urn, label)
+        edge_deletes: List[object] = []            # resolved dicts, else entity_id str
         urn_of: Dict[str, str] = {}
+        label_of: Dict[str, str] = {}
 
         if from_seq <= 0:
             # Seed: the full live state (fork-aware copy-on-write composition).
@@ -475,14 +522,15 @@ class FalkorProjector:
                     continue
                 urn = _node_urn(eid, p)
                 urn_of[eid] = urn
+                label_of[eid] = str(p.get("entityType") or "Entity")
                 node_upserts.append((eid, urn, p))
             for eid, p in state.items():
                 if p is None or not _is_edge_payload(p):
                     continue
                 src, tgt = _edge_endpoints(p)
-                su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
-                tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
-                edge_upserts.append((eid, su, tu, p))
+                su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+                tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+                edge_upserts.append((eid, su, tu, p, slb, tlb))
             return node_upserts, edge_upserts, node_deletes, edge_deletes
 
         # Incremental: net of each entity's rows in (from_seq, to_seq]. Key the fold by
@@ -503,28 +551,51 @@ class FalkorProjector:
             if kind != "node":
                 continue
             if op == "delete":
-                node_deletes.append(await self._urn_for(s, graph, main_id, eid))
+                node_deletes.append(await self._urn_label_for(s, graph, main_id, eid))
             else:
                 urn = _node_urn(eid, p)
                 urn_of[eid] = urn
+                label_of[eid] = str((p or {}).get("entityType") or "Entity")
                 node_upserts.append((eid, urn, p))
+        deleted_edge_ids: List[str] = []
         for (kind, eid), (_, op, p) in last.items():
             if kind != "edge":
                 continue
             if op == "delete":
-                edge_deletes.append(eid)
+                deleted_edge_ids.append(eid)
             else:
                 src, tgt = _edge_endpoints(p)
-                su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
-                tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
-                edge_upserts.append((eid, su, tu, p))
+                su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+                tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+                edge_upserts.append((eid, su, tu, p, slb, tlb))
+        # Deleted edges: resolve the BEFORE-window value so the delete can
+        # run typed + endpoint-anchored (delete rows carry no payload).
+        # Unresolvable ids keep the legacy scan-delete fallback.
+        if deleted_edge_ids:
+            before = await self._svc._values_at(
+                s, graph.id, main_id, deleted_edge_ids, from_seq)
+            for eid in deleted_edge_ids:
+                p = before.get(eid)
+                if p and _is_edge_payload(p):
+                    src, tgt = _edge_endpoints(p)
+                    su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+                    tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+                    edge_deletes.append({
+                        "eid": eid, "src": su, "tgt": tu,
+                        "rel": str(p.get("edgeType") or "REL"),
+                        "slb": slb, "tlb": tlb,
+                    })
+                else:
+                    edge_deletes.append(eid)
 
         await self._merkle_augment_upserts(
-            s, graph, main_id, from_seq, to_seq, last, urn_of, node_upserts, edge_upserts)
+            s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
+            node_upserts, edge_upserts)
         return node_upserts, edge_upserts, node_deletes, edge_deletes
 
     async def _merkle_augment_upserts(
-        self, s, graph, main_id, from_seq, to_seq, last, urn_of, node_upserts, edge_upserts,
+        self, s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
+        node_upserts, edge_upserts,
     ) -> None:
         """Union the raw commit-row delta with the AUTHORITATIVE Merkle diff.
 
@@ -563,12 +634,13 @@ class FalkorProjector:
                         continue
                     if _is_edge_payload(p):
                         src, tgt = _edge_endpoints(p)
-                        su = urn_of.get(src) or await self._urn_for(s, graph, main_id, src)
-                        tu = urn_of.get(tgt) or await self._urn_for(s, graph, main_id, tgt)
-                        edge_upserts.append((eid, su, tu, p))
+                        su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+                        tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+                        edge_upserts.append((eid, su, tu, p, slb, tlb))
                     else:
                         urn = _node_urn(eid, p)
                         urn_of[eid] = urn
+                        label_of[eid] = str(p.get("entityType") or "Entity")
                         node_upserts.append((eid, urn, p))
                     recovered += 1
         if recovered:
@@ -774,6 +846,10 @@ class FalkorProjector:
         ids = {i for k in pairs for i in k}
         vals = await self._svc._values_at(s, graph.id, main_id, ids, to_seq)
         urn_of = {i: ((vals.get(i) or {}).get("urn") or f"gv:{i}") for i in ids}
+        # entityType is what the node merge labeled the cache node with —
+        # carried so _apply_rollups anchors every match on the per-label
+        # URN index instead of an unlabeled full scan per row.
+        lbl_of = {i: str(((vals.get(i) or {}).get("entityType")) or "Entity") for i in ids}
         digest = None
         if use_canonical:
             from backend.app.services.ontology_levels import compute_level_digest
@@ -783,6 +859,8 @@ class FalkorProjector:
             e = out.setdefault((urn_of[sx], urn_of[tx]), {"dw": 0, "types": set()})
             e["dw"] += v["dw"]
             e["types"] |= v["types"]
+            e.setdefault("slb", lbl_of[sx])
+            e.setdefault("tlb", lbl_of[tx])
             if "sl" in v:
                 e["sl"], e["tl"] = v["sl"], v["tl"]
             if digest is not None:
@@ -802,88 +880,131 @@ class FalkorProjector:
         # Graph-level high-water mark for rollup application (a meta node, wiped with the
         # graph on full seeds). Catches what per-pair stamps can't: a prior application
         # whose pairs don't recur in this (grown/concurrent) window.
-        res = await client.query("MATCH (m:_GVRollupMeta) RETURN m.seq")
+        res = await _q(client, "MATCH (m:_GVRollupMeta) RETURN m.seq",
+                       timeout_ms=_READ_TIMEOUT_MS)
         marker = int(res.result_set[0][0]) if getattr(res, "result_set", None) else 0
         if marker >= to_seq:
             return True                                  # whole window already applied (retry no-op)
         if marker > from_seq:
             return False                                 # partial/foreign overlap — rebuild, don't guess
 
-        items = [{"s": s_, "t": t_, "dw": int(v["dw"]), "et": sorted(v["types"]),
-                  "key": f"{s_}|{t_}", "seq": to_seq,
-                  "sl": v.get("sl"), "tl": v.get("tl"), "dg": v.get("dg")}
-                 for (s_, t_), v in pairs.items()]
-        for chunk in _batches(items, self._batch):
-            res = await client.query(
-                "UNWIND $batch AS item "
-                "MATCH (a {urn: item.s})-[r:AGGREGATED]->(b {urn: item.t}) "
-                "RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq",
-                params={"batch": chunk})
-            existing = {}
-            for s_, t_, w, types, gv in (getattr(res, "result_set", None) or []):
-                existing[(s_, t_)] = (int(w or 0), list(types or []), int(gv or 0))
-            upserts, deletes = [], []
-            for item in chunk:
-                k = (item["s"], item["t"])
-                w0, types0, gv = existing.get(k, (0, [], 0))
-                if gv >= item["seq"]:
-                    continue                             # already applied (same-window retry)
-                if gv > from_seq:
-                    return False                         # partial overlap — rebuild, don't guess
-                w1 = w0 + item["dw"]
-                if w1 <= 0:
-                    if k in existing:
-                        deletes.append({"s": item["s"], "t": item["t"]})
-                    continue
-                upserts.append({"s": item["s"], "t": item["t"], "w": w1, "key": item["key"],
-                                "et": sorted(set(types0) | set(item["et"])), "seq": item["seq"],
-                                "sl": item.get("sl"), "tl": item.get("tl"),
-                                "dg": item.get("dg")})
-            if upserts:
-                # Level stamps coalesce so the legacy (level-less) mode
-                # never NULLs stamps a backfill wrote; canonical mode
-                # always provides them — and stamped rows keep the read
-                # path's storage-regime probe clean (a NULL sourceLevel
-                # row makes every reader fall back to stored-only answers
-                # for up to 5 minutes).
-                await client.query(
-                    "UNWIND $batch AS item MATCH (a {urn: item.s}) MATCH (b {urn: item.t}) "
-                    "MERGE (a)-[r:AGGREGATED]->(b) "
-                    "SET r.weight = item.w, r.sourceEdgeTypes = item.et, r.aggKey = item.key, "
-                    "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
-                    "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
-                    "    r.levelDigest = coalesce(item.dg, r.levelDigest), "
-                    "    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
-                    params={"batch": upserts})
-            if deletes:
-                await client.query(
-                    "UNWIND $batch AS item "
-                    "MATCH (a {urn: item.s})-[r:AGGREGATED]->(b {urn: item.t}) DELETE r",
-                    params={"batch": deletes})
+        # Grouped by the endpoints' labels so every node match below is a
+        # per-label URN index seek (an unlabeled ``(a {urn: …})`` scans all
+        # nodes per UNWIND row).
+        items_by_labels: Dict[Tuple[str, str], list] = {}
+        for (s_, t_), v in pairs.items():
+            key = (
+                _sanitize_label(str(v.get("slb") or "Entity")),
+                _sanitize_label(str(v.get("tlb") or "Entity")),
+            )
+            items_by_labels.setdefault(key, []).append(
+                {"s": s_, "t": t_, "dw": int(v["dw"]), "et": sorted(v["types"]),
+                 "key": f"{s_}|{t_}", "seq": to_seq,
+                 "sl": v.get("sl"), "tl": v.get("tl"), "dg": v.get("dg")}
+            )
+        for (slb, tlb), items in items_by_labels.items():
+            for chunk in _batches(items, self._batch):
+                res = await _q(
+                    client,
+                    f"UNWIND $batch AS item "
+                    f"MATCH (a:{slb} {{urn: item.s}})-[r:AGGREGATED]->(b:{tlb} {{urn: item.t}}) "
+                    f"RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq",
+                    params={"batch": chunk}, timeout_ms=_READ_TIMEOUT_MS)
+                existing = {}
+                for s_, t_, w, types, gv in (getattr(res, "result_set", None) or []):
+                    existing[(s_, t_)] = (int(w or 0), list(types or []), int(gv or 0))
+                upserts, deletes = [], []
+                for item in chunk:
+                    k = (item["s"], item["t"])
+                    w0, types0, gv = existing.get(k, (0, [], 0))
+                    if gv >= item["seq"]:
+                        continue                         # already applied (same-window retry)
+                    if gv > from_seq:
+                        return False                     # partial overlap — rebuild, don't guess
+                    w1 = w0 + item["dw"]
+                    if w1 <= 0:
+                        if k in existing:
+                            deletes.append({"s": item["s"], "t": item["t"]})
+                        continue
+                    upserts.append({"s": item["s"], "t": item["t"], "w": w1, "key": item["key"],
+                                    "et": sorted(set(types0) | set(item["et"])), "seq": item["seq"],
+                                    "sl": item.get("sl"), "tl": item.get("tl"),
+                                    "dg": item.get("dg")})
+                if upserts:
+                    # Level stamps coalesce so the legacy (level-less) mode
+                    # never NULLs stamps a backfill wrote; canonical mode
+                    # always provides them — and stamped rows keep the read
+                    # path's storage-regime probe clean (a NULL sourceLevel
+                    # row makes every reader fall back to stored-only answers
+                    # for up to 5 minutes).
+                    await _q(
+                        client,
+                        f"UNWIND $batch AS item "
+                        f"MATCH (a:{slb} {{urn: item.s}}) MATCH (b:{tlb} {{urn: item.t}}) "
+                        f"MERGE (a)-[r:AGGREGATED]->(b) "
+                        f"SET r.weight = item.w, r.sourceEdgeTypes = item.et, r.aggKey = item.key, "
+                        f"    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
+                        f"    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+                        f"    r.levelDigest = coalesce(item.dg, r.levelDigest), "
+                        f"    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
+                        params={"batch": upserts})
+                if deletes:
+                    await _q(
+                        client,
+                        f"UNWIND $batch AS item "
+                        f"MATCH (a:{slb} {{urn: item.s}})-[r:AGGREGATED]->(b:{tlb} {{urn: item.t}}) "
+                        f"DELETE r",
+                        params={"batch": deletes})
         # Marker written only after EVERY chunk landed — a mid-apply crash leaves it behind
         # the watermark, so the retry re-applies with per-pair gvSeq stamps de-duplicating.
-        await client.query(
-            "MERGE (m:_GVRollupMeta {id: 'meta'}) SET m.seq = $seq", params={"seq": to_seq})
+        await _q(client,
+                 "MERGE (m:_GVRollupMeta {id: 'meta'}) SET m.seq = $seq",
+                 params={"seq": to_seq})
         return True
 
-    async def _urn_for(self, s, graph: GraphORM, main_id: str, entity_id: str) -> str:
-        """Latest non-null urn for an entity on `main` (fork-aware), else gv:<eid>."""
+    async def _urn_label_for(
+        self, s, graph: GraphORM, main_id: str, entity_id: str,
+    ) -> Tuple[str, str]:
+        """Latest committed (urn, entityType) for an entity on `main`
+        (fork-aware); ``(gv:<eid>, "Entity")`` when nothing resolves. The
+        entityType is exactly what the node merge labeled the cache node
+        with, so labeled anchors built from it always hit."""
         row = (await s.execute(
-            select(NodeVersionORM.urn).where(
+            select(NodeVersionORM.urn, NodeVersionORM.payload).where(
                 NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
                 NodeVersionORM.entity_id == entity_id, NodeVersionORM.urn.is_not(None),
             ).order_by(NodeVersionORM.commit_seq.desc()).limit(1)
-        )).scalar_one_or_none()
-        if row:
-            return str(row)
+        )).first()
+        if row and row[0]:
+            label = ((row[1] or {}).get("entityType")) or "Entity"
+            return str(row[0]), str(label)
         if graph.fork_parent_graph_id:
             parent = await s.get(GraphORM, graph.fork_parent_graph_id)
             if parent is not None:
                 pmain = await self._svc._main_branch_id(s, parent.id)
-                return await self._urn_for(s, parent, pmain, entity_id)
+                return await self._urn_label_for(s, parent, pmain, entity_id)
         logger.warning("projection: no urn for node entity %s on %s; keying as gv:<entity_id>",
                        entity_id, graph.id)
-        return f"gv:{entity_id}"
+        return f"gv:{entity_id}", "Entity"
+
+    async def _urn_for(self, s, graph: GraphORM, main_id: str, entity_id: str) -> str:
+        """Latest non-null urn for an entity on `main` (fork-aware), else gv:<eid>."""
+        return (await self._urn_label_for(s, graph, main_id, entity_id))[0]
+
+    async def _endpoint(
+        self, s, graph: GraphORM, main_id: str, entity_id: str,
+        urn_of: Dict[str, str], label_of: Dict[str, str],
+    ) -> Tuple[str, str]:
+        """(urn, label) for an edge endpoint via the window caches, falling
+        back to the committed rows for endpoints outside the window."""
+        urn = urn_of.get(entity_id)
+        label = label_of.get(entity_id)
+        if urn is None or label is None:
+            r_urn, r_label = await self._urn_label_for(s, graph, main_id, entity_id)
+            urn = urn if urn is not None else r_urn
+            label = label if label is not None else r_label
+            urn_of[entity_id], label_of[entity_id] = urn, label
+        return urn, label
 
     async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
         """Live (non-tombstone) node/edge counts on ``main`` from ``entity_heads`` —
@@ -1007,26 +1128,67 @@ class FalkorProjector:
                     EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
                     EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(True),
                 ))).scalars().all()
-            # Resolve each tombstoned node's last committed urn (the delete row's urn is null, so
-            # take the latest non-null) via the indexed urn column, chunking the IN-list.
-            pairs: List[dict] = []
+            # Resolve each tombstoned node's last committed (urn, label) — the delete row's
+            # urn is null, so take the latest non-null — via the indexed urn column,
+            # chunking the IN-list. The label anchors the delete on the per-label URN index.
+            pairs_by_label: Dict[str, List[dict]] = {}
             for chunk in _batches(list(node_ids), self._batch):
                 rows = (await s.execute(
-                    select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.urn,
+                           NodeVersionORM.payload).where(
                         NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
                         NodeVersionORM.entity_id.in_(list(chunk)), NodeVersionORM.urn.is_not(None),
                     ).order_by(NodeVersionORM.commit_seq)
                 )).all()
-                latest: Dict[str, str] = {}
-                for eid, urn in rows:
-                    latest[eid] = urn               # ascending commit_seq → last non-null wins
-                pairs.extend({"urn": u, "eid": e} for e, u in latest.items())
+                latest: Dict[str, Tuple[str, str]] = {}
+                for eid, urn, payload in rows:      # ascending commit_seq → last non-null wins
+                    latest[eid] = (urn, str((payload or {}).get("entityType") or "Entity"))
+                for e, (u, lbl) in latest.items():
+                    pairs_by_label.setdefault(_sanitize_label(lbl), []).append(
+                        {"urn": u, "eid": e})
+            # Tombstoned edges: their delete rows carry no payload — fold the last
+            # non-delete row per entity so the delete runs typed + endpoint-anchored;
+            # anything unresolvable keeps the legacy per-id scan fallback.
+            edge_deletes: List[object] = []
+            if edge_ids:
+                graph = await s.get(GraphORM, graph_id)
+                urn_cache: Dict[str, str] = {}
+                label_cache: Dict[str, str] = {}
+                for chunk in _batches(list(edge_ids), self._batch):
+                    rows = (await s.execute(
+                        select(EdgeVersionORM.entity_id, EdgeVersionORM.op,
+                               EdgeVersionORM.payload).where(
+                            EdgeVersionORM.graph_id == graph_id,
+                            EdgeVersionORM.branch_id == main_id,
+                            EdgeVersionORM.entity_id.in_(list(chunk)),
+                        ).order_by(EdgeVersionORM.commit_seq)
+                    )).all()
+                    last_payload: Dict[str, Optional[dict]] = {}
+                    for eid, op, payload in rows:
+                        if op != "delete" and payload:
+                            last_payload[eid] = payload
+                    for eid in chunk:
+                        p = last_payload.get(eid)
+                        if p and _is_edge_payload(p):
+                            src, tgt = _edge_endpoints(p)
+                            su, slb = await self._endpoint(
+                                s, graph, main_id, src, urn_cache, label_cache)
+                            tu, tlb = await self._endpoint(
+                                s, graph, main_id, tgt, urn_cache, label_cache)
+                            edge_deletes.append({
+                                "eid": eid, "src": su, "tgt": tu,
+                                "rel": str(p.get("edgeType") or "REL"),
+                                "slb": slb, "tlb": tlb,
+                            })
+                        else:
+                            edge_deletes.append(eid)
         # Reads no query stats — the FalkorDB asyncio client mis-parses them; removal is measured
         # by the caller's re-count (mirrors the incremental delete in ``_apply``).
-        for chunk in _batches(pairs, self._batch):
-            await client.query(_DELETE_NODES_BY_PAIR, params={"pairs": list(chunk)})
-        for chunk in _batches(list(edge_ids), self._batch):
-            await client.query(_DELETE_EDGES, params={"ids": list(chunk)})
+        for label, pairs in pairs_by_label.items():
+            for chunk in _batches(pairs, self._batch):
+                await _q(client, _delete_nodes_by_pair_cypher(label),
+                         params={"pairs": list(chunk)})
+        await self._run_edge_deletes(client, edge_deletes)
 
     def _progress_writer(self, graph_id: str, total: int):
         """Throttled full-seed progress: accumulates per-chunk counts and persists to
@@ -1054,7 +1216,9 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None) -> None:
-        # Nodes in (grouped by label), edges in (grouped by type), edges out, nodes out.
+        # Nodes in (grouped by label), edges in (grouped by type + endpoint
+        # labels — the per-label URN indexes drive every node match), edges
+        # out, nodes out.
         by_label: Dict[str, list] = {}
         for eid, urn, p in node_upserts:
             by_label.setdefault(_sanitize_label(p.get("entityType") or "Entity"), []).append(
@@ -1062,29 +1226,67 @@ class FalkorProjector:
             )
         for label, items in by_label.items():
             for chunk in _batches(items, self._batch):
-                await client.query(_node_merge_cypher(label), params={"batch": chunk})
+                await _q(client, _node_merge_cypher(label), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
 
-        by_rel: Dict[str, list] = {}
-        for eid, su, tu, p in edge_upserts:
-            by_rel.setdefault(_sanitize_label(p.get("edgeType") or "REL"), []).append(
-                _edge_item(eid, su, tu, p)
+        by_rel: Dict[Tuple[str, str, str], list] = {}
+        for eid, su, tu, p, slb, tlb in edge_upserts:
+            key = (
+                _sanitize_label(p.get("edgeType") or "REL"),
+                _sanitize_label(slb or "Entity"),
+                _sanitize_label(tlb or "Entity"),
             )
-        for rel, items in by_rel.items():
+            by_rel.setdefault(key, []).append(_edge_item(eid, su, tu, p))
+        for (rel, sl, tl), items in by_rel.items():
             for chunk in _batches(items, self._batch):
-                await client.query(_edge_merge_cypher(rel), params={"batch": chunk})
+                await _q(client, _edge_merge_cypher(rel, sl, tl), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
 
-        for chunk in _batches(edge_deletes, self._batch):
-            await client.query(_DELETE_EDGES, params={"ids": list(chunk)})
-            if progress:
-                await progress(len(chunk))
-        for chunk in _batches(node_deletes, self._batch):
-            await client.query(_DELETE_NODES, params={"urns": list(chunk)})
-            if progress:
-                await progress(len(chunk))
+        await self._run_edge_deletes(client, edge_deletes, progress=progress)
+
+        ndel_by: Dict[str, list] = {}
+        for urn, label in node_deletes:
+            ndel_by.setdefault(_sanitize_label(label or "Entity"), []).append(urn)
+        for label, urns in ndel_by.items():
+            for chunk in _batches(urns, self._batch):
+                await _q(client, _delete_nodes_cypher(label), params={"urns": list(chunk)})
+                if progress:
+                    await progress(len(chunk))
+
+    async def _run_edge_deletes(self, client, edge_deletes, progress=None) -> None:
+        """Typed + endpoint-anchored deletes for resolved entries (dicts);
+        the legacy per-id scan only for ids whose before-state could not be
+        resolved (shared by the incremental apply and the tombstone sweep)."""
+        del_by: Dict[Tuple[str, str, str], list] = {}
+        fallback: list = []
+        for e in edge_deletes:
+            if isinstance(e, dict):
+                key = (
+                    _sanitize_label(e.get("rel") or "REL"),
+                    _sanitize_label(e.get("slb") or "Entity"),
+                    _sanitize_label(e.get("tlb") or "Entity"),
+                )
+                del_by.setdefault(key, []).append(
+                    {"eid": e["eid"], "src": e["src"], "tgt": e["tgt"]}
+                )
+            else:
+                fallback.append(e)
+        for (rel, sl, tl), items in del_by.items():
+            for chunk in _batches(items, self._batch):
+                await _q(client, _delete_edges_cypher(rel, sl, tl), params={"batch": chunk})
+                if progress:
+                    await progress(len(chunk))
+        if fallback:
+            logger.warning(
+                "projection: %d edge delete(s) had no resolvable before-state — "
+                "using the legacy per-id scan delete", len(fallback),
+            )
+            for chunk in _batches(fallback, self._batch):
+                await _q(client, _DELETE_EDGES_FALLBACK, params={"ids": list(chunk)})
+                if progress:
+                    await progress(len(chunk))
 
 
 def make_falkor_graph_factory() -> Callable[..., object]:

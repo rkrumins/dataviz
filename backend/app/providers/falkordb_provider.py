@@ -3635,6 +3635,97 @@ class FalkorDBProvider(GraphDataProvider):
             return []
 
 
+    async def _resolve_chain_levels(
+        self,
+        s_chain: List[str],
+        t_chain: List[str],
+        entity_levels: Dict[str, int],
+        *,
+        caller: str,
+    ) -> Optional[Tuple[Dict[str, int], Dict[str, str]]]:
+        """(urn → level, urn → label) for both ancestor chains via the
+        urn→label cache — the level/label resolution SHARED by the write
+        and delete hooks so their pair selection can never diverge.
+
+        Returns ``None`` when the hook must DEFER to the batch pipeline: a
+        partially-resolved chain silently yields non-canonical rep pairs
+        (a missing middle label makes the "deepest rep" skip a level),
+        polluting the boundary. No level map ⇒ empty maps (legacy mode)."""
+        urn_levels: Dict[str, int] = {}
+        urn_labels: Dict[str, str] = {}
+        if not entity_levels:
+            return urn_levels, urn_labels
+        chain_urns = list(dict.fromkeys(s_chain + t_chain))
+        # The urn→label cache records the graph's OBSERVED spellings;
+        # the level map is keyed by DECLARED ontology ids. Re-key by
+        # every observed spelling, or alias-variant sources resolve
+        # zero levels and the hooks defer on every single write.
+        levels_by_spelling: Dict[str, int] = {}
+        for _lbl, _lv in entity_levels.items():
+            for _sp in self._alias_entity_types([_lbl]):
+                levels_by_spelling[str(_sp)] = _lv
+            levels_by_spelling[_lbl] = _lv
+        try:
+            label_key = self._urn_label_key()
+            label_pipe = self._redis.pipeline(transaction=False)
+            for u in chain_urns:
+                label_pipe.hget(label_key, u)
+            rows = await label_pipe.execute()
+            unresolved = 0
+            for u, raw in zip(chain_urns, rows):
+                if not raw:
+                    unresolved += 1
+                    continue
+                lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                urn_labels[u] = lbl
+                lvl = levels_by_spelling.get(lbl)
+                if lvl is not None:
+                    urn_levels[u] = lvl
+            if unresolved:
+                logger.debug(
+                    "%s: %d chain member(s) not in the urn→label cache — "
+                    "deferring to the batch pipeline.", caller, unresolved,
+                )
+                return None
+        except Exception as exc:
+            logger.warning("%s: level lookup failed: %s", caller, exc)
+            return None
+        return urn_levels, urn_labels
+
+    @staticmethod
+    def _canonical_rep_pairs(
+        s_chain: List[str],
+        t_chain: List[str],
+        urn_levels: Dict[str, int],
+        finest: int,
+    ) -> List[Tuple[str, str]]:
+        """Canonical level-bridged pair selection — the single mirror of
+        the batch pipeline's ``_merge_canonical_pairs``, shared by the
+        write and delete hooks: per ontology level L, the pair of each
+        side's deepest NON-leaf ancestor at level <= L."""
+
+        def _reps(chain: List[str]) -> List[tuple]:
+            reps = [
+                (urn_levels[u], u) for u in chain
+                if u in urn_levels and urn_levels[u] < finest
+            ]
+            reps.sort(key=lambda lu: -lu[0])   # deepest first
+            return reps
+
+        cs, ct = _reps(s_chain), _reps(t_chain)
+        pairs: List[Tuple[str, str]] = []
+        seen_pairs = set()
+        for level in {l for l, _ in cs} | {l for l, _ in ct}:
+            sp = next((u for l, u in cs if l <= level), None)
+            tp = next((u for l, u in ct if l <= level), None)
+            if sp is None or tp is None or sp == tp:
+                continue
+            if (sp, tp) in seen_pairs:
+                continue
+            seen_pairs.add((sp, tp))
+            pairs.append((sp, tp))
+        return pairs
+
     async def on_lineage_edge_written(
         self,
         source_urn: str,
@@ -3677,53 +3768,12 @@ class FalkorDBProvider(GraphDataProvider):
         # urn→label cache pipeline) — needed both to select CANONICAL
         # pairs and to stamp sourceLevel/targetLevel on the merge.
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        chain_urns = list(dict.fromkeys(s_chain + t_chain))
-        urn_levels: Dict[str, int] = {}
-        urn_labels: Dict[str, str] = {}
-        if entity_levels:
-            # The urn→label cache records the graph's OBSERVED spellings;
-            # the level map is keyed by DECLARED ontology ids. Re-key by
-            # every observed spelling, or alias-variant sources resolve
-            # zero levels and this hook defers on every single write.
-            levels_by_spelling: Dict[str, int] = {}
-            for _lbl, _lv in entity_levels.items():
-                for _sp in self._alias_entity_types([_lbl]):
-                    levels_by_spelling[str(_sp)] = _lv
-                levels_by_spelling[_lbl] = _lv
-            try:
-                label_key = self._urn_label_key()
-                label_pipe = self._redis.pipeline(transaction=False)
-                for u in chain_urns:
-                    label_pipe.hget(label_key, u)
-                rows = await label_pipe.execute()
-                unresolved = 0
-                for u, raw in zip(chain_urns, rows):
-                    if not raw:
-                        unresolved += 1
-                        continue
-                    lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                    urn_labels[u] = lbl
-                    lvl = levels_by_spelling.get(lbl)
-                    if lvl is not None:
-                        urn_levels[u] = lvl
-                if unresolved:
-                    # A PARTIALLY resolved chain silently yields
-                    # non-canonical rep pairs (a missing middle label makes
-                    # the "deepest rep" skip a level) — polluting the
-                    # boundary. Defer to the batch pipeline instead.
-                    logger.debug(
-                        "on_lineage_edge_written: %d chain member(s) not in "
-                        "the urn→label cache for %s -> %s — deferring to "
-                        "the batch pipeline.",
-                        unresolved, source_urn, target_urn,
-                    )
-                    return 0
-            except Exception as exc:
-                logger.warning(
-                    "on_lineage_edge_written: level lookup failed: %s", exc,
-                )
-                if entity_levels:
-                    return 0
+        resolved = await self._resolve_chain_levels(
+            s_chain, t_chain, entity_levels, caller="on_lineage_edge_written",
+        )
+        if resolved is None:
+            return 0
+        urn_levels, urn_labels = resolved
 
         # Pair selection MUST mirror the batch pipeline's
         # _merge_canonical_pairs: only canonical level-bridged pairs
@@ -3746,27 +3796,9 @@ class FalkorDBProvider(GraphDataProvider):
                     source_urn, target_urn,
                 )
                 return 0
-            finest = max(entity_levels.values())
-
-            def _reps(chain: List[str]) -> List[tuple]:
-                reps = [
-                    (urn_levels[u], u) for u in chain
-                    if u in urn_levels and urn_levels[u] < finest
-                ]
-                reps.sort(key=lambda lu: -lu[0])   # deepest first
-                return reps
-
-            cs, ct = _reps(s_chain), _reps(t_chain)
-            seen_pairs = set()
-            for level in {l for l, _ in cs} | {l for l, _ in ct}:
-                sp = next((u for l, u in cs if l <= level), None)
-                tp = next((u for l, u in ct if l <= level), None)
-                if sp is None or tp is None or sp == tp:
-                    continue
-                if (sp, tp) in seen_pairs:
-                    continue
-                seen_pairs.add((sp, tp))
-                pairs_to_check.append((sp, tp))
+            pairs_to_check = self._canonical_rep_pairs(
+                s_chain, t_chain, urn_levels, max(entity_levels.values()),
+            )
         else:
             # Legacy graphs without an ontology level map: full ancestor
             # cross-product (parity with the pipeline's full-cube
@@ -3894,8 +3926,20 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> None:
         """Decrement AGGREGATED edge weights when a lineage edge is removed.
 
-        Batched: single SREM pipeline → single SCARD pipeline →
-        one UNWIND+SET for weight updates + one UNWIND+DELETE for empty pairs.
+        Mirror of ``on_lineage_edge_written`` (shared chain/level
+        resolution + canonical pair selection), inverted:
+
+        * SREM is the GATE — only a pair this edge verifiably contributed
+          to via the hook (its id sat in the pair's ``agg_members`` set)
+          is touched. The batch pipeline never populates those sets, so
+          its cells are left alone for its own reconcile — the old SCARD
+          path OVERWROTE pipeline-computed weights with set cardinality
+          and DELETED any pair whose set was empty, i.e. every
+          batch-written cell (the "12,000 → 1" data-loss class).
+        * The graph write is a decrement-by-one via the
+          ``AGGREGATED(aggKey)`` edge-index seek — no node lookups at
+          all, so nothing to label-anchor; a cell reaching weight 0 is
+          deleted in the same query.
         """
         await self._ensure_connected()
 
@@ -3906,78 +3950,71 @@ class FalkorDBProvider(GraphDataProvider):
         t_chain = [target_urn] + t_ancestors
 
         members_key_prefix = f"{self._graph_name}:agg_members"
-        pairs = [(s, t) for s in s_chain for t in t_chain if s != t]
+
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        resolved = await self._resolve_chain_levels(
+            s_chain, t_chain, entity_levels, caller="on_lineage_edge_deleted",
+        )
+        if resolved is None:
+            return  # defer to the batch pipeline, like the write hook
+        urn_levels, _urn_labels = resolved
+
+        if entity_levels:
+            if not urn_levels:
+                logger.debug(
+                    "on_lineage_edge_deleted: no chain levels resolved "
+                    "for %s -> %s — deferring to the batch pipeline",
+                    source_urn, target_urn,
+                )
+                return
+            pairs = self._canonical_rep_pairs(
+                s_chain, t_chain, urn_levels, max(entity_levels.values()),
+            )
+        else:
+            # Legacy graphs without an ontology level map: full ancestor
+            # cross-product candidates (write-hook parity) — the SREM
+            # gate below still limits writes to hook-tracked pairs.
+            pairs = [(s, t) for s in s_chain for t in t_chain if s != t]
         if not pairs:
             return
 
-        # Phase 1: Pipeline SREM for all pairs
+        # SREM gate: 1 ⇒ this edge's contribution was tracked for the
+        # pair — its stored weight (hook-incremented OR pipeline-computed
+        # while the edge existed) includes it, so decrementing is exact.
+        # 0 ⇒ untracked (pipeline-only cell, or a Redis flush): leave it
+        # for the next batch reconcile rather than guess.
         try:
             pipe = self._redis.pipeline(transaction=False)
             for s_urn, t_urn in pairs:
-                pipe.srem(f"{members_key_prefix}:{s_urn}:{t_urn}", edge_id)
-            await pipe.execute()
-        except Exception:
-            pass
+                pipe.execute_command(
+                    "SREM", f"{members_key_prefix}:{s_urn}:{t_urn}", edge_id,
+                )
+            srem_results = await pipe.execute()
+        except Exception as exc:
+            logger.warning(
+                "on_lineage_edge_deleted: members-set SREM failed (%s) — "
+                "leaving weights for the next batch reconcile", exc,
+            )
+            return
 
-        # Phase 2: Pipeline SCARD to get remaining counts
+        keys = [
+            f"{s_urn}|{t_urn}"
+            for (s_urn, t_urn), removed in zip(pairs, srem_results)
+            if removed
+        ]
+        if not keys:
+            return
+
         try:
-            pipe = self._redis.pipeline(transaction=False)
-            for s_urn, t_urn in pairs:
-                pipe.scard(f"{members_key_prefix}:{s_urn}:{t_urn}")
-            counts = await pipe.execute()
-        except Exception:
-            return  # Can't determine counts — bail
-
-        # Phase 3: Separate into delete (count=0) vs update (count>0)
-        delete_batch = []
-        update_batch = []
-        cleanup_keys = []
-        for i, (s_urn, t_urn) in enumerate(pairs):
-            remaining = counts[i] if i < len(counts) else None
-            if remaining == 0:
-                delete_batch.append({"s": s_urn, "t": t_urn})
-                cleanup_keys.append(f"{members_key_prefix}:{s_urn}:{t_urn}")
-            elif remaining is not None:
-                update_batch.append({"s": s_urn, "t": t_urn, "w": int(remaining)})
-
-
-        if delete_batch:
-            try:
-                # nolint-unlabeled-unwind-match: pair-bounded DELETE.
-                # Rewriting to ``WHERE s.urn IN $sUrns AND t.urn IN
-                # $tUrns`` would Cartesian-delete (every edge between
-                # ANY s in sUrns and ANY t in tUrns), which is wrong
-                # semantics here — we need to delete only the specific
-                # (s, t) pairs in delete_batch. Bounded by lineage-edge
-                # deletion rate (rare in steady state).
-                await self._proj_query(
-                    "UNWIND $batch AS item "
-                    "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
-                    "DELETE r",
-                    params={"batch": delete_batch},
-                )
-                # Clean up empty Redis keys
-                pipe = self._redis.pipeline(transaction=False)
-                for key in cleanup_keys:
-                    pipe.delete(key)
-                await pipe.execute()
-            except Exception as e:
-                logger.error(f"Batched AGGREGATED DELETE failed: {e}")
-
-        if update_batch:
-            try:
-                # nolint-unlabeled-unwind-match: pair-bounded UPDATE.
-                # Same reasoning as the DELETE branch above — must
-                # update only specific (s, t) pairs from update_batch,
-                # not the Cartesian of two URN sets.
-                await self._proj_query(
-                    "UNWIND $batch AS item "
-                    "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
-                    "SET r.weight = item.w, r.latestUpdate = timestamp()",
-                    params={"batch": update_batch},
-                )
-            except Exception as e:
-                logger.error(f"Batched AGGREGATED weight update failed: {e}")
+            await self._proj_query(
+                "UNWIND $keys AS k "
+                "MATCH ()-[r:AGGREGATED {aggKey: k}]->() "
+                "SET r.weight = r.weight - 1, r.latestUpdate = timestamp() "
+                "WITH r WHERE r.weight <= 0 DELETE r",
+                params={"keys": keys},
+            )
+        except Exception as e:
+            logger.error(f"Batched AGGREGATED decrement failed: {e}")
 
     async def on_containment_changed(self, urn: str) -> None:
         """Invalidate ancestor cache for a node and its descendants, then rebuild.
@@ -6963,6 +7000,26 @@ class FalkorDBProvider(GraphDataProvider):
         for urn, sl in (endpoint_labels or {}).items():
             urn_label[urn] = _sanitize_label(str(sl))
         urn_label.update(label_mapping)  # same-call node labels win
+
+        # Endpoints still unknown (edges into nodes saved in a prior call
+        # with no caller-supplied label): resolve through the urn→label
+        # cache / graph in one bulk pass so they hit the indexed MATCH
+        # too; anything unresolvable keeps the label-less fallback below.
+        unknown = list({
+            u for e in edges for u in (e.source_urn, e.target_urn)
+        } - set(urn_label))
+        if unknown:
+            try:
+                resolved = await self._resolve_urn_labels_bulk(unknown)
+                urn_label.update(
+                    {u: lbl for u, lbl in resolved.items() if lbl}
+                )
+            except Exception as exc:
+                logger.warning(
+                    "save_custom_graph: bulk urn→label resolve failed (%s) — "
+                    "%d endpoint(s) fall back to unlabeled matches",
+                    exc, len(unknown),
+                )
 
         # Group edges by (relationship type, source label, target label) so each
         # UNWIND's endpoint MATCH is label-qualified (index-eligible). A None label

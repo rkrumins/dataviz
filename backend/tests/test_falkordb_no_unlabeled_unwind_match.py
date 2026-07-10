@@ -25,26 +25,40 @@ from pathlib import Path
 # Skips ``MATCH (xyz:Label {urn: ...})`` (labeled — fine) and ``MATCH
 # (xyz {id: ...})`` (different property — different cost profile).
 _ANTIPATTERN_RE = re.compile(
+    # ``\{\{?`` — f-string sources double the brace (``MATCH (a {{urn:``),
+    # which the original single-brace pattern silently missed (that blind
+    # spot let save_custom_graph's edge merge evade this test).
     r"UNWIND\s+\$[A-Za-z_][A-Za-z0-9_]*\s+AS\s+[A-Za-z_][A-Za-z0-9_]*"
     r".{0,160}?"
-    r"MATCH\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\{\s*urn\s*:",
+    r"MATCH\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\{\{?\s*urn\s*:",
     re.DOTALL,
 )
 
 
-PROVIDER_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "app" / "providers" / "falkordb_provider.py"
+_APP_DIR = Path(__file__).resolve().parent.parent / "app"
+
+# Every module that writes Cypher against the projection graphs. The
+# projector was the audit's biggest offender: its edge merges ran the
+# antipattern for EVERY projected edge of a full seed.
+SCANNED_PATHS = (
+    _APP_DIR / "providers" / "falkordb_provider.py",
+    _APP_DIR / "services" / "versioning" / "projection.py",
 )
 
+PROVIDER_PATH = SCANNED_PATHS[0]
 
-def test_falkordb_provider_has_no_unlabeled_unwind_match() -> None:
-    """Source text of the FalkorDB provider must not contain the
-    unlabeled-MATCH-in-UNWIND antipattern. Use
-    ``MATCH (n) WHERE n.urn IN $list`` instead — see plan Phase 1.5.
+
+import pytest
+
+
+@pytest.mark.parametrize("path", SCANNED_PATHS, ids=lambda p: p.name)
+def test_no_unlabeled_unwind_match(path: Path) -> None:
+    """Source text must not contain the unlabeled-MATCH-in-UNWIND
+    antipattern. Use ``MATCH (n) WHERE n.urn IN $list`` or a labeled
+    ``MATCH (n:Label {urn: ...})`` anchor instead — see plan Phase 1.5.
     """
-    assert PROVIDER_PATH.exists(), f"provider source not found at {PROVIDER_PATH}"
-    src = PROVIDER_PATH.read_text(encoding="utf-8")
+    assert path.exists(), f"source not found at {path}"
+    src = path.read_text(encoding="utf-8")
 
     # Strip docstrings so a doc reference to the antipattern (e.g.
     # "the old form was ``UNWIND $urns AS u MATCH (n {urn: u})``")
@@ -89,8 +103,8 @@ def test_falkordb_provider_has_no_unlabeled_unwind_match() -> None:
             snippet = src_no_docs[m.start(): min(m.end(), m.start() + 200)]
             hits.append(f"  line ~{line_no}: {snippet!r}")
         raise AssertionError(
-            "Unlabeled-MATCH-in-UNWIND antipattern detected in "
-            "falkordb_provider.py. Rewrite to "
-            "`MATCH (n) WHERE n.urn IN $list` form. See plan Phase 1.5. "
-            "Offending location(s):\n" + "\n".join(hits)
+            f"Unlabeled-MATCH-in-UNWIND antipattern detected in "
+            f"{path.name}. Rewrite to `MATCH (n) WHERE n.urn IN $list` "
+            f"or a labeled `MATCH (n:Label {{urn: ...}})` anchor. "
+            f"Offending location(s):\n" + "\n".join(hits)
         )

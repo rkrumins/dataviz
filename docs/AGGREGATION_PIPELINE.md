@@ -80,7 +80,15 @@ escape hatch can never inflate weights; they heal at the first
 boundary-mode run. Incremental writers stay canonical too: the
 versioning projector derives the same canonical selection from the
 ontology level map (level-stamped, digest-stamped), and the write hook
-alias-translates observed label spellings before level lookup.
+alias-translates observed label spellings before level lookup. The
+delete hook mirrors the write hook (shared chain/level resolution and
+canonical selection) and only ever DECREMENTS: a pair is touched only
+when SREM proves this edge's id was tracked in its `agg_members` set,
+via the `AGGREGATED(aggKey)` index seek (weight 0 deletes the cell).
+Untracked pairs — anything only the batch pipeline wrote, or after a
+Redis flush — are deliberately left for the next reconcile; the old
+SCARD-based overwrite/empty-set-delete could destroy pipeline-computed
+cells (one raw deletion collapsing a 12,000-weight rollup).
 
 Endpoints whose label is OUTSIDE the ontology (messy ingests) are
 served as raw anchors (exact edges + upward rollups) rather than
