@@ -1,7 +1,7 @@
 """End-to-end proof that a Solidatus model converted under a CUSTOM ontology
-(roots_node: Layer→Roots, everything else→Node, containment Has, lineage
-Flows_To, emitting lowercase ``has``) ingests, canonicalizes, enforces, and
-nests through the whole versioned stack + a live FalkorDB projection.
+(roots_node: Layer→Roots, everything else→Node, containment HAS, lineage
+FLOWS_TO — physical-uppercase) ingests, enforces, and nests through the whole
+versioned stack + a live FalkorDB projection with no source alias needed.
 
 Needs Postgres (GRAPHVER_E2E=1) and a real FalkorDB. Run:
   docker exec -w /app -e GRAPHVER_E2E=1 -e RUN_FALKOR_LIVE=1 synodic-dev-viz-service-1 \
@@ -59,14 +59,15 @@ async def _run() -> None:
     svc = h.svc
 
     try:
-        # ── 1) Canonicalization: the durable copy uses DECLARED casing ────────
-        # (the preset emitted lowercase `has`; canonicalize_rows rewrote it to `Has`).
-        assert h.canonicalized > 0
+        # ── 1) Durable copy uses the declared UPPERCASE edge types natively ───
+        # roots_node declares HAS/FLOWS_TO, so the physical graph is uppercase-clean with
+        # no canonicalization needed (nothing to rewrite).
+        assert h.canonicalized == 0
         state = await svc.materialize_state(graph_id=h.graph_id, branch_id=h.main_branch_id)
         node_types = {p["entityType"] for p in state["nodes"].values()}
         edge_types = {p["edgeType"] for p in state["edges"].values()}
         assert node_types <= {"Roots", "Node"}, node_types
-        assert edge_types == {"Has", "Flows_To"}, edge_types
+        assert edge_types == {"HAS", "FLOWS_TO"}, edge_types
 
         # ── 2) Strict enforcement (write-through gate) ────────────────────────
         rules = h.rules
@@ -74,50 +75,40 @@ async def _run() -> None:
         with pytest.raises(OntologyViolation) as e_unknown:
             await svc.apply_ops(
                 graph_id=h.graph_id, actor="t", ontology_rules=rules,
-                containment_edge_types=["Has"],
+                containment_edge_types=["HAS"],
                 ops=[_node("BadX", "urn:sol:test:badx", "Widget")])
         assert any(v["rule"] == "unknown_entity_type" for v in e_unknown.value.violations)
 
-        # containment_not_allowed: Node.can_contain == [Node], so Node -Has-> Roots is illegal
+        # containment_not_allowed: Node.can_contain == [Node], so Node -HAS-> Roots is illegal
         with pytest.raises(OntologyViolation) as e_contain:
             await svc.apply_ops(
                 graph_id=h.graph_id, actor="t", ontology_rules=rules,
-                containment_edge_types=["Has"],
+                containment_edge_types=["HAS"],
                 ops=[_node("N1", "urn:sol:test:n1", "Node"),
                      _node("R1", "urn:sol:test:r1", "Roots"),
-                     _edge("EBad", "Has", "N1", "R1")])
+                     _edge("EBad", "HAS", "N1", "R1")])
         assert any(v["rule"] == "containment_not_allowed" for v in e_contain.value.violations)
 
-        # legal create spelled `has` succeeds and lands as declared `Has`
+        # a case variant `has` at the boundary is normalized to the declared `HAS` (never a violation)
         commit_id = await svc.apply_ops(
             graph_id=h.graph_id, actor="t", ontology_rules=rules,
-            containment_edge_types=["Has"],
+            containment_edge_types=["HAS"],
             ops=[_node("R2", "urn:sol:test:r2", "Roots"),
                  _node("N2", "urn:sol:test:n2", "Node"),
                  _edge("EOk", "has", "R2", "N2")])
         assert commit_id
         state2 = await svc.materialize_state(graph_id=h.graph_id, branch_id=h.main_branch_id)
-        assert state2["edges"]["EOk"]["edgeType"] == "Has"
+        assert state2["edges"]["EOk"]["edgeType"] == "HAS"
 
         # ── 3) Nesting in the live FalkorDB projection ────────────────────────
-        # Wire the provider exactly as ContextEngine._apply_source_alignment does: the
-        # containment set is uppercased internally ({"HAS"}), so alignment translates it
-        # back to the graph's observed casing (:Has). Governed here means observed ==
-        # declared, but the declared `Has`/`Roots` still differ from their UPPER() form,
-        # so alignment is what makes the case-sensitive Cypher patterns match.
-        from backend.app.ontology.source_alignment import derive_alignment
-        declared_rel = schema.containment + schema.lineage
-        declared_ent = list(dict.fromkeys(schema.entity_map.values()))
-        align = derive_alignment(
-            declared_relationship_types=declared_rel, declared_entity_types=declared_ent,
-            observed_relationship_types=declared_rel, observed_entity_types=declared_ent)
-
+        # Physical edges are uppercase HAS, which the containment set (uppercased internally
+        # to {"HAS"}) matches DIRECTLY — no source alias needed. That is the whole point of
+        # keeping the data we author physical-uppercase.
         prov = FalkorDBProvider(
             host=os.getenv("FALKORDB_HOST", "localhost"),
             port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=h.graph_name)
         await prov._ensure_connected()
-        prov.set_containment_edge_types(schema.containment)
-        prov.set_source_type_aliases(align.rel_alias_map(), align.entity_alias_map())
+        prov.set_containment_edge_types(["HAS"])
 
         top = await prov.get_top_level_or_orphan_nodes(root_entity_types=["Roots"], limit=500)
         assert top.root_type_count == 3               # 3 layers → 3 Roots
@@ -125,8 +116,8 @@ async def _run() -> None:
         assert {n.entity_type for n in top.nodes} <= {"Roots", "Node"}
 
         a_root = next(n for n in top.nodes if n.entity_type == "Roots")
-        children = await prov.get_children(a_root.urn, edge_types=["Has"])
-        assert children, "a Roots node must contain children via Has"
+        children = await prov.get_children(a_root.urn, edge_types=["HAS"])
+        assert children, "a Roots node must contain children via HAS"
         print("test_solidatus_schema_ingest: OK")
     finally:
         try:

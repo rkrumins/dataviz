@@ -4,8 +4,9 @@ Solidatus→ontology conversion seam.
 A ConversionSchema maps the generator's structural roles (layer/object/group/
 attribute + containment/lineage) onto arbitrary declared vocabularies. The
 identity preset must reproduce the legacy SolidatusGraphBuilder output; the
-roots_node preset is the canonical many-to-one collapse (Roots/Node + Has/
-Flows_To with a lowercase `has` emit variant).
+roots_node preset is the canonical many-to-one collapse (Roots/Node + uppercase
+HAS/FLOWS_TO). The emit feature (case-variant payloads) is still exercised via
+inline schemas for canonicalization/alignment coverage.
 """
 import os
 import sys
@@ -43,9 +44,9 @@ def _base_spec(**overrides):
 def test_load_preset_roots_node():
     s = load_schema("roots_node")
     assert s.entity_map == {"layer": "Roots", "object": "Node", "group": "Node", "attribute": "Node"}
-    assert s.containment == ["Has"]
-    assert s.lineage == ["Flows_To"]
-    assert s.emit == {"Has": "has"}
+    assert s.containment == ["HAS"]
+    assert s.lineage == ["FLOWS_TO"]
+    assert s.emit == {}
 
 
 def test_missing_role_raises():
@@ -88,7 +89,7 @@ def test_identity_schema_matches_legacy_builder():
         == {(e.source_urn, e.target_urn, e.edge_type) for e in legacy.edges}
 
 
-def test_roots_node_conversion_maps_types_and_emit_casing():
+def test_roots_node_conversion_maps_types():
     model = _model()
     assert model["transitions"], "seed must produce lineage for this test"
     cg = convert_model(model, load_schema("roots_node"))
@@ -100,15 +101,27 @@ def test_roots_node_conversion_maps_types_and_emit_casing():
         expected = "Roots" if n.properties.get("solidatusId") in layer_ids else "Node"
         assert n.entity_type == expected
 
-    # Edge payloads carry the EMITTED spelling (has), lineage the declared one
-    assert {e.edge_type for e in cg.edges} == {"has", "Flows_To"}
+    # Edges use the declared uppercase spellings (our data is physical-uppercase)
+    assert {e.edge_type for e in cg.edges} == {"HAS", "FLOWS_TO"}
 
-    # Derivation surfaces keep DECLARED casing
     assert cg.root_types == {"Roots"}
-    assert ("Roots", "Node", "Has") in cg.containment_pairs
-    assert ("Node", "Node", "Has") in cg.containment_pairs
-    assert all(et == "Has" for _, _, et in cg.containment_pairs)
-    assert cg.lineage_pairs and all(et == "Flows_To" for _, _, et in cg.lineage_pairs)
+    assert ("Roots", "Node", "HAS") in cg.containment_pairs
+    assert ("Node", "Node", "HAS") in cg.containment_pairs
+    assert all(et == "HAS" for _, _, et in cg.containment_pairs)
+    assert cg.lineage_pairs and all(et == "FLOWS_TO" for _, _, et in cg.lineage_pairs)
+
+
+def test_inline_emit_schema_produces_case_variant():
+    # The emit feature still simulates a federated source that spells types differently
+    # than declared (for canonicalization/alignment testing), even though shipped presets
+    # are uppercase-clean.
+    schema = schema_from_dict(_base_spec(
+        entityTypes={"layer": "Roots", "object": "Node", "group": "Node", "attribute": "Node"},
+        edgeTypes={"containment": ["HAS"], "lineage": ["FLOWS_TO"]},
+        emit={"HAS": "has"}))
+    cg = convert_model(_model(), schema)
+    assert {e.edge_type for e in cg.edges} == {"has", "FLOWS_TO"}   # payload carries the variant
+    assert all(et == "HAS" for _, _, et in cg.containment_pairs)    # derivation keeps declared
 
 
 # ── Ontology derivation ──────────────────────────────────────────────────────
@@ -137,16 +150,16 @@ def test_derive_ontology_roots_node():
     assert ents["Node"].hierarchy.level == 1  # min observed depth
 
     rels = parse_relationship_definitions(req.relationship_type_definitions)
-    assert set(rels) == {"Has", "Flows_To"}
-    assert rels["Has"].is_containment and not rels["Has"].is_lineage
-    assert rels["Flows_To"].is_lineage and not rels["Flows_To"].is_containment
-    assert rels["Has"].source_types == ["Node", "Roots"]
-    assert rels["Has"].target_types == ["Node"]
-    assert rels["Flows_To"].source_types == ["Node"]
-    assert rels["Flows_To"].target_types == ["Node"]
+    assert set(rels) == {"HAS", "FLOWS_TO"}
+    assert rels["HAS"].is_containment and not rels["HAS"].is_lineage
+    assert rels["FLOWS_TO"].is_lineage and not rels["FLOWS_TO"].is_containment
+    assert rels["HAS"].source_types == ["Node", "Roots"]
+    assert rels["HAS"].target_types == ["Node"]
+    assert rels["FLOWS_TO"].source_types == ["Node"]
+    assert rels["FLOWS_TO"].target_types == ["Node"]
 
-    assert req.containment_edge_types == ["Has"]
-    assert req.lineage_edge_types == ["Flows_To"]
+    assert req.containment_edge_types == ["HAS"]
+    assert req.lineage_edge_types == ["FLOWS_TO"]
     assert req.root_entity_types == ["Roots"]
 
 
@@ -187,28 +200,27 @@ def test_conversion_is_deterministic():
 def test_multi_containment_assigns_edge_type_by_parent_depth():
     model = _model(groups_chance=1.0)  # force the Group tier so depths 0/1/2 all parent
     schema = load_schema("multi_containment")
-    assert schema.containment == ["Groups", "Holds"]
+    assert schema.containment == ["GROUPS", "HOLDS"]
     cg = convert_model(model, schema)
 
-    # Emit variant on the attribute type only
-    assert {n.entity_type for n in cg.nodes} == {"Zone", "Asset", "field"}
+    assert {n.entity_type for n in cg.nodes} == {"Zone", "Asset", "Field"}
 
-    # containment[parent_depth % 2]: layers (0) → Groups, objects (1) → Holds, groups (2) → Groups
+    # containment[parent_depth % 2]: layers (0) → GROUPS, objects (1) → HOLDS, groups (2) → GROUPS
     id_of = lambda urn: urn.rsplit(":", 1)[1]
     layer_ids = set(model["layers"])
     for e in cg.edges:
-        if e.edge_type == "Feeds":
+        if e.edge_type == "FEEDS":
             continue
         parent_id = id_of(e.source_urn)
         if parent_id in layer_ids:
-            assert e.edge_type == "Groups"
+            assert e.edge_type == "GROUPS"
         elif parent_id.startswith("OBJ-"):
-            assert e.edge_type == "Holds"
+            assert e.edge_type == "HOLDS"
         else:
             assert parent_id.startswith("GRP-")
-            assert e.edge_type == "Groups"
+            assert e.edge_type == "GROUPS"
 
-    assert {et for _, _, et in cg.containment_pairs} == {"Groups", "Holds"}
+    assert {et for _, _, et in cg.containment_pairs} == {"GROUPS", "HOLDS"}
 
 
 # ── Derived ontology must admit its own data ─────────────────────────────────
@@ -255,7 +267,12 @@ def test_canonicalize_rows_restores_declared_casing():
     from backend.scripts.solidatus_schema import derive_ontology_request, to_ingest_rows
 
     model = _model()
-    schema = load_schema("roots_node")
+    # Inline schema simulating a federated source that emits lowercase spellings while the
+    # ontology declares the canonical uppercase — the case the canonicalizer must fix.
+    schema = schema_from_dict(_base_spec(
+        entityTypes={"layer": "Roots", "object": "Node", "group": "Node", "attribute": "Node"},
+        edgeTypes={"containment": ["HAS"], "lineage": ["FLOWS_TO"]},
+        emit={"HAS": "has", "FLOWS_TO": "flows_to"}))
     cg = convert_model(model, schema)
     req = derive_ontology_request(schema, cg, name="t")
     rows = to_ingest_rows(cg)
@@ -270,7 +287,7 @@ def test_canonicalize_rows_restores_declared_casing():
     changed = canonicalize_rows(rows, rules)
     assert changed > 0
     edge_types = {r["edgeType"] for r in rows if r["kind"] == "edge"}
-    assert edge_types == {"Has", "Flows_To"}
+    assert edge_types == {"HAS", "FLOWS_TO"}
 
 
 # ── Converter handles the generator's structural knobs ──────────────────────
@@ -280,7 +297,7 @@ def test_flat_depth2_yields_layer_to_attribute_containment():
     cg = convert_model(model, load_schema("roots_node"))
     # Every containment pair is Roots→Node (layer directly holds attributes)
     assert cg.containment_pairs
-    assert all(pair == ("Roots", "Node", "Has") for pair in cg.containment_pairs)
+    assert all(pair == ("Roots", "Node", "HAS") for pair in cg.containment_pairs)
 
 
 def test_orphans_are_nodes_with_no_containment_pair():
@@ -295,7 +312,7 @@ def test_orphans_are_nodes_with_no_containment_pair():
     orphan_urns = {n.urn for n in cg.nodes if n.properties.get("solidatusId") in orphan_ids}
     assert len(orphan_urns) == 4
     # An orphan is never the child endpoint of a containment edge
-    child_urns = {e.target_urn for e in cg.edges if e.edge_type in ("has", "Has")}
+    child_urns = {e.target_urn for e in cg.edges if e.edge_type == "HAS"}
     assert orphan_urns.isdisjoint(child_urns)
 
 

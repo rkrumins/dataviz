@@ -1,6 +1,6 @@
 {
   "name": "multi-containment",
   "entityTypes": { "layer": "Zone", "object": "Asset", "group": "Asset", "attribute": "Field" },
-  "edgeTypes":   { "containment": ["Groups", "Holds"], "lineage": ["Feeds"] },
-  "emit":        { "Field": "field" }
+  "edgeTypes":   { "containment": ["GROUPS", "HOLDS"], "lineage": ["FEEDS"] },
+  "emit":        {}
 }
