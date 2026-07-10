@@ -720,6 +720,12 @@ class AggregationService:
                 f"Job {job_id} is not resumable (current status: {job.status}; "
                 f"resume requires 'failed' or 'cancelled')"
             )
+        if job.trigger_source == "purge":
+            raise ValueError(
+                f"Job {job_id} is a purge job — it cannot be resumed as an "
+                "aggregation run. Re-run the purge from the data source "
+                "actions instead."
+            )
 
         # Apply optional per-job overrides (e.g. a larger timeout / batch).
         if overrides is not None:

@@ -436,6 +436,7 @@ class AggregationPipeline:
             # Hard write budget: refuse a result that cannot fit in the
             # FalkorDB instance BEFORE the first write reaches it.
             self._check_write_budget()
+            self._snapshot_pairs_by_level()
             self._mark_phase("reconcile_s")
 
             # RECONCILE: resume from the recorded range when the prior
@@ -472,6 +473,27 @@ class AggregationPipeline:
 
     # -- shared helpers ------------------------------------------------------
 
+    def _snapshot_pairs_by_level(self) -> None:
+        """Level-pair histogram of the computed result, persisted into
+        run_stats — makes a MISSING level (e.g. no domain→domain pairs
+        because the domain label didn't match the graph) visible in the
+        job detail instead of requiring a graph query to diagnose."""
+        nonleaf = self._nonleaf_levels
+        if nonleaf is None:
+            return
+        counts: Dict[str, int] = {}
+        for key in set(self._acc) | self._flushed:
+            sid, tid = _unpack(key)
+            ls, lt = nonleaf.get(sid), nonleaf.get(tid)
+            name = f"L{ls}->L{lt}" if ls is not None and lt is not None else "unknown"
+            counts[name] = counts.get(name, 0) + 1
+        self._pairs_by_level = counts
+        logger.info(
+            "aggregation pipeline on %s: computed pairs by level: %s",
+            self.p._graph_name,
+            ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none",
+        )
+
     def _result(self, affected: int = 0) -> Dict[str, Any]:
         return {
             "processed": self._scanned,
@@ -487,6 +509,10 @@ class AggregationPipeline:
                 "pairs": affected,
                 "scanned_edges": self._scanned,
                 "fine_merges_skipped": self._fine_merges_skipped,
+                **(
+                    {"pairs_by_level": self._pairs_by_level}
+                    if getattr(self, "_pairs_by_level", None) else {}
+                ),
             },
         }
 
@@ -1062,12 +1088,17 @@ class AggregationPipeline:
                 "ontology is genuinely single-level."
             )
         self._nonleaf_levels = levels
+        by_level: Dict[int, int] = {}
+        for lv in levels.values():
+            by_level[lv] = by_level.get(lv, 0) + 1
         logger.info(
             "aggregation pipeline on %s: materialization boundary loaded — "
-            "%d non-leaf nodes (only same-level container pairs are "
-            "materialized; leaf-involving and mixed-level pairs are served "
-            "on demand).",
+            "%d non-leaf nodes by level: %s (a level with 0 nodes here "
+            "CANNOT produce same-level pairs — check that its ontology "
+            "label matches the graph). Leaf-involving and mixed-level "
+            "pairs are served on demand.",
             self.p._graph_name, len(levels),
+            ", ".join(f"L{lv}={n}" for lv, n in sorted(by_level.items())),
         )
 
     def _check_write_budget(self) -> None:

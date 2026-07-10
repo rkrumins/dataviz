@@ -643,8 +643,27 @@ async def lifespan(_app: FastAPI):
                     )
                     agg_dispatcher = InProcessDispatcher(agg_worker)
                     logger.info("Aggregation dispatch: InProcessDispatcher (auto — worker role)")
+            elif os.getenv("REDIS_URL"):
+                # inprocess (or unknown) REQUESTED, but a job bus exists.
+                # Aggregation execution belongs to the worker service —
+                # in-process execution inside the viz-service is what
+                # caused invisible shadow runs contending on the graph
+                # lease, and a stale env (container restarted without
+                # being recreated) kept re-selecting it. With REDIS_URL
+                # present, the stream ALWAYS wins.
+                from .services.aggregation.redis_client import get_redis
+                from .services.aggregation.dispatcher import RedisStreamDispatcher
+                agg_dispatcher = RedisStreamDispatcher(get_redis())
+                logger.warning(
+                    "Aggregation dispatch: AGGREGATION_DISPATCH_MODE=%s "
+                    "requested but REDIS_URL is set — dispatching to the "
+                    "Redis stream instead (in-process execution in this "
+                    "process is disabled whenever a job bus exists; run "
+                    "the dedicated worker: python -m "
+                    "backend.app.services.aggregation).", dispatch_mode,
+                )
             else:
-                # inprocess or unknown — dev/single-process mode.
+                # inprocess with NO job bus — true single-process dev.
                 # worker_id attribution makes the execution location visible
                 # in the job detail UI instead of a blank Worker cell.
                 agg_worker = AggregationWorker(
@@ -654,11 +673,8 @@ async def lifespan(_app: FastAPI):
                 agg_dispatcher = InProcessDispatcher(agg_worker)
                 logger.warning(
                     "Aggregation dispatch: InProcessDispatcher — jobs will "
-                    "execute INSIDE this process. If a dedicated "
-                    "aggregation-worker container/pod is also running, it "
-                    "will never receive UI-triggered jobs and the two "
-                    "executors will contend for the per-graph write lease; "
-                    "set AGGREGATION_DISPATCH_MODE=redis in that topology."
+                    "execute INSIDE this process (no REDIS_URL, so no "
+                    "worker fleet can exist)."
                 )
 
             # Get ontology service reference for monolith-mode resolution.

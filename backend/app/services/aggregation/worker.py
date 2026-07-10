@@ -115,6 +115,20 @@ class AggregationWorker:
                 logger.error("Aggregation job %s not found", job_id)
                 return
 
+            if job.trigger_source == "purge":
+                # A purge row must never run the aggregation pipeline —
+                # it belongs to the insights purge stream. Checked BEFORE
+                # any mutation: the old in-pipeline guard flipped the
+                # purge row to running and then failed it, corrupting the
+                # purge's own state whenever a mis-dispatch happened.
+                logger.error(
+                    "Aggregation job %s is a PURGE row mis-dispatched to "
+                    "the aggregation worker (trigger_source=purge) — "
+                    "ignoring without touching the row. Find and fix the "
+                    "dispatcher that sent it here.", job_id,
+                )
+                return
+
             # Transition to running
             job.status = "running"
             job.started_at = job.started_at or _now()
@@ -179,15 +193,6 @@ class AggregationWorker:
                     getattr(job, "entity_type_levels", None) or "{}"
                 )
 
-                if job.trigger_source == "purge":
-                    # A purge row must never run the aggregation pipeline —
-                    # it carries no frozen edge types by design and is
-                    # executed by the insights-service purge worker.
-                    raise ValueError(
-                        "purge job delivered to the aggregation worker — "
-                        "refusing to aggregate; this row belongs to the "
-                        "purge stream"
-                    )
                 if not lineage_types:
                     # Self-heal instead of failing a doomed row: re-freeze
                     # the edge-type lists from the pinned ontology at

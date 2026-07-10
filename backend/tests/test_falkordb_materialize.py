@@ -707,6 +707,50 @@ def test_cross_level_raw_edges_keep_direct_pair(monkeypatch):
     assert fake.agg[(2, 12)]["weight"] == 2
 
 
+def test_top_level_domain_cross_product_is_complete():
+    """The user-facing contract at the very top: EVERY distinct
+    domain→domain relationship implied by leaf lineage must materialize
+    — the full cross product of top-level pairs, not a subset. Three
+    source domains, three target domains, four leaf edges spanning
+    four different domain pairs."""
+    fake = _FakeFalkor()
+    levels = {"domain": 0, "table": 1, "column": 2}
+    nid, rid = 1, 0
+    cols = {}
+    for side, count in (("d", 3), ("e", 3)):
+        for i in range(1, count + 1):
+            dom, tab, col = nid, nid + 1, nid + 2
+            nid += 3
+            fake.add_node(dom, f"urn:{side}{i}", "domain")
+            fake.add_node(tab, f"urn:{side}{i}_t", "table")
+            fake.add_node(col, f"urn:{side}{i}_c", "column")
+            fake.add_edge("CONTAINS", rid, dom, tab); rid += 1
+            fake.add_edge("CONTAINS", rid, tab, col); rid += 1
+            cols[f"{side}{i}"] = (dom, tab, col)
+    # Leaf lineage spanning four distinct domain pairs.
+    for src, tgt in (("d1", "e1"), ("d1", "e2"), ("d2", "e3"), ("d3", "e1")):
+        fake.add_edge("FLOWS", rid, cols[src][2], cols[tgt][2]); rid += 1
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p))
+
+    dom_pairs = {
+        (a, b) for (a, b) in fake.agg
+        if fake.nodes[a][1] == "domain" and fake.nodes[b][1] == "domain"
+    }
+    assert dom_pairs == {
+        (cols["d1"][0], cols["e1"][0]),
+        (cols["d1"][0], cols["e2"][0]),
+        (cols["d2"][0], cols["e3"][0]),
+        (cols["d3"][0], cols["e1"][0]),
+    }
+    for pair in dom_pairs:
+        assert fake.agg[pair]["weight"] == 1
+    # And the diagnostics report the same picture.
+    assert result["run_stats"]["pairs_by_level"]["L0->L0"] == 4
+    assert result["run_stats"]["pairs_by_level"]["L1->L1"] == 4
+
+
 def test_ragged_chain_materializes_canonical_bridged_pairs():
     """A column hanging DIRECTLY under a domain (no table between —
     ragged hierarchy) has no table-level ancestor. The canvas at table

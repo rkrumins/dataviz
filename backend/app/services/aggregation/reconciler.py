@@ -93,6 +93,13 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                 select(AggregationJobORM).where(
                     AggregationJobORM.status == "running"
                 )
+                # Purge rows live on the INSIGHTS stream and hold no
+                # aggregation exec lock — sweeping them here re-dispatched
+                # every purge outliving one tick onto the aggregation
+                # stream, where the worker refused it ("this row belongs
+                # to the purge stream"). Purge liveness is the insights
+                # PEL/XAUTOCLAIM's job.
+                .where(AggregationJobORM.trigger_source != "purge")
             )
         ).scalars().all()
 
