@@ -360,31 +360,50 @@ class AggregationWorker:
                 )
                 wall_start = time.monotonic()
                 timeout_reason = ""
-                while True:
-                    done, _ = await asyncio.wait(
-                        {materialize_task}, timeout=10.0,
-                    )
-                    if done:
-                        result = materialize_task.result()
-                        break
-                    now = time.monotonic()
-                    stalled_for = now - progress_marker["at"]
-                    if stalled_for > stall_timeout:
-                        timeout_reason = (
-                            f"no forward progress for {int(stalled_for)}s "
-                            f"(stall timeout {stall_timeout}s)"
+                try:
+                    while True:
+                        done, _ = await asyncio.wait(
+                            {materialize_task}, timeout=10.0,
                         )
-                    elif now - wall_start > _MAX_WALL_SECS:
-                        timeout_reason = (
-                            f"exceeded wall-clock safety net {_MAX_WALL_SECS}s"
-                        )
-                    if timeout_reason:
-                        materialize_task.cancel()
-                        try:
-                            await materialize_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                        raise asyncio.TimeoutError(timeout_reason)
+                        if done:
+                            result = materialize_task.result()
+                            break
+                        now = time.monotonic()
+                        stalled_for = now - progress_marker["at"]
+                        if stalled_for > stall_timeout:
+                            timeout_reason = (
+                                f"no forward progress for {int(stalled_for)}s "
+                                f"(stall timeout {stall_timeout}s)"
+                            )
+                        elif now - wall_start > _MAX_WALL_SECS:
+                            timeout_reason = (
+                                f"exceeded wall-clock safety net {_MAX_WALL_SECS}s"
+                            )
+                        if timeout_reason:
+                            materialize_task.cancel()
+                            try:
+                                await materialize_task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as inner_exc:
+                                # Surface the task's REAL terminal error
+                                # alongside the watchdog reason instead of
+                                # misreporting it as a pure timeout.
+                                timeout_reason += f" (task error: {inner_exc})"
+                            raise asyncio.TimeoutError(timeout_reason)
+                except asyncio.CancelledError:
+                    # run() itself was cancelled (exec-lock lost, consumer
+                    # drain). asyncio.wait does NOT propagate cancellation
+                    # into the awaited task — without this, the pipeline
+                    # keeps writing as an orphan whose lease-renew task
+                    # holds the per-graph write lease indefinitely while
+                    # the reconciler re-dispatches the job elsewhere.
+                    materialize_task.cancel()
+                    try:
+                        await materialize_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
 
                 # Success
                 job.status = "completed"
@@ -826,55 +845,15 @@ class AggregationWorker:
                 )
                 await asyncio.sleep(delay)
                 _mark_alive()
-                # Rewind the attempt counter so the iteration ahead doesn't
-                # consume retry budget. Python ``range`` iterators can't
-                # be rewound, so emulate by re-entering: we decrement a
-                # synthetic offset that lets us read the loop variable
-                # but the natural next iteration will still be ``attempt+1``
-                # — instead we ``continue`` and the original ``attempt``
-                # value is lost. Workaround: spin until the call succeeds
-                # or another exception fires. This nested-call form
-                # achieves "don't count quiesce" without restructuring.
-                while True:
-                    try:
-                        return await self._materialize_with_checkpoints(
-                            session=session,
-                            job=job,
-                            provider=provider,
-                            containment_types=containment_types,
-                            lineage_types=lineage_types,
-                            cancel_event=cancel_event,
-                            emitter=emitter,
-                            scope=scope,
-                            progress_marker=progress_marker,
-                        )
-                    except ProviderBusy as e2:
-                        quiesce_event_count += 1
-                        if quiesce_event_count > max_quiesce_events:
-                            logger.error(
-                                "Aggregation job %s: hit %d quiesce events; abandoning.",
-                                job.id, max_quiesce_events,
-                            )
-                            job.error_message = (
-                                f"Provider {e2.provider_name} stayed quiesced for "
-                                f"{max_quiesce_events} cooldown windows — abandoned."
-                            )[:2000]
-                            job.updated_at = _now()
-                            await session.commit()
-                            raise
-                        delay = (e2.retry_after_seconds or 30) + random.uniform(0, 2)
-                        logger.info(
-                            "Aggregation job %s: quiesce park (event %d/%d) — %s",
-                            job.id, quiesce_event_count, max_quiesce_events, e2,
-                        )
-                        await asyncio.sleep(delay)
-                        _mark_alive()
-                        # Loop again — still NOT a retry.
-                        continue
-                    # Any other exception breaks out of the quiesce park
-                    # loop and is re-raised so the outer for-loop's
-                    # standard handlers (ProviderUnavailable / generic)
-                    # apply their retry-budget logic.
+                # Re-enter the OUTER loop without consuming the retry
+                # budget (``attempt`` is only incremented by the failure
+                # handlers below). The previous nested re-call loop only
+                # caught ProviderBusy, so any other exception raised
+                # inside it propagated OUT of this handler and skipped
+                # every retry-budget handler — with graph-lease parks now
+                # routine, the first transient error after a park
+                # terminally failed the job with zero retries.
+                continue
             except ProviderUnavailable as e:
                 last_error = e
                 if (job.processed_edges or 0) > last_progress:

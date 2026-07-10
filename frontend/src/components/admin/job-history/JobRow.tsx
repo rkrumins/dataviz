@@ -72,6 +72,11 @@ function historicalEta(
         return acc + (typeof v === 'number' ? v : 0)
     }, 0)
     if (prevTotal < 5) return null   // previous run too fast to be signal
+    // A verified/no-change previous run has near-zero reconcile+apply
+    // durations — projecting the CURRENT run (which may rewrite
+    // everything, e.g. post-purge) from it yields an absurd "finishing
+    // now" estimate. Only writing runs are predictive.
+    if (stats.writes === 0 && stats.deletes === 0) return null
     const cur = stats[PHASES[idx].statKey]
     if (typeof cur !== 'number') return null
     const frac = Math.min(1, Math.max(0, (job.progress - band[0]) / (band[1] - band[0])))
@@ -781,7 +786,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     >
                                                         <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
                                                         <span className="text-[11px] text-red-400 flex-1">
-                                                            Remove all materialized edges? This cannot be undone.
+                                                            Remove all materialized edges? A re-aggregation job starts automatically when the purge completes (use the Assets tab purge for a stay-empty option).
                                                         </span>
                                                         <button
                                                             onClick={() => onPurge(job)}

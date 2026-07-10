@@ -68,6 +68,9 @@ function tuningFromJob(raw: Record<string, unknown> | null | undefined): Aggrega
     const extractConcurrency = num(raw['extract_concurrency'])
     if (extractConcurrency !== undefined) tuning.extractConcurrency = extractConcurrency
     if (typeof raw['materialize_leaf_pairs'] === 'boolean') tuning.materializeLeafPairs = raw['materialize_leaf_pairs']
+    if (typeof raw['materialize_fine_pairs'] === 'boolean') tuning.materializeFinePairs = raw['materialize_fine_pairs']
+    const maxMaterializedEdges = num(raw['max_materialized_edges'])
+    if (maxMaterializedEdges !== undefined) tuning.maxMaterializedEdges = maxMaterializedEdges
     return Object.keys(tuning).length > 0 ? tuning : undefined
 }
 

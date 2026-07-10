@@ -1731,6 +1731,23 @@ class FalkorDBProvider(GraphDataProvider):
         seen = list(dict.fromkeys(out))          # dedupe, preserve order
         return set(seen) if isinstance(types, (set, frozenset)) else seen
 
+    def _containment_hop_bound(self) -> int:
+        """Upper bound for upward containment walks. Physical depth can
+        exceed the LABEL count (recursive same-label nesting, e.g.
+        Folder⊃Folder…), so the bound is 2× the level-map size with a
+        floor of 16, overridable for pathologically deep hierarchies via
+        AGGREGATION_MAX_CONTAINMENT_HOPS. Reader walks and ancestor-chain
+        computation MUST share this bound or they disagree with the
+        writer about which ancestors exist."""
+        override = os.getenv("AGGREGATION_MAX_CONTAINMENT_HOPS")
+        if override:
+            try:
+                return max(1, min(64, int(override)))
+            except ValueError:
+                pass
+        levels = getattr(self, "_entity_type_levels", None) or {}
+        return max(2 * len(levels), 16)
+
     def _alias_rel_types(self, types):
         return self._alias_types(types, "_source_rel_aliases")
 
@@ -2897,7 +2914,9 @@ class FalkorDBProvider(GraphDataProvider):
                 logger.info(
                     "Index health on %s: labeled-only strategy active "
                     "(server lacks unlabeled-index support; every ontology "
-                    "label has a URN index — all hot paths are index-driven).",
+                    "label has a URN index — job hot paths are index-"
+                    "driven; bounded visible-set reads may still issue "
+                    "single-scan queries).",
                     self._graph_name,
                 )
 
@@ -3084,7 +3103,7 @@ class FalkorDBProvider(GraphDataProvider):
             return out
 
         containment_cypher = "|".join(_sanitize_label(t) for t in containment)
-        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+        max_depth = self._containment_hop_bound()
 
         # Keep parameter lists bounded so a single misconfigured outer
         # batch (e.g. 10k URNs) doesn't generate a single oversized
@@ -3610,18 +3629,34 @@ class FalkorDBProvider(GraphDataProvider):
                 for u in chain_urns:
                     label_pipe.hget(label_key, u)
                 rows = await label_pipe.execute()
+                unresolved = 0
                 for u, raw in zip(chain_urns, rows):
                     if not raw:
+                        unresolved += 1
                         continue
                     lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
                     urn_labels[u] = lbl
                     lvl = entity_levels.get(lbl)
                     if lvl is not None:
                         urn_levels[u] = lvl
+                if unresolved:
+                    # A PARTIALLY resolved chain silently yields
+                    # non-canonical rep pairs (a missing middle label makes
+                    # the "deepest rep" skip a level) — polluting the
+                    # boundary. Defer to the batch pipeline instead.
+                    logger.debug(
+                        "on_lineage_edge_written: %d chain member(s) not in "
+                        "the urn→label cache for %s -> %s — deferring to "
+                        "the batch pipeline.",
+                        unresolved, source_urn, target_urn,
+                    )
+                    return 0
             except Exception as exc:
                 logger.warning(
                     "on_lineage_edge_written: level lookup failed: %s", exc,
                 )
+                if entity_levels:
+                    return 0
 
         # Pair selection MUST mirror the batch pipeline's
         # _merge_canonical_pairs: only canonical level-bridged pairs
@@ -3690,18 +3725,15 @@ class FalkorDBProvider(GraphDataProvider):
             pipe.execute_command("SADD", member_key, edge_id)
         sadd_results = await pipe.execute()
 
-        # Phase 2: SCARD pipeline for pairs that were newly added
+        # Phase 2: keep only pairs this raw edge hasn't contributed to
+        # yet (SADD=1). Weight accounting is INCREMENT-BY-ONE on the
+        # graph edge itself — never an overwrite from the Redis set's
+        # SCARD, which is a separate accounting system from the batch
+        # pipeline's raw-scan weights and would clobber a
+        # pipeline-computed weight (observed class: 12,000 → 1).
         new_pairs = [(pairs_to_check[i], sadd_results[i]) for i in range(len(pairs_to_check)) if sadd_results[i] != 0]
         if not new_pairs:
             return 0
-
-        # Same rationale as SADD above — silent fallback to [1]*N
-        # produces incorrect weights. Let failures propagate.
-        pipe = self._redis.pipeline(transaction=False)
-        for (s_urn, t_urn), _ in new_pairs:
-            member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
-            pipe.execute_command("SCARD", member_key)
-        scard_results = await pipe.execute()
 
         # Phase 3: single UNWIND+MERGE for all new pairs, stamped with
         # the levels resolved up front. Coalesce in the Cypher SET
@@ -3714,10 +3746,14 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.app.services.ontology_levels import UNKNOWN_LEVEL
 
         merge_batch = []
-        for i, ((s_urn, t_urn), _) in enumerate(new_pairs):
-            weight = scard_results[i] if scard_results[i] else 1
+        for (s_urn, t_urn), _ in new_pairs:
             merge_batch.append({
-                "s": s_urn, "t": t_urn, "w": int(weight),
+                "s": s_urn, "t": t_urn,
+                # Shared edge identity with the batch pipeline: without
+                # aggKey the two writers create PARALLEL edges for the
+                # same pair, and reconcile (which deletes by aggKey) can
+                # never remove the hook's copy.
+                "k": f"{s_urn}|{t_urn}",
                 "sl": urn_levels.get(s_urn, UNKNOWN_LEVEL),
                 "tl": urn_levels.get(t_urn, UNKNOWN_LEVEL),
             })
@@ -3737,8 +3773,8 @@ class FalkorDBProvider(GraphDataProvider):
         # last_cursor for resume.
 
         _SET_CLAUSE = (
-            "MERGE (s)-[r:AGGREGATED]->(t) "
-            "SET r.weight = item.w, "
+            "MERGE (s)-[r:AGGREGATED {aggKey: item.k}]->(t) "
+            "SET r.weight = coalesce(r.weight, 0) + 1, "
             "r.sourceLevel = item.sl, "
             "r.targetLevel = item.tl, "
             "r.levelDigest = $digest, "
@@ -4308,7 +4344,7 @@ class FalkorDBProvider(GraphDataProvider):
                 source_urns, target_urns, lineage_edges, timeout=timeout,
             ), []
         c_pattern = "|".join(_sanitize_label(t) for t in containment)
-        hops = max(len(levels), 10)
+        hops = self._containment_hop_bound()
         cap = AGGREGATED_EDGE_RESULT_CAP
         batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
         lt_list = list(ltypes)

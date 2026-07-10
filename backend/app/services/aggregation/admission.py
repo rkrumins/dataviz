@@ -45,10 +45,11 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _SLOT_LIMIT = int(os.getenv("FALKORDB_ENDPOINT_WRITE_SLOTS", "2"))
-_SLOT_STALE_SECS = float(os.getenv("AGGREGATION_SLOT_STALE_SECS", "200"))
+_SLOT_STALE_SECS = float(os.getenv("AGGREGATION_SLOT_STALE_SECS", "260"))
 """Holders older than this are pruned. Must exceed the longest single
-write query (bulk-create timeout ≤ 170s) or an in-flight write's slot
-could be reclaimed and the endpoint over-admitted."""
+write query (server TIMEOUT_MAX 180s + slot-wait/event-loop jitter) or
+an in-flight write's slot could be reclaimed and the endpoint
+over-admitted."""
 _SLOT_WAIT_MAX_SECS = float(os.getenv("AGGREGATION_SLOT_WAIT_MAX_SECS", "120"))
 """Upper bound on waiting for a slot before proceeding anyway (fail-open
 bias: local gates still apply, and an indefinitely-starved job is worse

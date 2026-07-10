@@ -349,6 +349,11 @@ services:
       context: .
       dockerfile: backend/Dockerfile.insights
     environment:
+      # Post-purge auto re-aggregation triggers through the Control
+      # Plane; without this the purge worker falls back to
+      # localhost:8091 (unreachable in-container) and the trigger
+      # silently no-ops.
+      AGGREGATION_SERVICE_URL: http://aggregation-controlplane:8091
       # Management DB (polling configs + stats cache + data source catalog)
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 

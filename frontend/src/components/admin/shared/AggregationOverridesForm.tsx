@@ -171,7 +171,7 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
         onChange(next)
     }
 
-    const materialize = value.materializeLeafPairs ?? true
+    const materialize = value.materializeLeafPairs ?? false
 
     return (
         <div className="space-y-4">

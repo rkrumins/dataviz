@@ -1735,13 +1735,22 @@ class ContextEngine:
         dedupe_key = f"materialize:in-flight:{ds_id}"
         if redis is not None:
             try:
-                # Short TTL: the job's own conflict handling dedupes real
-                # concurrency; this only damps read-path trigger storms.
-                claimed = bool(await redis.set(dedupe_key, "1", nx=True, ex=120))
+                # 15-minute damping: without it, a graph whose
+                # materialization fails terminally (budget exceeded,
+                # ontology misclassification) never stamps
+                # last_materialized_at, so every empty read re-triggers a
+                # full EXTRACT+COMPUTE that fails again — an unbounded,
+                # browsing-driven job-churn loop.
+                claimed = bool(await redis.set(dedupe_key, "1", nx=True, ex=900))
                 if not claimed:
                     return True
             except Exception as e:
-                logger.warning("Materialize dedupe-claim failed: %s", e)
+                logger.warning(
+                    "Materialize dedupe-claim failed (%s) — skipping "
+                    "read-path backfill rather than risking a trigger "
+                    "storm without damping.", e,
+                )
+                return False
 
         from backend.app.services.aggregation.service import get_active_service
         from backend.app.services.aggregation.schemas import (
@@ -1768,7 +1777,7 @@ class ContextEngine:
                     "Read-path backfill trigger for %s not scheduled: %s",
                     ds_id, e,
                 )
-                return "already" in str(e).lower() or "active" in str(e).lower()
+                return type(e).__name__ == "ConflictError"
 
         # Proxy deployment: this process has no aggregation service —
         # POST to the control plane's trigger endpoint instead.

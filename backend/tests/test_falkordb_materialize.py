@@ -39,6 +39,7 @@ class _FakeFalkor:
         self.typed_edges = {}  # TYPE -> [(rid, sid, tid), ...]
         self.agg = {}          # (aid, bid) -> {rid, aggKey, weight, digest, latest, ...}
         self._next_agg_rid = 0
+        self._urn_ids = {}
         self.write_queries = 0
         self.deleted_pairs = []
 
@@ -46,6 +47,7 @@ class _FakeFalkor:
 
     def add_node(self, nid, urn, label):
         self.nodes[nid] = (urn, label)
+        self._urn_ids[urn] = nid
 
     def add_edge(self, etype, rid, sid, tid):
         self.typed_edges.setdefault(etype, []).append((rid, sid, tid))
@@ -74,10 +76,10 @@ class _FakeFalkor:
     _TYPE_RE = re.compile(r"\[r:`([^`]+)`\]")
 
     def _urn_to_id(self, urn):
-        for nid, (u, _label) in self.nodes.items():
-            if u == urn:
-                return nid
-        raise AssertionError(f"unknown urn in write: {urn}")
+        nid = self._urn_ids.get(urn)
+        if nid is None:
+            raise AssertionError(f"unknown urn in write: {urn}")
+        return nid
 
     _LABEL_SCAN_RE = re.compile(r"MATCH \(n:`([^`]+)`\) WHERE ID\(n\)")
 
@@ -104,6 +106,13 @@ class _FakeFalkor:
                 for nid, (urn, label) in self.nodes.items()
                 if lo <= nid < hi
             ])
+        if cypher.strip() == "RETURN timestamp()":
+            return _Result([[int(time.time() * 1000)]])
+        if "r.aggKey IS NULL" in cypher and "RETURN 1 LIMIT 1" in cypher:
+            # Legacy-generation probe: fake edges always carry aggKey
+            # unless a test explicitly clears it.
+            legacy = [e for e in self.agg.values() if not e.get("aggKey")]
+            return _Result([[1]] if legacy else [])
         m = self._TYPE_RE.search(cypher)
         etype = m.group(1) if m else None
         edges = self.typed_edges.get(etype, [])
@@ -436,19 +445,107 @@ def test_legacy_v2_cursor_starts_fresh_without_wiping():
 
 
 def test_overflow_flush_keeps_exact_weights(monkeypatch):
-    """Force the accumulator over its cap mid-compute; weights must come
-    out exactly as in the unconstrained run."""
-    monkeypatch.setattr(mat, "_max_pending_pairs", lambda: 3)
+    """Force the overflow flush to ACTUALLY FIRE mid-rollup (the previous
+    version of this test never flushed — the knob clamp floors the cap at
+    50k — so the property it claimed to protect was unverified, and a
+    stale accumulator binding after the flush silently discarded every
+    later merge). 4097 column pairs under 4097 table pairs under one
+    domain pair, cap 4097: the flush fires at the n=4096 checkpoint and
+    the remaining merges MUST land in the fresh accumulator."""
+    n_pairs = 4097
+    monkeypatch.setattr(
+        mat.AggregationPipeline, "_pair_cap", lambda self: n_pairs,
+    )
     fake = _FakeFalkor()
-    levels = _seed_two_chain_graph(fake)
+    levels = {"domain": 0, "table": 1, "column": 2}
+    fake.add_node(1, "urn:dom_a", "domain")
+    fake.add_node(2, "urn:dom_b", "domain")
+    nid = 10
+    rid = 0
+    for i in range(n_pairs):
+        ta, ca, tb, cb = nid, nid + 1, nid + 2, nid + 3
+        nid += 4
+        fake.add_node(ta, f"urn:ta{i}", "table")
+        fake.add_node(ca, f"urn:ca{i}", "column")
+        fake.add_node(tb, f"urn:tb{i}", "table")
+        fake.add_node(cb, f"urn:cb{i}", "column")
+        fake.add_edge("CONTAINS", rid, 1, ta); rid += 1
+        fake.add_edge("CONTAINS", rid, ta, ca); rid += 1
+        fake.add_edge("CONTAINS", rid, 2, tb); rid += 1
+        fake.add_edge("CONTAINS", rid, tb, cb); rid += 1
+        fake.add_edge("FLOWS", rid, ca, cb); rid += 1
     p = _make_provider(fake, levels)
 
     result = _run(_materialize(p))
 
-    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    # Every table pair present with weight 1 — including the ones merged
+    # AFTER the mid-rollup flush — and the shared domain pair carries the
+    # full raw-edge count.
+    assert len(fake.agg) == n_pairs + 1
+    dom_key = (1, 2)
+    assert fake.agg[dom_key]["weight"] == n_pairs
     for key, edge in fake.agg.items():
-        assert edge["weight"] == 2, key
-    assert result["aggregated_edges_affected"] == len(_EXPECTED_PAIRS)
+        if key != dom_key:
+            assert edge["weight"] == 1, key
+    assert result["aggregated_edges_affected"] == n_pairs + 1
+
+
+def test_write_budget_counts_flushed_and_pending_as_union(monkeypatch):
+    """A key flushed earlier AND re-touched since sits in both the
+    flushed set and the accumulator — the budget must count it once.
+    Budget == true result size exactly: summing would overshoot and
+    terminally fail a legitimately under-budget job."""
+    n_pairs = 4097
+    monkeypatch.setattr(
+        mat.AggregationPipeline, "_pair_cap", lambda self: n_pairs,
+    )
+    # True result size is n_pairs + 1; the domain pair is flushed at the
+    # mid-rollup flush AND re-touched afterwards (every later raw edge
+    # rolls into it), so the naive sum reads n_pairs + 2 and raises.
+    monkeypatch.setattr(mat, "_max_materialized_edges", lambda: n_pairs + 1)
+    fake = _FakeFalkor()
+    levels = {"domain": 0, "table": 1, "column": 2}
+    fake.add_node(1, "urn:dom_a", "domain")
+    fake.add_node(2, "urn:dom_b", "domain")
+    nid, rid = 10, 0
+    for i in range(n_pairs):
+        ta, ca, tb, cb = nid, nid + 1, nid + 2, nid + 3
+        nid += 4
+        fake.add_node(ta, f"urn:ta{i}", "table")
+        fake.add_node(ca, f"urn:ca{i}", "column")
+        fake.add_node(tb, f"urn:tb{i}", "table")
+        fake.add_node(cb, f"urn:cb{i}", "column")
+        fake.add_edge("CONTAINS", rid, 1, ta); rid += 1
+        fake.add_edge("CONTAINS", rid, ta, ca); rid += 1
+        fake.add_edge("CONTAINS", rid, 2, tb); rid += 1
+        fake.add_edge("CONTAINS", rid, tb, cb); rid += 1
+        fake.add_edge("FLOWS", rid, ca, cb); rid += 1
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p))
+    assert result["aggregated_edges_affected"] == n_pairs + 1
+
+
+def test_empty_boundary_map_fails_loud_instead_of_wiping(monkeypatch):
+    """A boundary map that matches NOTHING (single-level ontology, or
+    labels that don't match the graph) must fail the run — continuing
+    would materialize nothing and reconcile would delete every existing
+    :AGGREGATED edge as stale."""
+    fake = _FakeFalkor()
+    # Single level: every label is at the finest level → no non-leaf
+    # labels → empty boundary.
+    levels = {"column": 0}
+    fake.add_node(3, "urn:col_a", "column")
+    fake.add_node(13, "urn:col_b", "column")
+    fake.add_edge("FLOWS", 10, 3, 13)
+    fake.seed_aggregated(3, 13, weight=7, latest=1000)
+    p = _make_provider(fake, levels)
+
+    with pytest.raises(ValueError, match="boundary is EMPTY"):
+        _run(_materialize(p))
+    # The pre-existing edge survives untouched.
+    assert fake.agg[(3, 13)]["weight"] == 7
+    assert fake.deleted_pairs == []
 
 
 # ── resume ──────────────────────────────────────────────────────────────

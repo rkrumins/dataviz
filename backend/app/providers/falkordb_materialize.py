@@ -398,7 +398,7 @@ class AggregationPipeline:
                 self.p._graph_name, self._run_start_ms, phase, pos,
             )
         else:
-            self._run_start_ms = int(time.time() * 1000)
+            self._run_start_ms = await self._server_now_ms()
             phase, pos = PHASE_AGGREGATE, 0
             if self._last_cursor:
                 logger.info(
@@ -926,9 +926,35 @@ class AggregationPipeline:
             n += 1
             if n % 4096 == 0:
                 await self._maybe_overflow_flush()
+                # The flush swaps self._acc for a fresh dict — rebind or
+                # every later merge lands in the orphaned snapshot and is
+                # silently discarded (missing edges, undercounted weights).
+                acc = self._acc
                 await asyncio.sleep(0)
         self._fine_merges_skipped += skipped
         await self._maybe_overflow_flush()
+
+    async def _server_now_ms(self) -> int:
+        """FalkorDB server clock. ``latestUpdate`` is stamped with the
+        server's ``timestamp()``, so the reconcile delete guard
+        (``latestUpdate < run_start``) must compare within the SAME clock
+        domain — a worker clock a few seconds ahead of the DB would let
+        the guard delete a concurrent ``on_lineage_edge_written`` write.
+        Falls back to local time if the probe fails."""
+        try:
+            res = await self.p._proj_ro_query(
+                "RETURN timestamp()", timeout=_scan_timeout_s(),
+            )
+            rows = res.result_set or []
+            if rows and rows[0] and rows[0][0] is not None:
+                return int(rows[0][0])
+        except Exception as exc:
+            logger.warning(
+                "aggregation pipeline on %s: server clock probe failed "
+                "(%s) — using worker clock for run_start.",
+                self.p._graph_name, exc,
+            )
+        return int(time.time() * 1000)
 
     def _pair_cap(self) -> int:
         return self._knob_int("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000)
@@ -1023,6 +1049,18 @@ class AggregationPipeline:
                 async for row in self._scan_label_nodes(spelled, want_urn=False):
                     if row and row[0] is not None:
                         levels[int(row[0])] = level
+        if not levels:
+            raise ValueError(
+                "materialization boundary is EMPTY: no graph node matched "
+                "any non-leaf ontology label. Continuing would materialize "
+                "nothing and the reconcile pass would then delete every "
+                "existing :AGGREGATED edge as stale — refusing. Check that "
+                "the ontology declares more than one hierarchy level and "
+                "that its entity-type labels (or their source aliases) "
+                "match the graph's labels; set "
+                "AGGREGATION_MATERIALIZE_FINE_PAIRS=true only if the "
+                "ontology is genuinely single-level."
+            )
         self._nonleaf_levels = levels
         logger.info(
             "aggregation pipeline on %s: materialization boundary loaded — "
@@ -1038,7 +1076,11 @@ class AggregationPipeline:
         cap = self._knob_int(
             "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
         )
-        projected = len(self._acc) + len(self._flushed)
+        # Union, not sum: a key flushed earlier AND re-touched since sits
+        # in both sets — summing double-counts it and terminally fails a
+        # legitimately under-budget job.
+        flushed = self._flushed
+        projected = len(flushed) + sum(1 for k in self._acc if k not in flushed)
         if projected > cap:
             raise MaterializationBudgetExceeded(
                 f"aggregation would materialize ~{projected} :AGGREGATED edges "
@@ -1333,6 +1375,36 @@ class AggregationPipeline:
         dedicated = getattr(self.p, "_projection_mode", "in_source") == "dedicated"
         await self._ensure_agg_index()
 
+        if start_lo == 0:
+            # Heal generations that predate the aggKey contract: edges
+            # with NULL aggKey (legacy strategies, or the pre-fix
+            # incremental hook) can never be reconciled by the keyed
+            # delete below — they would double-serve pairs forever. One
+            # relationship-bounded pass removes any that this run did
+            # not itself write.
+            try:
+                probe = await self.p._proj_ro_query(
+                    "MATCH ()-[r:AGGREGATED]->() WHERE r.aggKey IS NULL "
+                    "RETURN 1 LIMIT 1",
+                    timeout=_scan_timeout_s(),
+                )
+                if probe.result_set:
+                    await self._paced_write(lambda: self.p._proj_query(
+                        "MATCH ()-[r:AGGREGATED]->() "
+                        "WHERE r.aggKey IS NULL "
+                        "AND (r.latestUpdate IS NULL OR r.latestUpdate < $runStart) "
+                        "DELETE r",
+                        params={"runStart": self._run_start_ms},
+                        timeout=self.p._bulk_create_timeout_s,
+                    ))
+            except Exception as exc:
+                logger.warning(
+                    "aggregation pipeline on %s: legacy (NULL-aggKey) edge "
+                    "cleanup failed (%s) — stale legacy cells may double-"
+                    "serve until the next run.",
+                    self.p._graph_name, exc,
+                )
+
         # In dedicated mode the projection graph has its own node IDs, so
         # membership is matched by aggKey. Resolve the accumulator's URNs
         # once up front (they are needed for the apply phase anyway).
@@ -1401,6 +1473,20 @@ class AggregationPipeline:
                     latest_i = int(latest) if latest is not None else 0
                     if latest_i >= run_start:
                         continue
+                    if (
+                        val is not None
+                        and key is not None
+                        and key in existing
+                        and key not in self._flushed
+                    ):
+                        # Duplicate edge for a DESIRED pair (no unique
+                        # constraint on aggKey): the keyed delete below
+                        # removes EVERY old edge with this aggKey —
+                        # including the matched one we meant to keep. Pull
+                        # the pair back out of `existing` so APPLY
+                        # re-creates one fresh edge after the duplicates
+                        # collapse.
+                        existing.discard(key)
                     if agg_key:
                         to_delete.append(agg_key)
                     continue

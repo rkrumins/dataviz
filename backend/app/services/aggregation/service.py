@@ -286,9 +286,9 @@ class AggregationService:
                 timeout_secs=request.timeout_secs,
                 # Pipeline tuning: request overrides layered over the stored
                 # global defaults, frozen here so the worker stays stateless.
-                tuning_json=json.dumps(
+                tuning_json=(lambda t: json.dumps(t) if t else None)(
                     await self._effective_tuning(session, getattr(request, "tuning", None))
-                ) or None,
+                ),
                 created_at=_now(),
             )
             # Only set max_retries when caller supplied one, so the ORM
