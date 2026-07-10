@@ -1545,6 +1545,7 @@ class AggregationPipeline:
         exist. Returns the keys observed existing so APPLY can skip them."""
         dedicated = getattr(self.p, "_projection_mode", "in_source") == "dedicated"
         await self._ensure_agg_index()
+        await self._await_agg_index_ready()
 
         if start_lo == 0:
             # Heal generations that predate the aggKey contract: edges
@@ -1749,6 +1750,50 @@ class AggregationPipeline:
             ):
                 return True
         return False
+
+    async def _await_agg_index_ready(
+        self, *, budget_s: float = 60.0, interval_s: float = 2.0,
+    ) -> None:
+        """Bounded wait for the AGGREGATED(aggKey) edge index to finish
+        building. FalkorDB constructs indexes in the BACKGROUND: on a
+        first run against a large existing :AGGREGATED set, the keyed
+        deletes below would run as full relation scans until it is ready.
+        Version-tolerant (cell-scan for the status marker; column order
+        varies) and never a correctness gate — probe failure, unknown
+        shapes and budget exhaustion all WARN + proceed."""
+        deadline = time.monotonic() + budget_s
+        while True:
+            try:
+                res = await self.p._proj_ro_query(
+                    "CALL db.indexes()", timeout=_scan_timeout_s(),
+                )
+            except Exception as exc:
+                logger.info(
+                    "aggregation pipeline on %s: db.indexes() probe "
+                    "unavailable (%s) — skipping the readiness wait.",
+                    self.p._graph_name, exc,
+                )
+                return
+            building = False
+            for row in (res.result_set or []):
+                cells = [str(c) for c in (row or []) if c is not None]
+                if not any("AGGREGATED" in c for c in cells):
+                    continue
+                if any("UNDER CONSTRUCTION" in c.upper() for c in cells):
+                    building = True
+                    break
+            if not building:
+                return
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "aggregation pipeline on %s: AGGREGATED(aggKey) index "
+                    "still building after %.0fs — proceeding; keyed deletes "
+                    "may scan until it completes.",
+                    self.p._graph_name, budget_s,
+                )
+                return
+            self._cancel_check()
+            await asyncio.sleep(interval_s)
 
     async def _ensure_agg_index(self) -> None:
         """Idempotently ensure the AGGREGATED(aggKey) edge index that keeps

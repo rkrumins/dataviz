@@ -948,3 +948,64 @@ def test_apply_resume_never_skips_pairs_sorting_before_the_cursor():
     assert set(fake.agg.keys()) == _EXPECTED_PAIRS
     for key, edge in fake.agg.items():
         assert edge["weight"] == 2, key
+
+
+def test_await_agg_index_ready_polls_until_operational():
+    """F6 audit finding: FalkorDB builds indexes in the background, and
+    nothing waited for AGGREGATED(aggKey) readiness — on a first run
+    against a large existing set, every keyed delete ran as a full
+    relation scan until the index finished. The wait is bounded and
+    NEVER fails the run (readiness is an optimization, not a gate)."""
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+    probes = {"n": 0}
+
+    async def proj_ro(cypher, params=None, **kw):
+        assert "db.indexes" in cypher
+        probes["n"] += 1
+        status = "UNDER CONSTRUCTION" if probes["n"] < 3 else "OPERATIONAL"
+        return _Result([["AGGREGATED", ["aggKey"], {"aggKey": status}]])
+
+    p._proj_ro_query = proj_ro
+    pipeline = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    _run(pipeline._await_agg_index_ready(budget_s=10, interval_s=0))
+    assert probes["n"] == 3
+
+
+def test_await_agg_index_ready_budget_exhaustion_proceeds():
+    fake = _FakeFalkor()
+    p = _make_provider(fake, _seed_two_chain_graph(fake))
+
+    async def proj_ro(cypher, params=None, **kw):
+        return _Result([["AGGREGATED", ["aggKey"], "UNDER CONSTRUCTION"]])
+
+    p._proj_ro_query = proj_ro
+    pipeline = mat.AggregationPipeline(
+        provider=p, containment_edge_types=["CONTAINS"],
+        lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+    )
+    _run(pipeline._await_agg_index_ready(budget_s=0, interval_s=0))  # returns, never raises
+
+
+def test_reconcile_probes_index_readiness():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    probes = {"n": 0}
+    orig = fake.ro_query
+
+    async def proj_ro(cypher, params=None, **kw):
+        if "db.indexes" in cypher:
+            probes["n"] += 1
+            return _Result([["AGGREGATED", ["aggKey"], "OPERATIONAL"]])
+        return await orig(cypher, params, **kw)
+
+    p._proj_ro_query = proj_ro
+    result = _run(_materialize(p))
+    assert result["errors"] == 0
+    assert probes["n"] >= 1, "reconcile must check aggKey index readiness"
