@@ -62,7 +62,9 @@ Cursor format
 * ``reconcile`` — scanning current AGGREGATED edges; ``pos`` = the next
   ID-range lower bound to scan.
 * ``apply`` — creating missing edges; ``pos`` = last applied packed pair
-  key (resume recomputes and continues after it).
+  key (progress display only: resume re-runs RECONCILE, whose rebuilt
+  ``existing`` set already excludes everything the prior attempt wrote —
+  fast-forwarding past ``pos`` would skip pairs that are new since then).
 
 ``run_start_ms`` is minted once per logical run and survives resume: it
 is the ``latestUpdate`` guard that protects edges written during the run
@@ -73,7 +75,6 @@ is the ``latestUpdate`` guard that protects edges written during the run
 from __future__ import annotations
 
 import asyncio
-import bisect
 import logging
 import os
 import time
@@ -470,12 +471,15 @@ class AggregationPipeline:
             existing = await self._reconcile(start_lo=reconcile_from)
 
             # APPLY: create pairs the reconcile scan did not observe. On
-            # resume past a mid-apply crash the earlier attempt's
-            # ``existing`` set is unknown, so remaining keys are simply
-            # (idempotently) MERGE-written again.
+            # resume past a mid-apply crash RECONCILE just re-ran fully and
+            # rebuilt ``existing`` — including everything the prior attempt
+            # already wrote — so remaining keys are exactly the still-
+            # missing ones. (No cursor fast-forward here: bisecting past
+            # the recorded pos skipped pairs that were NEW since the
+            # crashed attempt but sorted before it; the recorded pos is
+            # progress display only.)
             self._mark_phase("apply_s")
-            apply_after = pos if phase == PHASE_APPLY else None
-            await self._apply_missing(existing, after_key=apply_after)
+            await self._apply_missing(existing)
             self._mark_phase("done")
 
             await self._stamp_materialized()
@@ -1791,16 +1795,12 @@ class AggregationPipeline:
 
     # -- APPLY ---------------------------------------------------------------------
 
-    async def _apply_missing(
-        self, existing: Set[int], *, after_key: Optional[int],
-    ) -> None:
+    async def _apply_missing(self, existing: Set[int]) -> None:
         """Create the accumulator pairs the reconcile scan did not observe,
-        in sorted key order so the cursor is a deterministic resume point."""
+        in sorted key order so the recorded cursor pos tracks progress
+        deterministically (writes are idempotent MERGEs; resume relies on
+        the reconcile re-scan, never on the recorded pos)."""
         missing = sorted(k for k in self._acc if k not in existing)
-        if after_key is not None:
-            start_idx = bisect.bisect_right(missing, after_key)
-            missing = missing[start_idx:]
-            self._max_applied_key = after_key
         total = len(missing) or 1
         chunk_size = self._knob_int("apply_chunk", _apply_chunk, 1_000, 200_000)
         done = 0

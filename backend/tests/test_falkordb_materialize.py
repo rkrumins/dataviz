@@ -925,3 +925,26 @@ def test_run_stats_reports_boundary_effect():
     stats = result["run_stats"]
     assert stats["fine_merges_skipped"] == 1
     assert stats["pairs"] == len(_EXPECTED_PAIRS)
+
+
+def test_apply_resume_never_skips_pairs_sorting_before_the_cursor():
+    """F5 audit finding: the apply-phase ``after_key`` fast-forward could
+    skip pairs that are NEW since the crashed attempt but sort before the
+    persisted cursor position — RECONCILE re-runs fully on apply-resume
+    and already filters what exists, so the bisect was a redundant
+    optimization with a correctness hole. Resuming mid-apply with a
+    cursor PAST every computed key must still create every missing pair.
+    """
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    past_everything = mat._pack(2, 12)      # the largest computed pair key
+    cursor = mat.make_cursor(int(time.time() * 1000), mat.PHASE_APPLY, past_everything)
+
+    result = _run(_materialize(p, last_cursor=cursor))
+
+    assert result["errors"] == 0
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    for key, edge in fake.agg.items():
+        assert edge["weight"] == 2, key
