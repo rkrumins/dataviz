@@ -179,3 +179,9 @@ How the deployed `FALKORDB_ARGS` values are derived:
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling
   before the kernel OOM-kills the whole pod.
+- **`maxmemory` / `maxmemory-policy noeviction`** (via `REDIS_ARGS`, not
+  `FALKORDB_ARGS`): the INSTANCE-level ceiling. `QUERY_MEM_CAPACITY` bounds one
+  query; only `maxmemory` bounds the dataset itself, and without it graph growth
+  eventually OOM-kills the pod. Size it ~75% of the pod memory limit;
+  `noeviction` makes writes fail loudly at the ceiling (FalkorDB data must never
+  be silently evicted).

@@ -51,6 +51,11 @@ spec:
           env:
             - name: FALKORDB_ARGS
               value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
+            # Instance ceiling at 75% of the 8Gi pod limit: QUERY_MEM_CAPACITY
+            # bounds one query; the dataset itself needs maxmemory or growth
+            # OOM-kills the pod. noeviction = writes fail loudly at the ceiling.
+            - name: REDIS_ARGS
+              value: "--maxmemory 6gb --maxmemory-policy noeviction"
           ports:
             - name: redis
               containerPort: 6379

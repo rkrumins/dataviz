@@ -43,6 +43,10 @@ services:
       - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
     environment:
       FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50
+      # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
+      # without maxmemory the dataset itself can still OOM-kill the container.
+      # noeviction = writes fail loudly at the ceiling instead of silent eviction.
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-4gb} --maxmemory-policy noeviction
     volumes:
       # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
       # symlinks /data/data → there). Mounting the volume at /data would

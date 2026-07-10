@@ -43,6 +43,8 @@ spec:
           env:
             - name: FALKORDB_ARGS
               value: {{ .Values.stores.falkordb.args | quote }}
+            - name: REDIS_ARGS
+              value: {{ .Values.stores.falkordb.redisArgs | quote }}
           ports:
             - name: redis
               containerPort: 6379
