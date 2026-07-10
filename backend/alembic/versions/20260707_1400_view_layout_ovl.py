@@ -18,7 +18,10 @@ from typing import Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "20260707_1400_view_layout_overlays"
+revision: str = "20260707_1400_view_layout_ovl"
+# NOTE: id shortened from "20260707_1400_view_layout_overlays" (34 chars) —
+# alembic_version.version_num is VARCHAR(32), so the long id could never
+# be stamped and no database can hold the old value.
 down_revision: Union[str, None] = "20260707_1200_view_layout_merge"
 branch_labels = None
 depends_on = None

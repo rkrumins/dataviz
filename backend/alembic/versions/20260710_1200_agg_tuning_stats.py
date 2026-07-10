@@ -1,7 +1,7 @@
 """Aggregation Iteration-2 columns + settings table.
 
 Revision ID: 20260710_1200_agg_tuning_stats
-Revises: 20260707_1400_view_layout_overlays
+Revises: 20260707_1400_view_layout_ovl
 Create Date: 2026-07-10 12:00
 
 Adds the ``aggregation.aggregation_jobs`` columns introduced by the
@@ -40,7 +40,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20260710_1200_agg_tuning_stats"
-down_revision: Union[str, None] = "20260707_1400_view_layout_overlays"
+down_revision: Union[str, None] = "20260707_1400_view_layout_ovl"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
