@@ -736,8 +736,23 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             )}
                                         </div>
 
+                                        {/* Waiting (routine park on a running job — not a failure) */}
+                                        {job.errorMessage && isRunning && job.errorMessage.startsWith('Quiesce') && (
+                                            <div className="rounded-xl bg-amber-500/[0.05] border border-amber-500/15 p-4">
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                                                    <span className="text-[10px] font-bold text-amber-500/90 uppercase tracking-wider">Waiting for the graph</span>
+                                                </div>
+                                                <p className="text-[11px] text-amber-500/90 leading-relaxed">
+                                                    {job.errorMessage}
+                                                </p>
+                                                <p className="mt-1.5 text-[10px] text-ink-muted">
+                                                    Writes to one graph are serialized across the fleet. This job resumes automatically when the current writer finishes; a lease whose job has already ended is broken automatically.
+                                                </p>
+                                            </div>
+                                        )}
                                         {/* Error */}
-                                        {job.errorMessage && (
+                                        {job.errorMessage && !(isRunning && job.errorMessage.startsWith('Quiesce')) && (
                                             <div className="rounded-xl bg-red-500/[0.04] border border-red-500/10 p-4">
                                                 <div className="flex items-center gap-2 mb-2">
                                                     <AlertCircle className="w-3.5 h-3.5 text-red-400" />

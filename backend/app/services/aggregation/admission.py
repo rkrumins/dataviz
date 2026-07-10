@@ -80,6 +80,17 @@ end
 return 0
 """
 
+# Atomic compare-and-replace: take the lease over only if it still holds
+# the exact value we observed (no window for a third party's fresh lease
+# to be clobbered).
+_TAKE_OVER_IF_VALUE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+  return 1
+end
+return 0
+"""
+
 
 def endpoint_key(provider: Any) -> str:
     """Stable identity for the FalkorDB endpoint a provider talks to.
@@ -164,13 +175,17 @@ class AggregationAdmission:
             return None
         if not ok:
             holder_desc = "unknown holder"
+            holder_job = ""
+            holder_value = None
             ttl_desc = ""
             try:
                 raw = await self._redis.get(key)
                 if raw is not None:
                     val = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    holder_value = val
                     parts = val.split("|")
                     if len(parts) == 3:
+                        holder_job = parts[1]
                         holder_desc = f"job {parts[1]} on {parts[2]}"
                 ttl_ms = await self._redis.pttl(key)
                 if isinstance(ttl_ms, int) and ttl_ms > 0:
@@ -180,6 +195,20 @@ class AggregationAdmission:
                     )
             except Exception:
                 pass
+            # SELF-REACQUIRE: the holder is THIS job (a retry after a
+            # crash / failed release of its own previous attempt). Take
+            # the lease over instead of parking on ourselves for up to a
+            # full TTL — the previous attempt is dead by definition
+            # (one executor per job, enforced by the exec lock).
+            if owner and holder_job == owner and holder_value is not None:
+                took = await self._try_take_over(key, holder_value, token)
+                if took:
+                    logger.info(
+                        "aggregation admission: re-acquired own graph "
+                        "lease for job %s (previous attempt's lease had "
+                        "not expired).", owner,
+                    )
+                    return self._start_renew(key, token)
             from backend.common.adapters import ProviderBusy
             raise ProviderBusy(
                 provider_name=graph,
@@ -190,6 +219,9 @@ class AggregationAdmission:
                 retry_after_seconds=30,
             )
 
+        return self._start_renew(key, token)
+
+    def _start_renew(self, key: str, token: str) -> GraphLease:
         async def _renew() -> None:
             try:
                 while True:
@@ -197,6 +229,8 @@ class AggregationAdmission:
                     try:
                         # Refresh TTL only while we still own the lease.
                         current = await self._redis.get(key)
+                        if isinstance(current, (bytes, bytearray)):
+                            current = current.decode()
                         if current != token:
                             logger.warning(
                                 "aggregation admission: graph lease %s lost "
@@ -211,6 +245,56 @@ class AggregationAdmission:
 
         task = asyncio.create_task(_renew())
         return GraphLease(key, token, task)
+
+    async def _try_take_over(
+        self, key: str, expected_value: str, new_token: str,
+    ) -> bool:
+        try:
+            res = await self._redis.eval(
+                _TAKE_OVER_IF_VALUE_LUA, 1, key,
+                expected_value, new_token, str(_GRAPH_LEASE_TTL_MS),
+            )
+            return bool(res)
+        except Exception as exc:
+            self._warn_fail_open("graph-lease takeover", exc)
+            return False
+
+    async def get_lease_holder(self, provider: Any) -> Optional[tuple]:
+        """(holder_job_id, raw_value) of the current graph-lease holder,
+        or None. Used by the worker to detect ZOMBIE leases — a holder
+        whose job row is already terminal (crashed pre-release, or an
+        orphan from the pre-cancellation-fix build) that would otherwise
+        block every writer until TTL (or forever while an orphan renews)."""
+        graph = getattr(provider, "_graph_name", "unknown")
+        key = f"agg:graphwrite:{endpoint_key(provider)}:{graph}"
+        try:
+            raw = await self._redis.get(key)
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        val = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+        parts = val.split("|")
+        if len(parts) != 3:
+            return None
+        return parts[1], val
+
+    async def break_lease_if_holder(
+        self, provider: Any, expected_value: str,
+    ) -> bool:
+        """Delete the graph lease iff it still holds ``expected_value``
+        (atomic — a freshly acquired third-party lease is never
+        clobbered). Returns True when the zombie was cleared."""
+        graph = getattr(provider, "_graph_name", "unknown")
+        key = f"agg:graphwrite:{endpoint_key(provider)}:{graph}"
+        try:
+            res = await self._redis.eval(
+                _RELEASE_IF_OWNED_LUA, 1, key, expected_value,
+            )
+            return bool(res)
+        except Exception as exc:
+            self._warn_fail_open("graph-lease break", exc)
+            return False
 
     async def release_graph_lease(self, lease: Optional[GraphLease]) -> None:
         if lease is None:

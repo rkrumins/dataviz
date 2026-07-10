@@ -409,6 +409,10 @@ class AggregationWorker:
                 job.status = "completed"
                 job.progress = 100
                 job.completed_at = _now()
+                # Clear transient park/retry text — without this, a job
+                # that quiesce-parked once ("write lease held ...") shows
+                # that message as a red error FOREVER after completing.
+                job.error_message = None
                 job.created_edges = result.get("aggregated_edges_affected", 0)
                 # Durable per-phase timings + write/delete counters for the
                 # job detail UI (best-effort; NULL on legacy providers).
@@ -660,6 +664,42 @@ class AggregationWorker:
         except Exception as e:
             logger.warning("Failed to update data source state for %s: %s", data_source_id, e)
 
+    async def _break_zombie_lease(
+        self, session: AsyncSession, provider: Any, my_job_id: str,
+    ) -> bool:
+        """True when the graph lease was held by a job whose row is
+        already terminal and we cleared it (atomically, value-compared —
+        a freshly acquired live lease is never touched)."""
+        admission = getattr(provider, "_admission_controller", None)
+        if admission is None:
+            return False
+        try:
+            holder = await admission.get_lease_holder(provider)
+            if not holder:
+                return True  # already expired — retry immediately
+            holder_job_id, holder_value = holder
+            if not holder_job_id or holder_job_id in ("unattributed", my_job_id):
+                return False
+            row = await session.get(AggregationJobORM, holder_job_id)
+            if row is None or row.status in ("completed", "failed", "cancelled"):
+                broken = await admission.break_lease_if_holder(
+                    provider, holder_value,
+                )
+                if broken:
+                    logger.warning(
+                        "Aggregation job %s: broke ZOMBIE graph lease held "
+                        "by %s (job row status=%s) — retrying immediately.",
+                        my_job_id, holder_job_id,
+                        row.status if row else "missing",
+                    )
+                return broken
+        except Exception as exc:
+            logger.warning(
+                "Aggregation job %s: zombie-lease check failed: %s",
+                my_job_id, exc,
+            )
+        return False
+
     async def _refreeze_edge_types(
         self, session: AsyncSession, job: AggregationJobORM,
     ) -> tuple:
@@ -765,6 +805,7 @@ class AggregationWorker:
         # the job forever — after the cap the job moves to ``failed``.
         max_quiesce_events = int(os.getenv("AGGREGATION_MAX_QUIESCE_EVENTS", "20"))
         quiesce_event_count = 0
+        zombie_breaks = 0
 
         # Progress-aware retry budget: a job that keeps moving forward past
         # transient FalkorDB connection resets must survive arbitrarily many
@@ -810,6 +851,20 @@ class AggregationWorker:
                 # message intact.
                 raise
             except ProviderBusy as e:
+                # ZOMBIE-LEASE takeover: if the park is a graph-lease
+                # conflict and the named holder's job row is already
+                # TERMINAL (crashed before releasing, or an orphan from a
+                # pre-cancellation-fix build renewing forever), break the
+                # lease atomically and retry immediately instead of
+                # parking 30s at a time on a lease nobody living holds.
+                if (
+                    "write lease held" in (e.reason or "")
+                    and zombie_breaks < 3
+                    and await self._break_zombie_lease(session, provider, job.id)
+                ):
+                    zombie_breaks += 1
+                    _mark_alive()
+                    continue
                 # Phase 2 — park-and-resume on quiesce. NOT a retry:
                 # don't increment ``retry_count``, don't consume the
                 # ``max_attempts`` budget. Effectively re-runs the same

@@ -38,6 +38,11 @@ class _FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         key = args[0]
+        if "SET" in script and "PX" in script:  # takeover compare-and-replace
+            if self.kv.get(key) == args[1]:
+                self.kv[key] = args[2]
+                return 1
+            return 0
         if "ZCARD" in script:  # slot acquire
             now, stale, limit, member = float(args[1]), float(args[2]), int(args[3]), args[4]
             z = self.zsets.setdefault(key, {})
@@ -113,6 +118,51 @@ def test_graph_lease_conflict_names_the_holder():
             await b.acquire_graph_lease(provider, owner="agg_67890")
         assert "agg_12345" in str(exc.value)
         await a.release_graph_lease(lease)
+
+    _run(scenario())
+
+
+def test_own_stale_lease_is_reacquired_not_parked():
+    """A retry of the SAME job must not park on its own previous
+    attempt's unexpired lease — it takes it over (the previous attempt
+    is dead by definition; the exec lock enforces one executor/job)."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+
+        first = await a.acquire_graph_lease(provider, owner="agg_self")
+        assert first is not None
+        first.renew_task.cancel()   # simulate dead attempt, lease left behind
+
+        second = await a.acquire_graph_lease(provider, owner="agg_self")
+        assert second is not None   # took over, no ProviderBusy
+        await a.release_graph_lease(second)
+
+    _run(scenario())
+
+
+def test_zombie_lease_holder_break():
+    """A claimant can atomically break a lease whose observed value is
+    unchanged — and never clobbers a lease re-acquired in between."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        b = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+
+        lease = await a.acquire_graph_lease(provider, owner="agg_dead")
+        lease.renew_task.cancel()
+        holder = await b.get_lease_holder(provider)
+        assert holder is not None and holder[0] == "agg_dead"
+
+        # Value changed under us (a live job re-acquired) → break refuses.
+        assert not await b.break_lease_if_holder(provider, holder[1] + "x")
+        # Exact observed value → break succeeds, next acquire is clean.
+        assert await b.break_lease_if_holder(provider, holder[1])
+        fresh = await b.acquire_graph_lease(provider, owner="agg_new")
+        assert fresh is not None
+        await b.release_graph_lease(fresh)
 
     _run(scenario())
 
