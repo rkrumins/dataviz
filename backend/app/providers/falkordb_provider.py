@@ -2872,15 +2872,34 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         if not unlabeled_urn:
-            logger.warning(
-                "Index health on %s: unlabeled URN index is missing. The "
-                "bulk-rebuild label-resolution fallback path and the "
-                "incremental MERGE path will both scan. If FalkorDB version "
-                "< 2.10, this is expected; consider upgrading or accept the "
-                "labeled-only path. If FalkorDB version >= 2.10, "
-                "investigate why CREATE INDEX FOR (n) ON (n.urn) was rejected.",
-                self._graph_name,
-            )
+            # Labeled-only is a fully supported strategy: every hot path
+            # (ancestor chains, node directory, apply MERGEs, the
+            # incremental write hook, on-demand reads) anchors on the
+            # per-label URN indexes. Health depends only on whether every
+            # ontology label is covered — warn on GAPS, not on the
+            # server lacking unlabeled-index support.
+            entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+            expected: set = set()
+            for lbl in entity_levels:
+                expected.update(self._alias_entity_types([lbl]))
+            have = set(labeled_urn)
+            missing = sorted(l for l in expected if l not in have)
+            if missing:
+                logger.warning(
+                    "Index health on %s: no unlabeled URN index (server "
+                    "does not support it) and %d ontology label(s) lack a "
+                    "URN index: %s. Queries anchored on those labels will "
+                    "scan — run ensure_indices / retrigger aggregation to "
+                    "create them.",
+                    self._graph_name, len(missing), ", ".join(missing[:8]),
+                )
+            else:
+                logger.info(
+                    "Index health on %s: labeled-only strategy active "
+                    "(server lacks unlabeled-index support; every ontology "
+                    "label has a URN index — all hot paths are index-driven).",
+                    self._graph_name,
+                )
 
     def _ancestors_cache_key(self) -> str:
         """Return the Redis Hash key for ancestor chains in this graph,
@@ -2945,25 +2964,11 @@ class FalkorDBProvider(GraphDataProvider):
         hardcoded ``*1..10`` for shallow ontologies, and extends to
         deeper ones without code edits.
         """
-        containment = list(self._get_containment_edge_types())
-        if not containment:
-            # No containment types — flat graph, no ancestors
-            return []
-        containment_cypher = "|".join(_sanitize_label(t) for t in containment)
-        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
-
-        # Variable-length path: returns ordered list of ancestor URNs
-        # nodes(path) gives [child, parent, grandparent, ...] — skip index 0 (self)
-        result = await self._ro_query(
-            f"MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(ancestor) "
-            f"WHERE child.urn = $urn "
-            f"WITH path ORDER BY length(path) DESC LIMIT 1 "
-            f"RETURN [n IN nodes(path)[1..] | n.urn] AS chain",
-            params={"urn": urn},
-        )
-        if result.result_set and result.result_set[0][0]:
-            return result.result_set[0][0]
-        return []
+        # Delegates to the label-driven bulk path — the previous
+        # unlabeled ``WHERE child.urn = $urn`` was a full node scan per
+        # call on servers without unlabeled-index support.
+        chains = await self._compute_ancestor_chains_bulk_cypher([urn])
+        return chains.get(urn, [])
 
     async def _compute_and_store_ancestors_bulk(
         self,
@@ -3088,35 +3093,70 @@ class FalkorDBProvider(GraphDataProvider):
         # override via FALKORDB_ANCESTOR_CHUNK_SIZE.
         chunk_size = int(os.getenv("FALKORDB_ANCESTOR_CHUNK_SIZE", "2000"))
 
-        # ``MATCH (child) WHERE child.urn IN $urns`` is one node-scan for
-        # the whole chunk; ``UNWIND $urns AS u MATCH (child {urn:u})``
-        # was N scans (one per URN), which on a multi-million-node graph
-        # without an unlabeled URN index busts the 5s read timeout and
-        # triggers the worker retry loop. Same pathology as the original
-        # MERGE-on-relationship problem, just hiding in the ancestor
-        # lookup. URNs that don't exist in the graph simply produce no
-        # row; the caller's pre-initialization to ``[]`` handles them.
-        cypher = (
-            "MATCH (child) WHERE child.urn IN $urns "
-            f"OPTIONAL MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(a) "
-            "WITH child.urn AS u, "
-            "     [n IN nodes(path)[1..] | n.urn] AS chain_candidate, "
-            "     coalesce(length(path), 0) AS plen "
-            "ORDER BY u, plen DESC "
-            "WITH u, collect(chain_candidate) AS candidates "
-            "RETURN u, coalesce(candidates[0], []) AS chain"
-        )
+        # LABEL-DRIVEN anchoring. An unlabeled ``MATCH (child) WHERE
+        # child.urn IN $urns`` is a FULL node scan per chunk on FalkorDB
+        # versions without unlabeled-index support (observed: 1776-urn
+        # chunk timing out on a 1M-node graph, then degrading to 1776
+        # per-URN full scans). Every ontology label has a URN index, so
+        # each chunk is classified per label (indexed IN lookups) and
+        # the path expansion anchors on ``(child:Label)`` — index seeks
+        # end to end. URNs matching no ontology label sit outside the
+        # containment hierarchy and keep their pre-initialized [] chain.
+        def _chain_cypher(label_clause: str) -> str:
+            return (
+                f"MATCH (child{label_clause}) WHERE child.urn IN $urns "
+                f"OPTIONAL MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(a) "
+                "WITH child.urn AS u, "
+                "     [n IN nodes(path)[1..] | n.urn] AS chain_candidate, "
+                "     coalesce(length(path), 0) AS plen "
+                "ORDER BY u, plen DESC "
+                "WITH u, collect(chain_candidate) AS candidates "
+                "RETURN u, coalesce(candidates[0], []) AS chain"
+            )
+
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        labels: List[str] = []
+        for lbl in entity_levels:
+            for spelled in self._alias_entity_types([lbl]):
+                if spelled not in labels:
+                    labels.append(spelled)
 
         for i in range(0, len(urns), chunk_size):
             chunk = urns[i : i + chunk_size]
-            result = await self._ro_query(cypher, params={"urns": chunk})
-            for row in result.result_set or []:
-                urn = row[0]
-                chain = row[1] or []
-                # Preserve list-of-str shape; FalkorDB may return None
-                # entries inside the list if a node lacked .urn — drop
-                # them so callers don't have to defend against None.
-                out[urn] = [c for c in chain if c]
+            if not labels:
+                # No ontology label map — legacy single-scan chunk query.
+                result = await self._ro_query(
+                    _chain_cypher(""), params={"urns": chunk},
+                )
+                for row in result.result_set or []:
+                    out[row[0]] = [c for c in (row[1] or []) if c]
+                continue
+            remaining = set(chunk)
+            for lbl in labels:
+                if not remaining:
+                    break
+                safe = _sanitize_label(lbl)
+                members = (await self._ro_query(
+                    f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
+                    params={"urns": list(remaining)},
+                )).result_set or []
+                member_urns = [r[0] for r in members if r and r[0]]
+                if not member_urns:
+                    continue
+                remaining.difference_update(member_urns)
+                result = await self._ro_query(
+                    _chain_cypher(f":{safe}"), params={"urns": member_urns},
+                )
+                for row in result.result_set or []:
+                    # Drop None entries (node lacked .urn) so callers
+                    # don't defend against them.
+                    out[row[0]] = [c for c in (row[1] or []) if c]
+            if remaining:
+                logger.debug(
+                    "ancestor chains: %d urns matched no ontology label "
+                    "(outside the containment hierarchy) — empty chains.",
+                    len(remaining),
+                )
 
         return out
 
@@ -3562,6 +3602,7 @@ class FalkorDBProvider(GraphDataProvider):
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         chain_urns = list(dict.fromkeys(s_chain + t_chain))
         urn_levels: Dict[str, int] = {}
+        urn_labels: Dict[str, str] = {}
         if entity_levels:
             try:
                 label_key = self._urn_label_key()
@@ -3573,6 +3614,7 @@ class FalkorDBProvider(GraphDataProvider):
                     if not raw:
                         continue
                     lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                    urn_labels[u] = lbl
                     lvl = entity_levels.get(lbl)
                     if lvl is not None:
                         urn_levels[u] = lvl
@@ -3694,10 +3736,7 @@ class FalkorDBProvider(GraphDataProvider):
         # failure, AggregationBatchAbort aborts the job and preserves
         # last_cursor for resume.
 
-        await self._proj_query(
-            "UNWIND $batch AS item "
-            "MERGE (s {urn: item.s}) "
-            "MERGE (t {urn: item.t}) "
+        _SET_CLAUSE = (
             "MERGE (s)-[r:AGGREGATED]->(t) "
             "SET r.weight = item.w, "
             "r.sourceLevel = item.sl, "
@@ -3708,9 +3747,40 @@ class FalkorDBProvider(GraphDataProvider):
             "  WHEN NOT $edgeType IN r.sourceEdgeTypes "
             "    THEN r.sourceEdgeTypes + $edgeType "
             "  ELSE r.sourceEdgeTypes END, "
-            "r.latestUpdate = timestamp()",
-            params={"batch": merge_batch, "edgeType": edge_type, "digest": digest},
+            "r.latestUpdate = timestamp()"
         )
+        # Anchor node MERGEs on the per-label URN indexes (an unlabeled
+        # ``MERGE (s {urn: ...})`` is a full node scan per item on
+        # servers without unlabeled-index support). Canonical pairs are
+        # containers whose labels resolved above; items with unknown
+        # labels (legacy level-less graphs) keep the unlabeled pattern.
+        by_label_pair: Dict[Tuple[str, str], list] = {}
+        unlabeled_items: list = []
+        for item in merge_batch:
+            s_lbl = urn_labels.get(item["s"])
+            t_lbl = urn_labels.get(item["t"])
+            if s_lbl and t_lbl:
+                by_label_pair.setdefault(
+                    (_sanitize_label(s_lbl), _sanitize_label(t_lbl)), [],
+                ).append(item)
+            else:
+                unlabeled_items.append(item)
+        for (s_lbl, t_lbl), items in by_label_pair.items():
+            await self._proj_query(
+                "UNWIND $batch AS item "
+                f"MERGE (s:{s_lbl} {{urn: item.s}}) "
+                f"MERGE (t:{t_lbl} {{urn: item.t}}) "
+                + _SET_CLAUSE,
+                params={"batch": items, "edgeType": edge_type, "digest": digest},
+            )
+        if unlabeled_items:
+            await self._proj_query(
+                "UNWIND $batch AS item "
+                "MERGE (s {urn: item.s}) "
+                "MERGE (t {urn: item.t}) "
+                + _SET_CLAUSE,
+                params={"batch": unlabeled_items, "edgeType": edge_type, "digest": digest},
+            )
         return len(merge_batch)
 
     async def on_lineage_edge_deleted(

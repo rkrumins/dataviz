@@ -38,6 +38,7 @@ _Q1_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*MATCH \(y\)-\[:")
 _Q2_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y:(\w+)\)")
 _SRC_ONLY_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*AND t\.urn <> x\.urn")
 _RESOLVE_UP_RE = re.compile(r"RETURN c\.urn, a\.urn")
+_CHAIN_RE = re.compile(r"MATCH \(child(?::(\w+))?\) WHERE child\.urn IN \$urns")
 _AGG_FANOUT_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r:AGGREGATED\]->\(t2\)")
 _AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y:(\w+)\)")
 
@@ -105,6 +106,28 @@ class _FakeGraph:
         if m:
             lbl = m.group(1)
             return _Result([[u] for u in params["urns"] if self.labels.get(u) == lbl])
+        m = _CHAIN_RE.search(cypher)
+        if m:
+            lbl = m.group(1)
+            if lbl is None:
+                raise AssertionError(
+                    "unlabeled ancestor-chain anchor issued — full node "
+                    "scan on servers without unlabeled-index support"
+                )
+            parent = {}
+            for par, kids in self.children.items():
+                for k in kids:
+                    parent[k] = par
+            rows = []
+            for u in params["urns"]:
+                if self.labels.get(u) != lbl:
+                    continue
+                chain, cur = [], parent.get(u)
+                while cur is not None:
+                    chain.append(cur)
+                    cur = parent.get(cur)
+                rows.append([u, chain])
+            return _Result(rows)
         if _RESOLVE_UP_RE.search(cypher):
             # strict upward resolution: c.urn IN $cs, a.urn IN $as_, a above c
             return _Result([
@@ -368,6 +391,30 @@ def test_trace_drilldown_falls_back_to_raw_when_aggregated_empty():
         ("urn:a2", "urn:b2"), ("urn:a2", "urn:b2"),
     ]
     assert all(e.edge_type == "FLOWS" for e in edges)
+
+
+def test_bulk_ancestor_chains_are_label_driven():
+    """Ancestor-chain computation must anchor on the per-label URN
+    indexes — the old unlabeled ``MATCH (child) WHERE child.urn IN``
+    was a full node scan per chunk (observed timing out for 1776 urns
+    on a 1M-node graph, then degrading to per-URN full scans). The fake
+    REFUSES unlabeled anchors."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=4)
+    p = _make_provider(fake, levels)
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+
+    chains = _run(p._compute_ancestor_chains_bulk_cypher(
+        ["urn:a3", "urn:b2", "urn:nonexistent"],
+    ))
+    assert chains["urn:a3"] == ["urn:a2", "urn:a1", "urn:a0"]
+    assert chains["urn:b2"] == ["urn:b1", "urn:b0"]
+    assert chains["urn:nonexistent"] == []
+
+    # The per-URN path delegates to the same label-driven query.
+    assert _run(p._compute_ancestor_chain("urn:b3")) == [
+        "urn:b2", "urn:b1", "urn:b0",
+    ]
 
 
 def test_progressive_topdown_drilldown_journey():
