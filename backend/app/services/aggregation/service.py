@@ -141,7 +141,20 @@ class AggregationService:
         4. DISPATCH: dispatcher.dispatch(job_id)
         5. RETURN: AggregationJobResponse
         """
-        from .models import AggregationDataSourceStateORM
+        from .models import API_TRIGGER_SOURCES, AggregationDataSourceStateORM
+
+        # Reject unknown sources HERE (ValueError → 422 at both endpoints)
+        # instead of letting the jobs-table CHECK constraint raise an
+        # IntegrityError 500 — that failure mode silently broke both
+        # automatic callers (post_purge from the purge worker, auto from
+        # the read-path backfill). 'purge' is valid in the table but not
+        # mintable through trigger(): those rows mark the purge lifecycle
+        # itself and are excluded from the reconciler/recovery/resume.
+        if trigger_source not in API_TRIGGER_SOURCES:
+            raise ValueError(
+                f"invalid trigger_source {trigger_source!r}; expected one of "
+                f"{', '.join(API_TRIGGER_SOURCES)}"
+            )
 
         # ── Phase 2.2 — idempotency early-return (read-only fast path) ──
         # Two POSTs sharing a key for the same data source within 60 min

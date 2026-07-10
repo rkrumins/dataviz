@@ -20,6 +20,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Every value the jobs-table CHECK constraint accepts. ``purge`` marks the
+# purge lifecycle row itself (managed by the insights worker; excluded from
+# the reconciler, crash recovery and resume), so API callers may mint any
+# source EXCEPT it — ``post_purge`` is the re-aggregation fired after a
+# purge completes, ``auto`` the read-path backfill.
+TRIGGER_SOURCES = (
+    "onboarding", "manual", "schedule", "drift", "api",
+    "purge", "post_purge", "auto",
+)
+API_TRIGGER_SOURCES = tuple(s for s in TRIGGER_SOURCES if s != "purge")
+
+
 class AggregationJobORM(Base):
     """Job tracking table — the worker reads everything from this record.
 
@@ -146,14 +158,23 @@ class AggregationJobORM(Base):
             "data_source_id",
             "idempotency_key",
             unique=True,
-            postgresql_where=text("idempotency_key IS NOT NULL"),
+            # Only ACTIVE rows participate in uniqueness (the name always
+            # promised this): the replay window is 60 min, so a key reused
+            # against a long-completed job must create a fresh run, not
+            # explode on a forever-unique tombstone.
+            postgresql_where=text(
+                "idempotency_key IS NOT NULL "
+                "AND status IN ('pending', 'running')"
+            ),
         ),
         CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
             name="ck_agg_jobs_status",
         ),
         CheckConstraint(
-            "trigger_source IN ('onboarding', 'manual', 'schedule', 'drift', 'api', 'purge')",
+            "trigger_source IN ({})".format(
+                ", ".join(f"'{s}'" for s in TRIGGER_SOURCES)
+            ),
             name="ck_agg_jobs_trigger_source",
         ),
         CheckConstraint(
