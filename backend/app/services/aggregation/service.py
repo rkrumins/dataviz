@@ -62,6 +62,31 @@ def _generate_id() -> str:
     return f"agg_{uuid.uuid4().hex[:12]}"
 
 
+def _estimate_completion(job) -> Optional[str]:
+    """ETA extrapolated from PHASE-WEIGHTED progress (0-100, monotonic
+    across EXTRACT→COMPUTE→RECONCILE→APPLY). The previous
+    processed/total extrapolation saturated the moment the extract scan
+    finished (~45%% of real work) and promised completion 'now' while
+    reconcile/apply were still running."""
+    if job.status != "running" or not job.started_at:
+        return None
+    pct = job.progress or 0
+    if pct <= 0:
+        return None
+    try:
+        started = datetime.fromisoformat(job.started_at)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        if elapsed < 5:
+            return None
+        pct = min(99, max(1, int(pct)))
+        remaining = elapsed * (100 - pct) / pct
+        return (
+            datetime.now(timezone.utc) + timedelta(seconds=remaining)
+        ).isoformat()
+    except Exception:
+        return None
+
+
 def _is_resumable(job) -> bool:
     """Whether a job can be MANUALLY resumed/restarted from its checkpoint.
 
@@ -568,19 +593,7 @@ class AggregationService:
             coverage = round(job.processed_edges / job.total_edges * 100, 1)
 
         # Estimate completion (same logic as _to_response)
-        estimated = None
-        if job.status == "running" and job.processed_edges > 0 and job.total_edges > 0:
-            if job.started_at:
-                try:
-                    started = datetime.fromisoformat(job.started_at)
-                    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-                    rate = job.processed_edges / elapsed if elapsed > 0 else 0
-                    remaining = job.total_edges - job.processed_edges
-                    if rate > 0:
-                        eta = datetime.now(timezone.utc) + timedelta(seconds=remaining / rate)
-                        estimated = eta.isoformat()
-                except Exception:
-                    pass
+        estimated = _estimate_completion(job)
 
         return AggregationJobResponse(
             id=job.id,
@@ -1305,20 +1318,7 @@ class AggregationService:
     def _to_response(job: AggregationJobORM) -> AggregationJobResponse:
         """Convert ORM to response model."""
         # Estimate completion time
-        estimated = None
-        if job.status == "running" and job.processed_edges > 0 and job.total_edges > 0:
-            if job.started_at:
-                try:
-                    started = datetime.fromisoformat(job.started_at)
-                    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-                    rate = job.processed_edges / elapsed if elapsed > 0 else 0
-                    remaining = job.total_edges - job.processed_edges
-                    if rate > 0:
-                        eta_seconds = remaining / rate
-                        eta = datetime.now(timezone.utc) + timedelta(seconds=eta_seconds)
-                        estimated = eta.isoformat()
-                except Exception:
-                    pass
+        estimated = _estimate_completion(job)
 
         return AggregationJobResponse(
             id=job.id,

@@ -30,7 +30,7 @@ import { useToast } from '@/components/ui/toast'
 import {
     buildDataSourceLookup,
     filtersToParams, paramsToFilters,
-    STATUS_CONFIG, PAGE_SIZE,
+    STATUS_CONFIG, PAGE_SIZE, triggerLabel,
     type DropdownOption,
 } from './job-history/shared'
 import { JobRow } from './job-history/JobRow'
@@ -322,7 +322,7 @@ export function RegistryJobHistory() {
             chips.push({ key: 'mode', label: filters.projectionMode === 'in_source' ? 'In-Source' : 'Dedicated' })
         }
         if (filters.triggerSource) {
-            chips.push({ key: 'trigger', label: filters.triggerSource.charAt(0).toUpperCase() + filters.triggerSource.slice(1) })
+            chips.push({ key: 'trigger', label: triggerLabel(filters.triggerSource) })
         }
         for (const s of filters.status ?? []) {
             chips.push({ key: `status-${s}`, label: STATUS_CONFIG[s]?.label ?? s })

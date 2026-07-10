@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
-import { formatDuration, timeAgo, STATUS_CONFIG, type DataSourceMeta } from './shared'
+import { formatDuration, timeAgo, triggerLabel, STATUS_CONFIG, type DataSourceMeta } from './shared'
 
 // UI phase visibility. Maps the backend's short phase IDs (emitted by
 // the aggregation pipeline's EXTRACT → COMPUTE → RECONCILE → APPLY
@@ -30,13 +30,60 @@ function phaseLabel(currentPhase: string | null | undefined): string {
     return 'Processing lineage edges'
 }
 
-// Per-phase duration keys emitted in ``job.runStats`` by the pipeline.
-const PHASE_STAT_KEYS: Array<[label: string, key: string]> = [
-    ['Extract', 'extract_s'],
-    ['Compute', 'compute_s'],
-    ['Reconcile', 'reconcile_s'],
-    ['Apply', 'apply_s'],
+// Pipeline phases in execution order — drives the stepper and the
+// per-phase duration readout (keys emitted in ``job.runStats``).
+const PHASES: Array<{ id: string; label: string; statKey: string }> = [
+    { id: 'extracting', label: 'Extract', statKey: 'extract_s' },
+    { id: 'computing', label: 'Compute', statKey: 'compute_s' },
+    { id: 'reconciling', label: 'Reconcile', statKey: 'reconcile_s' },
+    { id: 'applying', label: 'Apply', statKey: 'apply_s' },
 ]
+
+/**
+ * Four-segment EXTRACT → COMPUTE → RECONCILE → APPLY stepper.
+ * Running: segments before the current phase are done, the current one
+ * pulses, later ones are dormant. Completed: all done, with the
+ * per-phase durations from ``runStats`` under each segment.
+ */
+function PhaseStepper({ currentPhase, runStats, status }: {
+    currentPhase: string | null | undefined
+    runStats: Record<string, number> | null | undefined
+    status: string
+}) {
+    const completed = status === 'completed'
+    const currentIdx = currentPhase ? PHASES.findIndex(p => p.id === currentPhase) : -1
+    if (!completed && currentIdx < 0) return null
+    return (
+        <div className="flex items-start gap-1.5">
+            {PHASES.map((p, i) => {
+                const done = completed || i < currentIdx
+                const active = !completed && i === currentIdx
+                const secs = runStats?.[p.statKey]
+                return (
+                    <div key={p.id} className="flex-1 min-w-0">
+                        <div className={cn(
+                            'h-1 rounded-full transition-colors',
+                            done ? 'bg-indigo-500/70'
+                                : active ? 'bg-gradient-to-r from-indigo-500 to-violet-400 animate-pulse'
+                                : 'bg-black/[0.06] dark:bg-white/[0.08]',
+                        )} />
+                        <div className="mt-1 flex items-center justify-between gap-1">
+                            <span className={cn(
+                                'text-[9px] font-bold uppercase tracking-wider truncate',
+                                active ? 'text-indigo-400' : done ? 'text-ink-muted' : 'text-ink-muted/35',
+                            )}>{p.label}</span>
+                            {secs != null && (
+                                <span className="text-[9px] tabular-nums text-ink-muted/60 flex-shrink-0">
+                                    {formatDuration(secs)}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )
+            })}
+        </div>
+    )
+}
 
 // ── Tooltip ──────────────────────────────────────────────────────────
 
@@ -162,6 +209,15 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     const provType = meta?.providerType
     const ProviderLogoIcon = getProviderLogo(provType ?? '')
 
+    // This run's actual write/delete counts (diff apply). Present on
+    // every pipeline run; absent only on legacy rows.
+    const statWrites = typeof job.runStats?.writes === 'number' ? job.runStats.writes : null
+    const statDeletes = typeof job.runStats?.deletes === 'number' ? job.runStats.deletes : null
+    const isNoopRun = job.status === 'completed' && statWrites === 0 && statDeletes === 0
+    // Purge rows carry the post-purge mode on their tuning payload.
+    const purgeStaysEmpty = job.triggerSource === 'purge'
+        && Boolean((job.tuning as Record<string, unknown> | null)?.['skip_reaggregate'])
+
     // Diff-to-previous computations
     const edgeDelta = previousJob && job.status === 'completed' && previousJob.status === 'completed'
         ? job.createdEdges - previousJob.createdEdges : null
@@ -249,7 +305,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                             <Trash2 className="w-3 h-3" /> Purge
                         </span>
                     ) : (
-                        <span className="text-[11px] text-ink-muted capitalize">{job.triggerSource}</span>
+                        <span className="text-[11px] text-ink-muted">{triggerLabel(job.triggerSource)}</span>
                     )}
                 </td>
 
@@ -291,10 +347,35 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                             <span className="text-[11px] text-ink tabular-nums font-medium block">
                                 {job.processedEdges.toLocaleString()}{job.totalEdges > 0 ? ` / ${job.totalEdges.toLocaleString()}` : ''}
                             </span>
-                            {job.status === 'completed' && job.createdEdges > 0 && (
-                                <span className="text-[10px] text-emerald-500 font-semibold block tabular-nums">
-                                    +{job.createdEdges.toLocaleString()} materialized
-                                </span>
+                            {job.status === 'completed' && (
+                                statWrites != null || statDeletes != null ? (
+                                    isNoopRun ? (
+                                        <Tip label={`Graph already matched the computed result — ${job.createdEdges.toLocaleString()} aggregated edges verified, nothing rewritten`}>
+                                            <span className="text-[10px] text-emerald-500/80 font-medium block">
+                                                verified · no changes
+                                            </span>
+                                        </Tip>
+                                    ) : (
+                                        <Tip label={`${job.createdEdges.toLocaleString()} aggregated edges in graph after this run`}>
+                                            <span className="block space-x-1.5">
+                                                {statWrites != null && statWrites > 0 && (
+                                                    <span className="text-[10px] text-emerald-500 font-semibold tabular-nums">
+                                                        +{statWrites.toLocaleString()} written
+                                                    </span>
+                                                )}
+                                                {statDeletes != null && statDeletes > 0 && (
+                                                    <span className="text-[10px] text-amber-500 font-semibold tabular-nums">
+                                                        {'\u2212'}{statDeletes.toLocaleString()} removed
+                                                    </span>
+                                                )}
+                                            </span>
+                                        </Tip>
+                                    )
+                                ) : job.createdEdges > 0 ? (
+                                    <span className="text-[10px] text-emerald-500 font-semibold block tabular-nums">
+                                        +{job.createdEdges.toLocaleString()} materialized
+                                    </span>
+                                ) : null
                             )}
                             {isRunning && liveWrites != null && liveWrites > 0 && (
                                 <span className="text-[10px] text-emerald-500 font-semibold block tabular-nums">
@@ -442,17 +523,33 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 </div>
                                                 <div className="flex items-center justify-between text-[10px] text-ink-muted">
                                                     <span className="tabular-nums">
-                                                        {job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()} edges
-                                                        {job.createdEdges > 0 && (
+                                                        {job.currentPhase === 'extracting' || !job.currentPhase ? (
+                                                            <>{job.processedEdges.toLocaleString()} / {job.totalEdges.toLocaleString()} edges scanned</>
+                                                        ) : (
+                                                            <>{job.totalEdges.toLocaleString()} edges scanned</>
+                                                        )}
+                                                        {(liveWrites ?? 0) > 0 && (
                                                             <span className="text-emerald-500 ml-1.5">
-                                                                ({job.createdEdges.toLocaleString()} materialized)
+                                                                +{(liveWrites as number).toLocaleString()} written
+                                                            </span>
+                                                        )}
+                                                        {(liveDeletes ?? 0) > 0 && (
+                                                            <span className="text-amber-500 ml-1.5">
+                                                                {'\u2212'}{(liveDeletes as number).toLocaleString()} removed
                                                             </span>
                                                         )}
                                                     </span>
                                                     {job.estimatedCompletionAt && (
-                                                        <span>ETA {new Date(job.estimatedCompletionAt).toLocaleTimeString()}</span>
+                                                        <span>est. finish {new Date(job.estimatedCompletionAt).toLocaleTimeString()}</span>
                                                     )}
                                                 </div>
+                                                {isRunning && (
+                                                    <PhaseStepper
+                                                        currentPhase={job.currentPhase}
+                                                        runStats={job.runStats}
+                                                        status={job.status}
+                                                    />
+                                                )}
                                             </div>
                                         )}
 
@@ -460,8 +557,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                                             <StatCell
                                                 label="Trigger"
-                                                value={job.triggerSource === 'purge' ? 'Purge' : job.triggerSource}
-                                                capitalize
+                                                value={triggerLabel(job.triggerSource)}
                                             />
                                             <StatCell label="Batch Size" value={
                                                 job.triggerSource === 'purge' ? '\u2014'
@@ -496,7 +592,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 } />
                                             )}
                                             <StatCell
-                                                label={job.triggerSource === 'purge' ? 'Purged' : 'Materialized'}
+                                                label={job.triggerSource === 'purge' ? 'Purged' : 'In graph'}
                                                 value={
                                                     job.triggerSource === 'purge'
                                                         ? <span className="text-red-400">{job.processedEdges.toLocaleString()}</span>
@@ -512,21 +608,45 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                             : job.status === 'completed' ? '0' : '\u2014'
                                                 }
                                             />
+                                            {job.triggerSource !== 'purge' && job.status === 'completed'
+                                                && (statWrites != null || statDeletes != null) && (
+                                                <StatCell
+                                                    label="This run"
+                                                    value={
+                                                        isNoopRun
+                                                            ? <span className="text-emerald-500/80">verified {'\u00b7'} no changes</span>
+                                                            : <span className="space-x-1.5">
+                                                                {statWrites != null && statWrites > 0 && (
+                                                                    <span className="text-emerald-400">+{statWrites.toLocaleString()}</span>
+                                                                )}
+                                                                {statDeletes != null && statDeletes > 0 && (
+                                                                    <span className="text-amber-400">{'\u2212'}{statDeletes.toLocaleString()}</span>
+                                                                )}
+                                                              </span>
+                                                    }
+                                                />
+                                            )}
+                                            {job.triggerSource === 'purge' && (
+                                                <StatCell
+                                                    label="After purge"
+                                                    value={
+                                                        purgeStaysEmpty
+                                                            ? <span className="text-amber-400">Stays empty</span>
+                                                            : <span className="text-indigo-400">Auto re-aggregate</span>
+                                                    }
+                                                />
+                                            )}
                                         </div>
 
-                                        {/* Per-phase durations (self-tuning pipeline) */}
-                                        {job.runStats && PHASE_STAT_KEYS.some(([, key]) => job.runStats?.[key] != null) && (
-                                            <div className="rounded-lg bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2 flex items-center gap-6">
-                                                {PHASE_STAT_KEYS.map(([label, key]) => {
-                                                    const secs = job.runStats?.[key]
-                                                    if (secs == null) return null
-                                                    return (
-                                                        <div key={key}>
-                                                            <span className="block text-[9px] text-ink-muted/60 uppercase tracking-wider font-bold mb-1">{label}</span>
-                                                            <span className="text-[12px] font-semibold text-ink tabular-nums">{formatDuration(secs)}</span>
-                                                        </div>
-                                                    )
-                                                })}
+                                        {/* Pipeline phases with per-phase durations */}
+                                        {job.status === 'completed' && job.runStats
+                                            && PHASES.some(p => job.runStats?.[p.statKey] != null) && (
+                                            <div className="rounded-lg bg-black/[0.02] dark:bg-white/[0.02] px-3 py-2.5">
+                                                <PhaseStepper
+                                                    currentPhase={null}
+                                                    runStats={job.runStats}
+                                                    status={job.status}
+                                                />
                                             </div>
                                         )}
 
@@ -571,6 +691,18 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
                                                         <AlertTriangle className="w-3 h-3 flex-shrink-0" />
                                                         Likely caused by server restarts during processing, not a job logic failure.
+                                                    </p>
+                                                )}
+                                                {job.errorMessage.includes('max_materialized_edges') && (
+                                                    <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
+                                                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                                        The computed result exceeds the write budget — deterministic, so the job was not retried. Raise Max Materialized Edges in tuning only if the FalkorDB instance has memory headroom.
+                                                    </p>
+                                                )}
+                                                {job.errorMessage.includes('write lease held') && (
+                                                    <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
+                                                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                                        Another job was writing to the same graph — this job parked and retried automatically. If the named holder is stale, its lease expires on its own.
                                                     </p>
                                                 )}
                                             </div>
