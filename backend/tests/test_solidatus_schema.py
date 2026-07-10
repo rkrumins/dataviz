@@ -273,5 +273,31 @@ def test_canonicalize_rows_restores_declared_casing():
     assert edge_types == {"Has", "Flows_To"}
 
 
+# ── Converter handles the generator's structural knobs ──────────────────────
+
+def test_flat_depth2_yields_layer_to_attribute_containment():
+    model = _model(depth=2)
+    cg = convert_model(model, load_schema("roots_node"))
+    # Every containment pair is Roots→Node (layer directly holds attributes)
+    assert cg.containment_pairs
+    assert all(pair == ("Roots", "Node", "Has") for pair in cg.containment_pairs)
+
+
+def test_orphans_are_nodes_with_no_containment_pair():
+    model = _model(orphans=4)
+    cg = convert_model(model, load_schema("roots_node"))
+
+    layer_ids = set(model["layers"])
+    contained = {kid for e in model["entities"].values() for kid in e.get("children", [])}
+    orphan_ids = set(model["entities"]) - contained - layer_ids
+    assert len(orphan_ids) == 4
+
+    orphan_urns = {n.urn for n in cg.nodes if n.properties.get("solidatusId") in orphan_ids}
+    assert len(orphan_urns) == 4
+    # An orphan is never the child endpoint of a containment edge
+    child_urns = {e.target_urn for e in cg.edges if e.edge_type in ("has", "Has")}
+    assert orphan_urns.isdisjoint(child_urns)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

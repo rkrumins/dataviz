@@ -207,12 +207,20 @@ class SolidatusModelGenerator:
         groups_chance: float = 0.2,
         transition_density: float = 0.4,
         seed: int = None,
+        depth: int = None,
+        orphans: int = 0,
     ):
         self.num_layers = num_layers
         self.objects_per_layer = objects_per_layer
         self.attrs_per_object = attrs_per_object
         self.groups_chance = groups_chance
         self.transition_density = transition_density
+        # Deterministic hierarchy shape (None = legacy groups_chance behavior):
+        #   2 = Layer→Attribute (flat); 3 = Layer→Object→Attribute;
+        #   N>3 = insert N-3 nested Group levels between Object and Attribute.
+        self.depth = depth
+        # Extra uncontained, non-root attribute nodes (the top-level/orphan edge case).
+        self.orphans = orphans
 
         if seed is not None:
             random.seed(seed)
@@ -266,6 +274,64 @@ class SolidatusModelGenerator:
             entry["children"] = children
         self.entities[eid] = entry
 
+    def _build_depth_tier(self, lid: str, lname: str, li: int) -> List[str]:
+        """Build a layer's subtree with a deterministic depth.
+
+        depth 2 → attributes are direct children of the layer (flat).
+        depth ≥ 3 → objects under the layer; N-3 nested Group levels are inserted
+        between each Object and its Attributes (0 groups at depth 3). Returns the
+        layer's direct-child ids. Populates ``self._layer_attrs[lid]`` with the leaf
+        attribute ids so lineage generation is unchanged.
+        """
+        if self.depth <= 2:
+            attr_ids: List[str] = []
+            for attr_name, _, attr_props in self._pick_attributes(
+                random.randint(*self.attrs_per_object), lname
+            ):
+                aid = attribute_id()
+                self._add_entity(aid, attr_name, attr_props)
+                attr_ids.append(aid)
+                self._layer_attrs[lid].append(aid)
+            return attr_ids
+
+        num_group_levels = self.depth - 3
+        object_ids: List[str] = []
+        num_objects = random.randint(*self.objects_per_layer)
+        for oi in range(num_objects):
+            oid = object_id()
+            obj_name, owner = self._pick_object_name(lname, li * 10 + oi)
+
+            attr_ids = []
+            for attr_name, _, attr_props in self._pick_attributes(
+                random.randint(*self.attrs_per_object), obj_name
+            ):
+                aid = attribute_id()
+                self._add_entity(aid, attr_name, attr_props)
+                attr_ids.append(aid)
+                self._layer_attrs[lid].append(aid)
+
+            # Nest the attributes under a chain of groups, bottom-up.
+            child_ids = attr_ids
+            for level in range(num_group_levels, 0, -1):
+                gid = group_id()
+                self._add_entity(gid, f"{obj_name} Details {level}", {"GroupType": "metadata"}, child_ids)
+                child_ids = [gid]
+
+            self._add_entity(oid, obj_name, {"Owner": owner}, child_ids)
+            object_ids.append(oid)
+        return object_ids
+
+    def _add_orphans(self) -> None:
+        """Add uncontained, non-root attribute nodes. Each is placed in ``entities``
+        but in no ``children`` list and not in ``layers``; it joins a random layer's
+        attribute pool so lineage can still touch it (orphan-with-lineage case)."""
+        for _ in range(self.orphans):
+            aid = attribute_id()
+            attr_name, data_type = random.choice(ATTRIBUTE_TEMPLATES)
+            self._add_entity(aid, attr_name, {"DATA_TYPE": data_type, "orphan": True})
+            if self.layer_ids:
+                self._layer_attrs[random.choice(self.layer_ids)].append(aid)
+
     def generate(self) -> Dict[str, Any]:
         """Generate the full model and return as a dict."""
 
@@ -279,6 +345,13 @@ class SolidatusModelGenerator:
             lname = self._pick_layer_name(layer_names_shuffled[li % len(LAYER_TEMPLATES)])
 
             self._layer_attrs[lid] = []
+
+            # ── Deterministic-shape tier (--depth) ───────────────────
+            if self.depth is not None:
+                object_ids = self._build_depth_tier(lid, lname, li)
+                self._add_entity(lid, lname, {}, object_ids)
+                continue
+
             object_ids: List[str] = []
 
             # ── Create objects within this layer ─────────────────────
@@ -316,6 +389,10 @@ class SolidatusModelGenerator:
                 object_ids.append(oid)
 
             self._add_entity(lid, lname, {}, object_ids)
+
+        # ── Add orphan nodes (before lineage so they can be touched) ─
+        if self.orphans:
+            self._add_orphans()
 
         # ── Create transitions (lineage between adjacent layers) ─────
         # Data flows forward: layer[i] attributes → layer[i+1] attributes
@@ -395,6 +472,12 @@ Pipeline:
                         help="Max attributes per object (default: 8)")
     parser.add_argument("--groups-chance", type=float, default=0.2,
                         help="Probability of an object having a group (0.0-1.0, default: 0.2)")
+    parser.add_argument("--depth", type=int, default=None,
+                        help="Deterministic hierarchy depth (overrides --groups-chance): "
+                             "2=Layer->Attribute (flat), 3=Layer->Object->Attribute, "
+                             "N>3 inserts N-3 nested group levels")
+    parser.add_argument("--orphans", type=int, default=0,
+                        help="Number of extra uncontained, non-root attribute nodes (default: 0)")
     parser.add_argument("--transition-density", type=float, default=0.4,
                         help="Probability of a target attribute having lineage (0.0-1.0, default: 0.4)")
     parser.add_argument("--seed", type=int, default=None,
@@ -413,6 +496,8 @@ Pipeline:
         groups_chance=args.groups_chance,
         transition_density=args.transition_density,
         seed=args.seed,
+        depth=args.depth,
+        orphans=args.orphans,
     )
 
     model = gen.generate()
