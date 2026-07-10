@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import socket
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -630,14 +631,29 @@ async def lifespan(_app: FastAPI):
                     agg_dispatcher = PostgresDispatcher(get_jobs_session)
                     logger.info("Aggregation dispatch: PostgresDispatcher (auto — no REDIS_URL)")
                 else:
-                    agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+                    agg_worker = AggregationWorker(
+                        get_jobs_session, provider_manager,
+                        worker_id=f"inprocess-{socket.gethostname()}",
+                    )
                     agg_dispatcher = InProcessDispatcher(agg_worker)
                     logger.info("Aggregation dispatch: InProcessDispatcher (auto — worker role)")
             else:
-                # inprocess or unknown — dev/single-process mode
-                agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+                # inprocess or unknown — dev/single-process mode.
+                # worker_id attribution makes the execution location visible
+                # in the job detail UI instead of a blank Worker cell.
+                agg_worker = AggregationWorker(
+                    get_jobs_session, provider_manager,
+                    worker_id=f"inprocess-{socket.gethostname()}",
+                )
                 agg_dispatcher = InProcessDispatcher(agg_worker)
-                logger.info("Aggregation dispatch: InProcessDispatcher (all-in-one dev mode)")
+                logger.warning(
+                    "Aggregation dispatch: InProcessDispatcher — jobs will "
+                    "execute INSIDE this process. If a dedicated "
+                    "aggregation-worker container/pod is also running, it "
+                    "will never receive UI-triggered jobs and the two "
+                    "executors will contend for the per-graph write lease; "
+                    "set AGGREGATION_DISPATCH_MODE=redis in that topology."
+                )
 
             # Get ontology service reference for monolith-mode resolution.
             #
