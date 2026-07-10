@@ -55,8 +55,24 @@ SYSTEM_INTERNAL_RELATIONSHIP_TYPES: Dict[str, Dict[str, Any]] = {
 }
 
 
+def is_system_edge_type(edge_type_id: str) -> bool:
+    """True if ``edge_type_id`` is a platform-built-in edge (case-insensitive)."""
+    return bool(edge_type_id) and str(edge_type_id).upper() in SYSTEM_INTERNAL_EDGE_TYPES
+
+
 def with_system_edge_types(rel_defs_raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Return ``rel_defs_raw`` with the system-internal edge types merged in (user
-    definitions win on an id collision). Used to make every ontology implicitly include
-    the platform's built-in edges — for the resolution gate and for display."""
-    return {**SYSTEM_INTERNAL_RELATIONSHIP_TYPES, **(rel_defs_raw or {})}
+    """Return ``rel_defs_raw`` with the system-internal edge types merged in and always
+    marked ``is_system``. Makes every ontology implicitly include the platform's built-in
+    edges — for the resolution gate and for display. A user's own classification (if they
+    happened to declare one) is preserved; only the built-in marker is forced on."""
+    merged: Dict[str, Any] = {**(rel_defs_raw or {})}
+    for rid, sdef in SYSTEM_INTERNAL_RELATIONSHIP_TYPES.items():
+        existing = merged.get(rid)
+        merged[rid] = {**existing, "is_system": True} if isinstance(existing, dict) else dict(sdef)
+    return merged
+
+
+def strip_system_edge_types(rel_defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``rel_defs`` without the system-internal edge types — they are injected on
+    read, never persisted, so a save round-trip can't store (or duplicate) them."""
+    return {k: v for k, v in (rel_defs or {}).items() if not is_system_edge_type(k)}

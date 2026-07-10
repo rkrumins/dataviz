@@ -5,6 +5,9 @@ export interface RelTypeWithClassifications extends RelationshipTypeSchema {
   isLineage?: boolean
   category?: 'structural' | 'flow' | 'metadata' | 'association'
   direction?: 'source-to-target' | 'target-to-source' | 'bidirectional'
+  /** Platform built-in edge (e.g. the aggregation AGGREGATED rollup) — always present,
+   *  shown read-only. The user did not author it and cannot edit or delete it. */
+  isSystem?: boolean
 }
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info'

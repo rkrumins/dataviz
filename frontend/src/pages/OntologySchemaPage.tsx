@@ -416,7 +416,14 @@ export function OntologySchemaPage() {
     try {
       const req: Record<string, unknown> = {}
       if (workingEntityDefs) req.entityTypeDefinitions = workingEntityDefs
-      if (workingRelDefs) req.relationshipTypeDefinitions = workingRelDefs
+      if (workingRelDefs) {
+        // Built-in edges (e.g. AGGREGATED) are injected on read, marked is_system, and
+        // shown read-only. Never send them back — the backend strips them too, but keeping
+        // the payload clean avoids a pointless round-trip and any reconciliation on them.
+        req.relationshipTypeDefinitions = Object.fromEntries(
+          Object.entries(workingRelDefs).filter(([, def]) => !(def as Record<string, unknown>)?.is_system)
+        )
+      }
       if (workingContainment) req.containmentEdgeTypes = workingContainment
       if (workingLineage) req.lineageEdgeTypes = workingLineage
       if (workingDetails) {
@@ -651,6 +658,11 @@ export function OntologySchemaPage() {
 
   function handleSaveRelType(relType: RelTypeWithClassifications) {
     if (!selectedOntology || !workingRelDefs) return
+    if (relType.isSystem) {
+      showToast('info', `"${relType.name}" is a built-in edge maintained by the platform — it can't be edited.`)
+      setEditorPanel(null)
+      return
+    }
     if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
 
     // Type ids are opaque identifiers — preserve the declared casing verbatim. Normalizing

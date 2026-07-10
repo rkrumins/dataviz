@@ -111,6 +111,23 @@ def _reject_case_insensitive_type_dupes(req) -> None:
         raise HTTPException(status_code=422, detail="; ".join(collisions))
 
 
+def _strip_system_edge_types(req) -> None:
+    """Drop platform-built-in edge types (e.g. AGGREGATED) from an incoming payload — in
+    place — so they are never persisted. They are injected on read (marked ``is_system``,
+    shown read-only in the UI), so a save round-trip echoes them back; stripping here keeps
+    the stored ontology to the user's own types and stops a built-in id from being stored,
+    duplicated, or reconciled against."""
+    from backend.app.ontology.defaults import is_system_edge_type
+    rel_defs = getattr(req, "relationship_type_definitions", None)
+    if isinstance(rel_defs, dict):
+        req.relationship_type_definitions = {
+            k: v for k, v in rel_defs.items() if not is_system_edge_type(k)}
+    for field in ("containment_edge_types", "lineage_edge_types"):
+        lst = getattr(req, field, None)
+        if isinstance(lst, list):
+            setattr(req, field, [t for t in lst if not is_system_edge_type(t)])
+
+
 def _normalize_edge_type_references(req) -> None:
     """Reconcile ``containment_edge_types``/``lineage_edge_types`` entries to the declared
     casing of the relationship type they reference, and de-duplicate case-insensitively —
@@ -201,6 +218,7 @@ async def create_ontology(
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
+    _strip_system_edge_types(req)
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
@@ -300,6 +318,7 @@ async def update_ontology(
     Update an ontology. If published, creates a new version instead.
     Returns the updated or newly created ontology.
     """
+    _strip_system_edge_types(req)
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
@@ -738,6 +757,7 @@ async def import_ontology_new(
     Import a semantic layer from exported JSON, creating a new draft.
     Validates the JSON structure against the export format.
     """
+    _strip_system_edge_types(req)
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)

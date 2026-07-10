@@ -113,6 +113,7 @@ export function relDefToSchema(id: string, def: Record<string, unknown>): RelTyp
     isLineage: (def.is_lineage as boolean) ?? false,
     category: (def.category as RelTypeWithClassifications['category']) ?? 'association',
     direction: (def.direction as RelTypeWithClassifications['direction']) ?? 'source-to-target',
+    isSystem: (def.is_system as boolean) ?? (def.isSystem as boolean) ?? false,
   }
 }
 

@@ -11,6 +11,7 @@ from sqlalchemy import select, delete, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import OntologyORM, OntologyAuditLogORM
+from backend.app.ontology.defaults import with_system_edge_types
 from backend.common.models.management import (
     OntologyCreateRequest,
     OntologyUpdateRequest,
@@ -114,7 +115,12 @@ def _to_response(row: OntologyORM) -> OntologyDefinitionResponse:
         entityTypeHierarchy=json.loads(row.entity_type_hierarchy or "{}"),
         rootEntityTypes=json.loads(row.root_entity_types or "[]"),
         entityTypeDefinitions=json.loads(row.entity_type_definitions or "{}"),
-        relationshipTypeDefinitions=json.loads(row.relationship_type_definitions or "{}"),
+        # Every ontology implicitly includes the platform's built-in edges (e.g. the
+        # aggregation :AGGREGATED rollup), injected here marked ``is_system`` so the UI can
+        # always show them — clearly labelled and read-only — without persisting them.
+        relationshipTypeDefinitions=with_system_edge_types(
+            json.loads(row.relationship_type_definitions or "{}")
+        ),
         isPublished=bool(row.is_published),
         isSystem=bool(row.is_system) if row.is_system is not None else False,
         scope=row.scope or "universal",

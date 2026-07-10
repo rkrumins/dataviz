@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from backend.app.api.v1.endpoints.ontologies import (
     _normalize_edge_type_references,
     _reject_case_insensitive_type_dupes,
+    _strip_system_edge_types,
 )
 
 
@@ -78,6 +79,26 @@ def test_normalize_preserves_unmatched_reference():
     req = _req(rel={"HAS": {}}, containment=["HAS", "OWNS"])  # OWNS matches nothing
     _normalize_edge_type_references(req)
     assert req.containment_edge_types == ["HAS", "OWNS"]
+
+
+# ── System-internal (built-in) edge types are never persisted ────────────────
+
+def test_strip_system_edge_types_removes_builtins():
+    # Built-in edges are injected on read (marked is_system) and echoed back on save;
+    # the write path must strip them so they are never stored or reconciled.
+    req = _req(
+        rel={"HAS": {}, "AGGREGATED": {"is_system": True}},
+        containment=["HAS"], lineage=["FLOWS_TO", "AGGREGATED"])
+    _strip_system_edge_types(req)
+    assert set(req.relationship_type_definitions) == {"HAS"}
+    assert req.lineage_edge_types == ["FLOWS_TO"]
+    assert req.containment_edge_types == ["HAS"]
+
+
+def test_strip_is_case_insensitive():
+    req = _req(rel={"aggregated": {}})  # lowercase spelling of the built-in
+    _strip_system_edge_types(req)
+    assert req.relationship_type_definitions == {}
 
 
 if __name__ == "__main__":
