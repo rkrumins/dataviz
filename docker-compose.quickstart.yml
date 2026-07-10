@@ -36,7 +36,7 @@ services:
       # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
       # without maxmemory the dataset itself can still OOM-kill the container.
       # noeviction = writes fail loudly at the ceiling instead of silent eviction.
-      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-4gb} --maxmemory-policy noeviction
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
