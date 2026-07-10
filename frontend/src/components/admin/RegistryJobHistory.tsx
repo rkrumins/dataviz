@@ -685,10 +685,15 @@ export function RegistryJobHistory() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {data.items.map(job => (
+                                        {data.items.map((job, i) => (
                                             <JobRow
                                                 key={job.id}
                                                 job={job}
+                                                previousJob={data.items.slice(i + 1).find(
+                                                    j => j.dataSourceId === job.dataSourceId
+                                                        && j.status === 'completed'
+                                                        && j.triggerSource !== 'purge'
+                                                )}
                                                 meta={dsLookup.get(job.dataSourceId)}
                                                 expanded={expandedRowId === job.id}
                                                 onToggle={handleToggleRow}

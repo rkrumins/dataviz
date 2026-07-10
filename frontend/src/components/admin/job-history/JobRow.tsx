@@ -39,6 +39,51 @@ const PHASES: Array<{ id: string; label: string; statKey: string }> = [
     { id: 'applying', label: 'Apply', statKey: 'apply_s' },
 ]
 
+// Overall-progress band each phase occupies. MUST mirror the pipeline's
+// _progress_pct mapping in falkordb_materialize.py (extract 0-45,
+// compute 45-55, reconcile 55-75, apply 75-100).
+const PHASE_BANDS: Record<string, [number, number]> = {
+    extracting: [0, 45],
+    computing: [45, 55],
+    reconciling: [55, 75],
+    applying: [75, 100],
+}
+
+/**
+ * History-informed ETA: uses the PREVIOUS completed run's per-phase
+ * durations (persisted run_stats) for this data source — remaining
+ * time = the unfinished fraction of the current phase plus the full
+ * duration of every later phase, at the rates this graph actually
+ * exhibited last time. Falls back to null (caller uses the backend's
+ * linear phase-weighted estimate) when there is no usable history.
+ */
+function historicalEta(
+    job: AggregationJobResponse,
+    previousJob: AggregationJobResponse | undefined,
+): string | null {
+    if (job.status !== 'running' || !job.currentPhase) return null
+    const stats = previousJob?.status === 'completed' ? previousJob.runStats : null
+    if (!stats) return null
+    const idx = PHASES.findIndex(p => p.id === job.currentPhase)
+    const band = PHASE_BANDS[job.currentPhase]
+    if (idx < 0 || !band) return null
+    const prevTotal = PHASES.reduce((acc, p) => {
+        const v = stats[p.statKey]
+        return acc + (typeof v === 'number' ? v : 0)
+    }, 0)
+    if (prevTotal < 5) return null   // previous run too fast to be signal
+    const cur = stats[PHASES[idx].statKey]
+    if (typeof cur !== 'number') return null
+    const frac = Math.min(1, Math.max(0, (job.progress - band[0]) / (band[1] - band[0])))
+    let remaining = cur * (1 - frac)
+    for (let i = idx + 1; i < PHASES.length; i++) {
+        const v = stats[PHASES[i].statKey]
+        if (typeof v === 'number') remaining += v
+    }
+    if (!isFinite(remaining) || remaining <= 0) return null
+    return new Date(Date.now() + remaining * 1000).toISOString()
+}
+
 /**
  * Four-segment EXTRACT → COMPUTE → RECONCILE → APPLY stepper.
  * Running: segments before the current phase are done, the current one
@@ -539,9 +584,18 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                             </span>
                                                         )}
                                                     </span>
-                                                    {job.estimatedCompletionAt && (
-                                                        <span>est. finish {new Date(job.estimatedCompletionAt).toLocaleTimeString()}</span>
-                                                    )}
+                                                    {(() => {
+                                                        const hist = historicalEta(job, previousJob)
+                                                        const eta = hist ?? job.estimatedCompletionAt
+                                                        if (!eta) return null
+                                                        return (
+                                                            <Tip label={hist
+                                                                ? 'Projected from the previous run\u2019s per-phase durations on this data source'
+                                                                : 'Linear projection from phase-weighted progress'}>
+                                                                <span>est. finish {new Date(eta).toLocaleTimeString()}</span>
+                                                            </Tip>
+                                                        )
+                                                    })()}
                                                 </div>
                                                 {isRunning && (
                                                     <PhaseStepper
