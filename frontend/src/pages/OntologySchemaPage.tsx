@@ -653,7 +653,11 @@ export function OntologySchemaPage() {
     if (!selectedOntology || !workingRelDefs) return
     if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
 
-    const relId = relType.id.toUpperCase()
+    // Type ids are opaque identifiers — preserve the declared casing verbatim. Normalizing
+    // here (previously .toUpperCase()) corrupted any ontology whose ids aren't uppercase:
+    // it added a second, differently-cased key (Has + HAS) and pushed the uppercased id into
+    // the containment/lineage lists, which the backend then rejected as a duplicate type.
+    const relId = relType.id
     const updatedRelDefs = {
       ...workingRelDefs,
       [relId]: relSchemaToBackend(relType),
@@ -695,7 +699,7 @@ export function OntologySchemaPage() {
     if (!selectedOntology || isLocked || !workingRelDefs) return
     if (!window.confirm(`Delete relationship type "${name}"?`)) return
     const defs = { ...workingRelDefs }
-    delete defs[id.toUpperCase()]
+    delete defs[id]
     setWorkingRelDefs(defs)
     hasStagedChangesRef.current = true
     showToast('info', `"${name}" removed — save to persist`)

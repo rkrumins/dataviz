@@ -63,7 +63,7 @@ export function RelTypeRow({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
             <span className="font-semibold text-sm text-ink truncate">{rt.name}</span>
-            <code className="text-[10px] text-ink-muted/60 font-mono hidden sm:inline">{rt.id.toUpperCase()}</code>
+            <code className="text-[10px] text-ink-muted/60 font-mono hidden sm:inline">{rt.id}</code>
             {isChanged && (
               <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" title="Modified" />
             )}
@@ -237,7 +237,7 @@ export function RelationshipsPanel({
   const filtered = useMemo(() => {
     let list = relTypes
     if (showStagedOnly && changedIds && changedIds.size > 0) {
-      list = list.filter(rt => changedIds.has(rt.id.toUpperCase()))
+      list = list.filter(rt => changedIds.has(rt.id))
     }
     if (!search) return list
     const q = search.toLowerCase()
@@ -353,11 +353,11 @@ export function RelationshipsPanel({
                   <RelTypeRow
                     key={rt.id}
                     relType={rt}
-                    graphCount={edgeStatMap.get(rt.id.toUpperCase())?.count}
-                    graphSourceTargets={edgeStatMap.get(rt.id.toUpperCase())}
+                    graphCount={edgeStatMap.get(rt.id)?.count}
+                    graphSourceTargets={edgeStatMap.get(rt.id)}
                     isLocked={isLocked}
                     isEditing={editorPanel?.kind === 'rel' && editorPanel.data?.id === rt.id}
-                    isChanged={changedIds?.has(rt.id.toUpperCase())}
+                    isChanged={changedIds?.has(rt.id)}
                     onEdit={() => onEdit(rt)}
                     onDelete={() => onDelete(rt.id, rt.name)}
                   />

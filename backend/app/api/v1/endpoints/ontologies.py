@@ -90,18 +90,53 @@ async def _invalidate_ontology_caches(
 
 
 def _reject_case_insensitive_type_dupes(req) -> None:
-    """422 if the request declares two entity or relationship type ids that differ only
+    """422 if the request DECLARES two entity or relationship type ids that differ only
     by case. This is the authoring-side half of the case-insensitive normalization mandate:
     a payload's ``Has``/``HAS``/``has`` is normalized to the declared casing at the commit
     boundary, which is only well-defined when each case-folded id maps to one declared id.
-    Only fields present on the request are checked."""
+
+    Uniqueness is checked ONLY over the authoritative type-id sets — the
+    ``entity_type_definitions`` and ``relationship_type_definitions`` keys. The
+    ``containment_edge_types``/``lineage_edge_types`` lists are NOT type declarations; they
+    are references to those relationship types (a type is flagged containment/lineage by
+    appearing there). Folding them into this check conflated a reference with a declaration,
+    so a client that spelled a reference in a different case than the declared id (e.g. a
+    ``HAS`` reference against a declared ``Has``) was falsely rejected as a duplicate type.
+    ``_normalize_edge_type_references`` reconciles that casing instead. Only fields present
+    on the request are checked."""
     entity_ids = list((getattr(req, "entity_type_definitions", None) or {}).keys())
     edge_ids = list((getattr(req, "relationship_type_definitions", None) or {}).keys())
-    edge_ids += list(getattr(req, "containment_edge_types", None) or [])
-    edge_ids += list(getattr(req, "lineage_edge_types", None) or [])
     collisions = case_insensitive_type_id_collisions(entity_ids, edge_ids)
     if collisions:
         raise HTTPException(status_code=422, detail="; ".join(collisions))
+
+
+def _normalize_edge_type_references(req) -> None:
+    """Reconcile ``containment_edge_types``/``lineage_edge_types`` entries to the declared
+    casing of the relationship type they reference, and de-duplicate case-insensitively —
+    in place. These lists reference relationship types by id, so an entry must match a
+    declared id exactly (FalkorDB is case-sensitive); a case variant is a spelling of the
+    same reference, not a distinct type. Mirrors ``_reconcile_relationship_endpoints``:
+    only runs when the request carries the relationship definitions to reconcile against;
+    a lists-only partial update is left untouched. Never drops an entry — an entry that
+    matches no declared type (case-insensitively) is preserved verbatim."""
+    rel_defs = getattr(req, "relationship_type_definitions", None)
+    if not rel_defs:
+        return
+    canonical = {str(k).lower(): str(k) for k in rel_defs}
+    for field in ("containment_edge_types", "lineage_edge_types"):
+        lst = getattr(req, field, None)
+        if not isinstance(lst, list):
+            continue
+        seen: set = set()
+        out: list = []
+        for t in lst:
+            resolved = canonical.get(str(t).lower(), t)
+            key = str(resolved).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(resolved)
+        setattr(req, field, out)
 
 
 def _reconcile_relationship_endpoints(req) -> None:
@@ -167,6 +202,7 @@ async def create_ontology(
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     result = await ontology_definition_repo.create_ontology(session, req)
     await _invalidate_ontology_caches(session, getattr(result, "id", None))
@@ -265,6 +301,7 @@ async def update_ontology(
     Returns the updated or newly created ontology.
     """
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
@@ -702,6 +739,7 @@ async def import_ontology_new(
     Validates the JSON structure against the export format.
     """
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
