@@ -256,6 +256,21 @@ class SolidatusGraphBuilder:
 # FALKORDB PUSH
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _log_converted_stats(cg, schema) -> None:
+    """Log node/edge type counts for a schema-converted graph (payload spellings)."""
+    node_counts: Dict[str, int] = {}
+    for n in cg.nodes:
+        node_counts[n.entity_type] = node_counts.get(n.entity_type, 0) + 1
+    edge_counts: Dict[str, int] = {}
+    for e in cg.edges:
+        edge_counts[e.edge_type] = edge_counts.get(e.edge_type, 0) + 1
+    logger.info(f"Schema '{schema.name}': {len(cg.nodes)} nodes, {len(cg.edges)} edges")
+    for t, c in sorted(node_counts.items()):
+        logger.info(f"  node {t}: {c}")
+    for t, c in sorted(edge_counts.items()):
+        logger.info(f"  edge {t}: {c}")
+
+
 async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     provider = FalkorDBProvider(
@@ -304,11 +319,39 @@ Examples:
                         help="Source system identifier for URN generation (default: solidatus)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse and print stats without pushing to FalkorDB")
+    parser.add_argument("--schema", type=str, default=None,
+                        help="Conversion schema (preset name or JSON path) mapping the Solidatus "
+                             "roles onto a custom ontology, e.g. 'roots_node'. Omit for the "
+                             "legacy layer/object/group/attribute + HAS/FLOWS_TO output.")
+    parser.add_argument("--emit-ontology", type=str, default=None,
+                        help="Write the ontology derived from --schema to this path "
+                             "(JSON, OntologyCreateRequest shape). Requires --schema.")
+    parser.add_argument("--versioned", action="store_true",
+                        help="Ingest through the versioned service (register+publish the derived "
+                             "ontology, provision a strict manual graph, bulk-ingest, project) "
+                             "instead of a direct FalkorDB push. Requires --schema, --graph, "
+                             "--workspace-id, --provider-id.")
+    parser.add_argument("--workspace-id", type=str, default=None,
+                        help="Workspace id for --versioned ingest")
+    parser.add_argument("--provider-id", type=str, default=None,
+                        help="FalkorDB provider id for --versioned ingest")
+    parser.add_argument("--ontology-id", type=str, default=None,
+                        help="Reuse an existing published ontology instead of deriving+publishing one")
+    parser.add_argument("--no-project", action="store_true",
+                        help="Skip the FalkorDB projection in --versioned mode "
+                             "(the dev worker converges it eventually)")
 
     args = parser.parse_args()
 
     # Validate arguments
-    if not args.dry_run and not args.graph:
+    if args.emit_ontology and not args.schema:
+        parser.error("--emit-ontology requires --schema")
+    if args.versioned:
+        for flag, val in (("--schema", args.schema), ("--graph", args.graph),
+                          ("--workspace-id", args.workspace_id), ("--provider-id", args.provider_id)):
+            if not val:
+                parser.error(f"--versioned requires {flag}")
+    elif not args.dry_run and not args.graph:
         parser.error("--graph is required unless --dry-run is specified")
 
     # Load JSON
@@ -322,16 +365,45 @@ Examples:
     else:
         parser.error("Provide --file or pipe JSON to stdin")
 
-    # Build graph
-    builder = SolidatusGraphBuilder(source_system=args.source_system)
-    builder.build(data)
-    builder.print_stats()
+    # ── Legacy path (no --schema): unchanged behavior ────────────────────────
+    if not args.schema:
+        builder = SolidatusGraphBuilder(source_system=args.source_system)
+        builder.build(data)
+        builder.print_stats()
+        if args.dry_run:
+            logger.info("Dry run — no data pushed.")
+            for node in builder.nodes[:5]:
+                logger.info(f"  Sample: {node.urn}  type={node.entity_type}  name={node.display_name}")
+        else:
+            asyncio.run(push_to_falkordb(builder, args.graph))
+        sys.exit(0)
 
-    # Push or dry-run
-    if args.dry_run:
+    # ── Schema path: convert into the custom ontology ────────────────────────
+    from backend.scripts.solidatus_schema import convert_model, derive_ontology_request, load_schema
+
+    schema = load_schema(args.schema)
+    cg = convert_model(data, schema, source_system=args.source_system)
+    _log_converted_stats(cg, schema)
+
+    if args.emit_ontology:
+        req = derive_ontology_request(schema, cg, name=f"Solidatus {schema.name}")
+        with open(args.emit_ontology, "w") as f:
+            json.dump(req.model_dump(by_alias=True), f, indent=2)
+            f.write("\n")
+        logger.info(f"Wrote derived ontology to {args.emit_ontology}")
+
+    if args.versioned:
+        from backend.scripts.solidatus_schema import ingest_versioned
+        result = asyncio.run(ingest_versioned(
+            schema=schema, cg=cg, workspace_id=args.workspace_id, provider_id=args.provider_id,
+            graph_name=args.graph, ontology_id=args.ontology_id, project=not args.no_project))
+        logger.info("Versioned ingest complete: ontology=%s data_source=%s graph=%s "
+                    "canonicalized=%s ingested=%s rejected=%s",
+                    result["ontology_id"], result["data_source_id"], result["graph_id"],
+                    result["canonicalized"], result["ingested"], len(result["rejected"]))
+    elif args.dry_run:
         logger.info("Dry run — no data pushed.")
-        # Print a few sample nodes for verification
-        for node in builder.nodes[:5]:
+        for node in cg.nodes[:5]:
             logger.info(f"  Sample: {node.urn}  type={node.entity_type}  name={node.display_name}")
     else:
-        asyncio.run(push_to_falkordb(builder, args.graph))
+        asyncio.run(push_to_falkordb(cg, args.graph))

@@ -303,3 +303,98 @@ def derive_ontology_request(cg_schema: ConversionSchema, cg: ConvertedGraph, *, 
         entity_type_definitions=entity_defs,
         relationship_type_definitions=rel_defs,
     )
+
+
+# ── Versioned-service ingest (needs the management + graphver DBs) ────────────
+
+async def register_ontology(session, schema: ConversionSchema, cg: ConvertedGraph, *, name: str) -> str:
+    """Create + publish the ontology derived from ``schema``/``cg``; return its id."""
+    from backend.app.db.repositories import ontology_definition_repo
+
+    req = derive_ontology_request(schema, cg, name=name)
+    created = await ontology_definition_repo.create_ontology(session, req)
+    await ontology_definition_repo.publish_ontology(session, created.id)
+    return created.id
+
+
+async def ingest_versioned(
+    *,
+    schema: ConversionSchema,
+    cg: ConvertedGraph,
+    workspace_id: str,
+    provider_id: str,
+    graph_name: str,
+    actor: str = "import_solidatus",
+    ontology_name: str = None,
+    ontology_id: str = None,
+    project: bool = True,
+) -> Dict[str, Any]:
+    """Ingest a converted graph through the versioned service: register the derived
+    ontology (unless ``ontology_id`` reuses one), provision a manual data source +
+    strict versioned graph pinned to it, canonicalize the rows to the declared casing,
+    bulk-ingest one ``import`` commit, and (default) project to FalkorDB.
+
+    The workspace and provider rows must already exist (created by the CLI's dev stack
+    or the test helper's ``seed_workspace_provider``). Mirrors the blank-graph endpoint:
+    the data source commits before ``create_graph`` (management and graphver may be
+    separate DBs — no 2PC)."""
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.db.repositories import data_source_repo
+    from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+    from backend.app.ontology.rules import resolved_ontology_to_rules
+    from backend.app.ontology.service import LocalOntologyService
+    from backend.app.providers.versioned_bootstrap import canonicalize_rows
+    from backend.app.services.versioning import models as gv_models
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.common.models.management import DataSourceCreateRequest
+
+    await gv_models.create_schema_and_partitions()  # idempotent
+    svc = GraphVersioningService()
+    Session = get_session_factory(PoolRole.WEB)
+
+    async with Session() as s:
+        if ontology_id is None:
+            ontology_id = await register_ontology(
+                s, schema, cg, name=ontology_name or f"Solidatus {schema.name}")
+        ds = await data_source_repo.create_data_source(s, workspace_id, DataSourceCreateRequest(
+            provider_id=provider_id, ontology_id=ontology_id, graph_name=graph_name,
+            label=graph_name, access_level="write"))
+        row = await data_source_repo.get_data_source_orm(s, ds.id)
+        row.source_mode = "managed"
+        await s.commit()
+        ds_id = ds.id
+
+    created = await svc.create_graph(
+        data_source_id=ds_id, workspace_id=workspace_id, kind="manual", actor=actor,
+        base_ontology_id=ontology_id, falkor_graph_name=graph_name,
+        falkor_provider=provider_id, ontology_enforcement="strict")
+    graph_id = created["graph_id"]
+
+    async with Session() as s:
+        resolved = await LocalOntologyService(SQLAlchemyOntologyRepository(s)).resolve(
+            workspace_id=workspace_id, data_source_id=ds_id)
+    rules = resolved_ontology_to_rules(resolved)
+
+    rows = to_ingest_rows(cg)
+    canonicalized = canonicalize_rows(rows, rules)
+    report = await svc.bulk_ingest(
+        graph_id=graph_id, rows=rows, actor=actor,
+        idempotency_key=f"solidatus:{graph_name}:{schema.name}")
+
+    if project:
+        from backend.app.services.versioning.projection import (
+            FalkorProjector, make_falkor_graph_factory,
+        )
+        await FalkorProjector(graph_client_factory=make_falkor_graph_factory()).project_graph(graph_id)
+
+    return {
+        "ontology_id": ontology_id,
+        "data_source_id": ds_id,
+        "graph_id": graph_id,
+        "main_branch_id": created["main_branch_id"],
+        "canonicalized": canonicalized,
+        "ingested": report.get("ingested"),
+        "rejected": report.get("rejected", []),
+        "rules": rules,
+        "graph_name": graph_name,
+    }
