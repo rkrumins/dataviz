@@ -6887,6 +6887,54 @@ class FalkorDBProvider(GraphDataProvider):
         )
         return [self._extract_node_from_result(row) for row in (result.result_set or []) if self._extract_node_from_result(row)]
 
+    # TTL for the observed-casing maps below. Long enough to amortize the
+    # vocabulary probe across a bulk load's many calls; short enough that
+    # an out-of-band writer's new spelling is picked up quickly.
+    _TYPE_CASING_TTL_S = 60.0
+
+    async def _type_casing_maps(self) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """``casefold(name) → observed spelling`` for relationship types and
+        labels, TTL-cached per provider instance. Newly-written spellings are
+        added to the cached maps by ``_consistent_casing`` so consistency
+        holds across calls inside the TTL window. Probe failure ⇒ empty maps
+        (write-as-given) — casing consistency must never block a write."""
+        now = time.monotonic()
+        cached = getattr(self, "_casing_maps_cache", None)
+        if cached is not None and now - cached[0] < self._TYPE_CASING_TTL_S:
+            return cached[1], cached[2]
+        rels: Dict[str, str] = {}
+        labels: Dict[str, str] = {}
+        try:
+            res = await self._ro_query("CALL db.relationshipTypes()")
+            for row in (res.result_set or []):
+                if row and row[0]:
+                    rels.setdefault(str(row[0]).casefold(), str(row[0]))
+            res = await self._ro_query("CALL db.labels()")
+            for row in (res.result_set or []):
+                if row and row[0]:
+                    labels.setdefault(str(row[0]).casefold(), str(row[0]))
+        except Exception as exc:
+            logger.debug(
+                "type-casing vocabulary probe failed (%s) — writing types "
+                "as given this window", exc,
+            )
+        self._casing_maps_cache = (now, rels, labels)
+        return rels, labels
+
+    @staticmethod
+    def _consistent_casing(name: str, fold_map: Dict[str, str]) -> str:
+        """The graph's canonical spelling for ``name``: an already-observed
+        case-fold variant wins (FalkorDB matches types/labels case-
+        sensitively — a second casing fragments one logical type across two
+        relation matrices, and a differently-cased label makes MERGE mint a
+        DUPLICATE of an existing urn node); a genuinely new spelling is
+        recorded and becomes canonical for subsequent writes."""
+        got = fold_map.get(name.casefold())
+        if got is not None:
+            return got
+        fold_map[name.casefold()] = name
+        return name
+
     async def save_custom_graph(
         self, nodes: List[GraphNode], edges: List[GraphEdge],
         endpoint_labels: Optional[Dict[str, str]] = None,
@@ -6918,10 +6966,17 @@ class FalkorDBProvider(GraphDataProvider):
         except ValueError:
             batch_size = 2000
 
+        # Observed-casing maps: everything this call CREATES is written in
+        # the graph's existing casing (or mints the canonical one) so one
+        # logical type/label never fragments across case variants.
+        rel_casing, label_casing = await self._type_casing_maps()
+
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
-            label = _sanitize_label(str(node.entity_type))
+            label = self._consistent_casing(
+                _sanitize_label(str(node.entity_type)), label_casing,
+            )
             native_props, residual_blob = _split_user_properties(node.properties)
             nodes_by_label[label].append({
                 "urn": node.urn,
@@ -7034,7 +7089,9 @@ class FalkorDBProvider(GraphDataProvider):
         # means "unknown endpoint" → label-less MATCH (correct, unindexed fallback).
         edges_grouped: Dict[tuple, list] = defaultdict(list)
         for edge in edges:
-            rel_type = _sanitize_label(str(edge.edge_type))
+            rel_type = self._consistent_casing(
+                _sanitize_label(str(edge.edge_type)), rel_casing,
+            )
             key = (rel_type, urn_label.get(edge.source_urn), urn_label.get(edge.target_urn))
             edges_grouped[key].append({
                 "src": edge.source_urn,
@@ -7067,7 +7124,10 @@ class FalkorDBProvider(GraphDataProvider):
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         await self._ensure_connected()
         try:
-            label = _sanitize_label(str(node.entity_type))
+            rel_casing, label_casing = await self._type_casing_maps()
+            label = self._consistent_casing(
+                _sanitize_label(str(node.entity_type)), label_casing,
+            )
             native_props, residual_blob = _split_user_properties(node.properties)
             # Reserved fields go into the merge map alongside native user
             # props — `SET n += $p` writes them all in one pass. The native
@@ -7105,7 +7165,9 @@ class FalkorDBProvider(GraphDataProvider):
             )
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
-                rel_type = _sanitize_label(str(containment_edge.edge_type))
+                rel_type = self._consistent_casing(
+                    _sanitize_label(str(containment_edge.edge_type)), rel_casing,
+                )
                 await self._query(
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
@@ -7128,7 +7190,10 @@ class FalkorDBProvider(GraphDataProvider):
         """Create a single edge in FalkorDB."""
         await self._ensure_connected()
         try:
-            rel_type = _sanitize_label(str(edge.edge_type))
+            rel_casing, _ = await self._type_casing_maps()
+            rel_type = self._consistent_casing(
+                _sanitize_label(str(edge.edge_type)), rel_casing,
+            )
             await self._query(
                 f"MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "
