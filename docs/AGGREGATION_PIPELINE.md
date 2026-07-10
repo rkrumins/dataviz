@@ -246,3 +246,15 @@ server-side at its timeout (requires `TIMEOUT_MAX`). Unit coverage lives
 in `backend/tests/test_falkordb_materialize.py` (semantics, exact
 weights under overflow and cancel+resume, no-op re-runs, guarded
 deletes) and `backend/tests/test_aggregation_admission.py`.
+`backend/tests/integration/test_aggregation_pipeline_live.py`
+(`RUN_FALKOR_LIVE=1`) proves the completeness contract on a REAL
+engine: mixed-case seed → exact canonical cells/weights/level stamps,
+mutate → exact diff, unchanged re-run → zero writes with `latestUpdate`
+frozen, resume-mid-apply → every missing pair created, and the
+`db.indexes()` shape the readiness probe parses.
+
+**Worker-crash soak (manual):** seed 2M/5M via the benchmark script,
+trigger via the UI with the worker container running, then
+`docker restart` the worker mid-APPLY — the control plane's reconciler
+auto-resumes from `last_cursor` (watch for "auto-resume #1"), no edge
+is wiped, and the re-run converges to a zero-write diff.
