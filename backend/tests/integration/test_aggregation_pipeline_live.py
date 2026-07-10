@@ -185,3 +185,47 @@ async def test_db_indexes_shape_supports_readiness_probe():
         ), agg_rows
     finally:
         await _drop(p)
+
+
+@skip_if_down
+async def test_self_nesting_type_materializes_every_containment_depth():
+    """CRITICAL live regression (2026-07-11): a self-nesting type
+    (Node ⊃ Node) under a two-level ontology materialized ONLY the root
+    diagonal (9 cells on a graph with 246 Node→Node containments) —
+    Context View showed no aggregated lineage below the roots. The
+    structural boundary materializes every containment depth, and each
+    depth's weights sum to the raw lineage total (the quotient
+    invariant)."""
+    host, port = _host_port()
+    name = f"gvt_agg_{uuid.uuid4().hex[:8]}"
+    p = FalkorDBProvider(host=host, port=port, graph_name=name)
+    p._entity_type_levels = {"Roots": 0, "Node": 1}
+    p._level_digest = "live-digest-sn"
+    await p._ensure_connected()
+    try:
+        await p._graph.query(
+            "CREATE (r1:Roots {urn:'r1'}), (m1:Node {urn:'m1'}), (l1:Node {urn:'l1'}), "
+            "(r2:Roots {urn:'r2'}), (m2:Node {urn:'m2'}), (l2:Node {urn:'l2'}), "
+            "(r1)-[:contains]->(m1), (m1)-[:contains]->(l1), "
+            "(r2)-[:contains]->(m2), (m2)-[:contains]->(l2), "
+            "(l1)-[:FLOWS]->(l2), (l1)-[:FLOWS]->(l2), (l1)-[:FLOWS]->(l2)"
+        )
+        result = await _materialize(p)
+        assert result["errors"] == 0
+        rows = await _agg_rows(p)
+        weights = {k: v[0] for k, v in rows.items()}
+        assert weights == {
+            ("m1", "m2"): 3,       # Node-container depth — the missing cells
+            ("r1", "r2"): 3,       # Roots depth
+        }, weights
+        # Anchored drill both directions: what does m1 feed / what feeds m2.
+        res = await p._graph.ro_query(
+            "MATCH (a:Node {urn:'m1'})-[r:AGGREGATED]->(b) RETURN b.urn, r.weight"
+        )
+        assert [list(r) for r in res.result_set] == [["m2", 3]]
+        res = await p._graph.ro_query(
+            "MATCH (a)-[r:AGGREGATED]->(b:Node {urn:'m2'}) RETURN a.urn, r.weight"
+        )
+        assert [list(r) for r in res.result_set] == [["m1", 3]]
+    finally:
+        await _drop(p)
