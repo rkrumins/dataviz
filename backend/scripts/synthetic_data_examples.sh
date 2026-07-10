@@ -38,6 +38,16 @@
 #   --depth 2      flat (Layer->Attribute)      --depth 6   deep nesting (extra Group tiers)
 #   --orphans K    K uncontained, non-root nodes (top-level/orphan query case)
 #
+# REALISTIC LINEAGE (--realistic) — coherent, column-level, end-to-end flows.
+#   Data CONCEPTS flow through every layer, so columns trace source->sink with semantic
+#   correspondence (email->email->...), unlike the default adjacent-layer random fill.
+#     --realistic              enable it
+#     --e2e-fraction F         fraction of concepts carried source->sink (backbones, default 0.5)
+#     --fan-in MIN-MAX         join width on carry targets (e.g. 1-3)
+#     --fan-out MIN-MAX        split width on carry sources (e.g. 1-2)
+#     --table-lineage          also emit object->object (table-level) edges
+#     --transition-density     probability transient (non-backbone) columns get a derived edge
+#
 # WHERE TO RUN
 #   Generation needs only Python stdlib (runs anywhere). Push/versioned modes need
 #   the app deps + a live FalkorDB, i.e. the dev container:
@@ -77,6 +87,17 @@ size_example() {
   fi
 }
 
+# generate realistic lineage with the given generator flags, then dry-run or push.
+realistic_example() {
+  local label=$1; shift
+  local gen="$GEN --realistic $* --seed 7"
+  if [ "$MODE" = push ]; then
+    run "FALKORDB_SAVE_BATCH_SIZE=10000 $gen | $IMP --schema roots_node --graph demo_$label"
+  else
+    run "$gen | $IMP --dry-run --schema roots_node"
+  fi
+}
+
 catalog() {
   cat <<EOF
 ${BOLD}Synthetic data generation — examples${OFF}
@@ -96,6 +117,11 @@ ${BOLD}Shapes${OFF}        (structural edge cases)
   shape-flat            --depth 2  (Layer directly contains attributes)
   shape-deep            --depth 6  (extra nested Group tiers)
   shape-orphans         --orphans 5  (uncontained, non-root nodes)
+
+${BOLD}Realistic${OFF}     (coherent end-to-end column lineage; prints an actual source->sink trace)
+  realistic-10hop       10 layers, 60% backbone concepts carried source->sink
+  realistic-joins       fan-in 1-3, fan-out 1-2 (joins & splits around the backbone)
+  realistic-tables      adds object/table-level lineage alongside the column edges
 
 ${BOLD}Modes${OFF}
   mode-emit-ontology    write the derived OntologyCreateRequest JSON to stdout
@@ -131,6 +157,14 @@ case "${1:-}" in
                 run "$GEN --layers 2 --max-objects 4 --depth 6 --seed 1 | $IMP --dry-run --schema roots_node" ;;
   shape-orphans) note "5 uncontained, non-root nodes (the top-level/orphan query edge case)"
                 run "$GEN --layers 3 --orphans 5 --seed 1 | $IMP --dry-run --schema roots_node" ;;
+
+  # ── Realistic lineage (coherent end-to-end column flows) ─────────────────
+  realistic-10hop) note "10 layers; 60% of concepts are carried source->sink (real end-to-end traces)"
+                realistic_example realistic-10hop --layers 10 --e2e-fraction 0.6 ;;
+  realistic-joins) note "joins (fan-in 1-3) and splits (fan-out 1-2) around the backbone"
+                realistic_example realistic-joins --layers 8 --fan-in 1-3 --fan-out 1-2 ;;
+  realistic-tables) note "column-level lineage PLUS object/table-level rollup edges"
+                realistic_example realistic-tables --layers 8 --fan-in 1-2 --table-lineage ;;
 
   # ── Modes ────────────────────────────────────────────────────────────────
   mode-emit-ontology) note "derive the ontology (entity/relationship defs) from the schema + data"
