@@ -76,7 +76,11 @@ async def _drop(p: FalkorDBProvider) -> None:
         pass
 
 
-async def _materialize(p, *, last_cursor=None):
+async def _materialize(p, *, last_cursor=None, tuning=None):
+    # Scenario tests pin the BOUNDARY mode (the at-scale path); the auto
+    # full-cube default has its own live scenario below.
+    merged = {"materialize_fine_pairs": False}
+    merged.update(tuning or {})
     return await mat.materialize_aggregated_edges(
         p,
         containment_edge_types=["CONTAINS"],      # graph spells it 'contains'
@@ -85,6 +89,7 @@ async def _materialize(p, *, last_cursor=None):
         progress_callback=None,
         intra_batch_callback=None,
         should_cancel=None,
+        tuning=merged,
     )
 
 
@@ -227,5 +232,38 @@ async def test_self_nesting_type_materializes_every_containment_depth():
             "MATCH (a)-[r:AGGREGATED]->(b:Node {urn:'m2'}) RETURN a.urn, r.weight"
         )
         assert [list(r) for r in res.result_set] == [["m1", 3]]
+    finally:
+        await _drop(p)
+
+
+@skip_if_down
+async def test_auto_mode_stores_full_cube_and_answers_every_granularity():
+    """Default (auto) on a within-budget graph: the FULL ancestor
+    cross-product is stored — leaf→container, leaf→root, container→root,
+    every combination — so drilling/expanding in Context View always has
+    stored answers (the 2026-07-11 incident: root→root rendered, any
+    expansion showed nothing)."""
+    host, port = _host_port()
+    name = f"gvt_agg_{uuid.uuid4().hex[:8]}"
+    p = FalkorDBProvider(host=host, port=port, graph_name=name)
+    p._entity_type_levels = {"Roots": 0, "Node": 1}
+    p._level_digest = "live-digest-auto"
+    await p._ensure_connected()
+    try:
+        await p._graph.query(
+            "CREATE (r1:Roots {urn:'r1'}), (m1:Node {urn:'m1'}), (l1:Node {urn:'l1'}), "
+            "(r2:Roots {urn:'r2'}), (m2:Node {urn:'m2'}), (l2:Node {urn:'l2'}), "
+            "(r1)-[:contains]->(m1), (m1)-[:contains]->(l1), "
+            "(r2)-[:contains]->(m2), (m2)-[:contains]->(l2), "
+            "(l1)-[:FLOWS]->(l2), (l1)-[:FLOWS]->(l2)"
+        )
+        result = await _materialize(p, tuning={"materialize_fine_pairs": "auto"})
+        assert result["errors"] == 0
+        weights = {k: v[0] for k, v in (await _agg_rows(p)).items()}
+        assert weights == {
+            ("l1", "m2"): 2, ("l1", "r2"): 2,
+            ("m1", "l2"): 2, ("m1", "m2"): 2, ("m1", "r2"): 2,
+            ("r1", "l2"): 2, ("r1", "m2"): 2, ("r1", "r2"): 2,
+        }, weights
     finally:
         await _drop(p)

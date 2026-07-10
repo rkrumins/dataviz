@@ -168,21 +168,25 @@ def _materialize_leaf_pairs() -> bool:
     ).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _materialize_fine_pairs() -> bool:
-    """Legacy full-cube mode: materialize EVERY ancestor-pair combination,
-    including pairs involving leaf-LEVEL nodes (column→table,
-    column→domain, …) and mixed-level container pairs (table→domain).
-    The full cube scales as edges × depth² level combinations — the
-    blow-up that can exceed the FalkorDB instance's memory (observed:
-    1.17M edges → 5.6M pairs → OOM). Default OFF: only same-level
-    container pairs are materialized; leaf-involving and mixed-level
-    pairs are served on demand by ``get_aggregated_edges_between``, so
-    the capability is unchanged while the materialized set stays one
-    pair per level per raw edge, shrinking monotonically up the
-    hierarchy."""
-    return os.getenv(
-        "AGGREGATION_MATERIALIZE_FINE_PAIRS", "false"
-    ).strip().lower() in ("1", "true", "yes", "on")
+def _materialize_fine_pairs_mode() -> str:
+    """FULL-CUBE materialization mode: EVERY ancestor-pair combination
+    (leaf→table, table→table, column→domain, …) physically stored.
+
+    ``auto`` (default): the pipeline ESTIMATES the cube volume up front
+    (one counting pass over the raw edges using the ancestor walks it
+    already performs) and materializes the full cube whenever the
+    estimate fits ``AGGREGATION_MAX_MATERIALIZED_EDGES`` — the canvas
+    then answers at EVERY granularity from storage alone. Above budget
+    it falls back to the structural depth-diagonal + on-demand reads
+    (the scale mode; the cube scales as edges × depth² and OOM'd real
+    instances: 1.17M edges → 5.6M pairs). ``true``/``false`` force a
+    mode (a forced cube over budget fails terminally, loudly)."""
+    raw = os.getenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "auto").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return "true"
+    if raw in ("0", "false", "no", "off"):
+        return "false"
+    return "auto"
 
 
 def _max_materialized_edges() -> int:
@@ -351,6 +355,9 @@ class AggregationPipeline:
         self._nonleaf_type_level: Dict[int, int] = {}
         # All containment-parent ids (set once containment is loaded).
         self._struct_parents: Optional[Set[int]] = None
+        # Cube (full ancestor cross-product) vs boundary — decided per
+        # run by _decide_materialization_mode.
+        self._cube_mode: Optional[bool] = None
         # Memoized (rank, id) ancestor rep-chains keyed by non-leaf node
         # — bounded by container count; reset when the parent map reloads.
         self._rep_chain_cache: Dict[int, Tuple[Tuple[int, int], ...]] = {}
@@ -891,7 +898,8 @@ class AggregationPipeline:
             self.p._graph_name, len(parents), len(multi_parents),
         )
 
-        # ---- materialization boundary (non-leaf node IDs) ----
+        # ---- materialization mode + structural boundary ----
+        await self._decide_materialization_mode()
         await self._load_nonleaf_ids()
 
         # ---- total lineage count (honest processed/total display) ----
@@ -1212,16 +1220,98 @@ class AggregationPipeline:
 
     # -- STRUCTURAL materialization boundary ----------------------------------
 
+    def _fine_mode(self) -> str:
+        """Resolved materialization mode: job tuning (bool or "auto")
+        beats the env tri-state."""
+        raw = self._tuning.get("materialize_fine_pairs")
+        if raw is None:
+            return _materialize_fine_pairs_mode()
+        if isinstance(raw, str) and raw.strip().lower() == "auto":
+            return "auto"
+        return "true" if raw else "false"
+
     def _fine_filter_active(self) -> bool:
-        """True when leaf-involving pairs are excluded from materialization
-        (the default). The boundary is STRUCTURAL — any containment parent
-        is a container — so it works with or without an ontology level map
-        and on types that nest under themselves. Only the explicit
-        fine-pairs escape hatch (or a graph with no containment at all)
-        restores the legacy full-cube path."""
+        """True when the structural depth-diagonal boundary is in force
+        (cube mode OFF). Valid only after _decide_materialization_mode."""
         if not getattr(self, "_struct_parents", None):
             return False
-        return not self._knob_bool("materialize_fine_pairs", _materialize_fine_pairs)
+        return not bool(self._cube_mode)
+
+    async def _decide_materialization_mode(self) -> None:
+        """Pick cube vs boundary for this run (see
+        ``_materialize_fine_pairs_mode``). The auto estimator is one
+        counting scan over the raw lineage edges: Σ (ancestors(src)+1) ×
+        (ancestors(tgt)+1) — a conservative upper bound on distinct cube
+        cells (dedupe only shrinks it), so auto can never pick a cube
+        that terminally exceeds the budget."""
+        self._struct_parents = set(self._parents.values())
+        if not self._struct_parents and self._containment:
+            # Containment types are DECLARED but matched zero edges. If
+            # the graph holds rollup cells, EITHER mode would recompute a
+            # result without container cells and reconcile would delete
+            # every stored one as stale. Refuse loudly (types/alias/
+            # casing problem) instead of wiping.
+            probe = await self.p._proj_ro_query(
+                "MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1",
+                timeout=_scan_timeout_s(),
+            )
+            if probe.result_set:
+                raise MaterializationPreconditionFailed(
+                    "declared containment edge types matched ZERO edges in "
+                    "the graph, but :AGGREGATED rollups exist — continuing "
+                    "would recompute a leaf-only result and delete every "
+                    "stored container cell as stale. Check the ontology's "
+                    "containment types / source aliases / casing."
+                )
+        mode = self._fine_mode()
+        if not self._struct_parents:
+            # No containment at all: the lattice degenerates to the leaf
+            # mirror; the boundary has nothing to rank. Legacy path.
+            self._cube_mode = True
+            return
+        if mode == "true":
+            self._cube_mode = True
+            return
+        if mode == "false":
+            self._cube_mode = False
+            return
+        parents = self._parents
+        cnt_memo: Dict[int, int] = {}
+
+        def anc_count(node: int) -> int:
+            path: List[int] = []
+            cur: Optional[int] = node
+            while cur is not None and cur not in cnt_memo:
+                path.append(cur)
+                cur = parents.get(cur)
+            base = cnt_memo.get(cur, 0) if cur is not None else 0
+            for n in reversed(path):
+                base += 1
+                cnt_memo[n] = base
+            return cnt_memo[node]
+
+        from backend.app.providers.falkordb_provider import _sanitize_label
+        estimate = 0
+        for etype in self._effective_types:
+            safe = _sanitize_label(etype)
+            async for _lo, rows in self._scan_type_ranges(safe):
+                for sid, tid in rows:
+                    if sid is None or tid is None:
+                        continue
+                    estimate += (anc_count(int(sid))) * (anc_count(int(tid)))
+        cap = self._knob_int(
+            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
+        )
+        self._cube_mode = estimate <= cap
+        logger.info(
+            "aggregation pipeline on %s: auto mode — full-cube estimate "
+            "~%d cells vs budget %d → %s.",
+            self.p._graph_name, estimate, cap,
+            "FULL CUBE (every ancestor combination stored)"
+            if self._cube_mode else
+            "structural depth-diagonal (cube exceeds budget; mixed "
+            "granularities served on demand)",
+        )
 
     async def _load_nonleaf_ids(self) -> None:
         """Build the structural boundary from the containment parent map:
@@ -1244,25 +1334,6 @@ class AggregationPipeline:
         """
         if self._nonleaf_levels is not None:
             return
-        self._struct_parents = set(self._parents.values())
-        if not self._struct_parents and self._containment:
-            # Containment types are DECLARED but matched zero edges. If the
-            # graph holds rollup cells, the legacy full-cube path this run
-            # would fall into computes only leaf pairs — and reconcile
-            # would then delete every stored container cell as stale.
-            # Refuse loudly (types/alias/casing problem) instead of wiping.
-            probe = await self.p._proj_ro_query(
-                "MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1",
-                timeout=_scan_timeout_s(),
-            )
-            if probe.result_set:
-                raise MaterializationPreconditionFailed(
-                    "declared containment edge types matched ZERO edges in "
-                    "the graph, but :AGGREGATED rollups exist — continuing "
-                    "would recompute a leaf-only result and delete every "
-                    "stored container cell as stale. Check the ontology's "
-                    "containment types / source aliases / casing."
-                )
         if not self._fine_filter_active():
             return
         parents = self._parents

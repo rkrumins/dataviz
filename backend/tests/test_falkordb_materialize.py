@@ -222,7 +222,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None):
+async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None,
+                       tuning=None):
+    # The suite pins the BOUNDARY (depth-diagonal) mechanics — the mode
+    # every graph too big for the full cube runs in. Auto/cube behavior
+    # has its own dedicated tests below.
+    merged = {"materialize_fine_pairs": False}
+    merged.update(tuning or {})
     return await mat.materialize_aggregated_edges(
         p,
         containment_edge_types=["CONTAINS"],
@@ -231,6 +237,7 @@ async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None
         progress_callback=progress,
         intra_batch_callback=None,
         should_cancel=should_cancel,
+        tuning=merged,
     )
 
 
@@ -323,7 +330,7 @@ def test_fine_pairs_env_flag_restores_full_cube(monkeypatch):
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
 
-    _run(_materialize(p))
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
 
     assert set(fake.agg.keys()) == _EXPECTED_FINE_PAIRS
     for key in _EXPECTED_FINE_PAIRS:
@@ -337,7 +344,7 @@ def test_leaf_pairs_env_flag_restores_mirrors(monkeypatch):
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
 
-    _run(_materialize(p))
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
 
     assert set(fake.agg.keys()) == _EXPECTED_FINE_PAIRS | {(3, 13)}
     assert fake.agg[(3, 13)]["weight"] == 2
@@ -358,7 +365,7 @@ def test_equal_endpoint_pairs_excluded_but_rollups_kept(monkeypatch):
     fake.add_edge("FLOWS", 10, 2, 3)
     p = _make_provider(fake, levels)
 
-    _run(_materialize(p))
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
 
     # (c1,c2) leaf mirror dropped; (t,t) equal pair dropped; the mixed
     # pairs (c1→t) and (t→c2) remain.
@@ -382,7 +389,7 @@ def test_multi_parent_longest_chain(monkeypatch):
     fake.add_edge("FLOWS", 10, 4, 5)
     p = _make_provider(fake, levels)
 
-    _run(_materialize(p))
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
 
     # leaf's chain resolves through mid → deep_root, not shallow.
     assert (2, 5) in fake.agg
@@ -600,8 +607,10 @@ def test_single_level_ontology_run_succeeds_not_fails():
     fake2.add_edge("CONTAINS", 1, 2, 4)   # b ⊃ d
     fake2.add_edge("FLOWS", 10, 3, 4)     # c → d
     p2 = _make_provider(fake2, {"folder": 0})
-    _run(_materialize(p2))
-    assert {k: v["weight"] for k, v in fake2.agg.items()} == {(1, 2): 1}
+    _run(_materialize(p2, tuning={"materialize_fine_pairs": "auto"}))
+    # Tiny graph → auto picks the FULL CUBE: the original cross-product
+    # cells (c→b, a→d, a→b) are physically stored again.
+    assert set(fake2.agg.keys()) == {(3, 2), (1, 4), (1, 2)}
 
 
 def test_empty_graph_is_a_clean_noop():
@@ -798,7 +807,7 @@ def test_containment_cycle_is_broken(monkeypatch):
     p = _make_provider(fake, levels)
 
     # Must terminate and produce the acyclic part of the rollup.
-    _run(_materialize(p))
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
     assert (1, 3) in fake.agg
 
 
@@ -820,7 +829,7 @@ def test_write_budget_guard_fails_loud_instead_of_oom(monkeypatch):
     with pytest.raises(
         mat.MaterializationBudgetExceeded, match="max_materialized_edges"
     ):
-        _run(_materialize(p))
+        _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
     assert fake.agg == {}
 
 
@@ -1072,3 +1081,64 @@ def test_self_nesting_four_deep_materializes_three_container_ranks():
     assert result["errors"] == 0
     agg = {k: v["weight"] for k, v in fake.agg.items()}
     assert agg == {(3, 13): 2, (2, 12): 2, (1, 11): 2}, agg
+
+
+
+# ── auto mode: full cube within budget, boundary above it ───────────────
+
+
+def test_auto_mode_materializes_full_cube_within_budget():
+    """The old implementation's semantics, restored with the new
+    protections: on a graph whose full ancestor cross-product fits the
+    write budget, EVERY combination is physically stored — leaf→container
+    included — so the canvas answers at every granularity from storage
+    alone (the live incident: root→root rendered, expansion showed
+    nothing because mixed-granularity pairs were derive-on-read and the
+    reader thinks in type levels)."""
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": "auto"}))
+
+    assert result["errors"] == 0
+    agg = {k: v["weight"] for k, v in fake.agg.items()}
+    assert agg == {
+        (3, 12): 2, (3, 11): 2,          # leaf → container / root
+        (2, 13): 2, (2, 12): 2, (2, 11): 2,
+        (1, 13): 2, (1, 12): 2, (1, 11): 2,
+    }, agg
+
+
+def test_auto_mode_falls_back_to_boundary_above_budget():
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={
+        "materialize_fine_pairs": "auto",
+        # Cube estimate for this graph is 2 edges × 3 × 3 = 18 cells.
+        "max_materialized_edges": 10_000,
+    }))
+    assert result["errors"] == 0
+    # Default budget → cube (above). Now shrink the budget below the
+    # estimate: auto must fall back to the depth-diagonal, not fail.
+    fake2 = _FakeFalkor()
+    levels2 = _seed_self_nesting_graph(fake2, depth=3)
+    p2 = _make_provider(fake2, levels2)
+    import backend.app.providers.falkordb_materialize as m
+    orig = m._max_materialized_edges
+    m._max_materialized_edges = lambda: 10_000
+    try:
+        result2 = _run(mat.materialize_aggregated_edges(
+            p2,
+            containment_edge_types=["CONTAINS"],
+            lineage_edge_types=["FLOWS"],
+            last_cursor=None, progress_callback=None,
+            intra_batch_callback=None, should_cancel=None,
+            tuning={"materialize_fine_pairs": "auto",
+                    "max_materialized_edges": 10_000},
+        ))
+    finally:
+        m._max_materialized_edges = orig
+    assert result2["errors"] == 0

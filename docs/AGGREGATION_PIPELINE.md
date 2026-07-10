@@ -19,6 +19,21 @@ entity-type levels. Containment and lineage edge types are the
 ontology-resolved sets frozen onto the job row at trigger time; the
 worker re-validates the ontology fingerprint before running.
 
+**Materialization modes (auto by default).** The pipeline ESTIMATES
+the full ancestor cross-product volume up front (one counting scan:
+Σ ancestors(src)+1 × ancestors(tgt)+1 — a conservative upper bound) and,
+when it fits `AGGREGATION_MAX_MATERIALIZED_EDGES`, stores the FULL CUBE:
+every ancestor combination (column→table, table→table, column→domain,
+…) physically exists, so every canvas granularity and expansion answers
+from storage alone. Above budget it falls back to the structural
+boundary below (`AGGREGATION_MATERIALIZE_FINE_PAIRS=true|false` forces a
+mode; a forced cube over budget fails terminally, loudly). Known caveat
+of boundary mode on SELF-NESTING types: the on-demand reader still
+reasons in ontology type levels, so mixed-granularity drill answers can
+be incomplete there — depth-aware on-demand reads are the tracked
+follow-up; within-budget graphs never hit this because auto stores the
+cube.
+
 **The STRUCTURAL materialization boundary (the scale contract):**
 only CANONICAL DEPTH-BRIDGED pairs are materialized: a node is a
 container because it HAS CONTAINMENT CHILDREN (never because of its
