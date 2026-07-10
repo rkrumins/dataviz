@@ -4067,22 +4067,47 @@ class FalkorDBProvider(GraphDataProvider):
         # edges × hierarchy depth and OOMs the instance on large graphs.
         # They are computed here ON DEMAND for the requested (bounded)
         # URN sets: raw lineage fan-out + upward containment walks, all
-        # index-driven. Coarse pairs (both endpoints non-leaf) come from
-        # the materialized rows above with complete weights. Deduped in
-        # favor of a materialized row (covers graphs written before the
-        # boundary change until their next re-aggregation).
-        raw_rows = await self._synthesize_ondemand_lineage_pairs(
+        # index-driven. Canonical container pairs come from the
+        # materialized rows above with complete weights; mixed-level
+        # container pairs are derived from those cells.
+        raw_rows, mixed_rows = await self._synthesize_ondemand_lineage_pairs(
             source_urns, target_urns, containment_edges, lineage_edges,
             timeout=timeout,
         )
-        if raw_rows:
-            seen_pairs = {(row[0], row[1]) for row in rows}
-            rows = list(rows)
+        if raw_rows or mixed_rows:
+            rows = [list(row) for row in rows]
+            by_pair = {(row[0], row[1]): row for row in rows}
+            # Leaf-involving rows are disjoint from materialized cells by
+            # construction — a collision means a stale pre-boundary fine
+            # cell still exists (graph not yet re-aggregated); the
+            # materialized row wins until reconcile cleans it away.
             for row in raw_rows:
                 pair = (row[0], row[1])
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
+                if pair not in by_pair:
+                    row = list(row)
+                    by_pair[pair] = row
                     rows.append(row)
+            # Mixed-level derived rows carry ONLY the strictly-below-the-
+            # coarse-endpoint portion — ADD to a materialized canonical
+            # row for the same pair (disjoint provenance), else append.
+            for row in mixed_rows:
+                existing = by_pair.get((row[0], row[1]))
+                if existing is None:
+                    row = list(row)
+                    by_pair[(row[0], row[1])] = row
+                    rows.append(row)
+                    continue
+                existing[2] = (
+                    (int(existing[2]) if existing[2] else 0)
+                    + (int(row[2]) if row[2] else 0)
+                )
+                ex_types = existing[3] if isinstance(existing[3], list) else (
+                    [existing[3]] if existing[3] else []
+                )
+                new_types = row[3] if isinstance(row[3], list) else (
+                    [row[3]] if row[3] else []
+                )
+                existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
 
         last_materialized_at: Optional[str] = None
         try:
@@ -4108,10 +4133,14 @@ class FalkorDBProvider(GraphDataProvider):
         lineage_edges: Optional[List[str]],
         *,
         timeout: Optional[float] = None,
-    ) -> list:
+    ) -> Tuple[list, list]:
         """Compute leaf-involving aggregated pairs on demand for bounded
         URN sets — the read-side half of the level-based materialization
-        boundary.
+        boundary. Returns ``(leaf_rows, mixed_rows)``: leaf-involving
+        rows are disjoint from materialized cells (dedupe-safe); mixed
+        non-leaf rows carry ONLY the strictly-below-the-coarse-endpoint
+        portion and must be ADDED to a materialized canonical row for
+        the same pair (see ``_mixed_level_pairs``).
 
         A pair involves a leaf-LEVEL node only when that node is the raw
         edge endpoint itself (leaves have no descendants), so every such
@@ -4143,12 +4172,12 @@ class FalkorDBProvider(GraphDataProvider):
             [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
         )
         if not ltypes or not source_urns:
-            return []
+            return [], []
         levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         if not levels:
             return await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout,
-            )
+            ), []
 
         finest = max(levels.values())
         leaf_labels = [lbl for lbl, lv in levels.items() if lv == finest]
@@ -4161,7 +4190,7 @@ class FalkorDBProvider(GraphDataProvider):
         if not leaf_labels or not containment:
             return await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout,
-            )
+            ), []
         c_pattern = "|".join(_sanitize_label(t) for t in containment)
         hops = max(len(levels), 10)
         cap = AGGREGATED_EDGE_RESULT_CAP
@@ -4212,6 +4241,7 @@ class FalkorDBProvider(GraphDataProvider):
                 return []
 
         rows: list = []
+        mixed_rows: list = []
         src_leaf_by_label = await _classify(source_urns, leaf_labels)
         src_leaf_set = {u for m in src_leaf_by_label.values() for u in m}
 
@@ -4266,11 +4296,11 @@ class FalkorDBProvider(GraphDataProvider):
             if src_nonleaf and tgt_nonleaf and nonleaf_labels:
                 src_nl_by_label = await _classify(src_nonleaf, nonleaf_labels)
                 tgt_nl_by_label = await _classify(tgt_nonleaf, nonleaf_labels)
-                rows.extend(await self._mixed_level_pairs(
+                mixed_rows = await self._mixed_level_pairs(
                     src_nl_by_label, tgt_nl_by_label, levels,
                     c_pattern=c_pattern, hops=hops, cap=cap, batch=batch,
                     run_src=_run, run_proj=_run_proj,
-                ))
+                )
         else:
             # Source-only mode (no target set): exact raw fan-out of the
             # requested leaf sources. Upward resolution is skipped — with no
@@ -4288,7 +4318,7 @@ class FalkorDBProvider(GraphDataProvider):
                             f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
                             {"xs": members[i:i + batch], "lt": lt_list},
                         ))
-        return rows
+        return rows, mixed_rows
 
     async def _mixed_level_pairs(
         self,
@@ -4304,15 +4334,22 @@ class FalkorDBProvider(GraphDataProvider):
         run_proj,
     ) -> list:
         """Derive mixed-level non-leaf pairs (table→domain, domain→table)
-        from the materialized same-level diagonal.
+        from the materialized canonical cells.
 
         For each finer/coarser combination: (1) read the finer endpoint's
-        same-level :AGGREGATED cells from the projection graph (URN-index
-        anchor), (2) resolve the far endpoints upward through containment
-        on the source graph, (3) join and sum in Python. Two bounded
-        index-driven queries per level combination — never a subtree
-        enumeration. Weights are exact because the pipeline stores each
-        raw edge in exactly one same-level cell per endpoint.
+        :AGGREGATED cells whose far side is at-or-below the finer level
+        (``targetLevel <= Ls`` / ``sourceLevel <= Lt`` — under canonical
+        level-bridging each raw edge appears in exactly ONE such cell per
+        anchored endpoint, aligned or ragged), (2) resolve the far
+        endpoints STRICTLY upward through containment on the source
+        graph, (3) join and sum in Python. Two bounded index-driven
+        queries per level combination — never a subtree enumeration.
+
+        The strictly-upward walk makes these sums DISJOINT from any
+        directly-materialized canonical cell for the same (finer, coarser)
+        pair (whose raw edges resolve AT the coarser endpoint, not below
+        it) — the caller must therefore ADD a derived row's weight to a
+        materialized row for the same pair, not drop it.
         """
         cells: Dict[Tuple[str, str], list] = {}
 
@@ -4355,10 +4392,10 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(xs), batch):
                     fanout.extend(await run_proj(
                         f"MATCH (x:{safe})-[r:AGGREGATED]->(t2) "
-                        f"WHERE x.urn IN $xs AND r.sourceLevel = r.targetLevel "
+                        f"WHERE x.urn IN $xs AND r.targetLevel <= $maxTl "
                         f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
                         f"LIMIT {cap}",
-                        {"xs": xs[i:i + batch]},
+                        {"xs": xs[i:i + batch], "maxTl": ls},
                     ))
             up = await _resolve_up([row[1] for row in fanout if row and row[1]], ys)
             for row in fanout:
@@ -4379,10 +4416,10 @@ class FalkorDBProvider(GraphDataProvider):
                 for i in range(0, len(ys), batch):
                     fanin.extend(await run_proj(
                         f"MATCH (s2)-[r:AGGREGATED]->(y:{safe}) "
-                        f"WHERE y.urn IN $ys AND r.sourceLevel = r.targetLevel "
+                        f"WHERE y.urn IN $ys AND r.sourceLevel <= $maxSl "
                         f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
                         f"LIMIT {cap}",
-                        {"ys": ys[i:i + batch]},
+                        {"ys": ys[i:i + batch], "maxSl": lt},
                     ))
             up = await _resolve_up([row[1] for row in fanin if row and row[1]], xs)
             for row in fanin:

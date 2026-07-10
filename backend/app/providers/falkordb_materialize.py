@@ -323,6 +323,9 @@ class AggregationPipeline:
         # fine filter is active; the map is bounded by CONTAINER counts
         # (small), never by edge or leaf counts. None = filter inactive.
         self._nonleaf_levels: Optional[Dict[int, int]] = None
+        # Memoized (level, id) ancestor rep-chains keyed by non-leaf node
+        # — bounded by container count; reset when the parent map reloads.
+        self._rep_chain_cache: Dict[int, Tuple[Tuple[int, int], ...]] = {}
         self._fine_merges_skipped = 0
 
         # Run state
@@ -653,6 +656,7 @@ class AggregationPipeline:
             self._resolve_multi_parents(parents, multi_parents)
         self._break_cycles(parents)
         self._parents = parents
+        self._rep_chain_cache = {}  # chains derive from the fresh parent map
         logger.info(
             "aggregation pipeline on %s: containment loaded — %d child→parent "
             "entries (%d multi-parent nodes resolved by longest chain).",
@@ -764,20 +768,38 @@ class AggregationPipeline:
                 state[n] = 1
 
     async def _rollup_base(self, base: Dict[int, int]) -> None:
-        """Roll one (partial) base map up through the ancestor lattice and
-        merge every derived cell into the run accumulator.
+        """Merge every materialized cell derived from one (partial) base
+        map into the run accumulator.
 
-        Cell (0,0) is the raw-pair mirror — merged only when
-        ``AGGREGATION_MATERIALIZE_LEAF_PAIRS`` is on. All other cells
-        (source and/or target mapped up ≥1 containment step) are merged.
-        Equal-endpoint pairs are kept in lattice intermediates (their
-        roll-ups are valid distinct pairs) but excluded from output,
-        matching the legacy ``if sa == ta: continue`` rule.
+        With the boundary active (``self._nonleaf_levels`` loaded), each
+        raw pair produces its CANONICAL LEVEL-BRIDGED pairs: for every
+        ontology level L present on either ancestor chain, the pair of
+        each side's deepest non-leaf ancestor at level ≤ L. On aligned
+        chains this is exactly the same-level diagonal (table→table,
+        domain→domain). On RAGGED chains (a column hanging directly
+        under a domain, skipping table/schema) it yields the mixed-level
+        cell the canvas shows at each granularity (table→domain) — the
+        cell a pure level-equality filter silently drops. Either way the
+        bound is at most one pair per level per raw edge. Cross-level
+        raw lineage (a raw table→database edge) falls out of the same
+        rule — no special base-cell case.
+
+        Without the boundary (legacy full-cube mode) the original
+        ancestor-lattice roll produces every cross-product cell; the
+        (0,0) raw mirror is merged only when
+        ``AGGREGATION_MATERIALIZE_LEAF_PAIRS`` is on. Equal-endpoint
+        pairs are excluded from output in both modes (legacy
+        ``if sa == ta: continue`` parity).
         """
         if not base:
             return
         values = self._values
         parents = self._parents
+        nonleaf = self._nonleaf_levels  # None = boundary inactive
+
+        if nonleaf is not None:
+            await self._merge_canonical_pairs(base)
+            return
 
         def roll(cell: Dict[int, int], *, source_side: bool) -> Dict[int, int]:
             out: Dict[int, int] = {}
@@ -793,48 +815,19 @@ class AggregationPipeline:
                 )
             return out
 
-        nonleaf = self._nonleaf_levels  # None = fine filter inactive
-
-        async def merge_cell(
-            cell: Dict[int, int], *, require_same_level: bool = True,
-        ) -> None:
+        async def merge_cell(cell: Dict[int, int]) -> None:
             acc = self._acc
-            skipped = 0
             for key, val in cell.items():
                 sid, tid = _unpack(key)
                 if sid == tid:
                     continue
-                if nonleaf is not None:
-                    ls = nonleaf.get(sid)
-                    lt = nonleaf.get(tid)
-                    if ls is None or lt is None or (
-                        require_same_level and ls != lt
-                    ):
-                        # Leaf-involving or mixed-level pair: served on
-                        # demand by the read path. Materializing either
-                        # class scales with raw-edge count (leaf pairs as
-                        # edges × depth, mixed-level pairs as edges ×
-                        # depth² level combinations) — the cube blow-up
-                        # that exceeds FalkorDB memory. Only the
-                        # same-level diagonal (one pair per level per raw
-                        # edge, shrinking monotonically up the hierarchy)
-                        # is stored.
-                        skipped += 1
-                        continue
                 cur = acc.get(key)
                 acc[key] = val if cur is None else values.merge(
                     cur, values.weight(val), values.mask(val),
                 )
-            self._fine_merges_skipped += skipped
             await self._maybe_overflow_flush()
 
-        if nonleaf is not None:
-            # Base cells keep the DIRECT raw endpoint pair even across
-            # levels (e.g. a raw table→database lineage edge) — bounded by
-            # distinct non-leaf raw pairs, and the only exact record of
-            # cross-level raw facts.
-            await merge_cell(base, require_same_level=False)
-        elif self._knob_bool("materialize_leaf_pairs", _materialize_leaf_pairs):
+        if self._knob_bool("materialize_leaf_pairs", _materialize_leaf_pairs):
             await merge_cell(base)
 
         row = base
@@ -853,6 +846,85 @@ class AggregationPipeline:
                 break
             await merge_cell(row)
             await asyncio.sleep(0)
+
+    def _rep_chain(self, node: int) -> Tuple[Tuple[int, int], ...]:
+        """(level, id) of every non-leaf ancestor-or-self of ``node``,
+        deepest (largest level) first. Memoized per non-leaf node —
+        bounded by container count, shared by every leaf underneath."""
+        nonleaf = self._nonleaf_levels
+        parents = self._parents
+        cache = self._rep_chain_cache
+        # Leaf/unknown endpoints climb to their first non-leaf ancestor;
+        # visited-guard bounds dirty-data containment cycles.
+        cur: Optional[int] = node
+        visited: Set[int] = set()
+        while cur is not None and cur not in nonleaf:
+            if cur in visited:
+                return ()
+            visited.add(cur)
+            cur = parents.get(cur)
+        if cur is None:
+            return ()
+        # Walk upward from the first non-leaf rep until a cache hit,
+        # skipping ancestors with no ontology level (unknown labels) —
+        # the legacy lattice rolled straight through such gaps too.
+        path: List[int] = []
+        while cur is not None and cur not in cache:
+            if cur in visited:
+                break
+            visited.add(cur)
+            path.append(cur)
+            nxt = parents.get(cur)
+            while nxt is not None and nxt not in nonleaf:
+                if nxt in visited:
+                    nxt = None
+                    break
+                visited.add(nxt)
+                nxt = parents.get(nxt)
+            cur = nxt
+        tail: Tuple[Tuple[int, int], ...] = cache.get(cur, ()) if cur is not None else ()
+        for n in reversed(path):
+            tail = ((nonleaf[n], n),) + tail
+            cache[n] = tail
+        return tail
+
+    async def _merge_canonical_pairs(self, base: Dict[int, int]) -> None:
+        """Boundary-mode rollup: canonical level-bridged pairs per raw
+        pair. Weight semantics: each raw pair's value contributes ONCE
+        to each distinct canonical pair (a pair repeated across levels —
+        the ragged case — is merged once)."""
+        values = self._values
+        acc = self._acc
+        skipped = 0
+        n = 0
+        for key, val in base.items():
+            sid, tid = _unpack(key)
+            cs = self._rep_chain(sid)
+            ct = self._rep_chain(tid)
+            if not cs or not ct:
+                skipped += 1
+                continue
+            pairs: Set[int] = set()
+            for level in {l for l, _ in cs} | {l for l, _ in ct}:
+                sp = next((i for l, i in cs if l <= level), None)
+                tp = next((i for l, i in ct if l <= level), None)
+                if sp is None or tp is None or sp == tp:
+                    continue
+                pairs.add(_pack(sp, tp))
+            if not pairs:
+                skipped += 1
+                continue
+            for nk in pairs:
+                cur = acc.get(nk)
+                acc[nk] = val if cur is None else values.merge(
+                    cur, values.weight(val), values.mask(val),
+                )
+            n += 1
+            if n % 4096 == 0:
+                await self._maybe_overflow_flush()
+                await asyncio.sleep(0)
+        self._fine_merges_skipped += skipped
+        await self._maybe_overflow_flush()
 
     def _pair_cap(self) -> int:
         return self._knob_int("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000)

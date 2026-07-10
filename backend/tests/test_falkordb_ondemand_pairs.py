@@ -63,8 +63,11 @@ class _FakeGraph:
     def flow(self, eid, src, tgt, etype="FLOWS"):
         self.lineage.append((eid, src, tgt, etype))
 
-    def aggregated(self, src, tgt, weight, types=("FLOWS",)):
-        self.agg.append((src, tgt, weight, list(types)))
+    def aggregated(self, src, tgt, weight, types=("FLOWS",), sl=None, tl=None):
+        lvl = lambda u: int(re.search(r"(\d+)", self.labels[u]).group(1))
+        self.agg.append((src, tgt, weight, list(types),
+                         lvl(src) if sl is None else sl,
+                         lvl(tgt) if tl is None else tl))
 
     def _descendants_or_self(self, urn):
         out, stack = {urn}, [urn]
@@ -82,15 +85,17 @@ class _FakeGraph:
         if m:
             lbl = m.group(1)
             return _Result([
-                [s, t, w, list(tl)] for s, t, w, tl in self.agg
+                [s, t, w, list(ty)] for s, t, w, ty, sl, tl in self.agg
                 if s in params["xs"] and self.labels.get(s) == lbl
+                and tl <= params["maxTl"]
             ])
         m = _AGG_FANIN_RE.search(cypher)
         if m:
             lbl = m.group(1)
             return _Result([
-                [t, s, w, list(tl)] for s, t, w, tl in self.agg
+                [t, s, w, list(ty)] for s, t, w, ty, sl, tl in self.agg
                 if t in params["ys"] and self.labels.get(t) == lbl
+                and sl <= params["maxSl"]
             ])
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
@@ -191,7 +196,7 @@ def test_leaf_source_resolves_ancestor_eight_levels_up():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a7"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a7", "urn:b0", 2, ["FLOWS"]]]
@@ -202,7 +207,7 @@ def test_leaf_source_resolves_every_requested_ancestor_level():
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
     targets = [f"urn:b{i}" for i in range(8)]
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a7"], targets, ["CONTAINS"], ["FLOWS"],
     ))
     assert {(r[0], r[1], r[2]) for r in rows} == {
@@ -215,7 +220,7 @@ def test_nonleaf_source_to_leaf_target_uses_reverse_walk():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b7"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a0", "urn:b7", 2, ["FLOWS"]]]
@@ -225,7 +230,7 @@ def test_source_only_mode_returns_exact_raw_targets():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], None, ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b2", 2, ["FLOWS"]]]
@@ -238,7 +243,7 @@ def test_same_level_pairs_are_not_produced_on_demand():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == []
@@ -252,10 +257,11 @@ def test_mixed_level_pair_derived_from_materialized_diagonal():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)   # materialized table→table
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
-    assert rows == [["urn:a1", "urn:b0", 2, ["FLOWS"]]]
+    assert rows == []
+    assert mixed == [["urn:a1", "urn:b0", 2, ["FLOWS"]]]
 
 
 def test_mixed_level_pair_reverse_direction():
@@ -264,10 +270,11 @@ def test_mixed_level_pair_reverse_direction():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
-    assert rows == [["urn:a0", "urn:b1", 2, ["FLOWS"]]]
+    assert rows == []
+    assert mixed == [["urn:a0", "urn:b1", 2, ["FLOWS"]]]
 
 
 def test_mixed_level_pair_deep_hierarchy():
@@ -277,10 +284,11 @@ def test_mixed_level_pair_deep_hierarchy():
     levels = _seed_deep_chains(fake, depth=8)
     fake.aggregated("urn:a6", "urn:b6", 2)
     p = _make_provider(fake, levels)
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a6"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
     ))
-    assert rows == [["urn:a6", "urn:b1", 2, ["FLOWS"]]]
+    assert rows == []
+    assert mixed == [["urn:a6", "urn:b1", 2, ["FLOWS"]]]
 
 
 def test_alias_variant_labels_still_classify_and_anchor():
@@ -301,7 +309,7 @@ def test_alias_variant_labels_still_classify_and_anchor():
     fake.flow(2, "urn:a2", "urn:b2")
     p = _make_provider(fake, levels)
     p._source_entity_aliases = {"LVL2": ["LVL2_OBS"]}
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
@@ -319,7 +327,7 @@ def test_missing_level_map_falls_back_to_raw_synthesis():
         return sentinel
 
     p._synthesize_raw_lineage_pairs = fake_raw
-    rows = _run(p._synthesize_ondemand_lineage_pairs(
+    rows, mixed = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b2"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == sentinel
@@ -360,6 +368,94 @@ def test_trace_drilldown_falls_back_to_raw_when_aggregated_empty():
         ("urn:a2", "urn:b2"), ("urn:a2", "urn:b2"),
     ]
     assert all(e.edge_type == "FLOWS" for e in edges)
+
+
+def test_full_cross_product_matrix_six_levels():
+    """The audit contract: on a 6-level hierarchy (domain ⊃ application ⊃
+    container ⊃ schema ⊃ table ⊃ column) with column→column lineage,
+    EVERY (source-level × target-level) query combination — all 36 —
+    must return exactly the one pair with the exact weight. Materialized
+    state is only the canonical diagonal the pipeline writes; everything
+    else must be derived. This is 'which domains does this column reach,
+    6 levels up' and every drill-down step in between."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=6)   # a0..a5 / b0..b5, leaf=5
+    for i in range(5):                          # the pipeline's diagonal
+        fake.aggregated(f"urn:a{i}", f"urn:b{i}", 2)
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None):
+        if params and "sourceUrns" in params:
+            return _Result([
+                [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
+                if s in params["sourceUrns"]
+                and t in (params.get("targetUrns") or [])
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+
+    for i in range(6):
+        for j in range(6):
+            result = _run(p.get_aggregated_edges_between(
+                [f"urn:a{i}"], [f"urn:b{j}"],
+                granularity=None,
+                containment_edges=["CONTAINS"],
+                lineage_edges=["FLOWS"],
+            ))
+            got = {
+                (e.source_urn, e.target_urn): e.edge_count
+                for e in result.aggregated_edges
+            }
+            assert got == {(f"urn:a{i}", f"urn:b{j}"): 2}, (
+                f"cross-product cell (L{i} → L{j}) wrong: {got}"
+            )
+
+
+def test_mixed_level_weight_sums_stored_and_derived_portions():
+    """Doubly-ragged exactness: table_a1 reaches domain_b0 through BOTH a
+    ragged raw edge (column directly under the domain → stored canonical
+    cell (a1,b0) w=1) AND aligned edges (stored diagonal (a1,b1) w=5,
+    b1 under b0). The response weight for (a1,b0) must be 1+5=6 — the
+    stored portion plus the strictly-below derived portion, summed, not
+    one dropping the other."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 5)            # aligned diagonal
+    fake.aggregated("urn:a1", "urn:b0", 1)            # ragged canonical
+    p = _make_provider(fake, levels)
+
+    async def noop_connect():
+        return None
+
+    async def proj_ro_query(cypher, params=None, timeout=None):
+        if params and "sourceUrns" in params:
+            return _Result([
+                ["urn:a1", "urn:b1", 5, ["FLOWS"]],
+                ["urn:a1", "urn:b0", 1, ["FLOWS"]],
+            ])
+        return await fake.proj_ro_query(cypher, params=params, timeout=timeout)
+
+    p._ensure_connected = noop_connect
+    p._proj_ro_query = proj_ro_query
+    result = _run(p.get_aggregated_edges_between(
+        ["urn:a1"], ["urn:b1", "urn:b0"],
+        granularity=None,
+        containment_edges=["CONTAINS"],
+        lineage_edges=["FLOWS"],
+    ))
+    got = {
+        (e.source_urn, e.target_urn): e.edge_count
+        for e in result.aggregated_edges
+    }
+    assert got == {
+        ("urn:a1", "urn:b1"): 5,
+        ("urn:a1", "urn:b0"): 6,   # 1 stored (ragged rep) + 5 derived
+    }
 
 
 def test_get_aggregated_edges_between_merges_and_dedupes():

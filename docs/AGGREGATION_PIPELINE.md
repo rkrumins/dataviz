@@ -20,26 +20,35 @@ ontology-resolved sets frozen onto the job row at trigger time; the
 worker re-validates the ontology fingerprint before running.
 
 **The level-based materialization boundary (the scale contract):**
-only the SAME-LEVEL diagonal is materialized — table→table,
-database→database, domain→domain — plus the direct base pair of any
-raw lineage edge whose endpoints are both non-leaf (the only exact
-record of cross-level raw facts). Each raw edge contributes at most one
-pair per level, and the per-level pair sets shrink monotonically going
-up the hierarchy (database→database pairs are a quotient of
-table→table pairs), so this is the minimal spanning set. Everything
-else is computed ON DEMAND by `get_aggregated_edges_between`:
+only CANONICAL LEVEL-BRIDGED pairs are materialized: for each raw
+lineage edge and each ontology level L, the pair of each side's deepest
+non-leaf ancestor at level ≤ L. On aligned chains that is exactly the
+same-level diagonal — table→table, database→database, domain→domain. On
+RAGGED chains (a column hanging directly under a domain, skipping
+levels) it is the mixed-level cell the canvas shows at that granularity
+(table→domain) — the cell a pure level-equality filter would silently
+drop. Cross-level raw lineage (a raw table→database edge) falls out of
+the same rule. Each raw edge contributes at most one pair per level,
+and the per-level pair sets shrink monotonically going up the hierarchy
+(database→database pairs are a quotient of table→table pairs), so this
+is the minimal spanning set. Everything else is computed ON DEMAND by
+`get_aggregated_edges_between`:
 
 * pairs involving LEAF nodes (column→table, column→domain,
   column→column) — raw lineage fan-out from the requested leaf nodes
   plus `*0..k` upward containment walks (these scale as edges × depth
   if materialized; observed: 1.17M edges → 5.6M pairs → FalkorDB OOM);
 * MIXED-LEVEL container pairs (table→domain, domain→table) — anchored
-  on the finer endpoint's materialized same-level `:AGGREGATED` cells,
-  with the coarser endpoint resolved by a strict upward walk; weights
-  are exact because the pipeline stores each raw edge in exactly one
-  same-level cell per endpoint (these scale with raw-edge count ×
-  depth² level combinations if materialized; observed: still 2.33M
-  pairs on the same graph after only the leaf cut).
+  on the finer endpoint's materialized canonical `:AGGREGATED` cells
+  (far side at-or-below the finer level: each raw edge appears in
+  exactly one such cell per anchored endpoint), with the coarser
+  endpoint resolved by a STRICT upward walk. The derived sum is
+  therefore disjoint from any directly-materialized canonical cell for
+  the same pair (whose edges resolve AT the coarser endpoint), and the
+  read path ADDS the two — exact weights even on doubly-ragged graphs.
+  (Materializing these instead would scale with raw-edge count × depth²
+  level combinations; observed: still 2.33M pairs on the same graph
+  after only the leaf cut.)
 
 All reads are index-driven and bounded by the visible set —
 milliseconds even 8 levels deep on multi-million-edge graphs. Same
@@ -50,11 +59,14 @@ default 2M) fails a job loudly — terminally, no retries, with a
 per-level composition breakdown in the error — rather than ever letting
 a result OOM the shared instance. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
-ontology level map fall back to it automatically. Known precision edge:
-a graph mixing cross-level RAW lineage (e.g. a raw table→database edge)
-with mixed-level queries keeps the direct pair but its on-demand
-roll-ups may undercount that edge's contribution — standard leaf-level
-lineage is always exact.
+ontology level map fall back to it automatically. Coverage is verified
+by an exhaustive cross-product matrix test
+(`test_full_cross_product_matrix_six_levels`): every source-level ×
+target-level combination on a 6-level hierarchy answers exactly from
+canonical cells + on-demand derivation. Known transitional edge: a
+graph still carrying pre-boundary full-cube cells (not yet
+re-aggregated) may over/undercount mixed-level pairs until its first
+run on the new pipeline reconciles the stale cells away.
 
 ## Phases
 

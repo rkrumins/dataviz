@@ -610,12 +610,46 @@ def test_cross_level_raw_edges_keep_direct_pair(monkeypatch):
     assert fake.agg[(2, 12)]["weight"] == 2
 
 
+def test_ragged_chain_materializes_canonical_bridged_pairs():
+    """A column hanging DIRECTLY under a domain (no table between —
+    ragged hierarchy) has no table-level ancestor. The canvas at table
+    granularity shows (table_a → domain_def); a pure same-level diagonal
+    would silently drop that cell. Canonical level-bridging materializes
+    the deepest at-or-above representative per level instead."""
+    fake = _FakeFalkor()
+    levels = {"domain": 0, "table": 1, "column": 2}
+    fake.add_node(1, "urn:domain_abc", "domain")
+    fake.add_node(2, "urn:table_a", "table")
+    fake.add_node(3, "urn:col_a", "column")
+    fake.add_node(11, "urn:domain_def", "domain")
+    fake.add_node(13, "urn:col_b", "column")
+    fake.add_edge("CONTAINS", 0, 1, 2)    # domain_abc > table_a
+    fake.add_edge("CONTAINS", 1, 2, 3)    # table_a > col_a
+    fake.add_edge("CONTAINS", 3, 11, 13)  # domain_def > col_b  (ragged!)
+    fake.add_edge("FLOWS", 10, 3, 13)
+    fake.add_edge("FLOWS", 11, 3, 13)
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p))
+
+    # L=1 (table): source rep table_a, target rep = deepest ≤ 1 = the
+    # domain itself → (2, 11). L=0: (1, 11). Both weight 2, once each.
+    assert set(fake.agg.keys()) == {(2, 11), (1, 11)}
+    assert fake.agg[(2, 11)]["weight"] == 2
+    assert fake.agg[(1, 11)]["weight"] == 2
+
+
 def test_run_stats_reports_boundary_effect():
     fake = _FakeFalkor()
     levels = _seed_two_chain_graph(fake)
+    # An orphan lineage edge between two uncontained leaf nodes has no
+    # non-leaf representative — nothing to materialize; the raw read
+    # path still serves it on demand. Counted in fine_merges_skipped.
+    fake.add_node(21, "urn:orphan_a", "column")
+    fake.add_node(22, "urn:orphan_b", "column")
+    fake.add_edge("FLOWS", 20, 21, 22)
     p = _make_provider(fake, levels)
     result = _run(_materialize(p))
     stats = result["run_stats"]
-    # Leaf-involving merges were skipped by the boundary, not materialized.
-    assert stats["fine_merges_skipped"] > 0
+    assert stats["fine_merges_skipped"] == 1
     assert stats["pairs"] == len(_EXPECTED_PAIRS)
