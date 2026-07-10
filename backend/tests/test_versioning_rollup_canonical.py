@@ -49,12 +49,17 @@ class _Svc:
 
     async def _containment_ancestors(self, s, gid, bid, node_ids, cset, as_of):
         seen = set(node_ids)
+        edges = {}
         for n in list(node_ids):
-            cur = self.parent.get(n)
+            child, cur = n, self.parent.get(n)
             while cur:
                 seen.add(cur)
-                cur = self.parent.get(cur)
-        return seen, {}
+                edges[f"ce_{child}"] = {
+                    "sourceEntityId": cur, "targetEntityId": child,
+                    "edgeType": "CONTAINS",
+                }
+                child, cur = cur, self.parent.get(cur)
+        return seen, edges
 
 
 def _projector(resolver):
@@ -96,10 +101,11 @@ def test_projector_emits_canonical_pairs_with_level_stamps():
         assert v["dg"]
 
 
-def test_projector_full_cube_without_level_map():
-    """Legacy 2-tuple resolvers (and level-less ontologies) keep the
-    original full cross-product — parity with the pipeline's own
-    full-cube fallback."""
+def test_projector_structural_canonical_without_level_map():
+    """Level maps are STAMPS, never the selector: a legacy 2-tuple
+    resolver (no level map) still emits the structural depth-diagonal —
+    parity with the pipeline's structural boundary. Stamps and digest
+    are simply omitted."""
 
     async def resolver(svc, gid):
         return (["CONTAINS"], ["FLOWS"])
@@ -110,7 +116,9 @@ def test_projector_full_cube_without_level_map():
         p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
     )
 
-    assert len(pairs) == 16  # {a3..a0} × {b3..b0}, no equal endpoints
+    assert set(pairs) == {
+        ("urn:a2", "urn:b2"), ("urn:a1", "urn:b1"), ("urn:a0", "urn:b0"),
+    }
     assert all("sl" not in v and "dg" not in v for v in pairs.values())
 
 
@@ -138,3 +146,41 @@ def test_projector_delete_emits_negative_canonical_deltas():
         ("urn:a2", "urn:b2"), ("urn:a1", "urn:b1"), ("urn:a0", "urn:b0"),
     }
     assert all(v["dw"] == -1 for v in pairs.values())
+
+
+def test_projector_self_nesting_type_emits_every_depth():
+    """Self-nesting types (Node ⊃ Node) must roll up at every containment
+    depth even though every container shares ONE type level — the
+    structural mirror of the pipeline's boundary. Stamps carry the type
+    level where mapped."""
+    levels = {"Roots": 0, "Node": 1}
+
+    async def resolver(svc, gid):
+        return (["CONTAINS"], ["FLOWS"], levels)
+
+    class _SelfNestSvc(_Svc):
+        def __init__(self):
+            self.parent = {
+                "a3": "a2", "a2": "a1",       # Roots a1 ⊃ Node a2 ⊃ leaf a3
+                "b3": "b2", "b2": "b1",
+            }
+            self.types = {
+                "a1": "Roots", "a2": "Node", "a3": "Node",
+                "b1": "Roots", "b2": "Node", "b3": "Node",
+            }
+
+    p = _projector(resolver)
+    p._svc = _SelfNestSvc()
+    s = _Session([("e1", "create",
+                   {"sourceEntityId": "a3", "targetEntityId": "b3",
+                    "edgeType": "FLOWS"})])
+    pairs = asyncio.run(
+        p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
+    )
+
+    assert set(pairs) == {
+        ("urn:a2", "urn:b2"),      # Node-container diagonal — was missing
+        ("urn:a1", "urn:b1"),      # Roots diagonal
+    }
+    assert pairs[("urn:a2", "urn:b2")]["sl"] == 1
+    assert pairs[("urn:a1", "urn:b1")]["sl"] == 0

@@ -19,10 +19,17 @@ entity-type levels. Containment and lineage edge types are the
 ontology-resolved sets frozen onto the job row at trigger time; the
 worker re-validates the ontology fingerprint before running.
 
-**The level-based materialization boundary (the scale contract):**
-only CANONICAL LEVEL-BRIDGED pairs are materialized: for each raw
-lineage edge and each ontology level L, the pair of each side's deepest
-non-leaf ancestor at level ≤ L. On aligned chains that is exactly the
+**The STRUCTURAL materialization boundary (the scale contract):**
+only CANONICAL DEPTH-BRIDGED pairs are materialized: a node is a
+container because it HAS CONTAINMENT CHILDREN (never because of its
+ontology type — a self-nesting type like ``Node ⊃ Node ⊃ Node`` rolls
+up at every nesting depth), and for each raw lineage edge and each
+containment DEPTH d, the pair is each side's deepest container ancestor
+at depth ≤ d. On graphs whose types encode the hierarchy
+(domain ⊃ table ⊃ column) depth ≡ type level and the output is
+identical to the previous level-based selection. Ontology type levels
+survive as the ``sourceLevel``/``targetLevel`` STAMPS the read path
+filters on (omitted when a label has no mapped level). On aligned chains that is exactly the
 same-level diagonal — table→table, database→database, domain→domain. On
 RAGGED chains (a column hanging directly under a domain, skipping
 levels) it is the mixed-level cell the canvas shows at that granularity
@@ -231,6 +238,21 @@ Memory budget per large job at 2M nodes / 5M edges: child→parent map
 worker pods ship with a 4Gi limit.
 
 ## Hardening wave (2026-07-10): what changed, why, and the impact
+
+**12. Type-level boundary broke self-nesting graphs (2026-07-11,
+live).** The canonical selection keyed on ontology TYPE levels, so any
+type nesting under itself (``Node ⊃ Node`` — folders, systems,
+components) made every intermediate container a "leaf": a live
+two-type graph with 246 Node→Node containments materialized only 9
+Roots→Roots cells and Context View showed no aggregated lineage below
+the roots. The boundary is now STRUCTURAL (containment parents, ranked
+by depth) across all three writers — pipeline, write/delete hooks,
+versioning projector — with type levels kept as stamps. The old
+label-mismatch precondition guard became obsolete (unmapped labels now
+aggregate fine) and was replaced by a sharper one: declared containment
+types matching ZERO edges while rollup cells exist fails loudly
+instead of wiping them.
+
 
 A full audit of this pipeline (old implementation vs the rewrite, plus
 every integration edge) confirmed the EXTRACT→COMPUTE→RECONCILE→APPLY

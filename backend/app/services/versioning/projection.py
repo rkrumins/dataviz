@@ -673,17 +673,16 @@ class FalkorProjector:
         if not lineage_types:
             return None
         level_map: Dict[str, int] = dict(sets[2]) if len(sets) > 2 and sets[2] else {}
-        finest = max(level_map.values()) if level_map else None
         # Canonical mode: the aggregation worker materializes only the
-        # canonical level-bridged selection (per level L, each side's
-        # deepest NON-leaf ancestor at level <= L). The projector must
-        # emit the SAME selection — its old full ancestor cross-product
-        # writes leaf/mixed cells the boundary excludes, which the
-        # on-demand reader then double-counts until the next batch run.
-        # A level map whose every type sits on one level has no container
-        # boundary (single-level ontology): the worker falls back to the
-        # full cube there, and so does this.
-        use_canonical = bool(level_map) and any(v < finest for v in level_map.values())
+        # canonical STRUCTURAL selection (containment ancestors ranked by
+        # depth from the root — independent of ontology type levels, so
+        # self-nesting types like Node ⊃ Node roll up too). The projector
+        # must emit the SAME selection — its old full ancestor
+        # cross-product wrote leaf/mixed cells the boundary excludes,
+        # which the on-demand reader then double-counts until the next
+        # batch run. Type levels survive only as the sourceLevel/
+        # targetLevel STAMPS (omitted when a label has no mapped level).
+        use_canonical = bool(cont_types)
 
         def _etype(p) -> str:
             return str((p or {}).get("edgeType") or "").upper()
@@ -735,15 +734,22 @@ class FalkorProjector:
         if not lineage_creates and not lineage_deletes and not moved:
             return None
 
-        anc_cache: Dict[Tuple[str, Optional[int]], List[str]] = {}
+        anc_cache: Dict[Tuple[str, Optional[int]], Tuple[List[str], Dict[str, str]]] = {}
         lvl_cache: Dict[Tuple[str, Optional[int]], Optional[int]] = {}
 
-        async def chain(node_id: str, as_of: Optional[int]) -> List[str]:
+        async def chain(node_id: str, as_of: Optional[int]) -> Tuple[List[str], Dict[str, str]]:
+            """(ancestors-or-self ids, child→parent map) — the parent map
+            carries the STRUCTURE the canonical selection ranks on."""
             key = (node_id, as_of)
             if key not in anc_cache:
-                seen, _e = await self._svc._containment_ancestors(
+                seen, edges = await self._svc._containment_ancestors(
                     s, graph.id, main_id, {node_id}, cont_types, as_of)
-                anc_cache[key] = list(seen)              # ancestors-or-self
+                child_parent: Dict[str, str] = {}
+                for payload in edges.values():
+                    a, b = _edge_endpoints(payload)      # a = parent, b = child
+                    if a and b:
+                        child_parent[b] = a
+                anc_cache[key] = (list(seen), child_parent)
             return anc_cache[key]
 
         async def levels_of(ids, as_of: Optional[int]) -> Dict[str, Optional[int]]:
@@ -755,30 +761,39 @@ class FalkorProjector:
                     lvl_cache[(i, as_of)] = level_map.get(et_id) if et_id else None
             return {i: lvl_cache[(i, as_of)] for i in ids}
 
-        async def canonical_pairs(cs: List[str], ct: List[str], as_of: Optional[int]):
-            """Mirror of the worker's _merge_canonical_pairs / the write
-            hook's _reps: per level L, each side's deepest NON-leaf member
-            at level <= L, with (level, id) tuples carried so the caller
-            can stamp sourceLevel/targetLevel. Chains here are ancestor
-            SETS (not the pipeline's longest-chain walk): a multi-parent
-            tie may attribute a delta to the other parent — deltas stay
-            self-consistent (create/delete use the same deterministic
-            min-id tie-break) and the next batch run reconciles exact
-            weights."""
-            lv = await levels_of(set(cs) | set(ct), as_of)
+        async def canonical_pairs(
+            cs: List[str], cp_s: Dict[str, str],
+            ct: List[str], cp_t: Dict[str, str],
+        ):
+            """Mirror of the worker's structural _merge_canonical_pairs /
+            the hooks' _canonical_rep_pairs: reps are the containment
+            PARENTS among each side's ancestors, ranked by depth from the
+            root; per rank R the pair of each side's deepest rep at
+            depth <= R. Chains here are ancestor SETS (not the pipeline's
+            longest-chain walk): a multi-parent tie may attribute a delta
+            to the other parent — deltas stay self-consistent and the
+            next batch run reconciles exact weights."""
+            def reps(ids: List[str], cp: Dict[str, str]):
+                parents_set = set(cp.values())
 
-            def reps(ids: List[str]):
+                def depth(n: str) -> int:
+                    d, cur, guard = 0, cp.get(n), 0
+                    while cur is not None and guard < 64:
+                        d += 1
+                        cur = cp.get(cur)
+                        guard += 1
+                    return d
+
                 return sorted(
-                    ((lv[i], i) for i in ids
-                     if lv.get(i) is not None and lv[i] < finest),
+                    ((depth(i), i) for i in ids if i in parents_set),
                     key=lambda t: (-t[0], t[1]),
                 )
 
-            cs_r, ct_r = reps(cs), reps(ct)
+            cs_r, ct_r = reps(cs, cp_s), reps(ct, cp_t)
             out, seen = [], set()
-            for level in {l for l, _ in cs_r} | {l for l, _ in ct_r}:
-                sp = next(((l, i) for l, i in cs_r if l <= level), None)
-                tp = next(((l, i) for l, i in ct_r if l <= level), None)
+            for rank in {r for r, _ in cs_r} | {r for r, _ in ct_r}:
+                sp = next(((r, i) for r, i in cs_r if r <= rank), None)
+                tp = next(((r, i) for r, i in ct_r if r <= rank), None)
                 if sp is None or tp is None or sp[1] == tp[1]:
                     continue
                 if (sp[1], tp[1]) in seen:
@@ -794,12 +809,20 @@ class FalkorProjector:
             if not src or not tgt:
                 return
             et = _etype(p)
-            cs, ct = await chain(src, as_of), await chain(tgt, as_of)
+            (cs, cp_s), (ct, cp_t) = await chain(src, as_of), await chain(tgt, as_of)
             if use_canonical:
-                for (sl, sx), (tl, tx) in await canonical_pairs(cs, ct, as_of):
+                selected = await canonical_pairs(cs, cp_s, ct, cp_t)
+                if selected:
+                    ids = {i for pair in selected for _r, i in pair}
+                    lv = await levels_of(ids, as_of)
+                else:
+                    lv = {}
+                for (_rs, sx), (_rt, tx) in selected:
                     e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
                     e["dw"] += sign
-                    e["sl"], e["tl"] = sl, tl
+                    sl, tl = lv.get(sx), lv.get(tx)
+                    if sl is not None and tl is not None:
+                        e["sl"], e["tl"] = sl, tl
                     if sign > 0 and et:
                         e["types"].add(et)
                 return
@@ -851,7 +874,7 @@ class FalkorProjector:
         # URN index instead of an unlabeled full scan per row.
         lbl_of = {i: str(((vals.get(i) or {}).get("entityType")) or "Entity") for i in ids}
         digest = None
-        if use_canonical:
+        if use_canonical and level_map:
             from backend.app.services.ontology_levels import compute_level_digest
             digest = compute_level_digest(level_map)
         out: Dict[Tuple[str, str], Dict[str, object]] = {}

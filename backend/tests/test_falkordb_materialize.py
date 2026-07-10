@@ -131,6 +131,8 @@ class _FakeFalkor:
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
     async def _agg_read(self, cypher, params):
+        if "RETURN 1 LIMIT 1" in cypher and "aggKey IS NULL" not in cypher:
+            return _Result([[1]] if self.agg else [])
         if "max(ID(r))" in cypher:
             rids = [v["rid"] for v in self.agg.values()]
             return _Result([[max(rids, default=None)]])
@@ -545,12 +547,17 @@ def test_write_budget_counts_flushed_and_pending_as_union(monkeypatch):
     assert result["aggregated_edges_affected"] == n_pairs + 1
 
 
-def test_empty_boundary_map_fails_loud_instead_of_wiping():
-    """A multi-level ontology whose labels match NOTHING in a non-empty
-    graph must fail the run — continuing would materialize nothing and
-    reconcile would delete every existing :AGGREGATED edge as stale.
-    Terminal (MaterializationPreconditionFailed): deterministic, so the
-    worker must not burn its retry budget re-running EXTRACT."""
+def test_zero_matched_containment_fails_loud_instead_of_wiping():
+    """Declared containment types matching ZERO edges in a graph that
+    already holds :AGGREGATED cells must fail the run — the legacy
+    full-cube fallback would recompute a leaf-only result and reconcile
+    would delete every stored container cell as stale. Terminal
+    (MaterializationPreconditionFailed): deterministic, so the worker
+    must not burn its retry budget re-running EXTRACT. (The structural
+    boundary made the old label-match guard obsolete: labels that don't
+    match the ontology now aggregate fine — see the structural tests —
+    but containment EDGE types matching nothing is still a wipe hazard.)
+    """
     fake = _FakeFalkor()
     levels = {"domain": 0, "column": 1}
     fake.add_node(3, "urn:col_a", "weird_label")
@@ -560,7 +567,7 @@ def test_empty_boundary_map_fails_loud_instead_of_wiping():
     p = _make_provider(fake, levels)
 
     with pytest.raises(
-        mat.MaterializationPreconditionFailed, match="boundary is EMPTY"
+        mat.MaterializationPreconditionFailed, match="containment edge types"
     ):
         _run(_materialize(p))
     # The pre-existing edge survives untouched.
@@ -569,12 +576,12 @@ def test_empty_boundary_map_fails_loud_instead_of_wiping():
 
 
 def test_single_level_ontology_run_succeeds_not_fails():
-    """A single-level level map has no container boundary — the run must
-    fall back to the legacy lattice (original behavior) instead of
-    failing on an empty boundary map. Flat graphs succeed as a no-op
-    (exact leaf pairs are served on demand by the read path); a
-    SELF-NESTING single-label graph (Folder⊃Folder) still materializes
-    the rolled-up ancestor pairs the original cube stored."""
+    """Single-level ontologies work STRUCTURALLY now. A flat graph (no
+    containment at all) succeeds as a no-op — exact leaf pairs are
+    served on demand by the read path; a
+    SELF-NESTING single-label graph (Folder⊃Folder) materializes the
+    canonical container diagonal; the leaf-involving combinations the
+    old cube stored (c→b, a→d) are on-demand reads — same answers."""
     fake = _FakeFalkor()
     levels = {"column": 0}
     fake.add_node(3, "urn:col_a", "column")
@@ -594,7 +601,7 @@ def test_single_level_ontology_run_succeeds_not_fails():
     fake2.add_edge("FLOWS", 10, 3, 4)     # c → d
     p2 = _make_provider(fake2, {"folder": 0})
     _run(_materialize(p2))
-    assert set(fake2.agg.keys()) == {(3, 2), (1, 4), (1, 2)}
+    assert {k: v["weight"] for k, v in fake2.agg.items()} == {(1, 2): 1}
 
 
 def test_empty_graph_is_a_clean_noop():
@@ -1009,3 +1016,59 @@ def test_reconcile_probes_index_readiness():
     result = _run(_materialize(p))
     assert result["errors"] == 0
     assert probes["n"] >= 1, "reconcile must check aggKey index readiness"
+
+
+def _seed_self_nesting_graph(fake, depth=3):
+    """Roots ⊃ Node ⊃ … ⊃ Node (self-nesting type), two chains, lineage
+    between the deepest leaves (×2 parallel). Ontology has only TWO type
+    levels (Roots=0, Node=1) — the structure is deeper than the types.
+
+    Chain ids: a-side 1..depth, b-side 11..10+depth.
+    """
+    levels = {"Roots": 0, "Node": 1}
+    for base, prefix in ((0, "a"), (10, "b")):
+        fake.add_node(base + 1, f"urn:{prefix}1", "Roots")
+        for d in range(2, depth + 1):
+            fake.add_node(base + d, f"urn:{prefix}{d}", "Node")
+            fake.add_edge("CONTAINS", 100 + base + d, base + d - 1, base + d)
+    leaf_a, leaf_b = depth, 10 + depth
+    fake.add_edge("FLOWS", 300, leaf_a, leaf_b)
+    fake.add_edge("FLOWS", 301, leaf_a, leaf_b)
+    return levels
+
+
+def test_self_nesting_containers_materialize_every_depth():
+    """CRITICAL regression (2026-07-11, live): a type that nests under
+    itself (Node ⊃ Node — folders, systems, Solidatus components) made
+    every intermediate container a 'leaf' under the TYPE-level boundary,
+    so only the root diagonal materialized (observed: 9 Roots→Roots
+    cells on a graph with 246 Node→Node containments) and Context View
+    showed no aggregated lineage below the roots. The boundary is
+    STRUCTURAL: any containment parent is non-leaf, ranked by depth."""
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p))
+
+    assert result["errors"] == 0
+    agg = {k: v["weight"] for k, v in fake.agg.items()}
+    assert agg == {
+        (2, 12): 2,      # Node-container diagonal (depth 1) — was missing
+        (1, 11): 2,      # Roots diagonal (depth 0)
+    }, agg
+    # Stamps keep TYPE-level semantics for the read path's filters.
+    assert fake.agg[(1, 11)]["sl"] == 0 and fake.agg[(1, 11)]["tl"] == 0
+    assert fake.agg[(2, 12)]["sl"] == 1 and fake.agg[(2, 12)]["tl"] == 1
+
+
+def test_self_nesting_four_deep_materializes_three_container_ranks():
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=4)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p))
+
+    assert result["errors"] == 0
+    agg = {k: v["weight"] for k, v in fake.agg.items()}
+    assert agg == {(3, 13): 2, (2, 12): 2, (1, 11): 2}, agg

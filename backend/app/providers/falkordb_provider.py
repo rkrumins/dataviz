@@ -3696,28 +3696,28 @@ class FalkorDBProvider(GraphDataProvider):
     def _canonical_rep_pairs(
         s_chain: List[str],
         t_chain: List[str],
-        urn_levels: Dict[str, int],
-        finest: int,
     ) -> List[Tuple[str, str]]:
-        """Canonical level-bridged pair selection — the single mirror of
-        the batch pipeline's ``_merge_canonical_pairs``, shared by the
-        write and delete hooks: per ontology level L, the pair of each
-        side's deepest NON-leaf ancestor at level <= L."""
+        """Canonical STRUCTURAL pair selection — the single mirror of the
+        batch pipeline's ``_merge_canonical_pairs``, shared by the write
+        and delete hooks. Reps are the containment ANCESTORS of each
+        endpoint (``chain[1:]``, root last), ranked by depth-from-root —
+        independent of ontology type levels, so self-nesting types
+        (Node ⊃ Node) roll up correctly. The endpoint itself is excluded
+        (whether it has children is unknowable from an upward chain; a
+        raw edge FROM a container is covered by the batch run). Per rank
+        R: the pair of each side's deepest ancestor at depth <= R."""
 
         def _reps(chain: List[str]) -> List[tuple]:
-            reps = [
-                (urn_levels[u], u) for u in chain
-                if u in urn_levels and urn_levels[u] < finest
-            ]
-            reps.sort(key=lambda lu: -lu[0])   # deepest first
-            return reps
+            anc = chain[1:]                    # deepest first, root last
+            n = len(anc)
+            return [(n - 1 - i, u) for i, u in enumerate(anc)]
 
         cs, ct = _reps(s_chain), _reps(t_chain)
         pairs: List[Tuple[str, str]] = []
         seen_pairs = set()
-        for level in {l for l, _ in cs} | {l for l, _ in ct}:
-            sp = next((u for l, u in cs if l <= level), None)
-            tp = next((u for l, u in ct if l <= level), None)
+        for rank in {r for r, _ in cs} | {r for r, _ in ct}:
+            sp = next((u for r, u in cs if r <= rank), None)
+            tp = next((u for r, u in ct if r <= rank), None)
             if sp is None or tp is None or sp == tp:
                 continue
             if (sp, tp) in seen_pairs:
@@ -3783,30 +3783,20 @@ class FalkorDBProvider(GraphDataProvider):
         # cells the boundary deliberately excludes — masking the
         # on-demand reader's exact answers and double-counting its
         # additive mixed-level sums until the next full run reconciles.
-        pairs_to_check = []
-        if entity_levels:
-            if not urn_levels:
-                # Level map exists but no chain member resolved (cold
-                # urn→label cache). Writing anything risks pollution;
-                # skipping only delays visibility until the next batch
-                # run reconciles.
-                logger.debug(
-                    "on_lineage_edge_written: no chain levels resolved "
-                    "for %s -> %s — deferring to the batch pipeline",
-                    source_urn, target_urn,
-                )
-                return 0
-            pairs_to_check = self._canonical_rep_pairs(
-                s_chain, t_chain, urn_levels, max(entity_levels.values()),
+        if entity_levels and not urn_levels:
+            # Level map exists but no chain member resolved (cold
+            # urn→label cache). Level STAMPS would pollute the boundary;
+            # skipping only delays visibility until the next batch run
+            # reconciles.
+            logger.debug(
+                "on_lineage_edge_written: no chain levels resolved "
+                "for %s -> %s — deferring to the batch pipeline",
+                source_urn, target_urn,
             )
-        else:
-            # Legacy graphs without an ontology level map: full ancestor
-            # cross-product (parity with the pipeline's full-cube
-            # fallback for level-less ontologies).
-            for s_urn in s_chain:
-                for t_urn in t_chain:
-                    if s_urn != t_urn:
-                        pairs_to_check.append((s_urn, t_urn))
+            return 0
+        # STRUCTURAL canonical selection — mirrors the batch pipeline on
+        # any graph shape (levels are stamps, never the selector).
+        pairs_to_check = self._canonical_rep_pairs(s_chain, t_chain)
 
         if not pairs_to_check:
             return 0
@@ -3959,22 +3949,16 @@ class FalkorDBProvider(GraphDataProvider):
             return  # defer to the batch pipeline, like the write hook
         urn_levels, _urn_labels = resolved
 
-        if entity_levels:
-            if not urn_levels:
-                logger.debug(
-                    "on_lineage_edge_deleted: no chain levels resolved "
-                    "for %s -> %s — deferring to the batch pipeline",
-                    source_urn, target_urn,
-                )
-                return
-            pairs = self._canonical_rep_pairs(
-                s_chain, t_chain, urn_levels, max(entity_levels.values()),
+        if entity_levels and not urn_levels:
+            logger.debug(
+                "on_lineage_edge_deleted: no chain levels resolved "
+                "for %s -> %s — deferring to the batch pipeline",
+                source_urn, target_urn,
             )
-        else:
-            # Legacy graphs without an ontology level map: full ancestor
-            # cross-product candidates (write-hook parity) — the SREM
-            # gate below still limits writes to hook-tracked pairs.
-            pairs = [(s, t) for s in s_chain for t in t_chain if s != t]
+            return
+        # STRUCTURAL canonical candidates (write-hook parity) — the SREM
+        # gate below still limits writes to hook-tracked pairs.
+        pairs = self._canonical_rep_pairs(s_chain, t_chain)
         if not pairs:
             return
 

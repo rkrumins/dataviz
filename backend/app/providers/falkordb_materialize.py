@@ -340,19 +340,24 @@ class AggregationPipeline:
         # replaces).
         self._node_dir: Optional[Dict[int, Tuple[str, str]]] = None
         self._indexed_labels: Set[str] = set()
-        # Non-leaf-LEVEL node ID → ontology level (labels whose level is
-        # above the finest). Loaded via cheap per-label ID scans when the
-        # fine filter is active; the map is bounded by CONTAINER counts
-        # (small), never by edge or leaf counts. None = filter inactive.
+        # STRUCTURAL boundary: container node ID → containment DEPTH
+        # (rank). A container is any containment PARENT — independent of
+        # its ontology type, so self-nesting types roll up correctly.
+        # Bounded by CONTAINER counts, never by edge or leaf counts.
+        # None = boundary inactive (no containment / fine-pairs mode).
         self._nonleaf_levels: Optional[Dict[int, int]] = None
-        # Memoized (level, id) ancestor rep-chains keyed by non-leaf node
+        # Container node ID → ontology TYPE level (the read path's stamp
+        # dimension); missing when the label has no declared level.
+        self._nonleaf_type_level: Dict[int, int] = {}
+        # All containment-parent ids (set once containment is loaded).
+        self._struct_parents: Optional[Set[int]] = None
+        # Memoized (rank, id) ancestor rep-chains keyed by non-leaf node
         # — bounded by container count; reset when the parent map reloads.
         self._rep_chain_cache: Dict[int, Tuple[Tuple[int, int], ...]] = {}
         self._fine_merges_skipped = 0
         # Level map re-keyed by observed label spellings, built lazily —
         # see _levels_by_observed_label.
         self._levels_by_spelling: Optional[Dict[str, int]] = None
-        self._single_level_logged = False
 
         # Run state
         self._run_start_ms: int = 0
@@ -506,19 +511,27 @@ class AggregationPipeline:
 
     # -- shared helpers ------------------------------------------------------
 
+    def _pair_bucket(self, node_id: int) -> str:
+        """Histogram bucket for one endpoint: the TYPE level when the
+        ontology maps its label (L2), else its containment depth (d2) —
+        self-nesting types have no distinguishing type level."""
+        lv = self._nonleaf_type_level.get(node_id)
+        if lv is not None:
+            return f"L{lv}"
+        rk = (self._nonleaf_levels or {}).get(node_id)
+        return f"d{rk}" if rk is not None else "leaf"
+
     def _snapshot_pairs_by_level(self) -> None:
-        """Level-pair histogram of the computed result, persisted into
-        run_stats — makes a MISSING level (e.g. no domain→domain pairs
+        """Rank-pair histogram of the computed result, persisted into
+        run_stats — makes a MISSING rank (e.g. no domain→domain pairs
         because the domain label didn't match the graph) visible in the
         job detail instead of requiring a graph query to diagnose."""
-        nonleaf = self._nonleaf_levels
-        if nonleaf is None:
+        if self._nonleaf_levels is None:
             return
         counts: Dict[str, int] = {}
         for key in set(self._acc) | self._flushed:
             sid, tid = _unpack(key)
-            ls, lt = nonleaf.get(sid), nonleaf.get(tid)
-            name = f"L{ls}->L{lt}" if ls is not None and lt is not None else "unknown"
+            name = f"{self._pair_bucket(sid)}->{self._pair_bucket(tid)}"
             counts[name] = counts.get(name, 0) + 1
         self._pairs_by_level = counts
         logger.info(
@@ -1197,40 +1210,86 @@ class AggregationPipeline:
         flushed.update(snapshot.keys())
 
 
-    # -- level-based materialization boundary --------------------------------
+    # -- STRUCTURAL materialization boundary ----------------------------------
 
     def _fine_filter_active(self) -> bool:
         """True when leaf-involving pairs are excluded from materialization
-        (the default). Requires the ontology level map to classify labels;
-        legacy jobs without it fall back to full-cube behavior."""
-        if not self._entity_levels:
-            return False
-        if not self._nonleaf_labels():
-            # Single-level ontology: every declared type sits at the finest
-            # level, so there IS no container boundary — the only content
-            # the original full cube stored was the leaf mirror set. Fall
-            # back to full-cube behavior (still bounded by the write
-            # budget) instead of failing on an empty boundary map.
-            if not self._single_level_logged:
-                self._single_level_logged = True
-                logger.info(
-                    "aggregation pipeline on %s: ontology is single-level "
-                    "(no non-leaf entity types) — materializing exact "
-                    "leaf-to-leaf pairs (full-cube fallback).",
-                    self.p._graph_name,
-                )
+        (the default). The boundary is STRUCTURAL — any containment parent
+        is a container — so it works with or without an ontology level map
+        and on types that nest under themselves. Only the explicit
+        fine-pairs escape hatch (or a graph with no containment at all)
+        restores the legacy full-cube path."""
+        if not getattr(self, "_struct_parents", None):
             return False
         return not self._knob_bool("materialize_fine_pairs", _materialize_fine_pairs)
 
-    def _nonleaf_labels(self) -> List[str]:
-        finest = max(self._entity_levels.values())
-        return [lbl for lbl, lv in self._entity_levels.items() if lv < finest]
+    async def _load_nonleaf_ids(self) -> None:
+        """Build the structural boundary from the containment parent map:
 
-    async def _scan_label_nodes(self, label: str, *, want_urn: bool):
-        """Yield rows for all nodes of one label via ID-range scans (label
-        matrix iteration + cheap ID filter — never an unlabeled scan)."""
-        from backend.app.providers.falkordb_provider import _sanitize_label
-        safe = _sanitize_label(label)
+        * non-leaf = any node that IS a containment parent — INDEPENDENT of
+          its ontology type. The previous TYPE-LEVEL boundary treated every
+          node of the finest type as a leaf, so a self-nesting type
+          (``Node ⊃ Node`` — folders, systems, components) materialized
+          ONLY the root diagonal and Context View showed no aggregated
+          lineage below the roots (observed live: 9 Roots→Roots cells on a
+          graph with 246 Node→Node containments).
+        * rank = containment DEPTH from the root — the quotient the
+          canonical selection runs on. On graphs whose types do encode the
+          hierarchy (domain ⊃ table ⊃ column) depth ≡ type level and the
+          output is unchanged.
+        * one full node-range pass resolves (urn, label) for exactly the
+          container ids — the eager node directory for writes — plus each
+          container's TYPE level for the read path's sourceLevel/
+          targetLevel stamps (None when no level map is injected).
+        """
+        if self._nonleaf_levels is not None:
+            return
+        self._struct_parents = set(self._parents.values())
+        if not self._struct_parents and self._containment:
+            # Containment types are DECLARED but matched zero edges. If the
+            # graph holds rollup cells, the legacy full-cube path this run
+            # would fall into computes only leaf pairs — and reconcile
+            # would then delete every stored container cell as stale.
+            # Refuse loudly (types/alias/casing problem) instead of wiping.
+            probe = await self.p._proj_ro_query(
+                "MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1",
+                timeout=_scan_timeout_s(),
+            )
+            if probe.result_set:
+                raise MaterializationPreconditionFailed(
+                    "declared containment edge types matched ZERO edges in "
+                    "the graph, but :AGGREGATED rollups exist — continuing "
+                    "would recompute a leaf-only result and delete every "
+                    "stored container cell as stale. Check the ontology's "
+                    "containment types / source aliases / casing."
+                )
+        if not self._fine_filter_active():
+            return
+        parents = self._parents
+
+        # Containment depth per container, memoized root-walks (roots = 0).
+        depth_memo: Dict[int, int] = {}
+
+        def depth_of(node: int) -> int:
+            path: List[int] = []
+            cur: Optional[int] = node
+            while cur is not None and cur not in depth_memo:
+                path.append(cur)
+                cur = parents.get(cur)
+            base = depth_memo.get(cur, -1) if cur is not None else -1
+            for n in reversed(path):
+                base += 1
+                depth_memo[n] = base
+            return depth_memo[node]
+
+        ranks = {cid: depth_of(cid) for cid in self._struct_parents}
+
+        # One bounded pass over the node matrix: keep (urn, label) for the
+        # container ids only — memory scales with CONTAINER count.
+        import sys
+        levels_by_label = self._levels_by_observed_label()
+        directory: Dict[int, Tuple[str, str]] = {}
+        type_levels: Dict[int, int] = {}
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         res = await self.p._ro_query(
@@ -1238,12 +1297,11 @@ class AggregationPipeline:
         )
         rows = res.result_set or []
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
-        returns = "ID(n), n.urn" if want_urn else "ID(n)"
 
         async def run_one(lo: int, hi: int):
             r = await self.p._ro_query(
-                f"MATCH (n:`{safe}`) WHERE ID(n) >= $lo AND ID(n) < $hi "
-                f"RETURN {returns}",
+                "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
+                "RETURN ID(n), n.urn, labels(n)",
                 params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
@@ -1258,61 +1316,29 @@ class AggregationPipeline:
             wave = lows[start:start + conc]
             for result in await asyncio.gather(*(fetch(lo) for lo in wave)):
                 for row in result:
-                    yield row
+                    nid, urn, labels = row[0], row[1], row[2] or []
+                    if nid is None or int(nid) not in ranks:
+                        continue
+                    nid = int(nid)
+                    if urn and labels:
+                        label = sys.intern(str(labels[0]))
+                        directory[nid] = (urn, label)
+                        lv = levels_by_label.get(label)
+                        if lv is not None:
+                            type_levels[nid] = lv
 
-    async def _load_nonleaf_ids(self) -> None:
-        """Populate the non-leaf node-ID → level map used by the
-        materialization boundary. Bounded by container counts — cheap at
-        any graph size."""
-        if self._nonleaf_levels is not None or not self._fine_filter_active():
-            return
-        levels: Dict[int, int] = {}
-        for label in self._nonleaf_labels():
-            level = self._entity_levels[label]
-            # Scan under every spelling of the declared label — alias
-            # translations plus observed case-fold variants (identity on
-            # governed graphs). An alias/case-variant source must not
-            # silently produce an empty boundary map, which would filter
-            # EVERY pair and materialize nothing.
-            for spelled in self._spellings_for_label(label):
-                async for row in self._scan_label_nodes(spelled, want_urn=False):
-                    if row and row[0] is not None:
-                        levels[int(row[0])] = level
-        if not levels:
-            probe = await self.p._ro_query(
-                "MATCH (n) RETURN 1 LIMIT 1", timeout=_scan_timeout_s(),
-            )
-            if not (probe.result_set or []):
-                # The graph has no nodes at all (pre-ingest, onboarding):
-                # nothing to materialize and nothing to wipe — an empty
-                # boundary map is safe here and the run completes as a
-                # clean no-op instead of a failed job.
-                logger.info(
-                    "aggregation pipeline on %s: graph is empty — nothing "
-                    "to materialize (no-op run).", self.p._graph_name,
-                )
-                self._nonleaf_levels = {}
-                return
-            raise MaterializationPreconditionFailed(
-                "materialization boundary is EMPTY: the graph has nodes "
-                "but none matched any non-leaf ontology label. Continuing "
-                "would materialize nothing and the reconcile pass would "
-                "then delete every existing :AGGREGATED edge as stale — "
-                "refusing. Check that the ontology's entity-type labels "
-                "(or their source aliases) match the graph's labels."
-            )
-        self._nonleaf_levels = levels
-        by_level: Dict[int, int] = {}
-        for lv in levels.values():
-            by_level[lv] = by_level.get(lv, 0) + 1
+        self._nonleaf_levels = ranks
+        self._nonleaf_type_level = type_levels
+        self._node_dir = directory
+        by_rank: Dict[int, int] = {}
+        for rk in ranks.values():
+            by_rank[rk] = by_rank.get(rk, 0) + 1
         logger.info(
-            "aggregation pipeline on %s: materialization boundary loaded — "
-            "%d non-leaf nodes by level: %s (a level with 0 nodes here "
-            "CANNOT produce same-level pairs — check that its ontology "
-            "label matches the graph). Leaf-involving and mixed-level "
+            "aggregation pipeline on %s: structural boundary loaded — %d "
+            "container nodes by depth: %s. Leaf-involving and mixed-level "
             "pairs are served on demand.",
-            self.p._graph_name, len(levels),
-            ", ".join(f"L{lv}={n}" for lv, n in sorted(by_level.items())),
+            self.p._graph_name, len(ranks),
+            ", ".join(f"d{rk}={n}" for rk, n in sorted(by_rank.items())),
         )
 
     def _check_write_budget(self) -> None:
@@ -1340,23 +1366,18 @@ class AggregationPipeline:
             )
 
     def _budget_composition(self) -> str:
-        """Per-level-pair histogram of the would-be result, so operators
+        """Per-rank-pair histogram of the would-be result, so operators
         can see WHAT exceeded the budget. Only computed on failure."""
-        nonleaf = self._nonleaf_levels
-        counts: Dict[Tuple[Optional[int], Optional[int]], int] = {}
+        counts: Dict[str, int] = {}
         for key in list(self._acc) + list(self._flushed):
             sid, tid = _unpack(key)
-            lk = (
-                (nonleaf.get(sid), nonleaf.get(tid))
-                if nonleaf is not None else (None, None)
+            name = (
+                f"{self._pair_bucket(sid)}→{self._pair_bucket(tid)}"
+                if self._nonleaf_levels is not None else "leaf→leaf"
             )
-            counts[lk] = counts.get(lk, 0) + 1
-        def _name(lv: Optional[int]) -> str:
-            return "leaf" if lv is None else f"L{lv}"
+            counts[name] = counts.get(name, 0) + 1
         top = sorted(counts.items(), key=lambda kv: -kv[1])[:5]
-        return ", ".join(
-            f"{_name(ls)}→{_name(lt)}: {n}" for (ls, lt), n in top
-        )
+        return ", ".join(f"{name}: {n}" for name, n in top)
 
     # -- node resolution -------------------------------------------------------
 
@@ -1373,25 +1394,10 @@ class AggregationPipeline:
         if self._node_dir is not None:
             return self._node_dir
         import sys
-        if self._fine_filter_active():
-            directory: Dict[int, Tuple[str, str]] = {}
-            for label in self._nonleaf_labels():
-                # Scan and record the OBSERVED spelling — the directory's
-                # label feeds the label+urn MERGE writes, which must match
-                # the graph's actual labels on alias/case-variant sources.
-                for spelled in self._spellings_for_label(label):
-                    interned = sys.intern(str(spelled))
-                    async for row in self._scan_label_nodes(spelled, want_urn=True):
-                        if row and row[0] is not None and row[1]:
-                            directory[int(row[0])] = (row[1], interned)
-            self._node_dir = directory
-            logger.info(
-                "aggregation pipeline on %s: node directory loaded — %d "
-                "non-leaf entries (leaf nodes excluded by the "
-                "materialization boundary).",
-                self.p._graph_name, len(directory),
-            )
-            return directory
+        # Boundary mode builds the container-only directory eagerly inside
+        # _load_nonleaf_ids (the same node pass that ranks the containers),
+        # so reaching this point means legacy full-cube mode: load the FULL
+        # node set.
         width = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
         res = await self.p._ro_query(
@@ -1831,10 +1837,12 @@ class AggregationPipeline:
         )
         if stored_et != desired_et:
             return True
-        nonleaf = self._nonleaf_levels
-        if nonleaf:
+        if self._nonleaf_levels:
+            # Desired stamps are TYPE levels (the read path's filter
+            # dimension) — the structural rank drives pair SELECTION only.
             sid, tid = _unpack(key)
-            desired_sl, desired_tl = nonleaf.get(sid), nonleaf.get(tid)
+            desired_sl = self._nonleaf_type_level.get(sid)
+            desired_tl = self._nonleaf_type_level.get(tid)
             if desired_sl is not None and (
                 row_sl is None or int(row_sl) != desired_sl
             ):

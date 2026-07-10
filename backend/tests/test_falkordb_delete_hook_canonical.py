@@ -157,9 +157,13 @@ def test_unresolved_levels_defer_to_the_batch_pipeline():
     )
 
 
-def test_legacy_levelless_graphs_use_cross_product_but_still_gate_on_srem():
+def test_levelless_graphs_use_structural_canonical_pairs():
+    """Level maps are STAMPS, never the selector: a level-less graph
+    still decrements the structural (depth-ranked ancestor) canonical
+    pairs — mirror of the write hook and the batch pipeline."""
     redis = _Redis()
-    _track(redis, "urn:a1", "urn:b0")         # one tracked legacy pair
+    _track(redis, "urn:a0", "urn:b0")         # the structural root pair
+    _track(redis, "urn:a1", "urn:b0")         # legacy cross-product cell — untracked by selection
     calls = []
     p = _provider(None, redis, calls)         # no level map at all
 
@@ -168,7 +172,7 @@ def test_legacy_levelless_graphs_use_cross_product_but_still_gate_on_srem():
     keys = set()
     for _c, params, _t in calls:
         keys.update(params["keys"])
-    assert keys == {"urn:a1|urn:b0"}, (
-        "legacy mode keeps write-hook parity (full cross-product "
-        "candidates) but only SREM-verified pairs reach the graph"
+    assert keys == {"urn:a0|urn:b0"}, (
+        "structural canonical candidates only — the old full "
+        "cross-product wrote cells the batch pipeline never owns"
     )
