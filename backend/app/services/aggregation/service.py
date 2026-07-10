@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
@@ -217,6 +218,55 @@ class AggregationService:
         # point — the block below performs the first writes.
         if session.in_transaction():
             await session.rollback()
+        try:
+            job, lineage_types = await self._trigger_insert(
+                ds_id, request, trigger_source, session, idem_key, cutoff_iso,
+            )
+        except IntegrityError:
+            # Unique-index race on (data_source_id, idempotency_key): a
+            # concurrent trigger inserted the same key between our replay
+            # lookup and this commit. Return THAT job as the replay —
+            # surfacing the constraint as a 500 broke retrying callers.
+            await session.rollback()
+            if idem_key:
+                replay = (
+                    await session.execute(
+                        select(AggregationJobORM)
+                        .where(AggregationJobORM.data_source_id == ds_id)
+                        .where(AggregationJobORM.idempotency_key == idem_key)
+                        .order_by(AggregationJobORM.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if replay is not None:
+                    logger.warning(
+                        "Idempotency unique-index race for data source %s "
+                        "(key=%s) — returning existing job %s",
+                        ds_id, idem_key, replay.id,
+                    )
+                    return self._to_response(replay)
+            raise
+
+        # Dispatch AFTER commit so the worker sees the persisted row
+        await self._dispatcher.dispatch(job.id)
+
+        logger.info(
+            "Aggregation job %s created for data source %s (trigger: %s, edges: %s)",
+            job.id, ds_id, trigger_source, lineage_types,
+        )
+
+        return self._to_response(job)
+
+    async def _trigger_insert(
+        self,
+        ds_id: str,
+        request: AggregationTriggerRequest,
+        trigger_source: str,
+        session: AsyncSession,
+        idem_key: Optional[str],
+        cutoff_iso: str,
+    ):
+        """The claim + resolve + INSERT transaction body of ``trigger``."""
         async with session.begin():
             if not await claim_exclusive(session, ds_id):
                 if idem_key:
@@ -315,15 +365,7 @@ class AggregationService:
             await self._upsert_ds_state(session, ds_id, aggregation_status="pending")
             # session.begin() commits on context exit
 
-        # Dispatch AFTER commit so the worker sees the persisted row
-        await self._dispatcher.dispatch(job.id)
-
-        logger.info(
-            "Aggregation job %s created for data source %s (trigger: %s, edges: %s)",
-            job.id, ds_id, trigger_source, lineage_types,
-        )
-
-        return self._to_response(job)
+        return job, lineage_types
 
     # ── Skip (user opts out with double confirmation) ─────────────────
 
