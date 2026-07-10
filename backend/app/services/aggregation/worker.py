@@ -179,8 +179,25 @@ class AggregationWorker:
                     getattr(job, "entity_type_levels", None) or "{}"
                 )
 
+                if job.trigger_source == "purge":
+                    # A purge row must never run the aggregation pipeline —
+                    # it carries no frozen edge types by design and is
+                    # executed by the insights-service purge worker.
+                    raise ValueError(
+                        "purge job delivered to the aggregation worker — "
+                        "refusing to aggregate; this row belongs to the "
+                        "purge stream"
+                    )
                 if not lineage_types:
-                    raise ValueError("No lineage edge types configured — cannot aggregate")
+                    # Self-heal instead of failing a doomed row: re-freeze
+                    # the edge-type lists from the pinned ontology at
+                    # pickup. Whatever entry path produced a row without
+                    # frozen types (legacy row, partial write, manual
+                    # insert), the pinned ontology is still the source of
+                    # truth the trigger would have used.
+                    containment_types, lineage_types, entity_type_levels = (
+                        await self._refreeze_edge_types(session, job)
+                    )
 
                 # Worker-side gate re-validation. Closes the trigger →
                 # pickup race: if the user edited the ontology between
@@ -624,6 +641,71 @@ class AggregationWorker:
         except Exception as e:
             logger.warning("Failed to update data source state for %s: %s", data_source_id, e)
 
+    async def _refreeze_edge_types(
+        self, session: AsyncSession, job: AggregationJobORM,
+    ) -> tuple:
+        """Re-derive (containment, lineage, levels) from the job's pinned
+        ontology when the frozen lists are empty, persisting them back
+        onto the row so a resume stays stable. Raises ValueError when no
+        ontology is pinned or it yields no lineage types — with enough
+        context to identify the entry path that produced the bad row."""
+        if not job.ontology_id:
+            raise ValueError(
+                "No lineage edge types configured — cannot aggregate "
+                f"(trigger_source={job.trigger_source!r}, no pinned "
+                "ontology to re-freeze from; retrigger this data source)"
+            )
+        from backend.app.db.models import OntologyORM
+        from backend.app.ontology.resolver import (
+            parse_entity_definitions,
+            parse_relationship_definitions,
+            derive_flat_lists,
+        )
+        from backend.app.services.ontology_levels import derive_level_map
+        from types import SimpleNamespace
+
+        pinned = await session.get(OntologyORM, job.ontology_id)
+        if pinned is None:
+            raise ValueError(
+                f"No lineage edge types configured and pinned ontology "
+                f"{job.ontology_id!r} no longer exists — retrigger"
+            )
+        entity_defs = parse_entity_definitions(
+            json.loads(pinned.entity_type_definitions or "{}")
+        )
+        rel_defs = parse_relationship_definitions(
+            json.loads(pinned.relationship_type_definitions or "{}")
+        )
+        flat = derive_flat_lists(entity_defs, rel_defs)
+        if not flat.lineage_edge_types:
+            raise ValueError(
+                "No lineage edge types configured — the pinned ontology "
+                f"{job.ontology_id!r} classifies no relationship as "
+                "lineage (trigger_source="
+                f"{job.trigger_source!r})"
+            )
+        levels = derive_level_map(
+            SimpleNamespace(entity_type_definitions=entity_defs)
+        )
+        job.containment_edge_types = json.dumps(list(flat.containment_edge_types))
+        job.lineage_edge_types = json.dumps(list(flat.lineage_edge_types))
+        if hasattr(job, "entity_type_levels"):
+            job.entity_type_levels = json.dumps(levels)
+        job.updated_at = _now()
+        await session.commit()
+        logger.warning(
+            "Aggregation job %s had no frozen edge types "
+            "(trigger_source=%r) — re-froze from pinned ontology %s "
+            "(%d lineage, %d containment types)",
+            job.id, job.trigger_source, job.ontology_id,
+            len(flat.lineage_edge_types), len(flat.containment_edge_types),
+        )
+        return (
+            list(flat.containment_edge_types),
+            list(flat.lineage_edge_types),
+            levels,
+        )
+
     async def _materialize_with_retries(
         self,
         session: AsyncSession,
@@ -988,7 +1070,8 @@ class AggregationWorker:
                 batches_since_commit = 0
                 is_first_checkpoint = False
                 logger.info(
-                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d materialized) [committed seq=%d]",
+                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d written this run; "
+                    "diff apply skips unchanged edges) [committed seq=%d]",
                     job.id, processed, total, job.progress, job.created_edges, job.last_sequence,
                 )
             except Exception as commit_exc:
@@ -1096,6 +1179,7 @@ class AggregationWorker:
             lineage_edge_types=lineage_types,
             batch_size=job.batch_size,
             tuning=job_tuning,
+            job_id=job.id,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,

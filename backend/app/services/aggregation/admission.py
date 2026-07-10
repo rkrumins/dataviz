@@ -140,25 +140,51 @@ class AggregationAdmission:
 
     # -- per-graph lease -------------------------------------------------------
 
-    async def acquire_graph_lease(self, provider: Any) -> Optional[GraphLease]:
+    async def acquire_graph_lease(
+        self, provider: Any, owner: str = "",
+    ) -> Optional[GraphLease]:
         """Acquire the exclusive per-graph write lease or raise
         ``ProviderBusy`` (the worker parks and resumes — not a retry).
-        Returns None (fail open) if Redis is unavailable."""
+        Returns None (fail open) if Redis is unavailable.
+
+        ``owner`` identifies the holder (job id) — embedded in the lease
+        value so a CONFLICTING claimant can name who is writing instead
+        of reporting an anonymous "lease held". Anonymous conflicts were
+        undiagnosable in production (an invisible in-process shadow run
+        held the lease while every user-triggered job parked)."""
         graph = getattr(provider, "_graph_name", "unknown")
         key = f"agg:graphwrite:{endpoint_key(provider)}:{graph}"
-        token = uuid.uuid4().hex
+        host = os.getenv("HOSTNAME", "") or "unknown-host"
+        token = f"{uuid.uuid4().hex}|{owner or 'unattributed'}|{host}"
         try:
             ok = await self._redis.set(key, token, nx=True, px=_GRAPH_LEASE_TTL_MS)
         except Exception as exc:
             self._warn_fail_open("graph-lease acquire", exc)
             return None
         if not ok:
+            holder_desc = "unknown holder"
+            ttl_desc = ""
+            try:
+                raw = await self._redis.get(key)
+                if raw is not None:
+                    val = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    parts = val.split("|")
+                    if len(parts) == 3:
+                        holder_desc = f"job {parts[1]} on {parts[2]}"
+                ttl_ms = await self._redis.pttl(key)
+                if isinstance(ttl_ms, int) and ttl_ms > 0:
+                    ttl_desc = (
+                        f"; lease auto-expires in {ttl_ms / 1000:.0f}s if "
+                        f"the holder dies"
+                    )
+            except Exception:
+                pass
             from backend.common.adapters import ProviderBusy
             raise ProviderBusy(
                 provider_name=graph,
                 reason=(
-                    "another aggregation job is currently writing to this "
-                    "graph (cross-pod write lease held)"
+                    f"another aggregation job is writing to this graph "
+                    f"(cross-pod write lease held by {holder_desc}{ttl_desc})"
                 ),
                 retry_after_seconds=30,
             )

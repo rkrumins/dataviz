@@ -36,6 +36,22 @@ from backend.app.ontology import runtime as ontology_runtime
 
 logger = logging.getLogger(__name__)
 
+# Process-wide handle to the wired AggregationService (set at startup by
+# main.py in direct mode / controlplane.py on the CP). Lets non-HTTP
+# callers (e.g. the read path's empty-result backfill) create REAL
+# aggregation jobs — visible in the UI, executed by the worker fleet —
+# instead of running shadow work in-process.
+_ACTIVE_SERVICE: Optional["AggregationService"] = None
+
+
+def set_active_service(svc: "AggregationService") -> None:
+    global _ACTIVE_SERVICE
+    _ACTIVE_SERVICE = svc
+
+
+def get_active_service() -> Optional["AggregationService"]:
+    return _ACTIVE_SERVICE
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

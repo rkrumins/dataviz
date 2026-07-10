@@ -292,8 +292,10 @@ class AggregationPipeline:
         intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
         should_cancel: Optional[Callable[[], bool]],
         tuning: Optional[Dict[str, Any]] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         self.p = provider
+        self._job_id = job_id or ""
         # Per-job tuning overrides (frozen on the job row at trigger time)
         # layered over env defaults — see _knob_int/_knob_float/_knob_bool.
         self._tuning: Dict[str, Any] = dict(tuning or {})
@@ -418,7 +420,9 @@ class AggregationPipeline:
         admission = getattr(self.p, "_admission_controller", None)
         lease = None
         if admission is not None:
-            lease = await admission.acquire_graph_lease(self.p)
+            lease = await admission.acquire_graph_lease(
+                self.p, owner=self._job_id,
+            )
         try:
             # Persist a parseable cursor IMMEDIATELY — before any graph
             # work — so an early crash resumes instead of restarting with
@@ -1528,6 +1532,7 @@ async def materialize_aggregated_edges(
     resume_processed: int = 0,
     resume_created: int = 0,
     tuning: Optional[Dict[str, Any]] = None,
+    job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Entry point used by ``FalkorDBProvider.materialize_aggregated_edges_batch``."""
     pipeline = AggregationPipeline(
@@ -1539,5 +1544,6 @@ async def materialize_aggregated_edges(
         intra_batch_callback=intra_batch_callback,
         should_cancel=should_cancel,
         tuning=tuning,
+        job_id=job_id,
     )
     return await pipeline.run()

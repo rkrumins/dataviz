@@ -105,6 +105,8 @@ async def lifespan(app: FastAPI):
         session_factory=get_jobs_session,
         ontology_service=ontology_svc,
     )
+    from .service import set_active_service
+    set_active_service(svc)
 
     # 6. Crash recovery — OFF the startup critical path. It re-dispatches
     # interrupted jobs with a per-job exponential backoff sleep, which can

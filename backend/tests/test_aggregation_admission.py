@@ -97,6 +97,26 @@ def test_graph_lease_is_exclusive_and_released():
     _run(scenario())
 
 
+def test_graph_lease_conflict_names_the_holder():
+    """A conflicting claimant must be told WHO holds the lease — an
+    anonymous 'lease held' was undiagnosable in production when a shadow
+    in-process run held it while user jobs parked."""
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        b = adm.AggregationAdmission(redis)
+        provider = _FakeProvider()
+
+        lease = await a.acquire_graph_lease(provider, owner="agg_12345")
+        assert lease is not None
+        with pytest.raises(ProviderBusy) as exc:
+            await b.acquire_graph_lease(provider, owner="agg_67890")
+        assert "agg_12345" in str(exc.value)
+        await a.release_graph_lease(lease)
+
+    _run(scenario())
+
+
 def test_write_slots_cap_concurrency():
     async def scenario():
         redis = _FakeRedis()

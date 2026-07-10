@@ -26,11 +26,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Strong references to fire-and-forget materialization tasks. Without this,
-# Python GC may collect a running task because no caller awaits it.
-_pending_materialize_tasks: Set[asyncio.Task] = set()
-
-
 # Granularity is now expressed as an entity type ID string (e.g. "dataset", "term").
 # Coarseness is derived from hierarchy.level in the resolved ontology — level 0 = coarsest.
 # No hardcoded mapping needed.
@@ -1720,44 +1715,101 @@ class ContextEngine:
         containment_types: List[str],
         lineage_types: List[str],
     ) -> bool:
-        """Fire a one-shot background materialize, deduped via Redis SET-NX.
+        """Request a re-materialization as a REAL aggregation job, deduped
+        via Redis SET-NX. Returns True when a job was created (or one is
+        already in flight), False when nothing could be scheduled.
 
-        Returns True when a new materialize was scheduled (or a prior one
-        is still in flight), False when the dedupe layer is unreachable
-        and we cannot safely fan-out.
+        The read path never writes. The previous implementation ran
+        ``materialize_aggregated_edges_batch`` inline in this process —
+        a shadow run invisible to the jobs UI that held the cross-pod
+        graph write lease, parking every user-triggered worker job on an
+        anonymous "lease held" error. Routing through the aggregation
+        service gives the run a job row (UI-visible, cancellable),
+        worker-fleet placement, watchdog, tuning, and admission — the
+        same lifecycle as any other job.
         """
+        ds_id = self._data_source_id
+        if not ds_id:
+            return False
         redis = getattr(self.provider, "_redis", None)
-        if redis is None:
-            return False
-        ds_id = self._data_source_id or self._workspace_id or "default"
         dedupe_key = f"materialize:in-flight:{ds_id}"
-        try:
-            claimed = bool(await redis.set(dedupe_key, "1", nx=True, ex=600))
-        except Exception as e:
-            logger.warning("Materialize dedupe-claim failed: %s", e)
-            return False
-
-        if not claimed:
-            return True
-
-        async def _run():
+        if redis is not None:
             try:
-                await self.provider.materialize_aggregated_edges_batch(
-                    containment_edge_types=containment_types,
-                    lineage_edge_types=lineage_types,
-                )
+                # Short TTL: the job's own conflict handling dedupes real
+                # concurrency; this only damps read-path trigger storms.
+                claimed = bool(await redis.set(dedupe_key, "1", nx=True, ex=120))
+                if not claimed:
+                    return True
             except Exception as e:
-                logger.error("Background aggregated materialization failed: %s", e, exc_info=True)
-            finally:
-                try:
-                    await redis.delete(dedupe_key)
-                except Exception:
-                    pass
+                logger.warning("Materialize dedupe-claim failed: %s", e)
 
-        task = asyncio.create_task(_run(), name=f"materialize-aggregated-{ds_id}")
-        _pending_materialize_tasks.add(task)
-        task.add_done_callback(_pending_materialize_tasks.discard)
-        return True
+        from backend.app.services.aggregation.service import get_active_service
+        from backend.app.services.aggregation.schemas import (
+            AggregationTriggerRequest,
+        )
+        projection_mode = getattr(self.provider, "_projection_mode", None) or "in_source"
+        request = AggregationTriggerRequest(projectionMode=projection_mode, batchSize=1000)
+
+        svc = get_active_service()
+        if svc is not None:
+            try:
+                async with svc._session_factory() as session:
+                    job = await svc.trigger(ds_id, request, "auto", session)
+                logger.info(
+                    "Read-path backfill: triggered aggregation job %s for %s",
+                    getattr(job, "id", "?"), ds_id,
+                )
+                return True
+            except Exception as e:
+                # ConflictError = a job is already active — mission
+                # accomplished. Anything else (unresolved ontology, DS
+                # missing) is logged, never raised into the read path.
+                logger.info(
+                    "Read-path backfill trigger for %s not scheduled: %s",
+                    ds_id, e,
+                )
+                return "already" in str(e).lower() or "active" in str(e).lower()
+
+        # Proxy deployment: this process has no aggregation service —
+        # POST to the control plane's trigger endpoint instead.
+        import os as _os
+        if _os.getenv("AGGREGATION_PROXY_ENABLED", "false").lower() == "true":
+            import httpx
+            base = _os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
+            try:
+                async with httpx.AsyncClient(
+                    base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
+                ) as client:
+                    resp = await client.post(
+                        f"/aggregation/data-sources/{ds_id}/jobs",
+                        params={"triggerSource": "auto"},
+                        json=request.model_dump(by_alias=True, exclude_none=True),
+                    )
+                if resp.status_code in (200, 202):
+                    logger.info(
+                        "Read-path backfill: triggered aggregation job via "
+                        "control plane for %s", ds_id,
+                    )
+                    return True
+                if resp.status_code == 409:
+                    return True  # a job is already active
+                logger.info(
+                    "Read-path backfill trigger for %s rejected by control "
+                    "plane (%s): %s", ds_id, resp.status_code, resp.text[:300],
+                )
+                return False
+            except Exception as e:
+                logger.warning(
+                    "Read-path backfill trigger for %s failed to reach the "
+                    "control plane: %s", ds_id, e,
+                )
+                return False
+
+        logger.info(
+            "Read-path backfill for %s skipped: no aggregation service in "
+            "this process and proxy mode is disabled.", ds_id,
+        )
+        return False
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
         """

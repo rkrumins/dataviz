@@ -676,6 +676,10 @@ async def lifespan(_app: FastAPI):
 
             # Register as app state for endpoint access
             _app.state.aggregation_service = agg_service
+            # Process-wide handle for non-HTTP callers (read-path backfill
+            # triggers a REAL job instead of shadow in-process work).
+            from .services.aggregation.service import set_active_service
+            set_active_service(agg_service)
 
             # Recovery and scheduler only run on control-plane / dev roles.
             # Web tier never starts background tasks — it is fully stateless.
