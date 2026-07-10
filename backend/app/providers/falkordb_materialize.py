@@ -149,6 +149,13 @@ def _extract_concurrency() -> int:
     return _env_int("AGGREGATION_EXTRACT_CONCURRENCY", 2, 1, 4)
 
 
+def _scan_shrink_floor() -> int:
+    """Smallest ID-range width the shrink-on-timeout ladder descends to.
+    A range THIS narrow that still times out is a server outage, not a
+    payload problem — the timeout propagates and the run fails."""
+    return _env_int("AGGREGATION_SCAN_SHRINK_FLOOR", 10_000, 1, 5_000_000)
+
+
 def _materialize_leaf_pairs() -> bool:
     return os.getenv(
         "AGGREGATION_MATERIALIZE_LEAF_PAIRS", "false"
@@ -360,6 +367,12 @@ class AggregationPipeline:
         self._pacing_ratio = self._knob_float("write_pacing_ratio", _pacing_ratio, 0.0, 10.0)
         self._phase_started = time.monotonic()
         self._phase_timings: Dict[str, float] = {}
+        # Shrink-on-timeout scan state (see _fetch_range): a per-query
+        # timeout halves the effective sub-range width for the REST of the
+        # run (sticky), re-growing after sustained successes. None = the
+        # knob width is healthy.
+        self._scan_subwidth: Optional[int] = None
+        self._scan_success_streak = 0
 
     # -- tuning knob resolution ---------------------------------------------
 
@@ -635,6 +648,64 @@ class AggregationPipeline:
         rows = res.result_set or []
         return int(rows[0][0] or 0) if rows and rows[0] else 0
 
+    async def _fetch_range(self, run_one, lo: int, hi: int) -> list:
+        """Run ``run_one(lo, hi) -> rows`` with shrink-on-timeout.
+
+        A per-query ``asyncio.TimeoutError`` (deliberately never retried at
+        the connection layer — a slow query must not be multiplied) used to
+        fail the WHOLE run, sending the job back through worker retry into
+        a full EXTRACT re-run. Instead: halve the effective width — sticky
+        for the rest of the run so later ranges don't re-discover it — and
+        re-fetch as sub-ranges; only a floor-width range that still times
+        out (a real outage, not payload size) propagates. Eight consecutive
+        un-split successes double the width back toward the knob ceiling.
+        Outer loops keep knob-width strides, so RECONCILE cursor positions
+        (absolute range lower bounds) are unaffected."""
+        floor = _scan_shrink_floor()
+        width = hi - lo
+        sticky = self._scan_subwidth
+        if sticky is not None and width > sticky:
+            rows: list = []
+            cur = lo
+            while cur < hi:
+                rows.extend(await self._fetch_range(run_one, cur, min(cur + sticky, hi)))
+                cur = min(cur + sticky, hi)
+            return rows
+        try:
+            rows = await run_one(lo, hi)
+        except asyncio.TimeoutError:
+            if width <= floor:
+                logger.error(
+                    "aggregation pipeline on %s: floor-width scan "
+                    "[%d, %d) still timed out — treating as a provider "
+                    "outage.", self.p._graph_name, lo, hi,
+                )
+                raise
+            half = max(floor, width // 2)
+            if self._scan_subwidth is None or half < self._scan_subwidth:
+                self._scan_subwidth = half
+            self._scan_success_streak = 0
+            logger.warning(
+                "aggregation pipeline on %s: scan [%d, %d) timed out — "
+                "shrinking effective range width to %d and re-fetching.",
+                self.p._graph_name, lo, hi, self._scan_subwidth,
+            )
+            return await self._fetch_range(run_one, lo, hi)
+        self._scan_success_streak += 1
+        if self._scan_subwidth is not None and self._scan_success_streak >= 8:
+            self._scan_success_streak = 0
+            ceiling = self._knob_int(
+                "scan_range_width", _scan_range_width, 10_000, 5_000_000,
+            )
+            doubled = self._scan_subwidth * 2
+            self._scan_subwidth = None if doubled >= ceiling else doubled
+            logger.info(
+                "aggregation pipeline on %s: scans healthy — effective "
+                "range width back to %s.",
+                self.p._graph_name, self._scan_subwidth or ceiling,
+            )
+        return rows
+
     async def _scan_type_ranges(self, safe_type: str, *, proj: bool = False):
         """Yield ``(range_lo, rows)`` for one edge type in fixed ID-range
         partitions, fetched in bounded-concurrency WAVES.
@@ -652,15 +723,18 @@ class AggregationPipeline:
         max_id = await self._max_edge_id(f"()-[r:`{safe_type}`]->()", proj=proj)
         runner = self.p._proj_ro_query if proj else self.p._ro_query
 
-        async def fetch(lo: int):
+        async def run_one(lo: int, hi: int):
             res = await runner(
                 f"MATCH (s)-[r:`{safe_type}`]->(t) "
                 f"WHERE ID(r) >= $lo AND ID(r) < $hi "
                 f"RETURN ID(s), ID(t)",
-                params={"lo": lo, "hi": lo + width},
+                params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
-            return lo, (res.result_set or [])
+            return res.result_set or []
+
+        async def fetch(lo: int):
+            return lo, await self._fetch_range(run_one, lo, lo + width)
 
         lows = list(range(0, max_id + 1, width))
         for start in range(0, len(lows), conc):
@@ -1066,14 +1140,17 @@ class AggregationPipeline:
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
         returns = "ID(n), n.urn" if want_urn else "ID(n)"
 
-        async def fetch(lo: int):
+        async def run_one(lo: int, hi: int):
             r = await self.p._ro_query(
                 f"MATCH (n:`{safe}`) WHERE ID(n) >= $lo AND ID(n) < $hi "
                 f"RETURN {returns}",
-                params={"lo": lo, "hi": lo + width},
+                params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
             return r.result_set or []
+
+        async def fetch(lo: int):
+            return await self._fetch_range(run_one, lo, lo + width)
 
         lows = list(range(0, max_id + 1, width))
         for start in range(0, len(lows), conc):
@@ -1225,20 +1302,24 @@ class AggregationPipeline:
         max_id = int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else -1
         directory: Dict[int, Tuple[str, str]] = {}
 
-        async def fetch(lo: int):
-            return await self.p._ro_query(
+        async def run_one(lo: int, hi: int):
+            res = await self.p._ro_query(
                 "MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
                 "RETURN ID(n), n.urn, labels(n)",
-                params={"lo": lo, "hi": lo + width},
+                params={"lo": lo, "hi": hi},
                 timeout=_scan_timeout_s(),
             )
+            return res.result_set or []
+
+        async def fetch(lo: int):
+            return await self._fetch_range(run_one, lo, lo + width)
 
         lows = list(range(0, max_id + 1, width))
         for start in range(0, len(lows), conc):
             self._cancel_check()
             wave = lows[start:start + conc]
-            for res in await asyncio.gather(*(fetch(lo) for lo in wave)):
-                for row in (res.result_set or []):
+            for rows in await asyncio.gather(*(fetch(lo) for lo in wave)):
+                for row in rows:
                     nid, urn, labels = row[0], row[1], row[2] or []
                     if nid is None or not urn or not labels:
                         continue
@@ -1541,9 +1622,7 @@ class AggregationPipeline:
         total_ranges = max(1, -(-(max_id + 1) // width)) if max_id >= 0 else 1
         lo = start_lo
 
-        while lo <= max_id:
-            hi = lo + width
-            self._cancel_check()
+        async def run_one(lo_: int, hi_: int):
             if not dedicated:
                 res = await runner(
                     "MATCH (a)-[r:AGGREGATED]->(b) "
@@ -1551,7 +1630,7 @@ class AggregationPipeline:
                     "RETURN ID(a), ID(b), r.aggKey, r.weight, r.levelDigest, "
                     "r.latestUpdate, r.sourceEdgeTypes, r.sourceLevel, "
                     "r.targetLevel",
-                    params={"lo": lo, "hi": hi},
+                    params={"lo": lo_, "hi": hi_},
                     timeout=_scan_timeout_s(),
                 )
             else:
@@ -1560,13 +1639,19 @@ class AggregationPipeline:
                     "WHERE ID(r) >= $lo AND ID(r) < $hi "
                     "RETURN r.aggKey, r.weight, r.levelDigest, r.latestUpdate, "
                     "r.sourceEdgeTypes, r.sourceLevel, r.targetLevel",
-                    params={"lo": lo, "hi": hi},
+                    params={"lo": lo_, "hi": hi_},
                     timeout=_scan_timeout_s(),
                 )
+            return res.result_set or []
+
+        while lo <= max_id:
+            hi = lo + width
+            self._cancel_check()
+            range_rows = await self._fetch_range(run_one, lo, hi)
             to_delete: List[str] = []
             to_overwrite: List[int] = []
             to_add: List[int] = []
-            for row in (res.result_set or []):
+            for row in range_rows:
                 if not dedicated:
                     (aid, bid, agg_key, weight, row_digest, latest,
                      row_et, row_sl, row_tl) = row
