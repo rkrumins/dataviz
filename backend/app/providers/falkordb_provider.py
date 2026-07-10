@@ -4254,7 +4254,10 @@ class FalkorDBProvider(GraphDataProvider):
         so the caller knows to trigger a backfill.
         """
         from fastapi import HTTPException
-        from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
+        from ..config.resilience import (
+            AGGREGATED_EDGE_RESULT_CAP,
+            AGGREGATED_SOURCE_URN_BATCH_SIZE,
+        )
 
         if len(source_urns) > 100_000:
             raise HTTPException(
@@ -4268,6 +4271,11 @@ class FalkorDBProvider(GraphDataProvider):
 
         await self._ensure_connected()
 
+        # LIMIT in the Cypher, not only at Python conversion: without it
+        # every batch materializes + weight-sorts its FULL match set on
+        # the server before the client truncates. Batched calls merge and
+        # re-truncate client-side, so the cap semantics are unchanged —
+        # only the server-side work is bounded.
         if target_urns:
             cypher = (
                 "MATCH (s)-[r:AGGREGATED]->(t) "
@@ -4275,7 +4283,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
-                "ORDER BY r.weight DESC"
+                f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
             )
         else:
             cypher = (
@@ -4284,7 +4292,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
-                "ORDER BY r.weight DESC"
+                f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
             )
 
         async def _run_batch(batch: List[str]) -> list:
