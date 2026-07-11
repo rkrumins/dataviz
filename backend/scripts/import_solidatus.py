@@ -271,8 +271,9 @@ def _log_converted_stats(cg, schema) -> None:
         logger.info(f"  edge {t}: {c}")
 
 
-async def push_to_falkordb(builder, graph_name: str, declared_labels=None):
+async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bulk=True):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
+    import redis.asyncio as _aioredis
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
@@ -280,56 +281,82 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None):
     )
     await provider._ensure_connected()
 
-    # Index the urn on EVERY label we're about to write, BEFORE writing. This is the single
-    # most important thing for a large load: without a per-label urn index, each node MERGE
-    # and each edge endpoint MATCH is a FULL label scan (O(N) per row → O(N²) total), which is
-    # both the slowness and the memory blow-up that OOM-restarts FalkorDB. `ensure_indices`
-    # otherwise only indexes a hardcoded default label set (domain/dataset/…), so the labels
-    # this load actually writes would never get indexed — the root cause of the multi-million-
-    # row load failing.
-    #
-    # Labels are sourced from the DECLARED model — the default hierarchy types
-    # (layer/object/group/attribute) or the --schema's entityTypes (e.g. Roots/Node) — passed
-    # in as ``declared_labels``, unioned with whatever the nodes actually carry as a safety net.
-    # Declared-first so a type that's sparse in this particular file is still indexed before its
-    # first write.
-    labels = sorted(set(declared_labels or ()) | {n.entity_type for n in builder.nodes if n.entity_type})
-    logger.info(f"Ensuring urn indices for labels {labels} before load...")
-    await provider.ensure_indices(entity_type_ids=labels)
+    _r = _aioredis.Redis(
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")))
 
-    # Batch size is tunable — smaller batches bound per-query memory/time on constrained
-    # instances (fewer rows in flight), at the cost of more round-trips.
-    CHUNK = int(os.getenv("SOLIDATUS_IMPORT_CHUNK", "10000"))
-    logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}' (chunk={CHUNK})...")
-    for i in range(0, len(builder.nodes), CHUNK):
-        await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
-        logger.info(f"  Nodes: {min(i + CHUNK, len(builder.nodes))}/{len(builder.nodes)}")
+    # Bulk mode (default): PAUSE AOF + RDB persistence for the duration of the load. Writing
+    # millions of MERGE commands through the AOF (appendfsync everysec, auto-rewrite at 80%)
+    # balloons the append-only file to tens of GB and repeatedly forks to rewrite it — that is
+    # what fills the disk and leaves FalkorDB stuck 'LOADING'. With persistence paused, disk
+    # only holds the in-memory graph; re-enabling AOF at the end writes ONE compact file with
+    # the final state. Trade-off: a crash mid-load loses the partial graph — fine for a load
+    # you can just re-run. Pass --keep-persistence to keep AOF on throughout.
+    saved_aof = None
+    saved_save = ""
+    if bulk:
+        try:
+            saved_aof = (await _r.config_get("appendonly")).get("appendonly", "yes")
+            saved_save = (await _r.config_get("save")).get("save", "")
+            await _r.config_set("appendonly", "no")
+            await _r.config_set("save", "")
+            logger.info("Bulk mode: PAUSED AOF + RDB persistence for the load so the AOF can't "
+                        "fill the disk. Persistence is restored (and compacted) afterwards.")
+        except Exception as exc:
+            logger.warning("Could not pause persistence for bulk load (%s) — continuing with it on.", exc)
+            saved_aof = None
 
-    # Endpoint urn→label so the edge MATCH is label-qualified — now index-assisted, since the
-    # urn index for these labels exists (created above), so this is a seek, not a scan.
-    endpoint_labels = {n.urn: n.entity_type for n in builder.nodes}
-    logger.info(f"Pushing {len(builder.edges)} edges...")
-    for i in range(0, len(builder.edges), CHUNK):
-        await provider.save_custom_graph([], builder.edges[i:i + CHUNK], endpoint_labels=endpoint_labels)
-        logger.info(f"  Edges: {min(i + CHUNK, len(builder.edges))}/{len(builder.edges)}")
-
-    # Re-run to add the level / built-in edge indices too (idempotent).
-    await provider.ensure_indices(entity_type_ids=labels)
-    logger.info("Push complete!")
-
-    # Compact the AOF so a subsequent FalkorDB restart reloads from the fast RDB base
-    # instead of replaying this whole import command-by-command (which is ~minutes/GB and
-    # can leave the instance stuck 'LOADING'). Best-effort; the graph is already durable.
     try:
-        import redis.asyncio as _aioredis
-        _r = _aioredis.Redis(
-            host=os.getenv("FALKORDB_HOST", "localhost"),
-            port=int(os.getenv("FALKORDB_PORT", "6379")))
-        await _r.execute_command("BGREWRITEAOF")
-        await _r.aclose()
-        logger.info("Triggered BGREWRITEAOF — the AOF will compact so restarts stay fast.")
-    except Exception as exc:
-        logger.warning("BGREWRITEAOF trigger failed (non-fatal, graph still durable): %s", exc)
+        # Index the urn on EVERY label we're about to write, BEFORE writing. Without a per-label
+        # urn index, each node MERGE and each edge endpoint MATCH is a FULL label scan (O(N) per
+        # row → O(N²) total) — the slowness and memory pressure behind the failure. `ensure_indices`
+        # otherwise only indexes a hardcoded default label set (domain/dataset/…), so the labels
+        # this load writes would never get indexed. Labels are sourced from the DECLARED model —
+        # default hierarchy (layer/object/group/attribute) or the --schema's entityTypes
+        # (e.g. Roots/Node) via ``declared_labels`` — unioned with observed node types as a safety
+        # net, declared-first so a sparse type is still indexed before its first write.
+        labels = sorted(set(declared_labels or ()) | {n.entity_type for n in builder.nodes if n.entity_type})
+        logger.info(f"Ensuring urn indices for labels {labels} before load...")
+        await provider.ensure_indices(entity_type_ids=labels)
+
+        # Batch size is tunable — smaller batches bound per-query memory/time (fewer rows in
+        # flight) at the cost of more round-trips.
+        CHUNK = int(os.getenv("SOLIDATUS_IMPORT_CHUNK", "10000"))
+        logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}' (chunk={CHUNK})...")
+        for i in range(0, len(builder.nodes), CHUNK):
+            await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
+            logger.info(f"  Nodes: {min(i + CHUNK, len(builder.nodes))}/{len(builder.nodes)}")
+
+        # Endpoint urn→label so the edge MATCH is label-qualified — now index-assisted (a seek,
+        # not a scan) since the urn index for these labels exists.
+        endpoint_labels = {n.urn: n.entity_type for n in builder.nodes}
+        logger.info(f"Pushing {len(builder.edges)} edges...")
+        for i in range(0, len(builder.edges), CHUNK):
+            await provider.save_custom_graph([], builder.edges[i:i + CHUNK], endpoint_labels=endpoint_labels)
+            logger.info(f"  Edges: {min(i + CHUNK, len(builder.edges))}/{len(builder.edges)}")
+
+        await provider.ensure_indices(entity_type_ids=labels)  # level / built-in edge indices (idempotent)
+        logger.info("Push complete!")
+    finally:
+        # Restore persistence. Re-enabling AOF triggers ONE rewrite that persists the final,
+        # compact graph, so a later restart reloads fast from the RDB base instead of replaying
+        # the whole import. When bulk was off (or pausing failed), just compact via BGREWRITEAOF.
+        try:
+            if saved_aof is not None:
+                await _r.config_set("save", saved_save or "")
+                await _r.config_set("appendonly", saved_aof)
+                logger.info("Bulk mode: restored persistence (AOF re-enabled → one compact rewrite).")
+            else:
+                await _r.execute_command("BGREWRITEAOF")
+                logger.info("Triggered BGREWRITEAOF — the AOF will compact so restarts stay fast.")
+        except Exception as exc:
+            logger.warning("Could not restore/compact persistence (%s) — if writes are rejected, run: "
+                           "redis-cli -p %s CONFIG SET appendonly yes", exc, os.getenv("FALKORDB_PORT", "6379"))
+        finally:
+            try:
+                await _r.aclose()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -356,6 +383,11 @@ Examples:
                         help="Source system identifier for URN generation (default: solidatus)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse and print stats without pushing to FalkorDB")
+    parser.add_argument("--keep-persistence", action="store_true",
+                        help="Keep AOF/RDB persistence ON during the load. Default is bulk mode, "
+                             "which pauses persistence for the load so the AOF can't balloon and "
+                             "fill the disk (restored + compacted afterwards). Use this only if you "
+                             "need durability against a crash mid-load.")
     parser.add_argument("--schema", type=str, default=None,
                         help="Conversion schema (preset name or JSON path) mapping the Solidatus "
                              "roles onto a custom ontology, e.g. 'roots_node'. Omit for the "
@@ -414,7 +446,8 @@ Examples:
         else:
             # Declared labels for the default path = the hierarchy types the builder can emit.
             asyncio.run(push_to_falkordb(
-                builder, args.graph, declared_labels=set(PREFIX_TO_TYPE.values())))
+                builder, args.graph, declared_labels=set(PREFIX_TO_TYPE.values()),
+                bulk=not args.keep_persistence))
         sys.exit(0)
 
     # ── Schema path: convert into the custom ontology ────────────────────────
@@ -447,4 +480,5 @@ Examples:
     else:
         # Declared labels for the schema path = the mapping's entityTypes (e.g. Roots, Node).
         asyncio.run(push_to_falkordb(
-            cg, args.graph, declared_labels=set(schema.entity_map.values())))
+            cg, args.graph, declared_labels=set(schema.entity_map.values()),
+            bulk=not args.keep_persistence))
