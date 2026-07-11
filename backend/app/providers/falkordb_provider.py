@@ -3441,6 +3441,30 @@ class FalkorDBProvider(GraphDataProvider):
                 deleted, self._graph_name,
             )
 
+    async def _label_buckets(
+        self, urns: List[str],
+    ) -> List[Tuple[str, List[str]]]:
+        """Group URNs by their sanitized node label so every anchor can
+        be label-qualified into a per-label URN-index SEEK. This build
+        has no label-less URN index, so an unlabeled ``WHERE n.urn IN
+        $list`` anchor is a FULL node/relation scan with per-row IN-list
+        membership — observed live at 4-9s per query on a 2M-node graph
+        (and timing out the stored aggregated read entirely). The ``""``
+        bucket collects URNs whose label could not be resolved; callers
+        keep the unlabeled pattern for that (bounded) residue."""
+        uniq = list(dict.fromkeys(u for u in urns if u))
+        if not uniq:
+            return []
+        try:
+            labels = await self._resolve_urn_labels_bulk(uniq)
+        except Exception as exc:
+            logger.debug("label bucketing failed (%s) — unlabeled fallback", exc)
+            return [("", uniq)]
+        buckets: Dict[str, List[str]] = {}
+        for u in uniq:
+            buckets.setdefault(labels.get(u) or "", []).append(u)
+        return sorted(buckets.items())
+
     async def _resolve_urn_labels_bulk(
         self, urns: List[str],
     ) -> Dict[str, Optional[str]]:
@@ -4447,18 +4471,26 @@ class FalkorDBProvider(GraphDataProvider):
         # the server before the client truncates. Batched calls merge and
         # re-truncate client-side, so the cap semantics are unchanged —
         # only the server-side work is bounded.
-        if target_urns:
-            cypher = (
-                "MATCH (s)-[r:AGGREGATED]->(t) "
-                "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
-                "AND s.urn <> t.urn "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "r.weight AS weight, r.sourceEdgeTypes AS types "
-                f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
-            )
-        else:
-            cypher = (
-                "MATCH (s)-[r:AGGREGATED]->(t) "
+        #
+        # Anchors are LABEL-QUALIFIED per source-label bucket: without a
+        # label the planner has no URN index on this build and falls back
+        # to scanning EVERY :AGGREGATED relation with per-row IN-list
+        # membership — observed timing out (and returning an empty
+        # canvas) at 595k stored cells × 600 visible urns. With the label
+        # it is |batch| index seeks + local out-edge expansion.
+        def _cypher_for(label: str) -> str:
+            anchor = f"(s:{label})" if label else "(s)"
+            if target_urns:
+                return (
+                    f"MATCH {anchor}-[r:AGGREGATED]->(t) "
+                    "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                    "AND s.urn <> t.urn "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "r.weight AS weight, r.sourceEdgeTypes AS types "
+                    f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
+                )
+            return (
+                f"MATCH {anchor}-[r:AGGREGATED]->(t) "
                 "WHERE s.urn IN $sourceUrns "
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
@@ -4466,21 +4498,28 @@ class FalkorDBProvider(GraphDataProvider):
                 f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
             )
 
-        async def _run_batch(batch: List[str]) -> list:
+        async def _run_batch(label: str, batch: List[str]) -> list:
             params: Dict[str, Any] = {"sourceUrns": batch}
             if target_urns:
                 params["targetUrns"] = target_urns
             try:
-                result = await self._proj_ro_query(cypher, params=params, timeout=timeout)
+                result = await self._proj_ro_query(
+                    _cypher_for(label), params=params, timeout=timeout,
+                )
                 return result.result_set or []
             except Exception as e:
                 logger.warning(f"AGGREGATED edge read failed: {e}")
                 return []
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
-        if len(source_urns) > batch_size:
-            batches = [source_urns[i:i + batch_size] for i in range(0, len(source_urns), batch_size)]
-            batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+        runs: List[Tuple[str, List[str]]] = []
+        for label, bucket in await self._label_buckets(source_urns):
+            for i in range(0, len(bucket), batch_size):
+                runs.append((label, bucket[i:i + batch_size]))
+        batch_results = await asyncio.gather(*[
+            _run_batch(lbl, b) for lbl, b in runs
+        ])
+        if len(runs) > 1:
             merged: Dict[Tuple[str, str], list] = {}
             for batch_rows in batch_results:
                 for row in batch_rows:
@@ -4495,7 +4534,7 @@ class FalkorDBProvider(GraphDataProvider):
                         existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
             rows = list(merged.values())
         else:
-            rows = await _run_batch(source_urns)
+            rows = batch_results[0] if batch_results else []
 
         # Leaf-involving pairs (column→column, column→table, column→domain,
         # …) are no longer materialized — the full cube scales as
@@ -4672,26 +4711,27 @@ class FalkorDBProvider(GraphDataProvider):
                 return []
 
         async def _profile(urns: List[str]) -> Dict[str, Tuple[bool, int]]:
-            """urn → (is_container, containment depth). One bounded
-            visible-set query per batch (unlabeled ``urn IN`` — the same
-            class as the raw fallback; batches are URN-batch sized and
-            time-boxed). Depth = longest upward containment path — the
+            """urn → (is_container, containment depth). Anchored on the
+            per-label URN indexes (label buckets from the urn→label
+            cache); the unresolved-label residue keeps the unlabeled
+            pattern. Depth = longest upward containment path — the
             read-side measurement of the writer's max-over-parents rule."""
             out: Dict[str, Tuple[bool, int]] = {}
-            uniq = list(dict.fromkeys(urns))
-            for i in range(0, len(uniq), batch):
-                for row in await _run(
-                    f"MATCH (n) WHERE n.urn IN $urns "
-                    f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
-                    f"WITH n, count(ch) AS kids "
-                    f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
-                    f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
-                    {"urns": uniq[i:i + batch]},
-                ):
-                    if row and row[0]:
-                        out[str(row[0])] = (
-                            int(row[1] or 0) > 0, int(row[2] or 0),
-                        )
+            for label, bucket in await self._label_buckets(urns):
+                anchor = f"(n:{label})" if label else "(n)"
+                for i in range(0, len(bucket), batch):
+                    for row in await _run(
+                        f"MATCH {anchor} WHERE n.urn IN $urns "
+                        f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
+                        f"WITH n, count(ch) AS kids "
+                        f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
+                        f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+                        {"urns": bucket[i:i + batch]},
+                    ):
+                        if row and row[0]:
+                            out[str(row[0])] = (
+                                int(row[1] or 0) > 0, int(row[2] or 0),
+                            )
             return out
 
         rows: list = []
@@ -4716,18 +4756,21 @@ class FalkorDBProvider(GraphDataProvider):
             }
 
             # Q1 — requested LEAF sources: their raw fan-out, targets
-            # resolved exactly or upward to any requested node.
-            for i in range(0, len(src_leaves), batch):
-                rows.extend(await _run(
-                    f"MATCH (x)-[r]->(t) "
-                    f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                    f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
-                    f"WHERE y.urn IN $ys AND x.urn <> y.urn "
-                    f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                    f"count(DISTINCT r) AS weight, "
-                    f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                    {"xs": src_leaves[i:i + batch], "ys": target_urns, "lt": lt_list},
-                ))
+            # resolved exactly or upward to any requested node. Anchored
+            # per label bucket (index seek), unlabeled residue kept.
+            for x_label, x_bucket in await self._label_buckets(src_leaves):
+                x_anchor = f"(x:{x_label})" if x_label else "(x)"
+                for i in range(0, len(x_bucket), batch):
+                    rows.extend(await _run(
+                        f"MATCH {x_anchor}-[r]->(t) "
+                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                        f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
+                        f"WHERE y.urn IN $ys AND x.urn <> y.urn "
+                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                        f"count(DISTINCT r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch], "ys": target_urns, "lt": lt_list},
+                    ))
             # Q2 — requested LEAF targets: their raw fan-in, sources
             # resolved exactly or upward to any requested CONTAINER (leaf
             # sources were fully covered by Q1 — the two stay disjoint,
@@ -4735,17 +4778,19 @@ class FalkorDBProvider(GraphDataProvider):
             # container→container cells).
             if src_containers and tgt_leaves:
                 xs_all = list(src_containers)
-                for i in range(0, len(tgt_leaves), batch):
-                    rows.extend(await _run(
-                        f"MATCH (s)-[r]->(y) "
-                        f"WHERE y.urn IN $ys AND type(r) IN $lt "
-                        f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
-                        f"WHERE x.urn IN $xs AND x.urn <> y.urn "
-                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                        f"count(DISTINCT r) AS weight, "
-                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"ys": tgt_leaves[i:i + batch], "xs": xs_all, "lt": lt_list},
-                    ))
+                for y_label, y_bucket in await self._label_buckets(tgt_leaves):
+                    y_anchor = f"(y:{y_label})" if y_label else "(y)"
+                    for i in range(0, len(y_bucket), batch):
+                        rows.extend(await _run(
+                            f"MATCH (s)-[r]->{y_anchor} "
+                            f"WHERE y.urn IN $ys AND type(r) IN $lt "
+                            f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
+                            f"WHERE x.urn IN $xs AND x.urn <> y.urn "
+                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                            f"count(DISTINCT r) AS weight, "
+                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                            {"ys": y_bucket[i:i + batch], "xs": xs_all, "lt": lt_list},
+                        ))
             # Q3 — mixed-DEPTH container pairs (table→domain): only the
             # canonical cells are materialized, so these are derived by
             # anchoring the finer endpoint's stored fan-out/fan-in and
@@ -4768,16 +4813,18 @@ class FalkorDBProvider(GraphDataProvider):
             src_leaves = [
                 u for u in source_urns if not src_prof.get(u, (False, 0))[0]
             ]
-            for i in range(0, len(src_leaves), batch):
-                rows.extend(await _run(
-                    f"MATCH (x)-[r]->(t) "
-                    f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                    f"AND t.urn <> x.urn "
-                    f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
-                    f"count(r) AS weight, "
-                    f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                    {"xs": src_leaves[i:i + batch], "lt": lt_list},
-                ))
+            for x_label, x_bucket in await self._label_buckets(src_leaves):
+                x_anchor = f"(x:{x_label})" if x_label else "(x)"
+                for i in range(0, len(x_bucket), batch):
+                    rows.extend(await _run(
+                        f"MATCH {x_anchor}-[r]->(t) "
+                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                        f"AND t.urn <> x.urn "
+                        f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
+                        f"count(r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch], "lt": lt_list},
+                    ))
         return rows, mixed_rows, degraded["v"]
 
     async def _mixed_depth_pairs(
@@ -4832,15 +4879,17 @@ class FalkorDBProvider(GraphDataProvider):
             same cell weight once per path."""
             out: Dict[str, Set[str]] = {}
             kids = list(dict.fromkeys(child_urns))
-            for i in range(0, len(kids), batch):
-                for row in await run_src(
-                    f"MATCH (a)-[:{c_pattern}*1..{hops}]->(c) "
-                    f"WHERE c.urn IN $cs AND a.urn IN $as_ "
-                    f"RETURN DISTINCT c.urn, a.urn LIMIT {cap}",
-                    {"cs": kids[i:i + batch], "as_": anc_urns},
-                ):
-                    if row and row[0] and row[1]:
-                        out.setdefault(row[0], set()).add(row[1])
+            for c_label, c_bucket in await self._label_buckets(kids):
+                c_anchor = f"(c:{c_label})" if c_label else "(c)"
+                for i in range(0, len(c_bucket), batch):
+                    for row in await run_src(
+                        f"MATCH (a)-[:{c_pattern}*1..{hops}]->{c_anchor} "
+                        f"WHERE c.urn IN $cs AND a.urn IN $as_ "
+                        f"RETURN DISTINCT c.urn, a.urn LIMIT {cap}",
+                        {"cs": c_bucket[i:i + batch], "as_": anc_urns},
+                    ):
+                        if row and row[0] and row[1]:
+                            out.setdefault(row[0], set()).add(row[1])
             return {k: sorted(v) for k, v in out.items()}
 
         def _merge(x: str, y: str, weight, types) -> None:
@@ -4864,14 +4913,16 @@ class FalkorDBProvider(GraphDataProvider):
             if not xs or not ys:
                 continue
             fanout = []
-            for i in range(0, len(xs), batch):
-                fanout.extend(await run_proj(
-                    f"MATCH (x)-[r:AGGREGATED]->(t2) "
-                    f"WHERE x.urn IN $xs AND r.targetDepth <= r.sourceDepth "
-                    f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
-                    f"LIMIT {cap}",
-                    {"xs": xs[i:i + batch]},
-                ))
+            for x_label, x_bucket in await self._label_buckets(xs):
+                x_anchor = f"(x:{x_label})" if x_label else "(x)"
+                for i in range(0, len(x_bucket), batch):
+                    fanout.extend(await run_proj(
+                        f"MATCH {x_anchor}-[r:AGGREGATED]->(t2) "
+                        f"WHERE x.urn IN $xs AND r.targetDepth <= r.sourceDepth "
+                        f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
+                        f"LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch]},
+                    ))
             up = await _resolve_up([row[1] for row in fanout if row and row[1]], ys)
             for row in fanout:
                 for y in up.get(row[1], ()):
@@ -4886,14 +4937,16 @@ class FalkorDBProvider(GraphDataProvider):
             if not xs or not ys:
                 continue
             fanin = []
-            for i in range(0, len(ys), batch):
-                fanin.extend(await run_proj(
-                    f"MATCH (s2)-[r:AGGREGATED]->(y) "
-                    f"WHERE y.urn IN $ys AND r.sourceDepth <= r.targetDepth "
-                    f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
-                    f"LIMIT {cap}",
-                    {"ys": ys[i:i + batch]},
-                ))
+            for y_label, y_bucket in await self._label_buckets(ys):
+                y_anchor = f"(y:{y_label})" if y_label else "(y)"
+                for i in range(0, len(y_bucket), batch):
+                    fanin.extend(await run_proj(
+                        f"MATCH (s2)-[r:AGGREGATED]->{y_anchor} "
+                        f"WHERE y.urn IN $ys AND r.sourceDepth <= r.targetDepth "
+                        f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
+                        f"LIMIT {cap}",
+                        {"ys": y_bucket[i:i + batch]},
+                    ))
             up = await _resolve_up([row[1] for row in fanin if row and row[1]], xs)
             for row in fanin:
                 for x in up.get(row[1], ()):
@@ -4926,42 +4979,46 @@ class FalkorDBProvider(GraphDataProvider):
         if not ltypes:
             return []
 
-        if target_urns:
-            cypher = (
-                "MATCH (s)-[r]->(t) "
-                "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
-                "AND type(r) IN $ltypes AND s.urn <> t.urn "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "count(r) AS weight, collect(DISTINCT type(r)) AS types"
-            )
-        else:
-            cypher = (
-                "MATCH (s)-[r]->(t) "
+        # Anchors label-qualified per source bucket — an unlabeled
+        # ``s.urn IN $list`` is a full scan on builds without a
+        # label-less URN index; the "" bucket keeps the unlabeled form.
+        def _cypher_for(label: str) -> str:
+            anchor = f"(s:{label})" if label else "(s)"
+            if target_urns:
+                return (
+                    f"MATCH {anchor}-[r]->(t) "
+                    "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                    "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "count(r) AS weight, collect(DISTINCT type(r)) AS types"
+                )
+            return (
+                f"MATCH {anchor}-[r]->(t) "
                 "WHERE s.urn IN $sourceUrns "
                 "AND type(r) IN $ltypes AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "count(r) AS weight, collect(DISTINCT type(r)) AS types"
             )
 
-        async def _run_batch(batch: List[str]) -> list:
+        async def _run_batch(label: str, batch: List[str]) -> list:
             params: Dict[str, Any] = {"sourceUrns": batch, "ltypes": list(ltypes)}
             if target_urns:
                 params["targetUrns"] = target_urns
             try:
-                result = await self._ro_query(cypher, params=params, timeout=timeout)
+                result = await self._ro_query(
+                    _cypher_for(label), params=params, timeout=timeout,
+                )
                 return result.result_set or []
             except Exception as e:
                 logger.warning(f"Raw lineage pair synthesis failed: {e}")
                 return []
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
-        if len(source_urns) <= batch_size:
-            return await _run_batch(source_urns)
-        batches = [
-            source_urns[i:i + batch_size]
-            for i in range(0, len(source_urns), batch_size)
-        ]
-        batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+        runs: List[Tuple[str, List[str]]] = []
+        for label, bucket in await self._label_buckets(source_urns):
+            for i in range(0, len(bucket), batch_size):
+                runs.append((label, bucket[i:i + batch_size]))
+        batch_results = await asyncio.gather(*[_run_batch(l, b) for l, b in runs])
         return [row for rows in batch_results for row in rows]
 
     def _rows_to_aggregated_result(
@@ -6329,29 +6386,31 @@ class FalkorDBProvider(GraphDataProvider):
         containment walk). Nodes with no stamped incident cell are
         absent; callers fall back to type/label filters for those."""
         out: Dict[str, int] = {}
-        for cypher, key in (
-            (
-                "MATCH (f)-[r:AGGREGATED]->() "
-                "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
-                "RETURN f.urn, max(r.sourceDepth)",
-                "out",
-            ),
-            (
-                "MATCH ()-[r:AGGREGATED]->(f) "
-                "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
-                "RETURN f.urn, max(r.targetDepth)",
-                "in",
-            ),
-        ):
-            try:
-                res = await self._proj_ro_query(cypher, params={"urns": urns})
-                for row in (res.result_set or []):
-                    if row and row[0] is not None and row[1] is not None:
-                        u, d = str(row[0]), int(row[1])
-                        if out.get(u, -1) < d:
-                            out[u] = d
-            except Exception as exc:
-                logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
+        for f_label, bucket in await self._label_buckets(urns):
+            f_anchor = f"(f:{f_label})" if f_label else "(f)"
+            for cypher, key in (
+                (
+                    f"MATCH {f_anchor}-[r:AGGREGATED]->() "
+                    "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
+                    "RETURN f.urn, max(r.sourceDepth)",
+                    "out",
+                ),
+                (
+                    f"MATCH ()-[r:AGGREGATED]->{f_anchor} "
+                    "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
+                    "RETURN f.urn, max(r.targetDepth)",
+                    "in",
+                ),
+            ):
+                try:
+                    res = await self._proj_ro_query(cypher, params={"urns": bucket})
+                    for row in (res.result_set or []):
+                        if row and row[0] is not None and row[1] is not None:
+                            u, d = str(row[0]), int(row[1])
+                            if out.get(u, -1) < d:
+                                out[u] = d
+                except Exception as exc:
+                    logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
         return out
 
     async def _collect_children_pair(
