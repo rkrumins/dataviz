@@ -42,6 +42,7 @@ class _FakeFalkor:
         self._urn_ids = {}
         self.write_queries = 0
         self.deleted_pairs = []
+        self.meta = None       # last _AggMeta stamp params
 
     # -- seeding helpers --
 
@@ -154,6 +155,11 @@ class _FakeFalkor:
     async def proj_query(self, cypher, params=None, **kw):
         params = params or {}
         if "CREATE INDEX" in cypher:
+            return _Result()
+        if "MERGE (m:_AggMeta" in cypher:
+            # Run metadata — stamped at the end of EVERY run (not a data
+            # write; the noop contract counts data writes only).
+            self.meta = dict(params)
             return _Result()
         self.write_queries += 1
         now_ms = int(time.time() * 1000)
@@ -1192,6 +1198,28 @@ def test_auto_mode_materializes_full_cube_within_budget():
         (2, 13): 2, (2, 12): 2, (2, 11): 2,
         (1, 13): 2, (1, 12): 2, (1, 11): 2,
     }, agg
+    # Run metadata stamped IN the graph: readers dispatch on the cube
+    # contract deterministically instead of probing (a probed cube
+    # misclassifies as 'boundary' and double-derives mixed weights).
+    assert fake.meta is not None
+    assert fake.meta["regime"] == "cube"
+    assert fake.meta["edgeCount"] == len(agg)
+    assert fake.meta["maxDepth"] == 2
+    # Depth stamps on every row, structural on the self-nesting shape.
+    assert fake.agg[(3, 11)]["sd"] == 2 and fake.agg[(3, 11)]["td"] == 0
+    assert fake.agg[(1, 12)]["sd"] == 0 and fake.agg[(1, 12)]["td"] == 1
+
+
+def test_boundary_run_stamps_boundary_regime_meta():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p))  # suite default: forced boundary mode
+
+    assert fake.meta is not None
+    assert fake.meta["regime"] == "boundary"
+    assert fake.meta["digest"] == "digest-1"
 
 
 def test_auto_mode_falls_back_to_boundary_above_budget():

@@ -9,7 +9,24 @@ import logging
 import os
 import time
 from collections import defaultdict, deque
-from typing import Awaitable, Callable, List, Optional, Dict, Any, Set, Tuple
+from typing import Awaitable, Callable, List, NamedTuple, Optional, Dict, Any, Set, Tuple
+
+
+class AggRunMeta(NamedTuple):
+    """Aggregation-run metadata resolved by ``_aggregation_run_meta``.
+
+    ``regime``: 'cube' (every ancestor combination stored) or 'boundary'
+    (canonical depth-diagonal only). ``stamp_version``: 2 = every stored
+    :AGGREGATED edge carries sourceDepth/targetDepth; 1 = legacy stamps
+    (depth unknown); 0 = env-forced, no stored contract. ``max_depth``:
+    deepest containment depth stamped by the last run (None when
+    unknown). ``last_materialized_at``: ISO timestamp of the last
+    completed run (None = never / unknown)."""
+
+    regime: str
+    stamp_version: int
+    max_depth: Optional[int]
+    last_materialized_at: Optional[str]
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -1836,42 +1853,83 @@ class FalkorDBProvider(GraphDataProvider):
     def _agg_regime_key(self) -> str:
         return f"{self._graph_name}:agg:regime"
 
-    async def _aggregation_storage_regime(self) -> str:
-        """``'boundary'`` when the stored :AGGREGATED set is the canonical
-        level-bridged selection, ``'fine'`` when it is (or may be) a
-        legacy / full-cube set.
+    async def _aggregation_run_meta(self) -> "AggRunMeta":
+        """Resolved aggregation-run metadata for the read paths.
 
-        The mixed-level on-demand derivation (Q3 in
-        ``_synthesize_ondemand_lineage_pairs``) is exact ONLY against
-        canonical cells; run against a full cube it re-derives
-        contributions the stored mixed rows already carry and the
-        additive merge then double-counts every mixed-level weight.
-        Resolution order: the operator's fine-pairs env escape hatch →
-        the pipeline-stamped Redis marker → a graph probe for
-        non-conforming rows (NULL aggKey or NULL level stamps — legacy
-        strategies and pre-canonical incremental writers). The probe runs
-        even when the marker says 'boundary', because incremental writers
-        that predate the canonical contract can add non-conforming rows
-        AFTER the marker was stamped. Cached ~5 minutes per provider."""
-        if os.getenv(
-            "AGGREGATION_MATERIALIZE_FINE_PAIRS", "false"
-        ).strip().lower() in ("1", "true", "yes", "on"):
-            return "fine"
-        cached = getattr(self, "_agg_regime_cached", None)
+        Precedence: the operator's fine-pairs env escape hatch → the
+        in-graph ``_AggMeta`` singleton (written atomically by the batch
+        pipeline at run end — survives Redis loss and topology splits) →
+        the legacy Redis regime marker → a graph probe for non-conforming
+        rows (NULL aggKey or NULL level stamps — legacy strategies and
+        pre-canonical incremental writers). Cached ~5 minutes.
+
+        ``regime``: 'cube' = every ancestor combination stored (readers
+        serve purely from storage; mixed-level derivation MUST stay off
+        or every mixed weight double-counts); 'boundary' = canonical
+        depth-diagonal only (depth-keyed derivation fills the rest).
+        ``stamp_version`` >= 2 means every edge carries
+        sourceDepth/targetDepth. ``last_materialized_at`` feeds the
+        result payload + the context-engine backfill trigger, so a graph
+        that HAS materialized but lost its Redis key no longer
+        re-triggers materialization on every empty read."""
+        cached = getattr(self, "_agg_meta_cached", None)
         now = time.monotonic()
         if cached and now - cached[1] < 300.0:
             return cached[0]
+        meta: Optional[AggRunMeta] = None
+        try:
+            res = await self._proj_ro_query(
+                "MATCH (m:_AggMeta {id: 'singleton'}) "
+                "RETURN m.regime, m.stampVersion, m.maxDepth, "
+                "m.lastMaterializedAt LIMIT 1",
+            )
+            rows = res.result_set or []
+            if rows and rows[0] and rows[0][0] in ("cube", "boundary"):
+                row = rows[0]
+                meta = AggRunMeta(
+                    str(row[0]),
+                    int(row[1]) if row[1] is not None else 1,
+                    int(row[2]) if row[2] is not None else None,
+                    str(row[3]) if row[3] is not None else None,
+                )
+        except Exception as e:
+            logger.debug("Aggregation _AggMeta read failed: %s", e)
+        if meta is None:
+            meta = await self._legacy_regime_meta()
+        if os.getenv(
+            "AGGREGATION_MATERIALIZE_FINE_PAIRS", "false"
+        ).strip().lower() in ("1", "true", "yes", "on"):
+            # Operator escape hatch forces the cube CONTRACT (mixed-level
+            # derivation off) without discarding the resolved timestamp
+            # or stamp version.
+            meta = meta._replace(regime="cube")
+        self._agg_meta_cached = (meta, now)
+        return meta
+
+    async def _legacy_regime_meta(self) -> "AggRunMeta":
+        """Marker/probe fallback for graphs that predate ``_AggMeta``.
+        Stamp version 1: depth stamps unknown — depth-keyed readers must
+        not trust them and fall back to stored rows only."""
         regime: Optional[str] = None
+        last_at: Optional[str] = None
         try:
             if self._redis is not None:
                 raw = await self._redis.get(self._agg_regime_key())
                 if raw:
                     val = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-                    if val in ("boundary", "fine"):
-                        regime = val
+                    if val == "boundary":
+                        regime = "boundary"
+                    elif val == "fine":
+                        regime = "cube"
+                raw = await self._redis.get(self._agg_last_materialized_key())
+                if raw is not None:
+                    last_at = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
         except Exception as e:
             logger.debug("Aggregation regime marker read failed: %s", e)
-        if regime != "fine":
+        if regime != "cube":
+            # The probe runs even when the marker says 'boundary':
+            # incremental writers that predate the canonical contract can
+            # add non-conforming rows AFTER the marker was stamped.
             try:
                 res = await self._proj_ro_query(
                     "MATCH ()-[r:AGGREGATED]->() "
@@ -1879,7 +1937,7 @@ class FalkorDBProvider(GraphDataProvider):
                     "RETURN 1 LIMIT 1",
                 )
                 if res.result_set:
-                    regime = "fine"
+                    regime = "cube"
                 elif regime is None:
                     regime = "boundary"
             except Exception as e:
@@ -1887,9 +1945,15 @@ class FalkorDBProvider(GraphDataProvider):
                 if regime is None:
                     # Unknown state: serve stored rows only (the original
                     # behavior) rather than risk double-counted sums.
-                    regime = "fine"
-        self._agg_regime_cached = (regime, now)
-        return regime
+                    regime = "cube"
+        return AggRunMeta(regime, 1, None, last_at)
+
+    async def _aggregation_storage_regime(self) -> str:
+        """Legacy two-value view of ``_aggregation_run_meta``:
+        ``'boundary'`` when the stored set is the canonical selection,
+        ``'fine'`` when it is (or may be) a full cube."""
+        meta = await self._aggregation_run_meta()
+        return "boundary" if meta.regime == "boundary" else "fine"
 
     def _agg_in_flight_key(self, ds_id: str) -> str:
         return f"materialize:in-flight:{ds_id}"
@@ -3515,6 +3579,8 @@ class FalkorDBProvider(GraphDataProvider):
         for row in (res.result_set or []):
             if row and row[0]:
                 lbl = row[0].decode("utf-8") if isinstance(row[0], (bytes, bytearray)) else str(row[0])
+                if lbl.startswith("_"):
+                    continue  # system-internal labels carry no URNs
                 labels.append(lbl)
         if not labels:
             return
@@ -4359,13 +4425,16 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
 
-        last_materialized_at: Optional[str] = None
+        # Through the resolved run meta: the in-graph _AggMeta stamp wins,
+        # the legacy Redis key is the fallback — a graph that HAS
+        # materialized but lost its Redis key must not read as "never
+        # materialized" (that re-triggered a background materialization
+        # on every empty read).
         try:
-            if self._redis is not None:
-                raw = await self._redis.get(self._agg_last_materialized_key())
-                if raw is not None:
-                    last_materialized_at = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+            meta = await self._aggregation_run_meta()
+            last_materialized_at = meta.last_materialized_at
         except Exception as e:
+            last_materialized_at = None
             logger.warning("Failed to read aggregated materialization timestamp: %s", e)
 
         # The legacy single-query read returned rows weight-descending;
@@ -6575,6 +6644,12 @@ class FalkorDBProvider(GraphDataProvider):
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
+                if str(lbl).startswith("_"):
+                    # System-internal labels (_AggMeta run metadata,
+                    # _Projection scaffolding) — not user entity types;
+                    # surfacing them puts phantom types in the ontology
+                    # wizard.
+                    continue
                 cnt = row[1]
                 samples = [s for s in (row[2] or []) if s]
                 total_nodes += cnt

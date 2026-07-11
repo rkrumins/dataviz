@@ -518,8 +518,8 @@ class AggregationPipeline:
             await self._apply_missing(existing)
             self._mark_phase("done")
 
-            await self._stamp_materialized()
             final_total = len(self._flushed | set(self._acc.keys()))
+            await self._stamp_run_meta(final_total)
             self._progress_pct = 100
             await self._checkpoint(
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
@@ -2048,24 +2048,57 @@ class AggregationPipeline:
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
             )
 
-    async def _stamp_materialized(self) -> None:
+    async def _stamp_run_meta(self, edge_count: int) -> None:
+        """Persist run metadata IN the graph — atomic with the data it
+        describes, immune to Redis loss and topology splits. The previous
+        Redis-only stamp silently no-oped whenever the executing
+        provider had no Redis attached (the worker topology), so readers
+        fell back to probing — and a probed full cube misclassifies as
+        'boundary', which double-derives every mixed-level weight (Q3)
+        and lets empty reads re-trigger materialization storms.
+
+        ``regime`` is the storage contract the readers dispatch on:
+        'cube' = every ancestor combination is stored (serve reads purely
+        from storage; only the raw leaf↔leaf mirror may need synthesis);
+        'boundary' = canonical depth-diagonal only (depth-keyed on-demand
+        derivation fills the rest). ``stampVersion`` 2 = every edge
+        carries sourceDepth/targetDepth. The Redis mirror stays for cheap
+        reads, in the legacy boundary/fine vocabulary."""
+        regime = "boundary" if self._fine_filter_active() else "cube"
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            await self.p._proj_query(
+                "MERGE (m:_AggMeta {id: 'singleton'}) "
+                "SET m.regime = $regime, m.stampVersion = 2, "
+                "m.pairRuleVersion = 2, m.levelDigest = $digest, "
+                "m.maxDepth = $maxDepth, m.edgeCount = $edgeCount, "
+                "m.runStartMs = $runStart, m.lastMaterializedAt = $now",
+                params={
+                    "regime": regime,
+                    "digest": self._level_digest,
+                    "maxDepth": self._max_stamped_depth,
+                    "edgeCount": edge_count,
+                    "runStart": self._run_start_ms,
+                    "now": now_iso,
+                },
+                timeout=self.p._bulk_create_timeout_s,
+            )
+        except Exception as exc:
+            logger.warning(
+                "aggregation pipeline on %s: failed to stamp _AggMeta run "
+                "metadata (%s) — readers will fall back to marker/probe.",
+                self.p._graph_name, exc,
+            )
         try:
             if self.p._redis is not None:
-                from datetime import datetime, timezone
                 await self.p._redis.set(
-                    self.p._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
+                    self.p._agg_last_materialized_key(), now_iso,
                 )
-                # Storage-regime marker for the read path: the mixed-level
-                # on-demand derivation (Q3) is only exact against CANONICAL
-                # stored cells — running it on a legacy/fine full cube
-                # double-counts every mixed-level weight. The reader gates
-                # Q3 on this marker (falling back to a graph probe when it
-                # is absent).
                 if hasattr(self.p, "_agg_regime_key"):
                     await self.p._redis.set(
                         self.p._agg_regime_key(),
-                        "boundary" if self._fine_filter_active() else "fine",
+                        "boundary" if regime == "boundary" else "fine",
                     )
         except Exception as exc:
             logger.warning(
