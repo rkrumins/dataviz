@@ -45,6 +45,7 @@ import type { AggregationOverridesValue } from './shared/AggregationOverridesFor
 import type { Envelope, AssetStatsPayload } from '@/types/insights'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { RefreshControl } from '@/components/insights/RefreshControl'
+import { DataSourceProfileDrawer } from '@/components/insights/DataSourceProfileDrawer'
 import { useInsightsJob } from '@/hooks/useInsightsJob'
 import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObserver'
 
@@ -136,7 +137,7 @@ const TYPE_COLOURS = [
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
     providerId, assetName, isRegistered, isSelected, catalogId,
-    onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge
+    onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge, onOpenProfile
 }: {
     providerId: string
     assetName: string
@@ -148,6 +149,7 @@ function AssetRow({
     onUnregister: (name: string) => void
     onReaggregate?: (name: string) => void
     onPurge?: (name: string, opts?: { skipReaggregate?: boolean }) => void
+    onOpenProfile: (catalogId: string) => void
     boundWorkspaceName?: string
 }) {
     const [expanded, setExpanded] = useState(false)
@@ -350,15 +352,14 @@ function AssetRow({
                             )}
                         </button>
                         {catalogId && (
-                            <Link
-                                to={`/datasources/${catalogId}`}
-                                onClick={e => e.stopPropagation()}
-                                title="Open data source insights"
-                                aria-label={`Open insights for ${assetName}`}
+                            <button
+                                onClick={(e) => { e.stopPropagation(); onOpenProfile(catalogId) }}
+                                title="Open data source profile"
+                                aria-label={`Open profile for ${assetName}`}
                                 className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
                             >
                                 <ArrowUpRight className="w-3.5 h-3.5" />
-                            </Link>
+                            </button>
                         )}
                     </div>
 
@@ -1499,6 +1500,7 @@ export function RegistryAssets() {
                                         onUnregister={handleUnregisterClick}
                                         onReaggregate={handleReaggregate}
                                         onPurge={handlePurge}
+                                        onOpenProfile={(id) => setSearchParams({ tab: 'assets', provider: selectedProviderId ?? '', profile: id })}
                                     />
                                 ))
                             )}
@@ -1614,6 +1616,12 @@ export function RegistryAssets() {
                     timeoutMinutes: 120,
                 }}
                 onConfirmRetrigger={handleConfirmReaggregate}
+            />
+
+            <DataSourceProfileDrawer
+                catalogId={searchParams.get('profile')}
+                isOpen={!!searchParams.get('profile')}
+                onClose={() => { const p = new URLSearchParams(searchParams); p.delete('profile'); setSearchParams(p) }}
             />
         </div>
     )
