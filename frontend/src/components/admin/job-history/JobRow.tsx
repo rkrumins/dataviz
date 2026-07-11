@@ -97,7 +97,7 @@ function historicalEta(
  */
 function PhaseStepper({ currentPhase, runStats, status }: {
     currentPhase: string | null | undefined
-    runStats: Record<string, number> | null | undefined
+    runStats: Record<string, number | string | Record<string, number>> | null | undefined
     status: string
 }) {
     const completed = status === 'completed'
@@ -108,7 +108,8 @@ function PhaseStepper({ currentPhase, runStats, status }: {
             {PHASES.map((p, i) => {
                 const done = completed || i < currentIdx
                 const active = !completed && i === currentIdx
-                const secs = runStats?.[p.statKey]
+                const raw = runStats?.[p.statKey]
+                const secs = typeof raw === 'number' ? raw : null
                 return (
                     <div key={p.id} className="flex-1 min-w-0">
                         <div className={cn(
@@ -263,6 +264,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
     // every pipeline run; absent only on legacy rows.
     const statWrites = typeof job.runStats?.writes === 'number' ? job.runStats.writes : null
     const statDeletes = typeof job.runStats?.deletes === 'number' ? job.runStats.deletes : null
+    // Storage regime this run decided (durable in run_stats): 'cube' =
+    // every ancestor combination materialized; 'boundary' = canonical
+    // depth-diagonal stored, finer granularities served on demand. The
+    // over-budget fallback must never be silent.
+    const statRegime = typeof job.runStats?.regime === 'string' ? job.runStats.regime : null
+    const statCubeEstimate = typeof job.runStats?.cube_estimate === 'number' ? job.runStats.cube_estimate : null
+    const statBudget = typeof job.runStats?.materialize_budget === 'number' ? job.runStats.materialize_budget : null
     const isNoopRun = job.status === 'completed' && statWrites === 0 && statDeletes === 0
     // Purge rows carry the post-purge mode on their tuning payload.
     const purgeStaysEmpty = job.triggerSource === 'purge'
@@ -692,6 +700,22 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         purgeStaysEmpty
                                                             ? <span className="text-amber-400">Stays empty</span>
                                                             : <span className="text-indigo-400">Auto re-aggregate</span>
+                                                    }
+                                                />
+                                            )}
+                                            {job.triggerSource !== 'purge' && statRegime && (
+                                                <StatCell
+                                                    label="Storage"
+                                                    value={
+                                                        <Tip label={
+                                                            statRegime === 'cube'
+                                                                ? 'Every ancestor combination is materialized — all canvas granularities answer from storage.'
+                                                                : `Full detail would be ~${(statCubeEstimate ?? 0).toLocaleString()} edges — over the ${(statBudget ?? 0).toLocaleString()} budget, so only the canonical depth-diagonal is stored and finer granularities are derived on demand. Raise the budget or force full detail in Advanced tuning to pre-create everything.`
+                                                        }>
+                                                            {statRegime === 'cube'
+                                                                ? <span className="text-emerald-400">Full detail</span>
+                                                                : <span className="text-amber-400">Diagonal {'·'} on-demand</span>}
+                                                        </Tip>
                                                     }
                                                 />
                                             )}

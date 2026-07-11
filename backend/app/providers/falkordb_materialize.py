@@ -362,8 +362,10 @@ class AggregationPipeline:
         # All containment-parent ids (set once containment is loaded).
         self._struct_parents: Optional[Set[int]] = None
         # Cube (full ancestor cross-product) vs boundary — decided per
-        # run by _decide_materialization_mode.
+        # run by _decide_materialization_mode. The auto estimate is kept
+        # for run_stats so an over-budget fallback is never silent.
         self._cube_mode: Optional[bool] = None
+        self._cube_estimate: Optional[int] = None
         # Memoized ancestor closures ({ancestor_or_self: depth}) keyed by
         # CONTAINER id only — bounded by container count (every strict
         # ancestor is a containment parent); leaf closures are derived
@@ -575,6 +577,28 @@ class AggregationPipeline:
                 "pairs": affected,
                 "scanned_edges": self._scanned,
                 "fine_merges_skipped": self._fine_merges_skipped,
+                # Storage-regime decision, DURABLE — never a silent
+                # fallback buried in worker logs: operators must see WHY
+                # a 2.9M-edge graph stored ~600k cells (boundary =
+                # canonical depth-diagonal stored, finer granularities
+                # served on demand) and what budget forced the choice.
+                **(
+                    {
+                        "regime": (
+                            "boundary" if self._fine_filter_active() else "cube"
+                        ),
+                        "materialize_budget": self._knob_int(
+                            "max_materialized_edges",
+                            _max_materialized_edges, 10_000, 50_000_000,
+                        ),
+                    }
+                    if self._cube_mode is not None else {}
+                ),
+                **(
+                    {"cube_estimate": self._cube_estimate}
+                    if getattr(self, "_cube_estimate", None) is not None
+                    else {}
+                ),
                 **(
                     {"pairs_by_level": self._pairs_by_level}
                     if getattr(self, "_pairs_by_level", None) else {}
@@ -1307,6 +1331,7 @@ class AggregationPipeline:
         cap = self._knob_int(
             "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
         )
+        self._cube_estimate = estimate
         self._cube_mode = estimate <= cap
         logger.info(
             "aggregation pipeline on %s: auto mode — full-cube estimate "

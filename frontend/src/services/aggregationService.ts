@@ -84,7 +84,7 @@ export interface AggregationJobResponse {
    */
   tuning?: Record<string, unknown> | null;
   /** Per-phase run stats (keys: extract_s, compute_s, reconcile_s, apply_s, writes, deletes, pairs, scanned_edges). */
-  runStats?: Record<string, number> | null;
+  runStats?: Record<string, number | string | Record<string, number>> | null;
   workerId?: string | null;
 }
 

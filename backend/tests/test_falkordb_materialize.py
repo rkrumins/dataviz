@@ -1203,6 +1203,11 @@ def test_auto_mode_materializes_full_cube_within_budget():
     # misclassifies as 'boundary' and double-derives mixed weights).
     assert fake.meta is not None
     assert fake.meta["regime"] == "cube"
+    # The storage decision is DURABLE in run_stats — an over-budget
+    # fallback must never be a silent log line.
+    assert result["run_stats"]["regime"] == "cube"
+    assert result["run_stats"]["cube_estimate"] >= len(agg)
+    assert result["run_stats"]["materialize_budget"] == 2_000_000
     assert fake.meta["edgeCount"] == len(agg)
     assert fake.meta["maxDepth"] == 2
     # Depth stamps on every row, structural on the self-nesting shape.
@@ -1215,11 +1220,14 @@ def test_boundary_run_stamps_boundary_regime_meta():
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
 
-    _run(_materialize(p))  # suite default: forced boundary mode
+    result = _run(_materialize(p))  # suite default: forced boundary mode
 
     assert fake.meta is not None
     assert fake.meta["regime"] == "boundary"
     assert fake.meta["digest"] == "digest-1"
+    assert result["run_stats"]["regime"] == "boundary"
+    # Forced mode skips the counting scan — no estimate to report.
+    assert "cube_estimate" not in result["run_stats"]
 
 
 def test_auto_mode_falls_back_to_boundary_above_budget():

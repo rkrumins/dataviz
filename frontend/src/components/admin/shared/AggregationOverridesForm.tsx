@@ -102,7 +102,7 @@ function ImpactMeter({ label, level, max = 5 }: { label: string; level: number; 
 // ============================================
 
 interface TuningFieldSpec {
-    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency'
+    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency' | 'maxMaterializedEdges'
     label: string
     tip: string
     help: string
@@ -142,6 +142,13 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         help: 'Parallel scans (1-4)',
         min: 1, max: 4, placeholder: 2,
     },
+    {
+        key: 'maxMaterializedEdges',
+        label: 'Materialization budget',
+        tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). Auto storage falls back to the depth-diagonal above this budget; forced full detail fails loudly instead of exceeding it. Raise it (with enough FalkorDB memory) to pre-create more.',
+        help: 'Max stored rollup edges (10,000-50,000,000)',
+        min: 10_000, max: 50_000_000, placeholder: 2_000_000,
+    },
 ]
 
 export interface TuningFieldsProps {
@@ -172,9 +179,60 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
     }
 
     const materialize = value.materializeLeafPairs ?? false
+    // undefined = Auto (cube within budget, diagonal above it);
+    // true = force full detail (fails loudly if over budget).
+    const fullDetail = value.materializeFinePairs === true
+
+    const setStrategy = (force: boolean) => {
+        const next: AggregationTuning = { ...value }
+        if (force) next.materializeFinePairs = true
+        else delete next.materializeFinePairs
+        onChange(next)
+    }
 
     return (
         <div className="space-y-4">
+            {/* Storage strategy: pre-create everything vs auto */}
+            <div>
+                <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
+                    Rollup storage
+                    <Tip label="Auto stores every ancestor combination when it fits the materialization budget, and falls back to the canonical depth-diagonal above it (finer granularities are derived on demand at read time — nothing is lost, it is just not pre-created). Full detail always pre-creates every combination and FAILS the job instead of exceeding the budget, so raise the budget to match the estimate the job log reports.">
+                        <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
+                    </Tip>
+                </label>
+                <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Rollup storage">
+                    <button
+                        type="button"
+                        role="radio"
+                        aria-checked={!fullDetail}
+                        disabled={disabled}
+                        onClick={() => setStrategy(false)}
+                        className={cn(
+                            'px-3 py-2 rounded-lg border text-left transition-colors duration-150',
+                            !fullDetail ? 'border-indigo-500/40 bg-indigo-500/5' : 'border-glass-border hover:border-indigo-500/20',
+                            disabled && 'cursor-not-allowed opacity-60',
+                        )}
+                    >
+                        <span className="block text-[11px] font-medium text-ink-secondary">Auto (recommended)</span>
+                        <span className="block text-[10px] text-ink-muted mt-0.5">Full detail within budget; diagonal + on-demand above it.</span>
+                    </button>
+                    <button
+                        type="button"
+                        role="radio"
+                        aria-checked={fullDetail}
+                        disabled={disabled}
+                        onClick={() => setStrategy(true)}
+                        className={cn(
+                            'px-3 py-2 rounded-lg border text-left transition-colors duration-150',
+                            fullDetail ? 'border-indigo-500/40 bg-indigo-500/5' : 'border-glass-border hover:border-indigo-500/20',
+                            disabled && 'cursor-not-allowed opacity-60',
+                        )}
+                    >
+                        <span className="block text-[11px] font-medium text-ink-secondary">Always full detail</span>
+                        <span className="block text-[10px] text-ink-muted mt-0.5">Pre-create every combination; fails instead of exceeding the budget.</span>
+                    </button>
+                </div>
+            </div>
             <div className="grid grid-cols-2 gap-4">
                 {TUNING_FIELDS.map(spec => (
                     <div key={spec.key}>
