@@ -13,7 +13,7 @@ import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
     AlertTriangle, Zap, X, Check, ChevronDown, ChevronLeft, ChevronRight,
-    Plus, WifiOff, ArrowUpDown,
+    Plus, WifiOff, ArrowUpDown, ArrowUpRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -135,13 +135,15 @@ const TYPE_COLOURS = [
 
 // ─── AssetRow ─────────────────────────────────────────────────────────────────
 function AssetRow({
-    providerId, assetName, isRegistered, isSelected,
+    providerId, assetName, isRegistered, isSelected, catalogId,
     onToggle, onUnregister, boundWorkspaceName, onReaggregate, onPurge
 }: {
     providerId: string
     assetName: string
     isRegistered: boolean
     isSelected: boolean
+    /** Present once the asset is registered — enables the insights link. */
+    catalogId?: string
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
     onReaggregate?: (name: string) => void
@@ -347,6 +349,17 @@ function AssetRow({
                                 <RefreshCw className="w-3 h-3" />
                             )}
                         </button>
+                        {catalogId && (
+                            <Link
+                                to={`/datasources/${catalogId}`}
+                                onClick={e => e.stopPropagation()}
+                                title="Open data source insights"
+                                aria-label={`Open insights for ${assetName}`}
+                                className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+                            >
+                                <ArrowUpRight className="w-3.5 h-3.5" />
+                            </Link>
+                        )}
                     </div>
 
                     <div className="flex items-center gap-3">
@@ -1481,6 +1494,7 @@ export function RegistryAssets() {
                                         assetName={assetName}
                                         isRegistered={registeredSourceIds.has(assetName)}
                                         isSelected={selected.has(assetName)}
+                                        catalogId={existingCatalogs.find(c => c.sourceIdentifier === assetName)?.id}
                                         onToggle={toggleSelection}
                                         onUnregister={handleUnregisterClick}
                                         onReaggregate={handleReaggregate}

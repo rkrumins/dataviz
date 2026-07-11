@@ -24,6 +24,7 @@ const AdminAnnouncements = lazy(() => import('@/components/admin/AdminAnnounceme
 const AdminSso = lazy(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
 const AdminAudit = lazy(() => import('@/components/admin/AdminAudit').then(m => ({ default: m.AdminAudit })))
 const IngestionPage = lazy(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
+const DataSourceOverviewPage = lazy(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
 const WorkspacesPage = lazy(() => import('@/pages/WorkspacesPage').then(m => ({ default: m.WorkspacesPage })))
 const WorkspaceDetailPage = lazy(() => import('@/pages/WorkspaceDetailPage').then(m => ({ default: m.WorkspaceDetailPage })))
 const WorkspaceReviewsPage = lazy(() => import('@/pages/WorkspaceReviewsPage').then(m => ({ default: m.WorkspaceReviewsPage })))
@@ -108,6 +109,10 @@ export const router = createBrowserRouter([
           </RequireNav>
         ),
       },
+      // Per-data-source overview (owner's home for one catalog item).
+      // Reached from the Ingestion → Data Sources list; content self-gates
+      // via permission-scoped catalog reads.
+      { path: 'datasources/:catalogId', element: <Lazy><DataSourceOverviewPage /></Lazy> },
 
       // Top-level Workspaces (listing + detail/management). Workspace visuals
       // are view-driven — see /views and /explorer; there is no standalone canvas.
