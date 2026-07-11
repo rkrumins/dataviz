@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +29,8 @@ from backend.app.services.graph_cache import (
     CacheScope,
     ENDPOINT_AGGREGATED,
     ENDPOINT_CHILDREN,
+    ENDPOINT_EDGES_BETWEEN,
+    ENDPOINT_NODES_QUERY,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
     ENDPOINT_TRACE_EXPAND,
@@ -1200,8 +1202,18 @@ class InternalEdgeQuery(BaseModel):
         populate_by_name = True
 
 
+class _EdgeListResult(RootModel[List[GraphEdge]]):
+    """RootModel wrapper so GraphCache can serialize the bare-list responses
+    of /edges/between and /edges/query."""
+
+
+class _NodeListResult(RootModel[List[GraphNode]]):
+    """RootModel wrapper for /nodes/query's bare-list response."""
+
+
 @router.post("/edges/between", response_model=List[GraphEdge], response_model_by_alias=True)
 async def get_edges_between(
+    response: Response,
     query: InternalEdgeQuery = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1211,20 +1223,36 @@ async def get_edges_between(
     edges connecting nodes within the set are returned — no over-fetch or
     Python post-filter needed.
 
-    Slot-bounded: this is the heaviest hydration query (an AND-scan over
-    every edge on large graphs, ~40s budget) and it is not response-
-    cached, so concurrent cold opens must shed with 429 rather than
-    pile onto FalkorDB's single Cypher thread.
+    Response-cached (gen-bump invalidated) AND slot-bounded: the heaviest
+    hydration query (an AND-scan over the loaded set) now serves repeat
+    canvas opens from Redis, and a cold-open burst still sheds with 429
+    (via ``_bounded_compute``) rather than piling onto FalkorDB.
     """
-    async def compute() -> List[GraphEdge]:
-        return await engine.get_edges(EdgeQuery(
+    async def compute() -> _EdgeListResult:
+        edges = await engine.get_edges(EdgeQuery(
             source_urns=query.urns,
             target_urns=query.urns,
             edge_types=query.edge_types,
             limit=query.limit,
         ))
+        return _EdgeListResult(edges)
 
-    return await _bounded_compute(engine, compute)()
+    scope = _cache_scope(engine)
+    if scope is None:
+        return (await _bounded_compute(engine, compute)()).root
+    result = await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_EDGES_BETWEEN,
+        params={
+            "urns": sorted(query.urns),
+            "edgeTypes": sorted(query.edge_types) if query.edge_types else None,
+            "limit": query.limit,
+        },
+        compute=_bounded_compute(engine, compute),
+        model_cls=_EdgeListResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+    )
+    return result.root
 
 
 @router.post("/edges/query", response_model=List[GraphEdge], response_model_by_alias=True)
@@ -1238,15 +1266,28 @@ async def query_edges(
 
 @router.post("/nodes/query", response_model=List[GraphNode], response_model_by_alias=True)
 async def query_nodes(
+    response: Response,
     query: NodeQuery = Body(..., embed=True),
     engine: ContextEngine = Depends(get_context_engine),
 ):
-    """Advanced node query (bulk fetch, complex filters). Slot-bounded —
-    fired on every canvas hydration with no response cache."""
-    async def compute() -> List[GraphNode]:
-        return await engine.get_nodes_query(query)
+    """Advanced node query (bulk fetch, complex filters). Response-cached
+    (gen-bump invalidated) + slot-bounded — fired on every canvas
+    hydration; repeat opens now serve from Redis, cold bursts shed 429."""
+    async def compute() -> _NodeListResult:
+        return _NodeListResult(await engine.get_nodes_query(query))
 
-    return await _bounded_compute(engine, compute)()
+    scope = _cache_scope(engine)
+    if scope is None:
+        return (await _bounded_compute(engine, compute)()).root
+    result = await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_NODES_QUERY,
+        params=query.model_dump(mode="json", by_alias=True, exclude_none=True),
+        compute=_bounded_compute(engine, compute),
+        model_cls=_NodeListResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+    )
+    return result.root
 
 
 @router.get("/metadata/entity-types", response_model=List[str])

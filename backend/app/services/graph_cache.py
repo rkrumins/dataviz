@@ -114,21 +114,37 @@ _LKG_PREFIX = "graphcache:lkg:v1"
 #   * hi = 1 hour — beyond this, ``bump_generation`` on writes is the
 #     only invalidation lever and operators would lose all ability to
 #     see fresh data without restarting.
+#
+# The long defaults below (5-15 min, up from 30-60s) are SAFE ONLY
+# BECAUSE every APP write path bumps the per-scope generation counter
+# (``bump_generation`` from ``_invalidate_cache`` on node/edge/draft
+# writes, merges, projection, purge) — a bumped generation makes every
+# prior cache key unreachable immediately, so a long TTL never serves
+# past an edit. The freshness win: a canvas gesture (bootstrap/expand/
+# children/aggregated) repeats the exact same request until the next
+# write, so a 15-min TTL turns every repeat into a Redis hit instead of
+# a FalkorDB round-trip — which is also the main relief valve against
+# the read-saturation cascade (fewer cache misses = fewer chances to
+# peg FalkorDB's worker threads).
+# CAVEAT: writes that BYPASS the app (redis-cli, a direct GRAPH.QUERY,
+# an external ingest not routed through the write endpoints) do NOT
+# bump the generation and will be masked for up to the TTL. Route bulk
+# mutations through the app, or bump the generation manually.
 _TTL_LO, _TTL_HI = 1, 3600
 
-_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 30, lo=_TTL_LO, hi=_TTL_HI)
-_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CHILDREN_TTL = _clamped_int_env("GRAPH_CACHE_CHILDREN_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_AGGREGATED_TTL = _clamped_int_env("GRAPH_CACHE_AGGREGATED_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
 # Trace responses are large and expensive; 60s catches repeat navigation
 # inside the lineage preview drawer without serving stale data for long.
 # The same gen counter (bumped on writes) invalidates trace entries.
-_DEFAULT_TRACE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
-_DEFAULT_TRACE_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_EXPAND_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TRACE_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TRACE_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_TRACE_EXPAND_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
 # Top-level nodes change only when a write inside the workspace shuffles
 # containment — gen counter bumps invalidate. Small payloads, hot path.
-_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 600, lo=_TTL_LO, hi=_TTL_HI)
 # Layer assignment is deterministic for a given (ws, ds, request body)
 # and touches the same node/edge set as a trace. 60s matches /trace.
-_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 900, lo=_TTL_LO, hi=_TTL_HI)
 # Batched canvas contract (open/expand). These compose top-level +
 # aggregated + children into one entry; a canvas gesture repeats the
 # exact same request until a write bumps the generation, so a longer
@@ -184,6 +200,8 @@ ENDPOINT_TOP_LEVEL = "top-level"
 ENDPOINT_LAYER_ASSIGNMENT = "layer-assignment"
 ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
 ENDPOINT_CANVAS_EXPAND = "canvas-expand"
+ENDPOINT_EDGES_BETWEEN = "edges-between"
+ENDPOINT_NODES_QUERY = "nodes-query"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -194,6 +212,8 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_LAYER_ASSIGNMENT: _flag("GRAPH_CACHE_ENABLED_LAYER_ASSIGNMENT", default=True),
     ENDPOINT_CANVAS_BOOTSTRAP: _flag("GRAPH_CACHE_ENABLED_CANVAS_BOOTSTRAP", default=True),
     ENDPOINT_CANVAS_EXPAND: _flag("GRAPH_CACHE_ENABLED_CANVAS_EXPAND", default=True),
+    ENDPOINT_EDGES_BETWEEN: _flag("GRAPH_CACHE_ENABLED_EDGES_BETWEEN", default=True),
+    ENDPOINT_NODES_QUERY: _flag("GRAPH_CACHE_ENABLED_NODES_QUERY", default=True),
 }
 
 
@@ -550,6 +570,10 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_CANVAS_BOOTSTRAP_TTL
     if endpoint == ENDPOINT_CANVAS_EXPAND:
         return _DEFAULT_CANVAS_EXPAND_TTL
+    if endpoint in (ENDPOINT_EDGES_BETWEEN, ENDPOINT_NODES_QUERY):
+        # Hydration reads — same gen-bump invalidation, same freshness as
+        # children; a canvas re-open repeats the identical URN set.
+        return _DEFAULT_CHILDREN_TTL
     return _DEFAULT_CHILDREN_TTL
 
 

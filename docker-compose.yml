@@ -42,7 +42,14 @@ services:
       - "${FALKORDB_PORT:-6379}:6379"
       - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
     environment:
-      FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50
+      # CACHE_SIZE is the per-graph COMPILED-QUERY-PLAN cache. The label-
+      # bucket read path issues many distinct parameterized Cypher shapes
+      # (one per node label × direction), so 50 thrashed and re-planned hot
+      # queries; 256 keeps the canvas/trace/aggregated shapes resident.
+      # THREAD_COUNT should track vCPUs in prod (managed FalkorDB): it is
+      # the parallel Cypher execution width and the ceiling the app's
+      # slot-shed (PROVIDER_MAX_CONCURRENCY, 429 on saturation) sits above.
+      FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 256
       # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
       # without maxmemory the dataset itself can still OOM-kill the container.
       # noeviction = writes fail loudly at the ceiling instead of silent eviction.
