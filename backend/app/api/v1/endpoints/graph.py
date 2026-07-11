@@ -493,6 +493,7 @@ class _TraceExpandBatchRequest(BaseModel):
 
 @router.post("/trace/expand-batch", response_model=TraceResult, response_model_by_alias=True)
 async def trace_expand_batch(
+    response: Response,
     request: _TraceExpandBatchRequest = Body(...),
     engine: ContextEngine = Depends(get_context_engine),
 ) -> TraceResult:
@@ -510,6 +511,7 @@ async def trace_expand_batch(
         # Empty batch — return an empty payload. Use the first pair's URN as
         # a placeholder focus; never reached because empty pairs short-circuit.
         raise HTTPException(status_code=400, detail="No pairs provided.")
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
 
     pair_errors: List[str] = []
 
@@ -532,7 +534,37 @@ async def trace_expand_batch(
             logger.warning("trace/expand-batch pair failed: %s", msg, exc_info=False)
             return None
 
-    results = await asyncio.gather(*(run_one(p) for p in request.pairs))
+    async def compute_batch() -> TraceResult:
+        results = await asyncio.gather(*(run_one(p) for p in request.pairs))
+        return _merge_expand_results(results, request, pair_errors)
+
+    # Response-cached like the single /trace/expand (this handler used to
+    # bypass GraphCache entirely, so every re-expand of the same drilled
+    # pair set re-ran the full fan-out). Pairs are sorted into the cache
+    # key so payload ordering doesn't fragment entries; gen-bump on writes
+    # invalidates as usual.
+    scope = _cache_scope(engine)
+    if scope is None:
+        return await compute_batch()
+    cache_params = {
+        "pairs": sorted(
+            f"{p.source_urn}->{p.target_urn}@{p.next_level}"
+            for p in request.pairs
+        ),
+        "lineageEdgeTypes": sorted(request.lineage_edge_types or []),
+        "includeContainmentEdges": request.include_containment_edges,
+    }
+    return await get_graph_cache().get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_TRACE_EXPAND,
+        params=cache_params,
+        compute=_bounded_compute(engine, compute_batch),
+        model_cls=TraceResult,
+        on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
+    )
+
+
+def _merge_expand_results(results, request, pair_errors) -> TraceResult:
     successes = [r for r in results if r is not None]
     if not successes:
         raise HTTPException(

@@ -60,6 +60,12 @@ class AggregationBatchAbort(Exception):
     """
 
 
+async def _completed(value):
+    """A completed awaitable — lets asyncio.gather mix cached values with
+    live queries without special-casing."""
+    return value
+
+
 def _sanitize_label(s: str) -> str:
     """Sanitize string for use as FalkorDB label/relationship type (alphanumeric + underscore)."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
@@ -3457,49 +3463,38 @@ class FalkorDBProvider(GraphDataProvider):
                 "RETURN u, coalesce(candidates[0], []) AS chain"
             )
 
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        labels: List[str] = []
-        for lbl in entity_levels:
-            for spelled in self._alias_entity_types([lbl]):
-                if spelled not in labels:
-                    labels.append(spelled)
-
         for i in range(0, len(urns), chunk_size):
             chunk = urns[i : i + chunk_size]
-            if not labels:
-                # No ontology label map — legacy single-scan chunk query.
-                result = await self._ro_query(
-                    _chain_cypher(""), params={"urns": chunk}, op="trace.chains",
-                )
-                for row in result.result_set or []:
-                    out[row[0]] = [c for c in (row[1] or []) if c]
-                continue
-            remaining = set(chunk)
-            for lbl in labels:
-                if not remaining:
-                    break
-                safe = _sanitize_label(lbl)
-                members = (await self._ro_query(
-                    f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
-                    params={"urns": list(remaining)}, op="trace.chains_membership",
-                )).result_set or []
-                member_urns = [r[0] for r in members if r and r[0]]
-                if not member_urns:
-                    continue
-                remaining.difference_update(member_urns)
-                result = await self._ro_query(
-                    _chain_cypher(f":{safe}"), params={"urns": member_urns}, op="trace.chains",
-                )
-                for row in result.result_set or []:
+            # Bucket via the urn→label cache (per-label bootstrap on miss)
+            # instead of the previous per-label MEMBERSHIP query + chain
+            # query run SEQUENTIALLY per ontology label (2·L round trips
+            # per chunk — the dominant sequential amplifier of trace
+            # hydration). One chain query per non-empty bucket, GATHERED;
+            # the unresolved-label residue keeps the unlabeled fallback.
+            buckets = await self._label_buckets(chunk)
+
+            async def _chain_for(label: str, bucket: List[str]) -> list:
+                clause = f":{label}" if label else ""
+                try:
+                    res = await self._ro_query(
+                        _chain_cypher(clause), params={"urns": bucket},
+                        op="trace.chains",
+                    )
+                    return res.result_set or []
+                except Exception as exc:
+                    logger.warning(
+                        "ancestor chain bucket (%s, %d urns) failed: %s",
+                        label or "<unlabeled>", len(bucket), exc,
+                    )
+                    return []
+
+            for rows in await asyncio.gather(*[
+                _chain_for(lbl, bucket) for lbl, bucket in buckets
+            ]):
+                for row in rows:
                     # Drop None entries (node lacked .urn) so callers
                     # don't defend against them.
                     out[row[0]] = [c for c in (row[1] or []) if c]
-            if remaining:
-                logger.debug(
-                    "ancestor chains: %d urns matched no ontology label "
-                    "(outside the containment hierarchy) — empty chains.",
-                    len(remaining),
-                )
 
         return out
 
@@ -5663,8 +5658,22 @@ class FalkorDBProvider(GraphDataProvider):
         ctypes = self._alias_rel_types(ctypes)
         ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
-        # Focus node — needed for the response shape regardless of trace outcome
-        focus_node = await self.get_node(urn)
+        # Focus node — needed for the response shape regardless of trace
+        # outcome. Wave 1: the root-anchor walk is independent of the focus
+        # payload, so run it CONCURRENTLY (optimistic — discarded when the
+        # focus's level turns out unknown). The anchor phase used to be 5-7
+        # strictly sequential round-trips; against a remote FalkorDB each
+        # paid full RTT.
+        root_anchor_task = None
+        if level == 0 and ctypes:
+            root_anchor_task = asyncio.ensure_future(
+                self._resolve_root_anchor(urn, ctypes))
+        try:
+            focus_node = await self.get_node(urn)
+        except Exception:
+            if root_anchor_task is not None:
+                root_anchor_task.cancel()
+            raise
         focus_level = self._get_node_level(focus_node.entity_type) if focus_node else level
         focus_entity_type = str(focus_node.entity_type) if focus_node else "unknown"
 
@@ -5695,8 +5704,11 @@ class FalkorDBProvider(GraphDataProvider):
         #          spilling into attributes.
         fallback_level: Optional[int] = None
         effective_level = level
+        if root_anchor_task is not None and (focus_level is None):
+            # Optimistic wave-1 walk not needed on this branch.
+            root_anchor_task.cancel()
         if level == 0 and ctypes and focus_level is not None:
-            root_urn, root_level = await self._resolve_root_anchor(urn, ctypes)
+            root_urn, root_level = await root_anchor_task
             if root_level == 0:
                 anchor_urn = root_urn
             elif root_level > 0:
@@ -5717,19 +5729,32 @@ class FalkorDBProvider(GraphDataProvider):
         else:
             anchor_urn = await self._resolve_anchor_at_level(urn, level, ctypes)
 
-        # 2. Inherited-lineage fallback
+        # 2. Inherited-lineage fallback. Wave 2: the has-lineage existence
+        # probe and the anchor node fetch are independent — gather them.
         is_inherited = False
         inherited_from = None
-        if include_inherited_lineage and not await self._has_aggregated_at_level(anchor_urn, effective_level, ltypes):
-            parent = await self._find_ancestor_with_lineage(anchor_urn, effective_level, ctypes, ltypes)
-            if parent and parent != anchor_urn:
-                inherited_from = anchor_urn
-                anchor_urn = parent
-                is_inherited = True
+        if include_inherited_lineage:
+            has_lineage, anchor_node = await asyncio.gather(
+                self._has_aggregated_at_level(anchor_urn, effective_level, ltypes),
+                self.get_node(anchor_urn) if anchor_urn != urn
+                else _completed(focus_node),
+            )
+            if not has_lineage:
+                parent = await self._find_ancestor_with_lineage(
+                    anchor_urn, effective_level, ctypes, ltypes)
+                if parent and parent != anchor_urn:
+                    inherited_from = anchor_urn
+                    anchor_urn = parent
+                    is_inherited = True
+                    anchor_node = await self.get_node(anchor_urn)
+        else:
+            anchor_node = (
+                focus_node if anchor_urn == urn
+                else await self.get_node(anchor_urn)
+            )
 
         # 3. Seed BFS state
         nodes_by_urn: Dict[str, GraphNode] = {}
-        anchor_node = await self.get_node(anchor_urn)
         if anchor_node:
             nodes_by_urn[anchor_urn] = anchor_node
         edges_by_id: Dict[str, GraphEdge] = {}
@@ -5857,6 +5882,7 @@ class FalkorDBProvider(GraphDataProvider):
         #       use peer-label fallback in _expand_aggregated_set")
         # The frontend safety-net memo: never return empty when the wire
         # had lineage to give. One retry; no recursion.
+        remaining_after_bfs = deadline - time.monotonic()
         needs_retry = (
             not edges_by_id
             and level == 0
@@ -5867,6 +5893,17 @@ class FalkorDBProvider(GraphDataProvider):
                 or focus_level is None
             )
         )
+        if needs_retry and remaining_after_bfs < 0.4 * (timeout_ms / 1000.0):
+            # The retry re-runs the WHOLE BFS — without a floor it could
+            # consume the tail of the budget and starve hydration, turning
+            # a truncated-but-usable answer into a 504. Skip and report.
+            logger.info(
+                "trace: skipping focus-level retry for %s — only %.1fs of "
+                "%.1fs budget left (<40%%)", urn, remaining_after_bfs,
+                timeout_ms / 1000.0,
+            )
+            truncation_reason = truncation_reason or "timeout"
+            needs_retry = False
         if needs_retry:
             retry_level = focus_level if focus_level is not None else -1
             logger.info(
@@ -5890,8 +5927,10 @@ class FalkorDBProvider(GraphDataProvider):
             down_frontier = {anchor_urn} if downstream_depth > 0 else set()
             per_source_count = {}
 
-            # Single retry pass — same loop body, but bounded
-            for hop in range(max_depth):
+            # Single retry pass — same loop body, but bounded (depth
+            # additionally capped: a fine-level retry over a deep graph
+            # multiplies per-hop waves against the leftover budget).
+            for hop in range(min(max_depth, 5)):
                 remaining_secs = deadline - time.monotonic()
                 if remaining_secs <= 0:
                     truncation_reason = "timeout"
@@ -5972,17 +6011,30 @@ class FalkorDBProvider(GraphDataProvider):
         # trace bug. The `include_containment_edges` flag is intentionally
         # ignored here: hierarchy context is non-optional for trace responses.
         containment_edges_list: List[GraphEdge] = []
-        if ctypes and nodes_by_urn:
+        if ctypes and nodes_by_urn and (deadline - time.monotonic()) < 2.0:
+            # Not enough budget left to hydrate ancestors safely — return
+            # the lineage skeleton as a truncated 200 (the FE tolerates a
+            # missing chain via the ancestors_failed path) instead of
+            # racing the middleware 504.
+            truncation_reason = truncation_reason or "ancestors_failed"
+        elif ctypes and nodes_by_urn:
+            chains: Dict[str, List[str]] = {}
             try:
-                ancestor_urns = await self._collect_ancestor_urns(
-                    list(nodes_by_urn.keys()), ctypes,
+                chains = await self._compute_and_store_ancestors_bulk(
+                    list(nodes_by_urn.keys()),
                 )
             except Exception:
                 # Lineage was already collected; surface the partial result
                 # via truncationReason so the frontend safety-net renders
                 # the lineage without the (now-missing) ancestor chain.
-                ancestor_urns = []
                 truncation_reason = truncation_reason or "ancestors_failed"
+            seen_anc: Set[str] = set()
+            ancestor_urns: List[str] = []
+            for chain in chains.values():
+                for ancestor in chain or []:
+                    if ancestor and ancestor not in seen_anc:
+                        seen_anc.add(ancestor)
+                        ancestor_urns.append(ancestor)
             new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
             if new_ancestors:
                 ancestor_nodes = await self.get_nodes_batch(new_ancestors)
@@ -5990,10 +6042,12 @@ class FalkorDBProvider(GraphDataProvider):
                     if n:
                         nodes_by_urn[n.urn] = n
             # Containment edges between every returned node — both lineage
-            # participants and their hydrated ancestors.
+            # participants and their hydrated ancestors. The chains just
+            # computed are passed through so the pair derivation doesn't
+            # re-fetch them (one Redis wave saved per trace).
             if len(nodes_by_urn) > 1:
                 containment_edges_list = await self._fetch_containment_edges(
-                    list(nodes_by_urn.keys()), ctypes,
+                    list(nodes_by_urn.keys()), ctypes, chains=chains,
                 )
 
         # Mega-node detection: any anchor whose AGGREGATED contribution
@@ -6746,31 +6800,37 @@ class FalkorDBProvider(GraphDataProvider):
         containment walk). Nodes with no stamped incident cell are
         absent; callers fall back to type/label filters for those."""
         out: Dict[str, int] = {}
+
+        async def _probe(cypher: str, bucket: List[str], key: str) -> list:
+            try:
+                res = await self._proj_ro_query(
+                    cypher, params={"urns": bucket}, op="trace.frontier_depths",
+                )
+                return res.result_set or []
+            except Exception as exc:
+                logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
+                return []
+
+        # Both directions × all label buckets GATHERED — these ran
+        # strictly sequentially before (2 round-trips per bucket per hop,
+        # each paying full RTT against a remote FalkorDB).
+        tasks = []
         for f_label, bucket in await self._label_buckets(urns):
             f_anchor = f"(f:{f_label})" if f_label else "(f)"
-            for cypher, key in (
-                (
-                    f"MATCH {f_anchor}-[r:AGGREGATED]->() "
-                    "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
-                    "RETURN f.urn, max(r.sourceDepth)",
-                    "out",
-                ),
-                (
-                    f"MATCH ()-[r:AGGREGATED]->{f_anchor} "
-                    "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
-                    "RETURN f.urn, max(r.targetDepth)",
-                    "in",
-                ),
-            ):
-                try:
-                    res = await self._proj_ro_query(cypher, params={"urns": bucket}, op="trace.frontier_depths")
-                    for row in (res.result_set or []):
-                        if row and row[0] is not None and row[1] is not None:
-                            u, d = str(row[0]), int(row[1])
-                            if out.get(u, -1) < d:
-                                out[u] = d
-                except Exception as exc:
-                    logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
+            tasks.append(_probe(
+                f"MATCH {f_anchor}-[r:AGGREGATED]->() "
+                "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
+                "RETURN f.urn, max(r.sourceDepth)", bucket, "out"))
+            tasks.append(_probe(
+                f"MATCH ()-[r:AGGREGATED]->{f_anchor} "
+                "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
+                "RETURN f.urn, max(r.targetDepth)", bucket, "in"))
+        for rows in await asyncio.gather(*tasks):
+            for row in rows:
+                if row and row[0] is not None and row[1] is not None:
+                    u, d = str(row[0]), int(row[1])
+                    if out.get(u, -1) < d:
+                        out[u] = d
         return out
 
     async def _collect_children_pair(
@@ -7031,6 +7091,7 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _fetch_containment_edges(
         self, urns: List[str], ctypes: List[str],
+        chains: Optional[Dict[str, List[str]]] = None,
     ) -> List[GraphEdge]:
         """Containment edges where both endpoints are in ``urns``.
 
@@ -7055,11 +7116,13 @@ class FalkorDBProvider(GraphDataProvider):
         rel_alt = "|".join(_sanitize_label(c) for c in ctypes)
         urn_set = set(urns)
 
-        # Build (parent, child) pair candidates from cached chains.
-        try:
-            chains = await self._compute_and_store_ancestors_bulk(list(urns))
-        except Exception:
-            chains = {}
+        # Build (parent, child) pair candidates from cached chains —
+        # reusing the caller's just-computed map when provided.
+        if chains is None:
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(list(urns))
+            except Exception:
+                chains = {}
 
         pairs: Set[tuple] = set()
         for child_urn, chain in (chains or {}).items():

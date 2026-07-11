@@ -141,8 +141,11 @@ class TraceRequest(BaseModel):
     """
     urn: str
     direction: str = "both"  # upstream | downstream | both
-    upstream_depth: int = Field(99, alias="upstreamDepth", ge=0)
-    downstream_depth: int = Field(99, alias="downstreamDepth", ge=0)
+    # Default 25 (was 99): the BFS runs one query-wave per hop per
+    # direction, and no real lineage question needs 99 hops — the FE
+    # already sends 25. le=100 caps adversarial/legacy callers.
+    upstream_depth: int = Field(25, alias="upstreamDepth", ge=0, le=100)
+    downstream_depth: int = Field(25, alias="downstreamDepth", ge=0, le=100)
     # 0      = top-level Domain skeleton (DEFAULT — skeleton-first)
     # int    = literal level
     # str    = entity-type-id ("dataset"); resolved to that type's level

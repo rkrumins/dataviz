@@ -16,7 +16,11 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
-from ..config.resilience import FALKORDB_AGGREGATED_READ_TIMEOUT_SECS, TRACE_TIMEOUT_SECS
+from ..config.resilience import (
+    FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
+    TRACE_ENGINE_HEADROOM_SECS,
+    TRACE_TIMEOUT_SECS,
+)
 from backend.common.adapters import ProviderUnavailable
 
 if TYPE_CHECKING:
@@ -1448,7 +1452,12 @@ class ContextEngine:
     # tunes both backend layers and stays in sync with the frontend.
     import os as _os
     TRACE_MAX_NODES: int = int(_os.getenv("TRACE_MAX_NODES", "2000"))
-    TRACE_TIMEOUT_MS: int = int(TRACE_TIMEOUT_SECS * 1000)
+    # Engine budget sits BELOW the HTTP middleware tier by the headroom,
+    # so the engine's truncated-200 (timeout/max_nodes/ancestors_failed)
+    # always beats the middleware 504.
+    TRACE_TIMEOUT_MS: int = int(
+        max(5.0, TRACE_TIMEOUT_SECS - TRACE_ENGINE_HEADROOM_SECS) * 1000
+    )
     del _os
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:

@@ -107,6 +107,11 @@ NEO4J_REDIS_OP_TIMEOUT_SECS: float = float(os.getenv("NEO4J_REDIS_OP_TIMEOUT", "
 # more headroom. Was previously read directly as TRACE_TIMEOUT_MS in
 # context_engine.py — moved here for central visibility.
 TRACE_TIMEOUT_SECS: float = float(os.getenv("TRACE_TIMEOUT_SECS", "60"))
+# Headroom the trace ENGINE leaves under the HTTP middleware tier: the
+# engine budget is TRACE_TIMEOUT_SECS - TRACE_ENGINE_HEADROOM_SECS
+# (floor 5s). With engine == middleware the truncated-200 raced the 504
+# and usually lost — the whole point of graceful truncation defeated.
+TRACE_ENGINE_HEADROOM_SECS: float = float(os.getenv("TRACE_ENGINE_HEADROOM_SECS", "10"))
 
 # ── Ontology introspection ──────────────────────────────────────────
 # Outer timeout for the aggregate get_ontology_metadata() call (which
