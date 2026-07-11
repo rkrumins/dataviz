@@ -6,11 +6,11 @@
  * - Full visual configuration (stroke color, style, animation)
  * - Source/target type selectors
  */
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import * as LucideIcons from 'lucide-react'
 import type { RelationshipTypeSchema, RelationshipVisualConfig } from '@/types/schema'
 import { cn } from '@/lib/utils'
-import { generateId } from '@/lib/utils'
+import { toRelationshipTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
 
 const COLOR_PALETTE = [
   '#8b5cf6', '#6366f1', '#3b82f6', '#06b6d4', '#14b8a6',
@@ -35,6 +35,9 @@ interface RelTypeWithClassifications extends RelationshipTypeSchema {
 interface RelationshipTypeEditorProps {
   relType?: RelTypeWithClassifications
   availableEntityTypes?: { id: string; name: string }[]
+  /** Every relationship type id already declared in THIS ontology (for per-ontology
+   * uniqueness — same name across other ontologies is fine and expected). */
+  existingTypeIds?: string[]
   readOnly?: boolean
   onSave: (relType: RelTypeWithClassifications) => void
   onCancel: () => void
@@ -42,7 +45,7 @@ interface RelationshipTypeEditorProps {
 
 function createDefaultRelType(): RelTypeWithClassifications {
   return {
-    id: generateId('rel'),
+    id: '',
     name: '',
     description: '',
     sourceTypes: [],
@@ -87,6 +90,7 @@ function Section({ title, description, children }: { title: string; description?
 export function RelationshipTypeEditor({
   relType,
   availableEntityTypes = [],
+  existingTypeIds = [],
   readOnly,
   onSave,
   onCancel,
@@ -95,6 +99,8 @@ export function RelationshipTypeEditor({
   const [form, setForm] = useState<RelTypeWithClassifications>(
     relType ?? createDefaultRelType()
   )
+  // Once the id is hand-edited, stop auto-deriving it from the name (slug-field pattern).
+  const [idTouched, setIdTouched] = useState(false)
   const [activeTab, setActiveTab] = useState<'basic' | 'visual' | 'connections'>('basic')
 
   const updateVisual = <K extends keyof RelationshipVisualConfig>(
@@ -104,7 +110,22 @@ export function RelationshipTypeEditor({
     setForm((prev) => ({ ...prev, visual: { ...prev.visual, [key]: value } }))
   }
 
-  const canSave = form.name.trim()
+  // The physical edge type is `form.id`. New types derive it from the name as UPPER_SNAKE
+  // (until hand-edited); existing types keep theirs frozen so live edges keep resolving.
+  const onNameChange = (name: string) =>
+    setForm((p) => ({ ...p, name, id: isNew && !idTouched ? toRelationshipTypeId(name) : p.id }))
+  const onIdChange = (raw: string) => {
+    setIdTouched(true)
+    setForm((p) => ({ ...p, id: toRelationshipTypeId(raw) }))
+  }
+
+  // Uniqueness is scoped to THIS ontology, excluding the type being edited.
+  const otherIds = useMemo(
+    () => existingTypeIds.filter((id) => id !== relType?.id),
+    [existingTypeIds, relType?.id],
+  )
+  const collision = findCaseInsensitiveCollision(form.id, otherIds)
+  const canSave = !!form.name.trim() && !!form.id.trim() && !collision
 
   // Edge preview SVG
   const preview = (
@@ -188,10 +209,48 @@ export function RelationshipTypeEditor({
                       <input
                         type="text"
                         value={form.name}
-                        onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                        onChange={(e) => onNameChange(e.target.value)}
                         placeholder="e.g., Flows To, Contains, Depends On"
                         className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
                       />
+                    </div>
+
+                    {/* Physical edge type — the id written to the graph. */}
+                    <div>
+                      <label className="block text-xs font-semibold text-ink mb-1.5">
+                        Edge type <span className="text-red-500">*</span>
+                        <span className="ml-1.5 font-normal text-ink-muted">— how it appears in the graph</span>
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-xs text-ink-muted/70 pointer-events-none select-none">[:</span>
+                        <input
+                          type="text"
+                          value={form.id}
+                          onChange={(e) => onIdChange(e.target.value)}
+                          disabled={!isNew}
+                          placeholder="FLOWS_TO"
+                          spellCheck={false}
+                          className={cn(
+                            'w-full pl-7 pr-6 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border text-sm font-mono text-ink placeholder:text-ink-muted/40 focus:outline-none focus:ring-2 transition-all disabled:opacity-70',
+                            collision
+                              ? 'border-red-400/70 focus:ring-red-500/25 focus:border-red-400/40'
+                              : 'border-glass-border focus:ring-indigo-500/30 focus:border-indigo-500/20',
+                          )}
+                        />
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 font-mono text-xs text-ink-muted/70 pointer-events-none select-none">]</span>
+                      </div>
+                      {collision ? (
+                        <p className="text-[11px] text-red-600 dark:text-red-400 mt-1 flex items-center gap-1">
+                          <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                          <span><span className="font-mono">{collision}</span> already exists in this ontology — choose a different name.</span>
+                        </p>
+                      ) : (
+                        <p className="text-[10px] text-ink-muted/70 mt-1">
+                          {isNew
+                            ? 'Auto-generated from the name (UPPER_SNAKE_CASE). Unique within this ontology — other ontologies can reuse it.'
+                            : 'Fixed after creation so existing edges keep resolving. Rename the display name freely; this stays put.'}
+                        </p>
+                      )}
                     </div>
 
                     <div>

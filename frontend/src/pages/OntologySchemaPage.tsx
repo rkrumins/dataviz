@@ -1458,6 +1458,7 @@ export function OntologySchemaPage() {
                         <RelationshipTypeEditor
                           relType={editorPanel.data}
                           availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
+                          existingTypeIds={relTypes.map(rt => rt.id)}
                           readOnly={isLocked}
                           onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
                           onCancel={() => setEditorPanel(null)}

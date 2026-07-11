@@ -110,10 +110,11 @@ export function SchemaPanel({
             edgeExample={relTypes[0]?.id || 'FLOWS_TO'}
           />
           <p className="text-[11px] text-ink-muted leading-relaxed">
-            Each relationship type becomes its own physical edge type, so edges in every versioned graph carry these exact names. By
-            convention they read best in <span className="font-medium text-ink-secondary">UPPERCASE</span> (e.g.{' '}
-            <code className="font-mono text-ink-secondary">FLOWS_TO</code>), matching how FalkorDB indexes them. The{' '}
-            <span className="font-medium text-ink-secondary">Health</span> tab flags any source whose real graph has drifted.
+            Name a relationship <span className="italic">"Flows To"</span> and it's stored as the edge type{' '}
+            <code className="font-mono text-ink-secondary">FLOWS_TO</code> — the editor derives that automatically (entities become{' '}
+            <span className="font-mono text-ink-secondary">PascalCase</span> node labels the same way), so the physical graph always
+            matches the ontology and hits FalkorDB's indexes. The <span className="font-medium text-ink-secondary">Health</span> tab
+            flags any source whose real graph has drifted.
           </p>
         </div>
       </EducationalCallout>
