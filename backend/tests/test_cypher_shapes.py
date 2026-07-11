@@ -159,3 +159,19 @@ def test_top_level_orders_without_tostring():
     assert "ORDER BY n.displayName ASC" in page
     assert "toString(n.displayName) ASC" not in page
     assert "MATCH (n:Roots)" in page and "MATCH (n:Node)" in page  # label union
+
+
+def test_get_nodes_urn_path_is_label_bucketed():
+    """/nodes/query (get_nodes) with URNs must label-seek per bucket, not
+    scan via an unlabeled `MATCH (n) WHERE n.urn IN` (measured 1.6s/100 urns
+    on a 2M-node graph — the hydration hot path). Residue bucket keeps the
+    unlabeled form for unresolved labels."""
+    from backend.common.models.graph import NodeQuery
+    p = _make_provider({"urn:a": "Node", "urn:b": "Roots", "urn:c": None})
+    _run(p.get_nodes(NodeQuery(urns=["urn:a", "urn:b", "urn:c"], includeChildCount=False)))
+    anchored = [q for q in p.recorded if "n.urn IN $urnList" in q]
+    assert anchored, p.recorded
+    assert any("(n:Node)" in q for q in anchored)
+    assert any("(n:Roots)" in q for q in anchored)
+    # urn:c has no resolved label → residue bucket keeps the unlabeled anchor
+    assert any("MATCH (n) WHERE n.urn IN $urnList" in q for q in anchored)

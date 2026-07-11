@@ -2174,6 +2174,81 @@ class FalkorDBProvider(GraphDataProvider):
         # Child count: only compute when needed (skip for bulk lineage fetches)
         include_child_count = query.include_child_count
 
+        # ── URN-anchored fetch: label-index seeks, not an All-Node-Scan ──
+        # ``MATCH (n) WHERE n.urn IN $list`` was a full node scan on this
+        # FalkorDB build (no label-less URN index) — measured 1.6s for 100
+        # urns on a 2M-node graph, and this is the /nodes/query hydration hot
+        # path. Bucket the urns by label via the warmed urn->label cache and
+        # seek each label's URN index; the unresolved-label residue keeps the
+        # unlabeled pattern. Other filters (entity type, tags, search) ride
+        # along as WHERE conditions. Pagination/order are applied in Python
+        # over the merged, bounded result (the urn set IS the bound).
+        if query.urns:
+            extra_conditions = [c for c in conditions
+                                if "n.urn " not in c and "n.urn=" not in c]
+            containment_rel_types = ""
+            if include_child_count:
+                containment = list(self._get_containment_edge_types())
+                containment_rel_types = "|".join(
+                    _sanitize_label(t) for t in containment)
+
+            def _urn_cypher(label: str) -> str:
+                anchor = f"(n:{label})" if label else "(n)"
+                where = " AND ".join(["n.urn IN $urnList", *extra_conditions])
+                base = f"MATCH {anchor} WHERE {where}"
+                if include_child_count and containment_rel_types:
+                    return (f"{base} WITH n "
+                            f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child) "
+                            f"RETURN n, count(child) as childCount")
+                if include_child_count:
+                    return f"{base} RETURN n, 0 as childCount"
+                return f"{base} RETURN n"
+
+            async def _fetch_bucket(label: str, bucket: List[str]) -> list:
+                try:
+                    res = await self._ro_query(
+                        _urn_cypher(label),
+                        params={**params, "urnList": bucket},
+                        op="nodes.query",
+                    )
+                    return res.result_set or []
+                except Exception as e:
+                    if _is_missing_graph_error(e):
+                        return []
+                    logger.warning(f"get_nodes urn bucket failed: {e}")
+                    return []
+
+            buckets = await self._label_buckets(query.urns)
+            rows_per_bucket = await asyncio.gather(*[
+                _fetch_bucket(lbl, b) for lbl, b in buckets
+            ])
+            merged: List[GraphNode] = []
+            for rows in rows_per_bucket:
+                for row in rows:
+                    if include_child_count:
+                        n = self._extract_node_from_result(row[0])
+                        child_count = row[1]
+                    else:
+                        n = self._extract_node_from_result(row)
+                        child_count = None
+                    if not n:
+                        continue
+                    if query.property_filters and not self._match_property_filters(n, query.property_filters):
+                        continue
+                    if query.tag_filters and not self._match_tag_filters(n, query.tag_filters):
+                        continue
+                    if query.name_filter and not self._match_text_filter(n.display_name, query.name_filter):
+                        continue
+                    if child_count is not None:
+                        n.child_count = int(child_count)
+                        if n.properties:
+                            n.properties['childCount'] = int(child_count)
+                    merged.append(n)
+            # Stable displayName order (matches the SKIP/LIMIT paths), then
+            # apply the requested window over the bounded urn result.
+            merged.sort(key=lambda n: (n.display_name is None, n.display_name or ""))
+            return merged[offset:offset + limit]
+
         if use_label_union:
             # Build UNION query with per-label MATCH clauses (uses FalkorDB label indices)
             where_suffix = (" WHERE " + " AND ".join(shared_conditions)) if shared_conditions else ""
