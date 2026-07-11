@@ -5538,15 +5538,35 @@ class FalkorDBProvider(GraphDataProvider):
         ctypes = self._alias_rel_types(ctypes)
         ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
+        # STRUCTURAL dispatch: when the expanded edge carries containment
+        # depth stamps, the drill is one containment step below the pair —
+        # each anchor's direct children, label-agnostic (self-nesting
+        # ontologies drill at every depth; the caller's type-level
+        # ``use_raw`` heuristic is ignored because it misclassifies on
+        # degenerate level maps — the agg-first + empty→raw fallback in
+        # _edges_between_sets already covers the finest grain). Edges
+        # without stamps (pre-depth generations) keep the legacy
+        # type-level descent.
+        structural = False
+        if ctypes:
+            structural = (
+                await self._edge_depth_stamps(source_urn, target_urn)
+            ) is not None
+
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a
         # pool slot for the duration. Surfaces the (now-single) failure
         # mode via truncationReason rather than aborting the expand.
         truncation_reason: Optional[str] = None
         try:
-            s_urns, t_urns = await self._collect_descendants_pair_at_level(
-                source_urn, target_urn, next_level, ctypes, max_nodes,
-            )
+            if structural:
+                s_urns, t_urns = await self._collect_children_pair(
+                    source_urn, target_urn, ctypes, max_nodes,
+                )
+            else:
+                s_urns, t_urns = await self._collect_descendants_pair_at_level(
+                    source_urn, target_urn, next_level, ctypes, max_nodes,
+                )
         except Exception:
             s_urns, t_urns = [], []
             truncation_reason = "descendants_failed"
@@ -5560,7 +5580,7 @@ class FalkorDBProvider(GraphDataProvider):
         if s_urns and t_urns and not truncation_reason:
             edges = await self._edges_between_sets(
                 s_urns, t_urns, next_level, ltypes,
-                use_raw=use_raw_edges, limit=max_nodes,
+                use_raw=use_raw_edges and not structural, limit=max_nodes,
             )
             for e in edges:
                 node_urns_in_edges.add(e.source_urn)
@@ -5900,13 +5920,31 @@ class FalkorDBProvider(GraphDataProvider):
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         use_level_filter = bool(entity_levels) and level >= 0
 
-        # Group frontier URNs by their entity-type label so each sub-query
-        # uses the per-label ``urn`` index. URNs without a known label go
-        # into the "" bucket and use a label-less fallback pattern.
-        by_label: Dict[str, List[str]] = {}
+        # STRUCTURAL peer rollup: when the stored cells carry containment
+        # depth stamps, each frontier node's peers are the cells at ITS
+        # OWN depth — `r.sourceDepth = r.targetDepth = depth(f)`. The
+        # type-level filter is degenerate on self-nesting ontologies
+        # (every container shares one type level, so it mixes every
+        # granularity into one wave); depth buckets are exact on any
+        # shape. Frontier nodes without a resolvable depth (no stamped
+        # incident cell — e.g. leaves in boundary regime) keep the legacy
+        # type/label filters.
+        depth_by_urn: Dict[str, int] = {}
+        try:
+            meta = await self._aggregation_run_meta()
+            if meta.stamp_version >= 2:
+                depth_by_urn = await self._frontier_depths_from_stamps(frontier)
+        except Exception as exc:
+            logger.debug("frontier depth resolution failed: %s", exc)
+
+        # Group frontier URNs by (entity-type label, stamped depth) so
+        # each sub-query uses the per-label ``urn`` index AND the exact
+        # depth cell filter. URNs without a known label go into the ""
+        # bucket and use a label-less fallback pattern.
+        by_label: Dict[Tuple[str, Optional[int]], List[str]] = {}
         for urn in frontier:
             lbl = frontier_labels.get(urn) or ""
-            by_label.setdefault(lbl, []).append(urn)
+            by_label.setdefault((lbl, depth_by_urn.get(urn)), []).append(urn)
 
         # Direction shapes: ``f`` is the frontier-side variable, ``other`` is
         # the neighbour we're expanding into. Edge orientation in the returned
@@ -5961,21 +5999,22 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
         queries: List[tuple[str, Dict[str, Any]]] = []
-        for f_label, urns in by_label.items():
+        for (f_label, f_depth), urns in by_label.items():
             sanitized_self_label = _sanitize_label(f_label) if f_label else ""
             label_clause = f":{sanitized_self_label}" if sanitized_self_label else ""
 
             # Peer-rollup neighbour filter. Order of preference:
             #   1. Per-bucket frontier label (sanitized_self_label)
             #   2. Caller-supplied default (focus entity_type)
-            # If NEITHER is set, refuse to emit an unconstrained query —
-            # the legacy "no filter at all" path is the over-fetch bug
-            # that pulled Attributes into a Layer trace.
+            # If NEITHER is set (and no depth bucket constrains the
+            # cells), refuse to emit an unconstrained query — the legacy
+            # "no filter at all" path is the over-fetch bug that pulled
+            # Attributes into a Layer trace.
             effective_peer_label = sanitized_self_label or sanitized_default_peer
             peer_filter_clause: Optional[str] = None
             if effective_peer_label:
                 peer_filter_clause = f"labels(other)[0] = '{effective_peer_label}'"
-            else:
+            elif f_depth is None:
                 logger.warning(
                     "trace expand: no peer label for bucket=%r and no default — "
                     "skipping sub-query to avoid unconstrained over-fetch",
@@ -5985,10 +6024,16 @@ class FalkorDBProvider(GraphDataProvider):
                 # than to return every neighbour in the graph.
                 continue
 
-            # AGGREGATED branch. The level-pair fast path is the primary
-            # filter when available; otherwise label scan or peer fallback.
+            # AGGREGATED branch. The DEPTH-pair filter is the primary
+            # when this bucket's frontier depth is stamped (exact on any
+            # graph shape); else the type-level fast path; else label
+            # scan or peer fallback.
             agg_where: List[str] = []
-            if use_level_filter:
+            if f_depth is not None:
+                agg_where.append(
+                    "r.sourceDepth = $fDepth AND r.targetDepth = $fDepth"
+                )
+            elif use_level_filter:
                 agg_where.append("r.sourceLevel = $level AND r.targetLevel = $level")
             elif types:
                 agg_where.append("labels(other)[0] IN $types")
@@ -6003,7 +6048,9 @@ class FalkorDBProvider(GraphDataProvider):
                 ":AGGREGATED", where_parts=agg_where, order_by_weight=True,
             ).replace("{F_LABEL}", label_clause)
             agg_params: Dict[str, Any] = {"frontier": urns, "limit": limit}
-            if use_level_filter:
+            if f_depth is not None:
+                agg_params["fDepth"] = f_depth
+            elif use_level_filter:
                 agg_params["level"] = level
             elif types:
                 agg_params["types"] = types
@@ -6012,9 +6059,11 @@ class FalkorDBProvider(GraphDataProvider):
             queries.append((agg_cypher, agg_params))
 
             # Raw-lineage branch (only when ltypes provided). Raw edges
-            # don't carry level props, so this branch uses the type-set
-            # filter, or peer-label fallback when types is empty.
-            if ltypes:
+            # don't carry level/depth props, so this branch uses the
+            # type-set filter, or peer-label fallback when types is
+            # empty; a depth-only bucket with neither constraint skips
+            # raw rather than over-fetch.
+            if ltypes and (types or peer_filter_clause):
                 rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
                 raw_where: List[str] = []
                 if types:
@@ -6129,6 +6178,108 @@ class FalkorDBProvider(GraphDataProvider):
                     out.append(ancestor)
         return out
 
+    async def _edge_depth_stamps(
+        self, source_urn: str, target_urn: str,
+    ) -> Optional[Tuple[int, int]]:
+        """The expanded :AGGREGATED edge's own containment-depth stamps
+        (sourceDepth, targetDepth), or None when the edge is missing or
+        pre-dates the depth-stamp generation — the structural-drill
+        dispatch signal."""
+        try:
+            res = await self._proj_ro_query(
+                "MATCH (s)-[r:AGGREGATED]->(t) "
+                "WHERE s.urn = $s AND t.urn = $t "
+                "AND r.sourceDepth IS NOT NULL AND r.targetDepth IS NOT NULL "
+                "RETURN r.sourceDepth, r.targetDepth LIMIT 1",
+                params={"s": source_urn, "t": target_urn},
+            )
+            rows = res.result_set or []
+            if rows and rows[0] and rows[0][0] is not None and rows[0][1] is not None:
+                return int(rows[0][0]), int(rows[0][1])
+        except Exception as exc:
+            logger.debug("edge depth-stamp read failed: %s", exc)
+        return None
+
+    async def _frontier_depths_from_stamps(
+        self, urns: List[str],
+    ) -> Dict[str, int]:
+        """urn → containment depth, read from any stamped incident
+        :AGGREGATED cell (two bounded relation-anchored queries — no
+        containment walk). Nodes with no stamped incident cell are
+        absent; callers fall back to type/label filters for those."""
+        out: Dict[str, int] = {}
+        for cypher, key in (
+            (
+                "MATCH (f)-[r:AGGREGATED]->() "
+                "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
+                "RETURN f.urn, max(r.sourceDepth)",
+                "out",
+            ),
+            (
+                "MATCH ()-[r:AGGREGATED]->(f) "
+                "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
+                "RETURN f.urn, max(r.targetDepth)",
+                "in",
+            ),
+        ):
+            try:
+                res = await self._proj_ro_query(cypher, params={"urns": urns})
+                for row in (res.result_set or []):
+                    if row and row[0] is not None and row[1] is not None:
+                        u, d = str(row[0]), int(row[1])
+                        if out.get(u, -1) < d:
+                            out[u] = d
+            except Exception as exc:
+                logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
+        return out
+
+    async def _collect_children_pair(
+        self,
+        source_urn: str,
+        target_urn: str,
+        ctypes: List[str],
+        limit: int,
+    ) -> Tuple[List[str], List[str]]:
+        """STRUCTURAL drill: each anchor's DIRECT containment children —
+        one step below the expanded pair, each side advancing from its
+        own depth (ragged pairs included: a childless side stays at the
+        anchor itself). Label-agnostic, so self-nesting ontologies drill
+        correctly at every depth; on aligned type-structured trees the
+        children ARE the next type level, so behavior is unchanged."""
+        cypher = (
+            "MATCH (a {urn: $source})-[c]->(child) "
+            "WHERE type(c) IN $ctypes "
+            "WITH DISTINCT child.urn AS urn "
+            "LIMIT $limit "
+            "RETURN 's' AS side, collect(urn) AS urns "
+            "UNION "
+            "MATCH (b {urn: $target})-[c]->(child) "
+            "WHERE type(c) IN $ctypes "
+            "WITH DISTINCT child.urn AS urn "
+            "LIMIT $limit "
+            "RETURN 't' AS side, collect(urn) AS urns"
+        )
+        result = await self._ro_query(
+            cypher,
+            params={"source": source_urn, "target": target_urn,
+                    "ctypes": ctypes, "limit": limit},
+            timeout=2.0,
+        )
+        s_urns: List[str] = []
+        t_urns: List[str] = []
+        for row in (result.result_set or []):
+            if not row or len(row) < 2:
+                continue
+            urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+            if row[0] == 's':
+                s_urns.extend(urns)
+            elif row[0] == 't':
+                t_urns.extend(urns)
+        return (
+            list(dict.fromkeys(s_urns)) or [source_urn],
+            list(dict.fromkeys(t_urns)) or [target_urn],
+        )
+
     async def _collect_descendants_pair_at_level(
         self,
         source_urn: str,
@@ -6139,8 +6290,11 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> Tuple[List[str], List[str]]:
         """Collect descendants of both anchors in a SINGLE Cypher round-trip.
 
-        Bounded depth-10 containment descent; per-anchor row LIMIT applied
-        before ``collect()`` so the slice form (which previously tripped
+        LEGACY (type-level) path — used only when the expanded edge has
+        no depth stamps (``expand_aggregated`` dispatches stamped edges
+        to ``_collect_children_pair`` instead). Bounded depth-10
+        containment descent; per-anchor row LIMIT applied before
+        ``collect()`` so the slice form (which previously tripped
         FalkorDB's "expected List or Null but was Edge" planner error) is
         never used.
 
