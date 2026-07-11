@@ -113,6 +113,9 @@ class AggregationEventListener:
                     aggregation_edge_count=payload.get("edge_count"),
                     graph_fingerprint=payload.get("fingerprint"),
                 )
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
+                )
             case "job.failed":
                 await self._sync_data_source(
                     data_source_id,
@@ -142,6 +145,44 @@ class AggregationEventListener:
                     graph_fingerprint=payload.get("graph_fingerprint"),
                     aggregation_schedule=payload.get("aggregation_schedule"),
                 )
+
+    async def _invalidate_aggregated_cache(
+        self, workspace_id: Any, data_source_id: str,
+    ) -> None:
+        """A completed aggregation run rewrote the :AGGREGATED layer —
+        bump the scoped graph-cache generation AND purge the
+        last-known-good entries (which survive generation bumps by
+        design), or degraded reads keep serving pre-run answers for up
+        to the LKG TTL. Events from workers that predate the
+        workspace_id field skip silently (the cache keys are
+        workspace-scoped, so the scope can't be built without it)."""
+        if not workspace_id:
+            logger.debug(
+                "job.completed for %s carried no workspace_id — skipping "
+                "aggregated-cache invalidation", data_source_id,
+            )
+            return
+        try:
+            from backend.app.services.graph_cache import (
+                CacheScope, ENDPOINT_AGGREGATED, get_graph_cache,
+            )
+            cache = get_graph_cache()
+            scope = CacheScope(
+                workspace_id=str(workspace_id),
+                data_source_id=data_source_id,
+                branch_id="",
+            )
+            await cache.bump_generation(scope)
+            removed = await cache.purge_lkg(scope, ENDPOINT_AGGREGATED)
+            logger.info(
+                "Aggregated-edge cache invalidated for %s/%s (%d LKG "
+                "entries purged)", workspace_id, data_source_id, removed,
+            )
+        except Exception as e:
+            logger.warning(
+                "Aggregated-edge cache invalidation failed for %s: %s",
+                data_source_id, e,
+            )
 
     async def _sync_data_source(self, data_source_id: str, **fields: Any) -> None:
         """Update workspace_data_sources with the given fields.

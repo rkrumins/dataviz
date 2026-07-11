@@ -118,10 +118,14 @@ class AggregationEventPublisher:
         edge_count: int,
         fingerprint: Optional[str],
         completed_at: str,
+        workspace_id: Optional[str] = None,
     ) -> None:
         await self.publish("job.completed", {
             "job_id": job_id,
             "data_source_id": data_source_id,
+            # Scopes the listener's graph-cache invalidation (the cache
+            # keys are workspace-scoped).
+            "workspace_id": workspace_id,
             "status": "ready",
             "edge_count": edge_count,
             "fingerprint": fingerprint,

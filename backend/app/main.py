@@ -563,30 +563,36 @@ async def lifespan(_app: FastAPI):
         "AGGREGATION_PROXY_ENABLED", "false"
     ).lower() == "true"
 
+    # Event listener: whenever a job bus exists (REDIS_URL), aggregation
+    # jobs execute on the worker fleet and publish their terminal events
+    # to the bus — SOMEONE in this process must consume them or the local
+    # workspace_data_sources row never syncs (observed live: a graph held
+    # 1,840 rollups while the row said status=none/count=0, because the
+    # listener only started in proxy mode while dispatch had long moved
+    # to the Redis stream for every topology with a bus). It also
+    # invalidates the aggregated-edge graph cache on job completion.
+    _agg_event_listener = None
+    if os.getenv("REDIS_URL"):
+        try:
+            from .services.aggregation.redis_client import get_redis
+            from .services.aggregation.event_listener import AggregationEventListener
+            _agg_event_listener = AggregationEventListener(
+                redis_client=get_redis(),
+                session_factory=get_jobs_session,
+            )
+            _app.state._agg_event_listener = _agg_event_listener
+            _app.state._agg_event_listener_task = asyncio.create_task(
+                _agg_event_listener.start()
+            )
+            logger.info("Aggregation event listener started (syncs status + invalidates caches)")
+        except Exception as exc:
+            logger.warning("Aggregation event listener startup failed: %s", exc)
+
     if aggregation_proxy_enabled:
         logger.info(
             "Aggregation: proxy mode enabled — all endpoints forwarded to %s",
             os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091"),
         )
-        # Start event listener to sync aggregation status from Control Plane
-        # into local workspace_data_sources table.
-        _agg_event_listener = None
-        redis_url = os.getenv("REDIS_URL")
-        if redis_url:
-            try:
-                from .services.aggregation.redis_client import get_redis
-                from .services.aggregation.event_listener import AggregationEventListener
-                _agg_event_listener = AggregationEventListener(
-                    redis_client=get_redis(),
-                    session_factory=get_jobs_session,
-                )
-                _app.state._agg_event_listener = _agg_event_listener
-                _app.state._agg_event_listener_task = asyncio.create_task(
-                    _agg_event_listener.start()
-                )
-                logger.info("Aggregation event listener started (syncs status from Control Plane)")
-            except Exception as exc:
-                logger.warning("Aggregation event listener startup failed: %s", exc)
     else:
         try:
             from .services.aggregation import (

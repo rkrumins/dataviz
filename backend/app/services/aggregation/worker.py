@@ -440,6 +440,13 @@ class AggregationWorker:
                     aggregation_edge_count=job.created_edges,
                     graph_fingerprint=job.graph_fingerprint_after,
                 )
+                await self._sync_workspace_ds_row(
+                    session, job,
+                    aggregation_status="ready",
+                    last_aggregated_at=job.completed_at,
+                    aggregation_edge_count=job.created_edges,
+                    graph_fingerprint=job.graph_fingerprint_after,
+                )
 
                 # Audit-log row written in this same transaction so the
                 # durable status flip + the audit trail land or roll
@@ -479,6 +486,7 @@ class AggregationWorker:
                 )
 
                 # Publish event for viz-service to sync its own tables
+                # and invalidate its aggregated-edge graph cache.
                 if self._events:
                     await self._events.job_completed(
                         job_id=job_id,
@@ -486,6 +494,7 @@ class AggregationWorker:
                         edge_count=job.created_edges,
                         fingerprint=job.graph_fingerprint_after,
                         completed_at=job.completed_at,
+                        workspace_id=job.workspace_id,
                     )
 
                 # Aggregated-edge materialization changed the graph's edge
@@ -513,6 +522,7 @@ class AggregationWorker:
                 )
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
 
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
@@ -564,6 +574,7 @@ class AggregationWorker:
                 )
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="cancelled")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="none")
 
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
@@ -603,6 +614,7 @@ class AggregationWorker:
                 logger.error("Aggregation job %s failed: %s", job_id, e, exc_info=True)
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
 
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
@@ -671,6 +683,34 @@ class AggregationWorker:
                     setattr(state, key, value)
         except Exception as e:
             logger.warning("Failed to update data source state for %s: %s", data_source_id, e)
+
+    async def _sync_workspace_ds_row(
+        self,
+        session: AsyncSession,
+        job: Any,
+        **fields: Any,
+    ) -> None:
+        """Best-effort DIRECT sync of the viz-service's
+        ``workspace_data_sources`` row in the same transaction as the
+        job's terminal state — covers single-DB topologies where no
+        aggregation event listener runs (the observed gap: a graph held
+        1,840 rollups while the row said status=none/count=0). In
+        split-DB topologies the table is absent from the jobs DB, the
+        get fails harmlessly and the event listener owns the sync."""
+        try:
+            from backend.app.db.models import WorkspaceDataSourceORM
+
+            ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+            if ds is None:
+                return
+            for key, value in fields.items():
+                if value is not None and hasattr(ds, key):
+                    setattr(ds, key, value)
+        except Exception as e:
+            logger.debug(
+                "workspace_data_sources direct sync skipped for %s: %s",
+                job.data_source_id, e,
+            )
 
     async def _break_zombie_lease(
         self, session: AsyncSession, provider: Any, my_job_id: str,

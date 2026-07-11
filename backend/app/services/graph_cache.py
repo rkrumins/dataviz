@@ -367,6 +367,37 @@ class GraphCache:
                 scope, exc,
             )
 
+    async def purge_lkg(self, scope: CacheScope, endpoint: str) -> int:
+        """Delete the last-known-good entries for ``scope`` + ``endpoint``
+        (every branch). LKG keys deliberately SURVIVE ``bump_generation``
+        — they are the outage fallback — so an event that rewrites the
+        underlying data (an aggregation run completing) must purge them
+        explicitly, or degraded reads keep serving pre-run answers for
+        up to the LKG TTL after the graph changed. Bounded SCAN, never
+        KEYS."""
+        pattern = (
+            f"{_LKG_PREFIX}:{scope.workspace_id}:{scope.data_source_id}"
+            f":*:{endpoint}:*"
+        )
+        removed = 0
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await self._redis.scan(
+                    cursor=cursor, match=pattern, count=500,
+                )
+                if keys:
+                    removed += int(await self._redis.delete(*keys) or 0)
+                if not cursor:
+                    break
+        except RedisError as exc:
+            logger.warning(
+                "graph_cache: LKG purge failed for %s/%s (%s); stale "
+                "last-known-good entries may persist until TTL expiry",
+                scope, endpoint, exc,
+            )
+        return removed
+
     # ─── Internals ────────────────────────────────────────────────────
 
     async def _get_generation(self, scope: CacheScope) -> int:
