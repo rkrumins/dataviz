@@ -22,7 +22,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .defaults import with_system_edge_types
+from .defaults import with_system_edge_types, with_system_entity_types
 from .models import EntityTypeDefEntry, RelationshipTypeDefEntry
 from .resolver import (
     parse_entity_definitions,
@@ -124,8 +124,10 @@ def check_resolution(
     itself, not of any specific graph. This keeps re-triggers working
     even before the stats refresh has caught up.
     """
+    # System-internal node types (the node analogue of :AGGREGATED — none today) are merged
+    # in for the same reason: the gate must never block on a type the platform itself emits.
     entity_defs: Dict[str, EntityTypeDefEntry] = parse_entity_definitions(
-        entity_type_definitions_raw or {}
+        with_system_entity_types(entity_type_definitions_raw or {})
     )
     # Every ontology implicitly includes the platform's built-in edge types (e.g. the
     # aggregation worker's :AGGREGATED rollup). Merge them in before evaluating the

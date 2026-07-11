@@ -76,3 +76,43 @@ def strip_system_edge_types(rel_defs: Dict[str, Any]) -> Dict[str, Any]:
     """Return ``rel_defs`` without the system-internal edge types — they are injected on
     read, never persisted, so a save round-trip can't store (or duplicate) them."""
     return {k: v for k, v in (rel_defs or {}).items() if not is_system_edge_type(k)}
+
+
+# ---------------------------------------------------------------------------
+# System-internal (built-in) entity types — the node counterpart of the edges above.
+# ---------------------------------------------------------------------------
+# There are none today, but the platform may one day emit built-in NODES (e.g. a synthetic
+# rollup/aggregate node) exactly as it emits ``:AGGREGATED`` edges. These helpers mirror the
+# edge ones so every coverage/adoption/gate path already injects "system nodes" — adding one
+# later is a one-line change to ``SYSTEM_INTERNAL_ENTITY_TYPES``, with no code to hunt down.
+SYSTEM_INTERNAL_ENTITY_TYPES: frozenset = frozenset()
+
+SYSTEM_INTERNAL_ENTITY_TYPE_DEFS: Dict[str, Dict[str, Any]] = {
+    eid: {**edef, "is_system": True}
+    for eid, edef in SYSTEM_ENTITY_TYPES.items()
+    if eid.upper() in {t.upper() for t in SYSTEM_INTERNAL_ENTITY_TYPES}
+}
+
+
+def is_system_entity_type(entity_type_id: str) -> bool:
+    """True if ``entity_type_id`` is a platform-built-in node type (case-insensitive)."""
+    return bool(entity_type_id) and str(entity_type_id).upper() in {
+        t.upper() for t in SYSTEM_INTERNAL_ENTITY_TYPES
+    }
+
+
+def with_system_entity_types(entity_defs_raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``entity_defs_raw`` with the system-internal entity types merged in and marked
+    ``is_system`` — the node analogue of :func:`with_system_edge_types`. No-op today (there
+    are no built-in nodes); wired everywhere so a future one is covered automatically."""
+    merged: Dict[str, Any] = {**(entity_defs_raw or {})}
+    for eid, sdef in SYSTEM_INTERNAL_ENTITY_TYPE_DEFS.items():
+        existing = merged.get(eid)
+        merged[eid] = {**existing, "is_system": True} if isinstance(existing, dict) else dict(sdef)
+    return merged
+
+
+def strip_system_entity_types(entity_defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``entity_defs`` without the system-internal entity types (injected on read,
+    never persisted)."""
+    return {k: v for k, v in (entity_defs or {}).items() if not is_system_entity_type(k)}

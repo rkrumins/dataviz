@@ -111,21 +111,28 @@ def _reject_case_insensitive_type_dupes(req) -> None:
         raise HTTPException(status_code=422, detail="; ".join(collisions))
 
 
-def _strip_system_edge_types(req) -> None:
-    """Drop platform-built-in edge types (e.g. AGGREGATED) from an incoming payload — in
-    place — so they are never persisted. They are injected on read (marked ``is_system``,
-    shown read-only in the UI), so a save round-trip echoes them back; stripping here keeps
-    the stored ontology to the user's own types and stops a built-in id from being stored,
-    duplicated, or reconciled against."""
-    from backend.app.ontology.defaults import is_system_edge_type
+def _strip_system_types(req) -> None:
+    """Drop platform-built-in types (e.g. the AGGREGATED edge — and any future built-in
+    node) from an incoming payload — in place — so they are never persisted. They are
+    injected on read (marked ``is_system``, shown read-only in the UI), so a save round-trip
+    echoes them back; stripping here keeps the stored ontology to the user's own types and
+    stops a built-in id from being stored, duplicated, or reconciled against."""
+    from backend.app.ontology.defaults import is_system_edge_type, is_system_entity_type
     rel_defs = getattr(req, "relationship_type_definitions", None)
     if isinstance(rel_defs, dict):
         req.relationship_type_definitions = {
             k: v for k, v in rel_defs.items() if not is_system_edge_type(k)}
+    entity_defs = getattr(req, "entity_type_definitions", None)
+    if isinstance(entity_defs, dict):
+        req.entity_type_definitions = {
+            k: v for k, v in entity_defs.items() if not is_system_entity_type(k)}
     for field in ("containment_edge_types", "lineage_edge_types"):
         lst = getattr(req, field, None)
         if isinstance(lst, list):
             setattr(req, field, [t for t in lst if not is_system_edge_type(t)])
+    lst = getattr(req, "root_entity_types", None)
+    if isinstance(lst, list):
+        setattr(req, "root_entity_types", [t for t in lst if not is_system_entity_type(t)])
 
 
 def _normalize_edge_type_references(req) -> None:
@@ -218,7 +225,7 @@ async def create_ontology(
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
-    _strip_system_edge_types(req)
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
@@ -318,7 +325,7 @@ async def update_ontology(
     Update an ontology. If published, creates a new version instead.
     Returns the updated or newly created ontology.
     """
-    _strip_system_edge_types(req)
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
@@ -569,14 +576,14 @@ async def get_ontology_adoption(
 
     from backend.app.db.repositories import stats_repo
     from backend.app.ontology.adoption import build_source_adoption, dimension_to_wire
-    from backend.app.ontology.defaults import with_system_edge_types
+    from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
 
     orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
     if not orm:
         raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
     await ensure_ontology_visible(session, claims, ontology_id)
 
-    entity_ids = set(_json.loads(orm.entity_type_definitions or "{}").keys())
+    entity_ids = set(with_system_entity_types(_json.loads(orm.entity_type_definitions or "{}")).keys())
     edge_ids = set(with_system_edge_types(_json.loads(orm.relationship_type_definitions or "{}")).keys())
 
     assignments = await ontology_definition_repo.get_assignments(session, ontology_id)
@@ -909,7 +916,7 @@ async def import_ontology_new(
     Import a semantic layer from exported JSON, creating a new draft.
     Validates the JSON structure against the export format.
     """
-    _strip_system_edge_types(req)
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
     _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
@@ -992,12 +999,16 @@ async def suggest_ontology(
     graph_rel_ids = {s.id.upper() for s in stats.edge_type_stats}
     graph_types = graph_entity_ids | graph_rel_ids
 
+    from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+
     matches = []
     if graph_types:
         all_ontologies = await ontology_definition_repo.list_latest_ontologies(session)
         for ont in all_ontologies:
-            ont_entity_ids = set((ont.entity_type_definitions or {}).keys())
-            ont_rel_ids = set((ont.relationship_type_definitions or {}).keys())
+            # Include the platform's built-in types so :AGGREGATED (present in every graph
+            # that's been aggregated) never reads as a "missing" type against any ontology.
+            ont_entity_ids = set(with_system_entity_types(ont.entity_type_definitions or {}).keys())
+            ont_rel_ids = set(with_system_edge_types(ont.relationship_type_definitions or {}).keys())
             ont_types = ont_entity_ids | ont_rel_ids
 
             intersection = graph_types & ont_types
