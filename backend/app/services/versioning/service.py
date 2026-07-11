@@ -2190,26 +2190,43 @@ class GraphVersioningService:
                         NodeVersionORM.commit_seq <= overlay_seq,
                     ).distinct()
                 )).scalars().all())
-            # Over-fetch: the incoming-containment filter prunes after discovery.
+            # Discover candidates with a GROWING window until a full page of
+            # top-level nodes emerges or the candidate space is exhausted.
+            # The old fixed ``limit*4`` over-fetch sampled candidates in
+            # arbitrary order and pruned AFTER — on graphs whose roots sit
+            # late in that order (observed live: 10 Roots among 275
+            # contained Nodes), the UNFILTERED browse returned ZERO rows and
+            # the view wizard rendered "the graph may be empty" while the
+            # type-filtered chips worked (their predicate narrows discovery
+            # BEFORE the sample).
             window = (limit * 4) + len(overlay_ids) + 1
-            cand = set(await self._latest_live_ids(
-                s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
-            cand.update(overlay_ids)
-            vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
-            nodes = {eid: p for eid, p in vals.items()
-                     if p is not None and not _is_edge_payload(p) and matches(p)}
-            inc = await self._incident_live_edges(s, graph_id, branch_id, set(nodes), as_of_seq)
-            has_incoming_cont: set = set()
-            child_count: Dict[str, int] = {}
-            for eid, p in inc.items():
-                if (p.get("edgeType") or "").upper() not in cset:
-                    continue
-                a, b = _edge_src_tgt(p)
-                if b in nodes:
-                    has_incoming_cont.add(b)
-                if include_child_count and a in nodes:
-                    child_count[a] = child_count.get(a, 0) + 1
-            top = [(eid, p) for eid, p in nodes.items() if eid not in has_incoming_cont]
+            while True:
+                cand = set(await self._latest_live_ids(
+                    s, NodeVersionORM, graph_id, main_id, base_seq, where=where, limit=window))
+                exhausted = len(cand) < window
+                cand.update(overlay_ids)
+                vals = await self._current_values(s, graph_id, branch_id, cand, as_of_seq)
+                nodes = {eid: p for eid, p in vals.items()
+                         if p is not None and not _is_edge_payload(p) and matches(p)}
+                inc = await self._incident_live_edges(s, graph_id, branch_id, set(nodes), as_of_seq)
+                has_incoming_cont: set = set()
+                child_count: Dict[str, int] = {}
+                for eid, p in inc.items():
+                    if (p.get("edgeType") or "").upper() not in cset:
+                        continue
+                    a, b = _edge_src_tgt(p)
+                    if b in nodes:
+                        has_incoming_cont.add(b)
+                    if include_child_count and a in nodes:
+                        child_count[a] = child_count.get(a, 0) + 1
+                top = [(eid, p) for eid, p in nodes.items() if eid not in has_incoming_cont]
+                past_cursor = (
+                    [kv for kv in top if (kv[1].get("displayName") or "") > cursor]
+                    if cursor else top
+                )
+                if exhausted or len(past_cursor) > limit:
+                    break
+                window *= 4
 
         top.sort(key=lambda kv: ((kv[1].get("displayName") or ""), kv[0]))
         total = len(top)
