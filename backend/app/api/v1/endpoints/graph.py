@@ -208,6 +208,10 @@ async def confirm_vocab_variant(
     if row is None:
         raise HTTPException(status_code=404, detail="no alignment profile for this data source")
     await session.commit()
+    # Alignment feeds the resolved-ontology alias maps — invalidate the
+    # process-wide resolution cache so every pod re-derives on next read.
+    from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+    await bump_ontology_generation(ws_id, dataSourceId)
     return {"declared": declared, "keepMerged": keepMerged, "hasDrift": bool(row.has_drift)}
 
 

@@ -88,6 +88,12 @@ class LayerAssignmentRequest(BaseModel):
     # the legacy per-layer `entity_assignments`. See layout_config.py.
     assignments: Dict[str, EntityAssignmentConfig] = Field(default_factory=dict)
     entity_scope: Optional[str] = Field(None, alias="entityScope")  # 'all' | 'curated'
+    # Optional explicit compute scope: when set, assignments are computed for
+    # exactly these URNs (plus containment edges among them). The canvas sends
+    # its loaded set — which includes every visible ancestor, so containment
+    # inheritance stays correct. When absent, the engine reads the whole graph
+    # bounded by ASSIGNMENT_MAX_ELEMENTS (stats.truncated flags the cap).
+    urns: Optional[List[str]] = None
 
     class Config:
         populate_by_name = True
@@ -110,6 +116,9 @@ class LayerAssignmentStats(BaseModel):
     total_nodes: int = Field(alias="totalNodes")
     assigned_nodes: int = Field(alias="assignedNodes")
     compute_time_ms: float = Field(alias="computeTimeMs")
+    # True when the unscoped read hit ASSIGNMENT_MAX_ELEMENTS — the compute
+    # ran on a bounded subset, never silently on an arbitrary 100 rows.
+    truncated: bool = False
 
     class Config:
         populate_by_name = True

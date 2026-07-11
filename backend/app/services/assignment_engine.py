@@ -50,10 +50,33 @@ class AssignmentEngine:
         )
 
         # ── Fetch graph data via the scoped engine ────────────────────────
-        all_nodes = await engine.get_nodes_query(NodeQuery())
-        all_edges = await engine.get_edges(EdgeQuery())
+        # Scoped compute (request.urns = the canvas's loaded set, ancestors
+        # included) reads exactly those nodes + the edges among them.
+        # Unscoped compute reads the graph bounded by ASSIGNMENT_MAX_ELEMENTS
+        # with an explicit truncated flag — the previous NodeQuery()/
+        # EdgeQuery() defaults silently computed on an arbitrary 100 rows.
+        # Child counts are irrelevant to assignment; skipping them avoids a
+        # per-node containment sub-query.
+        import os as _os
+        max_elements = int(_os.getenv("ASSIGNMENT_MAX_ELEMENTS", "50000"))
+        truncated = False
+        if request.urns:
+            scope = list(dict.fromkeys(request.urns))
+            all_nodes = await engine.get_nodes_query(NodeQuery(
+                urns=scope, limit=len(scope), include_child_count=False))
+            all_edges = await engine.get_edges(EdgeQuery(
+                source_urns=scope, target_urns=scope, limit=max_elements))
+        else:
+            all_nodes = await engine.get_nodes_query(NodeQuery(
+                limit=max_elements + 1, include_child_count=False))
+            all_edges = await engine.get_edges(EdgeQuery(limit=max_elements + 1))
+            truncated = len(all_nodes) > max_elements or len(all_edges) > max_elements
+            all_nodes = all_nodes[:max_elements]
+            all_edges = all_edges[:max_elements]
 
-        logging.info(f"Computing assignments for {len(all_nodes)} nodes and {len(all_edges)} edges")
+        logging.info(
+            "Computing assignments for %d nodes and %d edges (scoped=%s, truncated=%s)",
+            len(all_nodes), len(all_edges), bool(request.urns), truncated)
 
         # 2. Build Indices
         rule_index = self._build_rule_index(request.layers, request.assignments)
@@ -94,7 +117,8 @@ class AssignmentEngine:
             stats=LayerAssignmentStats(
                 totalNodes=len(all_nodes),
                 assignedNodes=len(assignments),
-                computeTimeMs=compute_time_ms
+                computeTimeMs=compute_time_ms,
+                truncated=truncated,
             )
         )
 

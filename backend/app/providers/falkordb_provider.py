@@ -7164,10 +7164,28 @@ class FalkorDBProvider(GraphDataProvider):
         containment_upper = {t.upper() for t in containment}
         
         # 1. Determine Lineage Types
-        # Instead of fetching all edges, we query distinct types. Tolerant:
-        # an empty/never-created graph has no edge types (not an outage).
-        type_res = await self._ro_query_tolerant("MATCH ()-[r]->() RETURN DISTINCT type(r)")
-        all_types = [row[0] for row in (type_res.result_set or [])]
+        # db.relationshipTypes() reads the graph schema catalog — O(#types),
+        # no edge scan. The DISTINCT type(r) scan (O(#edges): ~1s per million
+        # edges, and this runs on every ontology-cache miss) remains only as
+        # a fallback for engines without the procedure. The catalog can list
+        # types whose last edge was deleted — harmless here: downstream
+        # classification treats the list as "observed vocabulary" and a
+        # stale entry simply classifies an absent type.
+        all_types: List[str] = []
+        try:
+            type_res = await self._ro_query_tolerant(
+                "CALL db.relationshipTypes() YIELD relationshipType "
+                "RETURN relationshipType",
+                op="ontology.reltypes",
+            )
+            all_types = [row[0] for row in (type_res.result_set or []) if row and row[0]]
+        except Exception as exc:
+            logger.debug("db.relationshipTypes() unavailable (%s) — falling back to edge scan", exc)
+        if not all_types:
+            type_res = await self._ro_query_tolerant(
+                "MATCH ()-[r]->() RETURN DISTINCT type(r)", op="ontology.edge_scan",
+            )
+            all_types = [row[0] for row in (type_res.result_set or [])]
         
         # Use ontology-resolved edge metadata if available, otherwise fall back to heuristics
         resolved_meta = getattr(self, "_resolved_edge_metadata", None)

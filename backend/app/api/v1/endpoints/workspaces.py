@@ -410,6 +410,10 @@ async def update_data_source(
     if schema_invalidating_change:
         await session.commit()
         await enqueue_stats_job_safe(ds_id, workspace_id)
+        # Ontology (re)assignment / projection changes alter how reads
+        # resolve — invalidate the process-wide resolved-ontology cache.
+        from backend.app.services.resolved_ontology_cache import bump_ontology_generation
+        await bump_ontology_generation(workspace_id, ds_id)
 
     return ds
 
