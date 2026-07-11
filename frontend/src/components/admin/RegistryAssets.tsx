@@ -1098,28 +1098,22 @@ export function RegistryAssets() {
     // alarm (fixes stale/inaccurate error messaging).
     const providerWarming = isWarmingError(assetsEnvelope?.meta.last_error)
 
-    // Refresh the asset list + the assets on the CURRENT PAGE. Used by
-    // the panel-level RefreshControl. Deliberately NOT refresh-
-    // everything: a provider with 200 cached assets used to grind for
-    // minutes through the worker on every click; individual rows keep
-    // their own ⟳ button. The list stays rendered throughout, and the
-    // promise resolves only when every queued asset's job has finished
-    // (its envelope stops reporting ``refreshing``) — RefreshControl
-    // awaits this, so the button spins until the new figures are live.
+    // Refresh EVERY cached asset for the selected provider (all N sources,
+    // not just the visible page). Passing no asset_names tells the backend
+    // to fan out across every cached asset (capped at 200, deduped) plus the
+    // list sentinel. To keep feedback snappy and light, the button only
+    // *waits* on the VISIBLE page's rows to go live; the rest refresh in the
+    // background and update their figures as they're scrolled to (each row's
+    // own stats query polls while its ``meta.refreshing`` is set).
     const handleRefreshSelectedProvider = useCallback(async () => {
         if (!selectedProviderId) return
-        const targets = pagedAssets
+        const providerId = selectedProviderId
         try {
-            const result = await providerService.refreshAllAssets(
-                selectedProviderId, targets,
-            )
-            const noun = result.jobs_queued === 1 ? 'asset' : 'assets'
-            const scopeHint = sortedAssets.length > targets.length
-                ? ` (this page — ${targets.length} of ${sortedAssets.length})`
-                : ''
+            const result = await providerService.refreshAllAssets(providerId)
+            const n = result.jobs_queued
             showToast(
                 'success',
-                `Refresh queued for ${result.jobs_queued} ${noun}${scopeHint}.`,
+                `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
             )
         } catch (err: any) {
             // err.message is already run through friendlyError at the
@@ -1141,15 +1135,13 @@ export function RegistryAssets() {
                 && q.queryKey[1] === selectedProviderId,
         })
 
-        // Wait for the queued jobs to actually finish: poll each
-        // target's stats endpoint until ``refreshing`` clears (the
+        // Wait only for the VISIBLE page's jobs to finish (bounded, light):
+        // poll each visible row's stats until ``refreshing`` clears (the
         // worker releases the claim on success AND failure, so this
-        // terminates promptly either way; 90s safety cap). fetchQuery
-        // writes into the same query keys the rows render from, so the
-        // figures update in place as each job lands.
-        const providerId = selectedProviderId
+        // terminates promptly; 90s safety cap). fetchQuery writes into the
+        // same query keys the rows render from, so figures update in place.
         const deadline = Date.now() + 90_000
-        const pending = new Set(targets)
+        const pending = new Set(pagedAssets)
         while (pending.size > 0 && Date.now() < deadline) {
             await new Promise(r => setTimeout(r, 2500))
             const checks = await Promise.allSettled(
@@ -1176,7 +1168,7 @@ export function RegistryAssets() {
         // throughout (React Query keeps prior data during the refetch).
         queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, providerId] })
         queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, providerId] })
-    }, [selectedProviderId, pagedAssets, sortedAssets.length, queryClient, showToast])
+    }, [selectedProviderId, pagedAssets, queryClient, showToast])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (

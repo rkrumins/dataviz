@@ -158,7 +158,7 @@ export function RefreshControl({
             <button
                 onClick={handlePrimaryRefresh}
                 disabled={disabled || refreshing}
-                title="Force-refresh every asset for this provider now"
+                title="Refresh all sources for this provider now — the visible page updates live; the rest refresh in the background"
                 className={cn(
                     'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold',
                     'text-indigo-600 bg-indigo-500/10 hover:bg-indigo-500/20',
@@ -227,10 +227,10 @@ export function RefreshControl({
                             </div>
                             <div>
                                 <div className="text-xs font-semibold text-ink">
-                                    Run global discovery tick
+                                    Refresh every provider now
                                 </div>
                                 <div className="text-[11px] text-ink-muted mt-0.5">
-                                    Fires the scheduler for every active provider, not just this one. Dedup applies.
+                                    Runs the scheduler across all providers at once (not just this one) — enqueues a lot of jobs; duplicates are skipped. Use after a bulk provider change.
                                 </div>
                             </div>
                         </button>
