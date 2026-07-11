@@ -2004,20 +2004,29 @@ class AggregationPipeline:
 
     async def _ensure_agg_index(self) -> None:
         """Idempotently ensure the AGGREGATED(aggKey) edge index that keeps
-        MERGE-on-aggKey an index seek instead of an O(out_degree) scan."""
-        try:
-            await self.p._proj_query(
-                "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)",
-                timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
-            )
-        except Exception as exc:
-            msg = str(exc).lower()
-            if "already" not in msg and "exist" not in msg:
-                logger.warning(
-                    "aggregation pipeline on %s: could not ensure "
-                    "AGGREGATED(aggKey) index (%s) — MERGE will be slower.",
-                    self.p._graph_name, exc,
+        MERGE-on-aggKey an index seek instead of an O(out_degree) scan —
+        plus the depth-stamp indexes the depth-keyed readers (Q3, trace
+        structural drill) seek on. A run that writes stampVersion=2 cells
+        must leave the graph readable at index speed."""
+        for ddl in (
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)",
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
+        ):
+            try:
+                await self.p._proj_query(
+                    ddl,
+                    timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
                 )
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already" not in msg and "exist" not in msg:
+                    logger.warning(
+                        "aggregation pipeline on %s: could not ensure "
+                        "AGGREGATED index via %r (%s) — reads/deletes may scan.",
+                        self.p._graph_name, ddl, exc,
+                    )
 
     async def _delete_stale(self, agg_keys: List[str]) -> None:
         """Delete stale edges by ``aggKey`` (edge-property index seek) in

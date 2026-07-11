@@ -1518,6 +1518,13 @@ class FalkorDBProvider(GraphDataProvider):
             "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
             "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
             "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
+            # Depth stamps (stampVersion>=2) are the PREFERRED read filters
+            # (Q3 mixed-depth derivation, trace structural drill) — without
+            # these they run as Conditional Traverse property reads.
+            # Verified supported on FalkorDB v4.16.0 (WS0 D1 spike).
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
+            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
         ]
         for index_cypher in aggregated_edge_indices:
             try:
@@ -1682,14 +1689,23 @@ class FalkorDBProvider(GraphDataProvider):
         max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
         # Find topmost containment ancestor — the deepest reachable walk
         # via incoming containment edges. We use `*1..N` (not `*0..N`)
-        # because FalkorDB's planner trips on `ALL(rel IN c WHERE …)` when
-        # the variable-length match produces zero-length paths (c can be
-        # Edge instead of List). Handle the "focus is already top" case
-        # with COALESCE on the outer query (anc is null → return focus).
+        # because FalkorDB's planner trips on zero-length paths in the
+        # filtered form. Handle the "focus is already top" case with
+        # COALESCE on the outer query (anc is null → return focus).
+        # The focus anchor is label-qualified via the urn→label cache
+        # (urn-index seek, not an All-Node-Scan), and the containment
+        # types are a pattern ALTERNATION so the walk never expands
+        # non-containment edges at all (the old ALL(rel IN c …) filter
+        # expanded EVERY edge type then discarded mismatches).
+        focus_label = await self._get_cached_label(urn)
+        f_anchor = (
+            f"(focus:{_sanitize_label(focus_label)} {{urn: $urn}})"
+            if focus_label else "(focus {urn: $urn})"
+        )
+        c_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
         cypher = (
-            "MATCH (focus {urn: $urn}) "
-            f"OPTIONAL MATCH (focus)<-[c*1..{max_depth}]-(anc) "
-            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            f"MATCH {f_anchor} "
+            f"OPTIONAL MATCH (focus)<-[c:{c_alt}*1..{max_depth}]-(anc) "
             "WITH focus, anc, size(c) AS depth "
             "ORDER BY depth DESC LIMIT 1 "
             "RETURN COALESCE(anc.urn, focus.urn) AS urn, "
@@ -1697,7 +1713,7 @@ class FalkorDBProvider(GraphDataProvider):
         )
         try:
             result = await self._ro_query(
-                cypher, params={"urn": urn, "ctypes": ctypes}, timeout=1.5,
+                cypher, params={"urn": urn}, timeout=1.5, op="trace.root_anchor",
             )
             rows = result.result_set or []
             if rows and rows[0]:
@@ -2309,10 +2325,85 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         await self._ensure_connected()
 
-        cypher = "MATCH (a)-[r]->(b)"
-        params: Dict[str, Any] = {}
-        conditions: List[str] = []
+        offset = query.offset or 0
+        limit = query.limit or 100
 
+        # Relationship types as a PATTERN alternation (alias-mapped to this
+        # graph's observed spellings), not a post-hoc `type(r) IN` filter —
+        # the traversal then never visits other edge types on hub nodes.
+        types: Optional[List[str]] = None
+        if query.edge_types:
+            raw = [t.value if hasattr(t, "value") else str(t) for t in query.edge_types]
+            types = [t for t in self._alias_rel_types(raw) if t]
+        rel_pattern = (
+            f"[r:{'|'.join(_sanitize_label(t) for t in types)}]" if types else "[r]"
+        )
+
+        extra_conditions: List[str] = []
+        extra_params: Dict[str, Any] = {}
+        if query.min_confidence is not None:
+            extra_params["minConf"] = query.min_confidence
+            extra_conditions.append("r.confidence >= $minConf")
+
+        is_between = bool(query.source_urns and query.target_urns)
+        op = "edges.between" if is_between else "edges.query"
+        timeout = self._EDGES_BETWEEN_TIMEOUT if is_between else None
+
+        # URN-anchored reads (the /edges/between hydration path) run one
+        # urn-index-seeked sub-query per label bucket, gathered — an
+        # unlabeled `a.urn IN $list` anchor is a FULL node scan on builds
+        # without a label-less URN index (measured 310ms/2M nodes, before
+        # even walking edges). Bucketing keeps result sets disjoint (a node
+        # has one label), so a simple merge + truncate preserves semantics
+        # at offset 0. offset>0 or anyUrns fall back to the legacy single
+        # query below — those shapes have no index-friendly form.
+        anchor_urns = query.source_urns or query.target_urns
+        if anchor_urns and offset == 0 and not query.any_urns:
+            anchor_on_source = bool(query.source_urns)
+            conditions = list(extra_conditions)
+            params: Dict[str, Any] = {**extra_params, "limit": limit}
+            if anchor_on_source and query.target_urns:
+                params["targetUrns"] = query.target_urns
+                conditions.append("b.urn IN $targetUrns")
+
+            async def _run_bucket(label: str, bucket: List[str]) -> list:
+                var = "a" if anchor_on_source else "b"
+                node = f"({var}:{label})" if label else f"({var})"
+                pattern = (
+                    f"MATCH {node}-{rel_pattern}->(b)" if anchor_on_source
+                    else f"MATCH (a)-{rel_pattern}->{node}"
+                )
+                where = " AND ".join([f"{var}.urn IN $anchorUrns"] + conditions)
+                try:
+                    res = await self._ro_query(
+                        f"{pattern} WHERE {where} "
+                        "RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, "
+                        "properties(r) AS rprops LIMIT $limit",
+                        params={**params, "anchorUrns": bucket},
+                        timeout=timeout, op=op,
+                    )
+                    return res.result_set or []
+                except Exception as exc:
+                    logger.warning("get_edges bucket query failed: %s", exc)
+                    return []
+
+            rows_per_bucket = await asyncio.gather(*[
+                _run_bucket(label, bucket)
+                for label, bucket in await self._label_buckets(list(anchor_urns))
+            ])
+            edges: List[GraphEdge] = []
+            for rows in rows_per_bucket:
+                for row in rows:
+                    edges.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+                    if len(edges) >= limit:
+                        break
+                if len(edges) >= limit:
+                    break
+            return edges
+
+        cypher = f"MATCH (a)-{rel_pattern}->(b)"
+        params = dict(extra_params)
+        conditions = list(extra_conditions)
         if query.source_urns:
             params["sourceUrns"] = query.source_urns
             conditions.append("a.urn IN $sourceUrns")
@@ -2322,34 +2413,13 @@ class FalkorDBProvider(GraphDataProvider):
         if query.any_urns:
             params["anyUrns"] = query.any_urns
             conditions.append("(a.urn IN $anyUrns OR b.urn IN $anyUrns)")
-        if query.edge_types:
-            types = [t.value if hasattr(t, "value") else str(t) for t in query.edge_types]
-            params["edgeTypes"] = types
-            conditions.append("type(r) IN $edgeTypes")
-        if query.min_confidence is not None:
-            params["minConf"] = query.min_confidence
-            conditions.append("r.confidence >= $minConf")
-
         if conditions:
             cypher += " WHERE " + " AND ".join(conditions)
-
-        offset = query.offset or 0
-        limit = query.limit or 100
         params["skip"] = offset
         params["limit"] = limit
         cypher += " RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit"
 
-        # /edges/between issues an AND query (both source_urns and
-        # target_urns set). On large URN sets this legitimately exceeds the
-        # 5s read default, so give that pattern a longer deadline; all other
-        # callers keep the default.
-        is_between = bool(query.source_urns and query.target_urns)
-        result = await self._ro_query(
-            cypher,
-            params=params,
-            timeout=self._EDGES_BETWEEN_TIMEOUT if is_between else None,
-            op="edges.between" if is_between else "edges.query",
-        )
+        result = await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         edges = []
         for row in (result.result_set or []):
             src, tgt, rel_type, rprops = row[0], row[1], row[2], (row[3] or {})
@@ -2492,24 +2562,25 @@ class FalkorDBProvider(GraphDataProvider):
 
         skip_clause = "" if cursor else " SKIP $skip"
 
-        # Query returns child node, containment edge properties, and grandchild count
-        if len(rel_list) == 1:
-            rel = _sanitize_label(rel_list[0])
-            cypher = (
-                f"MATCH (p)-[r:{rel}]->(c) "
-                f"WHERE p.urn = $parent {search_where}{cursor_where}"
-                f"WITH p, r, c{order_suffix}{skip_clause} LIMIT $lim "
-                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
-                f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
-            )
-        else:
-            cypher = (
-                f"MATCH (p)-[r]->(c) "
-                f"WHERE p.urn = $parent AND type(r) IN $relTypes {search_where}{cursor_where}"
-                f"WITH p, r, c{order_suffix}{skip_clause} LIMIT $lim "
-                f"OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes "
-                f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
-            )
+        # Query returns child node, containment edge properties, and grandchild count.
+        # Anchors + relationships are index-friendly (root cause of the 5-11s
+        # children reads on multi-million-node graphs):
+        #  * the parent match is label-qualified via the urn→label cache so it
+        #    is a URN-index seek, not an All-Node-Scan (this build has no
+        #    label-less URN index — unlabeled residue keeps the old pattern);
+        #  * relationship types are pattern alternations ([r:HAS|PART_OF]),
+        #    not post-hoc `type(r) IN` filters, so the traversal never visits
+        #    edges of other types on hub nodes (both r and the grandchild rc).
+        rel_alt = "|".join(_sanitize_label(t) for t in rel_list)
+        parent_label = await self._get_cached_label(parent_urn)
+        p_anchor = f"(p:{_sanitize_label(parent_label)})" if parent_label else "(p)"
+        cypher = (
+            f"MATCH {p_anchor}-[r:{rel_alt}]->(c) "
+            f"WHERE p.urn = $parent {search_where}{cursor_where}"
+            f"WITH p, r, c{order_suffix}{skip_clause} LIMIT $lim "
+            f"OPTIONAL MATCH (c)-[rc:{rel_alt}]->(gc) "
+            f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
+        )
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
@@ -2544,26 +2615,62 @@ class FalkorDBProvider(GraphDataProvider):
             page_urns = [parent_urn] + child_urns
             exclude_types = list(target_edge_types) + ["AGGREGATED"]
 
+            # Prefer a TYPED alternation: explicit lineage types from the
+            # caller, else the resolved ontology's lineage set. The untyped
+            # NOT-filter form survives only for graphs with no resolved
+            # lineage vocabulary (pre-ontology) — there is nothing to type on.
+            effective_lineage = lineage_edge_types or [
+                t for t in self._get_lineage_edge_types() if t
+            ]
             lineage_params: Dict[str, Any] = {"pageUrns": page_urns}
-            if lineage_edge_types:
-                lineage_where = "AND type(lr) IN $lineageTypes"
-                lineage_params["lineageTypes"] = lineage_edge_types
+            if effective_lineage:
+                l_alt = "|".join(_sanitize_label(t) for t in effective_lineage)
+                lr_pattern, lineage_where = f"[lr:{l_alt}]", ""
             else:
-                lineage_where = "AND NOT type(lr) IN $excludeTypes"
+                lr_pattern, lineage_where = "[lr]", "AND NOT type(lr) IN $excludeTypes "
                 lineage_params["excludeTypes"] = exclude_types
 
-            lineage_cypher = (
-                f"MATCH (a)-[lr]->(b) "
-                f"WHERE a.urn IN $pageUrns AND b.urn IN $pageUrns {lineage_where} "
-                f"RETURN a.urn, b.urn, type(lr), properties(lr)"
-            )
+            # Anchor `a` per label bucket (urn-index seeks); `b` stays an
+            # IN-filter over the small page set after the typed traversal.
+            async def _lineage_for(label: str, bucket: List[str]) -> list:
+                a_anchor = f"(a:{label})" if label else "(a)"
+                try:
+                    res = await self._ro_query(
+                        f"MATCH {a_anchor}-{lr_pattern}->(b) "
+                        f"WHERE a.urn IN $bucketUrns AND b.urn IN $pageUrns {lineage_where}"
+                        f"RETURN a.urn, b.urn, type(lr), properties(lr)",
+                        params={**lineage_params, "bucketUrns": bucket},
+                        timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
+                        op="children.lineage",
+                    )
+                    return res.result_set or []
+                except Exception as exc:
+                    logger.warning("children page-lineage query failed: %s", exc)
+                    return []
 
-            lr_result = await self._ro_query(lineage_cypher, params=lineage_params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.lineage")
-            for row in (lr_result.result_set or []):
-                lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
+            lineage_rows = await asyncio.gather(*[
+                _lineage_for(label, bucket)
+                for label, bucket in await self._label_buckets(page_urns)
+            ])
+            for rows in lineage_rows:
+                for row in rows:
+                    lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
 
         has_more = len(children) >= limit
         total = offset + len(children) + (1 if has_more else 0)
+        # Defensive re-sort before deriving the keyset cursor: FalkorDB may
+        # discard ORDER BY around an aggregating RETURN (count(gc) here), and
+        # the cursor MUST be the page's max sort key or keyset pagination
+        # skips rows. LIMIT selection is unaffected (known engine behaviour).
+        if sort_property == "displayName" and children:
+            order = sorted(
+                range(len(children)),
+                key=lambda i: (children[i].display_name is None,
+                               children[i].display_name or ""),
+            )
+            children = [children[i] for i in order]
+            containment_edges = [containment_edges[i] for i in order]
+            child_urns = [children[i].urn for i in range(len(children))]
         next_cursor = children[-1].display_name if children and has_more else None
 
         return ChildrenWithEdgesResult(
@@ -2581,10 +2688,18 @@ class FalkorDBProvider(GraphDataProvider):
         if not containment:
             # No containment types — flat graph, no parent
             return None
-        # Match any containment-type edge where child is target
+        # Match any containment-type edge where child is target — typed
+        # alternation + label-seeked child anchor (index seek, no scan).
+        c_alt = "|".join(_sanitize_label(t) for t in containment if t)
+        child_label = await self._get_cached_label(child_urn)
+        c_anchor = (
+            f"(c:{_sanitize_label(child_label)} {{urn: $child}})"
+            if child_label else "(c {urn: $child})"
+        )
         result = await self._ro_query(
-            "MATCH (p)-[r]->(c) WHERE c.urn = $child AND type(r) IN $ctypes RETURN p",
-            params={"child": child_urn, "ctypes": list(containment)},
+            f"MATCH (p)-[r:{c_alt}]->{c_anchor} RETURN p",
+            params={"child": child_urn},
+            op="nodes.parent",
         )
         if result.result_set and len(result.result_set) > 0:
             return self._extract_node_from_result(result.result_set[0])
@@ -2679,7 +2794,7 @@ class FalkorDBProvider(GraphDataProvider):
         page_filters = list(filter_fragments)
         if cursor is not None:
             params["cursor"] = str(cursor)
-            page_filters.append("toString(n.displayName) > $cursor")
+            page_filters.append("n.displayName > $cursor")
 
         def _build_match(filters: List[str]) -> str:
             where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
@@ -2695,7 +2810,7 @@ class FalkorDBProvider(GraphDataProvider):
         if include_child_count and containment_rel_types:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
+                + " WITH n ORDER BY n.displayName ASC LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
                 # Re-project through a non-aggregating WITH before ORDER BY:
                 # FalkorDB discards an ORDER BY that sits directly on an
@@ -2703,13 +2818,13 @@ class FalkorDBProvider(GraphDataProvider):
                 # so the pre-aggregation window order is lost. Materializing the
                 # count into a WITH first, then ordering that WITH, restores the
                 # displayName-ASC output the keyset cursor depends on.
-                + " WITH n, count(child) as childCount ORDER BY toString(n.displayName) ASC"
+                + " WITH n, count(child) as childCount ORDER BY n.displayName ASC"
                 + " RETURN n, childCount"
             )
         else:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY toString(n.displayName) ASC LIMIT $limit"
+                + " WITH n ORDER BY n.displayName ASC LIMIT $limit"
                 + " RETURN n, 0 as childCount"
             )
 
@@ -6016,18 +6131,13 @@ class FalkorDBProvider(GraphDataProvider):
                     missing.append(u)
             if missing:
                 try:
-                    res = await self._ro_query(
-                        "MATCH (n) WHERE n.urn IN $urns "
-                        "RETURN n.urn AS urn, labels(n)[0] AS label",
-                        params={"urns": missing}, timeout=1.5,
-                    )
-                    bulk: Dict[str, str] = {}
-                    for row in (res.result_set or []):
-                        if row and row[0] and row[1]:
-                            labels[row[0]] = row[1]
-                            bulk[row[0]] = row[1]
-                    if bulk:
-                        await self._cache_urn_labels_bulk(bulk)
+                    # _resolve_urn_labels_bulk bootstraps cache misses via
+                    # per-observed-label index seeks (never an unlabeled
+                    # full scan) and writes the cache back itself.
+                    resolved_labels = await self._resolve_urn_labels_bulk(missing)
+                    for u, lbl in resolved_labels.items():
+                        if lbl:
+                            labels[u] = lbl
                 except Exception as exc:
                     logger.warning(
                         "trace_at_level: anchor label batch fetch failed: %s", exc,
@@ -6054,18 +6164,23 @@ class FalkorDBProvider(GraphDataProvider):
         # already cycle-safe via bounded max_depth + try/except. Cycle
         # protection for the new skeleton-first path lives in
         # _resolve_root_anchor (which itself falls back on failure).
+        anchor_label = await self._get_cached_label(urn)
+        f_anchor = (
+            f"(focus:{_sanitize_label(anchor_label)} {{urn: $urn}})"
+            if anchor_label else "(focus {urn: $urn})"
+        )
+        c_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
         cypher = (
-            "MATCH (focus {urn: $urn}) "
-            f"OPTIONAL MATCH path = (focus)<-[c*0..{max_depth}]-(anc) "
-            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
-            "  AND labels(anc)[0] IN $types "
+            f"MATCH {f_anchor} "
+            f"OPTIONAL MATCH path = (focus)<-[c:{c_alt}*0..{max_depth}]-(anc) "
+            "WHERE labels(anc)[0] IN $types "
             "RETURN coalesce(anc.urn, focus.urn) AS anchorUrn "
             "ORDER BY length(path) ASC LIMIT 1"
         )
         try:
             result = await self._ro_query(
-                cypher, params={"urn": urn, "ctypes": ctypes, "types": types},
-                timeout=1.5,
+                cypher, params={"urn": urn, "types": types},
+                timeout=1.5, op="trace.anchor_at_level",
             )
             rows = result.result_set or []
             if rows and rows[0]:
@@ -6091,30 +6206,33 @@ class FalkorDBProvider(GraphDataProvider):
             # doesn't fire — that fallback only makes sense with type info.
             return True
 
-        # Build the relationship-type filter: AGGREGATED OR any raw lineage
-        # type the caller declared. We match any relationship and filter via
-        # type(r) so the same query covers both.
+        # Relationship types as a pattern ALTERNATION (AGGREGATED plus any
+        # raw lineage types) so the existence probe never expands other
+        # edge classes on hub anchors; the anchor itself is label-qualified
+        # via the urn→label cache (urn-index seek, not an All-Node-Scan).
+        rel_parts: List[str] = ["AGGREGATED"]
         if ltypes:
-            ltype_clause = "AND (type(r) = 'AGGREGATED' OR type(r) IN $ltypes) "
-        else:
-            ltype_clause = "AND type(r) = 'AGGREGATED' "
+            rel_parts.extend(_sanitize_label(t) for t in ltypes if t)
+        rel_alt = "|".join(dict.fromkeys(rel_parts))
+        a_label = await self._get_cached_label(anchor_urn)
+        a_anchor = (
+            f"(a:{_sanitize_label(a_label)} {{urn: $anchor}})"
+            if a_label else "(a {urn: $anchor})"
+        )
 
         cypher = (
-            "MATCH (a {urn: $anchor})-[r]-(peer) "
+            f"MATCH {a_anchor}-[r:{rel_alt}]-(peer) "
             "WHERE labels(peer)[0] IN $types "
-            + ltype_clause
-            + "RETURN 1 LIMIT 1"
+            "RETURN 1 LIMIT 1"
         )
         params: Dict[str, Any] = {"anchor": anchor_urn, "types": types}
-        if ltypes:
-            params["ltypes"] = ltypes
         try:
             # Tight ``:timeout`` — this is an existence check on the
             # trace hot path; if FalkorDB can't decide in ~1s the
             # planner is doing something wrong and we'd rather
             # fail-open (skip the inherited-lineage fallback) than
             # block the whole trace.
-            result = await self._proj_ro_query(cypher, params=params, timeout=1.0)
+            result = await self._proj_ro_query(cypher, params=params, timeout=1.0, op="trace.has_lineage")
             return bool(result.result_set)
         except Exception as exc:
             logger.warning("trace_at_level: has-lineage check failed for %s: %s", anchor_urn, exc)
@@ -6158,20 +6276,28 @@ class FalkorDBProvider(GraphDataProvider):
 
         # NB: path-uniqueness predicate removed — legacy form, bounded by
         # max_depth + try/except. See note in _resolve_anchor_at_level.
+        # Anchor label-qualified (urn-index seek) and containment walk
+        # expressed as a typed alternation so non-containment edges are
+        # never expanded.
+        c_alt = "|".join(_sanitize_label(t) for t in ctypes if t)
+        a_label = await self._get_cached_label(anchor_urn)
+        a_anchor = (
+            f"(a:{_sanitize_label(a_label)} {{urn: $anchor}})"
+            if a_label else "(a {urn: $anchor})"
+        )
         cypher = (
-            "MATCH (a {urn: $anchor})"
-            f"<-[c*1..{max_depth}]-(parent) "
-            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
-            "  AND labels(parent)[0] IN $types "
+            f"MATCH {a_anchor}"
+            f"<-[c:{c_alt}*1..{max_depth}]-(parent) "
+            "WHERE labels(parent)[0] IN $types "
             "WITH parent, length(c) AS depth "
             "ORDER BY depth ASC LIMIT 5 "
             f"WITH parent, depth WHERE (parent)-[:{rel_alt}]-() "
             "RETURN parent.urn AS urn "
             "ORDER BY depth ASC LIMIT 1"
         )
-        params = {"anchor": anchor_urn, "ctypes": ctypes, "types": types}
+        params = {"anchor": anchor_urn, "types": types}
         try:
-            result = await self._ro_query(cypher, params=params, timeout=1.5)
+            result = await self._ro_query(cypher, params=params, timeout=1.5, op="trace.ancestor_with_lineage")
             rows = result.result_set or []
             if rows and rows[0] and rows[0][0]:
                 return rows[0][0]
@@ -6935,21 +7061,40 @@ class FalkorDBProvider(GraphDataProvider):
         if not urns:
             return []
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+
+        # Per-label urn-index seeks via the warmed urn→label cache; the
+        # unlabeled IN-list form survives only for the unresolved-label
+        # residue bucket (this build has no label-less URN index — the
+        # unlabeled anchor is a full node scan).
+        async def _fetch(label: str, bucket: List[str]) -> list:
+            anchor = f"(n:{label})" if label else "(n)"
+            try:
+                res = await self._ro_query(
+                    f"MATCH {anchor} WHERE n.urn IN $urns RETURN n",
+                    params={"urns": bucket},
+                    timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
+                    op="nodes.batch",
+                )
+                return res.result_set or []
+            except Exception as exc:
+                logger.warning("get_nodes_batch bucket failed: %s", exc)
+                return []
+
         try:
-            result = await self._ro_query(
-                "MATCH (n) WHERE n.urn IN $urns RETURN n",
-                params={"urns": urns},
-                timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
-            )
-            out: List[GraphNode] = []
-            for row in (result.result_set or []):
-                node = self._extract_node_from_result(row)
-                if node:
-                    out.append(node)
-            return out
+            rows_per_bucket = await asyncio.gather(*[
+                _fetch(label, bucket)
+                for label, bucket in await self._label_buckets(urns)
+            ])
         except Exception as exc:
             logger.warning("get_nodes_batch failed: %s", exc)
             return []
+        out: List[GraphNode] = []
+        for rows in rows_per_bucket:
+            for row in rows:
+                node = self._extract_node_from_result(row)
+                if node:
+                    out.append(node)
+        return out
 
     # Schema-level caches are persisted in Postgres by the stats service;
     # this in-memory Redis layer is just a short-term memoization for

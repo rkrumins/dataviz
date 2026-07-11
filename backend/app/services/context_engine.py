@@ -650,6 +650,17 @@ class ContextEngine:
         if resolved and getattr(resolved, "root_entity_types", None):
             root_types = list(resolved.root_entity_types)
 
+        # Default the entity-type filter to the ontology's full vocabulary so
+        # the provider always takes the label-union page/count form (per-label
+        # index scans) instead of the unlabeled MATCH (n) full scan. This also
+        # keeps internal underscore-labelled nodes (_AggMeta, _Projection) out
+        # of the top-level list. Callers passing an explicit filter, and
+        # graphs with no resolved vocabulary (pre-ontology), are unchanged.
+        if entity_types is None and resolved is not None:
+            defined = list(getattr(resolved, "entity_type_definitions", {}) or {})
+            if defined:
+                entity_types = defined
+
         # query_timeout / known_total_count are newer keyword-only params some
         # providers (DraftOverlayProvider, VersionedBranchProvider) don't yet
         # accept — only pass the ones actually given, and retry once without
