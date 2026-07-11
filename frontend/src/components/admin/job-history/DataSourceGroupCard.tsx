@@ -359,7 +359,13 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                     unmounted the menu before the item click could land —
                     making every item unclickable.) */}
                 <div className="relative flex-shrink-0" onClick={e => e.stopPropagation()}>
-                    <DropdownMenu.Root>
+                    {/* modal=false is REQUIRED: this card re-renders on the
+                        Job History poll/SSE, and a modal Radix menu that
+                        re-renders/unmounts while open leaves
+                        document.body at `pointer-events: none`, freezing
+                        clicks across the whole app. Non-modal never touches
+                        body pointer-events; outside-click still dismisses. */}
+                    <DropdownMenu.Root modal={false}>
                         <DropdownMenu.Trigger asChild>
                             <button
                                 aria-label="Data source actions"

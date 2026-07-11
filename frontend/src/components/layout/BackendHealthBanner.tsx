@@ -286,7 +286,13 @@ export function BackendHealthBanner() {
                     </span>
                   </div>
 
-                  <DropdownMenu.Root>
+                  {/* modal=false is REQUIRED: selecting a snooze option
+                      sets snoozeUntil, which hides this banner — unmounting
+                      the open menu. A modal Radix menu unmounted mid-close
+                      leaves document.body at `pointer-events: none`,
+                      freezing the whole app. Non-modal avoids the body lock
+                      entirely. */}
+                  <DropdownMenu.Root modal={false}>
                     <DropdownMenu.Trigger asChild>
                       <button
                         type="button"
