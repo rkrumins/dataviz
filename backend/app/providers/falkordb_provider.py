@@ -3661,26 +3661,73 @@ class FalkorDBProvider(GraphDataProvider):
         per_label_cap = int(os.getenv("FALKORDB_URN_LABEL_WARMUP_PER_LABEL_CAP", "200000"))
         per_label_timeout = float(os.getenv("FALKORDB_URN_LABEL_WARMUP_TIMEOUT_S", "30"))
 
-        for label in labels:
-            safe = _sanitize_label(label)
-            try:
-                lr = await asyncio.wait_for(
-                    self._proj.ro_query(
-                        f"MATCH (n:{safe}) RETURN n.urn LIMIT {per_label_cap}",
-                        {},
-                    ),
+        # CONTAINER-FIRST (BFS-priority) warm: the canvas opens at the
+        # roots and expands container-by-container, so the nodes every
+        # early request resolves are the CONTAINERS — and there are only
+        # thousands of them even on a 2M-node graph. The stored
+        # :AGGREGATED endpoints ARE that working set by construction
+        # (every rollup endpoint is a container the canvas can show), and
+        # the relation-anchored scan carries the labels along — no
+        # dependence on denormalized properties (childCount proved
+        # unpopulated on real import paths). The per-label fill passes
+        # below top up to the cap; HSET idempotency dedupes the overlap.
+        try:
+            prio_pipe = self._redis.pipeline(transaction=False)
+            prio_count = 0
+            for prio_cypher in (
+                f"MATCH (s)-[r:AGGREGATED]->() "
+                f"RETURN DISTINCT s.urn, labels(s)[0] LIMIT {per_label_cap}",
+                f"MATCH ()-[r:AGGREGATED]->(t) "
+                f"RETURN DISTINCT t.urn, labels(t)[0] LIMIT {per_label_cap}",
+            ):
+                pr = await asyncio.wait_for(
+                    self._proj.ro_query(prio_cypher, {}),
                     timeout=per_label_timeout,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "URN→label warmup on %s: scan for label %r failed (%s); "
-                    "skipping. Pairs with %s-labeled endpoints may still hit "
-                    "the resolver fallback Cypher.",
-                    self._graph_name, label, exc, label,
+                for row in (pr.result_set or []):
+                    if row and row[0] and row[1]:
+                        urn = row[0]
+                        if isinstance(urn, (bytes, bytearray)):
+                            urn = urn.decode("utf-8")
+                        prio_pipe.hset(
+                            label_key, urn, _sanitize_label(str(row[1])),
+                        )
+                        prio_count += 1
+            if prio_count:
+                await prio_pipe.execute()
+                total_cached += prio_count
+                logger.info(
+                    "URN→label warmup on %s: container-priority pass cached "
+                    "%d rollup-endpoint entries.",
+                    self._graph_name, prio_count,
                 )
-                continue
+        except Exception as exc:
+            logger.debug(
+                "URN→label warmup on %s: container-priority pass failed "
+                "(%s) — per-label fill only.", self._graph_name, exc,
+            )
 
-            rows = lr.result_set or []
+        for label in labels:
+            safe = _sanitize_label(label)
+            rows: list = []
+            remaining = per_label_cap - len(rows)
+            if remaining > 0:
+                try:
+                    lr = await asyncio.wait_for(
+                        self._proj.ro_query(
+                            f"MATCH (n:{safe}) RETURN n.urn LIMIT {remaining}",
+                            {},
+                        ),
+                        timeout=per_label_timeout,
+                    )
+                    rows.extend(lr.result_set or [])
+                except Exception as exc:
+                    logger.warning(
+                        "URN→label warmup on %s: scan for label %r failed (%s); "
+                        "skipping. Pairs with %s-labeled endpoints may still hit "
+                        "the resolver fallback Cypher.",
+                        self._graph_name, label, exc, label,
+                    )
             if not rows:
                 continue
 
@@ -3703,6 +3750,19 @@ class FalkorDBProvider(GraphDataProvider):
                     "(%d entries lost): %s",
                     self._graph_name, label, count, exc,
                 )
+
+        # TTL on the whole per-graph hash: the cache Redis runs
+        # volatile-lru, which can ONLY evict keys that carry a TTL — a
+        # TTL-less hash is unevictable and a fleet of warmed 2M-node
+        # graphs would wedge the instance at maxmemory. Refreshed on
+        # every warmup; idle graphs age out and the self-healing
+        # bootstrap rebuilds them on first touch.
+        try:
+            ttl_s = int(os.getenv("FALKORDB_URN_LABEL_CACHE_TTL_S", "604800"))
+            if ttl_s > 0:
+                await self._redis.expire(label_key, ttl_s)
+        except Exception:
+            pass
 
         elapsed_ms = (time.monotonic() - t_start) * 1000
         logger.info(
