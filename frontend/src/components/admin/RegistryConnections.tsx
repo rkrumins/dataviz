@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
-import { providerService, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
+import { providerService, friendlyError, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { usePermission } from '@/store/auth'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
 import { StatusChip } from '@/components/insights/StatusChip'
@@ -27,6 +27,16 @@ const PROVIDER_TYPES = [
 
 function getProviderConfig(type: string) {
     return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
+}
+
+/** Compact "45s ago" / "3m ago" freshness label. */
+function timeAgoShort(iso: string): string {
+    const diff = (Date.now() - new Date(iso).getTime()) / 1000
+    if (diff < 5) return 'just now'
+    if (diff < 60) return `${Math.floor(diff)}s ago`
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+    return `${Math.floor(diff / 86400)}d ago`
 }
 
 type HealthStatus = 'checking' | 'healthy' | 'unhealthy' | 'unknown'
@@ -75,10 +85,17 @@ function syntheticMetaFromSweep(
     }
 }
 
-function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; canManage: boolean; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
+function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedAt, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; canManage: boolean; justChecked?: boolean; lastCheckedAt?: string | null; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
     const config = getProviderConfig(provider.providerType)
     const [expanded, setExpanded] = useState(false)
     const statusDot = { checking: 'bg-amber-400 animate-pulse', healthy: 'bg-emerald-400', unhealthy: 'bg-red-400', unknown: 'bg-gray-400' }[health.status]
+    const freshness = health.status === 'checking'
+        ? null
+        : justChecked
+            ? 'Checked just now'
+            : lastCheckedAt
+                ? `Checked ${timeAgoShort(lastCheckedAt)}`
+                : null
 
     return (
         <div className={cn("group border border-glass-border rounded-xl bg-canvas-elevated hover:shadow-lg transition-colors duration-150 duration-200", health.status === 'healthy' && "hover:border-emerald-500/30", health.status === 'unhealthy' && "border-red-500/20")}>
@@ -97,6 +114,9 @@ function ConnectionCard({ provider, health, canManage, onTest, onEdit, onDelete,
                         <StatusChip meta={syntheticMetaFromSweep(health, provider.id)} compact />
                     </div>
                 </div>
+                {freshness && (
+                    <p className="text-[11px] text-ink-muted/70 mb-3 -mt-2">{freshness}</p>
+                )}
                 {/* Connection endpoint (host:port + TLS) is a connection
                     detail — only managers see it. Readers see name, type,
                     and status only. */}
@@ -176,6 +196,7 @@ export function RegistryConnections() {
     // initial render shows the truth observed by the platform instead
     // of a stale "Paused" placeholder.
     const backendStatuses = useProviderStatusStore(s => s.statuses)
+    const refreshProviderStatus = useProviderStatusStore(s => s.refresh)
     const [isLoading, setIsLoading] = useState(true)
     const [showWizard, setShowWizard] = useState(false)
     const [editingProvider, setEditingProvider] = useState<ProviderResponse | null>(null)
@@ -193,6 +214,18 @@ export function RegistryConnections() {
     }, [])
 
     useEffect(() => { loadProviders() }, [loadProviders])
+
+    // Pull fresh provider status the moment the tab opens (and whenever it
+    // regains focus) so a recovered provider clears its red state within
+    // seconds instead of waiting up to a full 60s background poll.
+    useEffect(() => {
+        void refreshProviderStatus()
+        const onVisible = () => {
+            if (document.visibilityState === 'visible') void refreshProviderStatus()
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        return () => document.removeEventListener('visibilitychange', onVisible)
+    }, [refreshProviderStatus])
 
     const handleDeleteClick = async (p: ProviderResponse) => {
         setDeleteTarget(p)
@@ -368,7 +401,10 @@ export function RegistryConnections() {
                                 backend.status === 'ready' ? 'healthy'
                                 : backend.status === 'unavailable' ? 'unhealthy'
                                 : 'unknown'
-                            resolved = { status, error: backend.error }
+                            // Map the raw backend error (e.g. "OOM command…",
+                            // "-LOADING…") to friendly copy — the sweep path
+                            // already does this, the cached-status path didn't.
+                            resolved = { status, error: backend.error ? friendlyError(backend.error) : undefined }
                         } else {
                             resolved = { status: 'unknown' }
                         }
@@ -377,6 +413,10 @@ export function RegistryConnections() {
                                 key={p.id}
                                 provider={p}
                                 health={resolved}
+                                // Local sweep = a Test the user just ran; backend
+                                // status carries the warmup loop's last probe time.
+                                justChecked={!!local}
+                                lastCheckedAt={backend?.lastCheckedAt ?? null}
                                 canManage={canManage}
                                 onTest={() => { void testOne(p.id) }}
                                 onEdit={() => handleEditProvider(p)}

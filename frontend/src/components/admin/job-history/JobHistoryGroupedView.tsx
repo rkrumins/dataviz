@@ -96,7 +96,7 @@ export const JobHistoryGroupedView = memo(function JobHistoryGroupedView({
     purgeConfirm,
     setPurgeConfirm,
 }: JobHistoryGroupedViewProps) {
-    const [sortKey, setSortKey] = useState<GroupSortKey>('attention')
+    const [sortKey, setSortKey] = useState<GroupSortKey>('recent')
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set())
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null)
 

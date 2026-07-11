@@ -12,10 +12,41 @@ interface ProviderStatusState {
    * fresh poll. Components can render a subtle "cached" indicator until
    * the first real refresh lands. */
   fromCache: boolean
+  /** Epoch ms until which provider polling + the status banner are
+   * snoozed, or null when active. Persisted so a snooze survives reload. */
+  snoozeUntil: number | null
   refresh: () => Promise<void>
+  /** Pause provider polling + the status banner for `ms` milliseconds. */
+  snooze: (ms: number) => void
+  /** Resume provider polling immediately. */
+  unsnooze: () => void
 }
 
 const POLL_INTERVAL_MS = POLLING_INTERVALS.providerStatus
+
+const SNOOZE_KEY = 'providerStatusSnoozeV1'
+
+function hydrateSnooze(): number | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(SNOOZE_KEY)
+    if (!raw) return null
+    const until = Number(raw)
+    return Number.isFinite(until) && until > Date.now() ? until : null
+  } catch {
+    return null
+  }
+}
+
+function persistSnooze(until: number | null): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    if (until) localStorage.setItem(SNOOZE_KEY, String(until))
+    else localStorage.removeItem(SNOOZE_KEY)
+  } catch {
+    // non-fatal
+  }
+}
 
 // P4.2 — persist last-known status to localStorage so a returning visit
 // renders the previous truth instantly while the first poll completes.
@@ -82,6 +113,21 @@ export const useProviderStatusStore = create<ProviderStatusState>((set, get) => 
   statuses: initialHydrated?.statuses ?? {},
   lastUpdatedAt: initialHydrated?.ts ?? null,
   fromCache: initialHydrated !== null,
+  snoozeUntil: hydrateSnooze(),
+
+  snooze: (ms: number) => {
+    const until = Date.now() + ms
+    persistSnooze(until)
+    set({ snoozeUntil: until })
+    // Restart the loop so it pauses immediately and wakes exactly at expiry.
+    restartPolling()
+  },
+
+  unsnooze: () => {
+    persistSnooze(null)
+    set({ snoozeUntil: null })
+    restartPolling()
+  },
 
   refresh: async () => {
     try {
@@ -118,6 +164,20 @@ export function useAllProviderStatuses(): ProviderStatusEntry[] {
   return useMemo(() => Object.values(statuses), [statuses])
 }
 
+/** Snooze controls for the provider status banner. `snoozeUntil` is epoch
+ *  ms (or null when active); reads reactively so the banner hides while
+ *  snoozed and a "Resume" affordance can show elsewhere. */
+export function useProviderSnooze(): {
+  snoozeUntil: number | null
+  snooze: (ms: number) => void
+  unsnooze: () => void
+} {
+  const snoozeUntil = useProviderStatusStore((s) => s.snoozeUntil)
+  const snooze = useProviderStatusStore((s) => s.snooze)
+  const unsnooze = useProviderStatusStore((s) => s.unsnooze)
+  return { snoozeUntil, snooze, unsnooze }
+}
+
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
 
@@ -132,6 +192,14 @@ function startPolling() {
   if (pollTimer || !authReady || typeof document === 'undefined' || document.hidden) return
 
   const poll = async () => {
+    // Snoozed: skip the refresh entirely and wake exactly at expiry, then
+    // resume the normal cadence. This is the request saving the user asked
+    // for — no polls fire while the banner is snoozed.
+    const snoozeUntil = useProviderStatusStore.getState().snoozeUntil
+    if (snoozeUntil && Date.now() < snoozeUntil) {
+      pollTimer = setTimeout(poll, snoozeUntil - Date.now() + 50)
+      return
+    }
     await useProviderStatusStore.getState().refresh()
     // Jitter every reschedule so 1000 clients that mounted near the
     // same instant don't fire in lockstep forever. Same flat-load
@@ -140,6 +208,13 @@ function startPolling() {
   }
 
   void poll()
+}
+
+/** Stop then start — used when snooze state changes so the pause/resume
+ *  takes effect immediately instead of on the next scheduled tick. */
+function restartPolling() {
+  stopPolling()
+  startPolling()
 }
 
 /** Call once after auth resolves to enable polling. */

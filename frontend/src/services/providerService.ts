@@ -136,6 +136,10 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     warmup_wall_clock_exceeded: "The connectivity probe exceeded its wall-clock budget. The provider may be overloaded.",
     preflight_not_implemented: "This provider type does not yet support fast connectivity probing.",
     httpx_not_installed: "Internal: the HTTP client library is not available.",
+    db_unavailable: "The database is busy right now — too many open connections. Please try again in a moment.",
+    provider_unavailable: "This provider is temporarily unavailable — it may be restarting or under load. Try again shortly.",
+    out_of_memory: "The provider ran low on memory and is recovering. Give it a moment, then try again.",
+    provider_loading: "This provider is still warming up — its data is loading and will appear shortly.",
 }
 
 export function friendlyError(raw: string): string {
@@ -158,6 +162,14 @@ export function friendlyError(raw: string): string {
         }
         // The /test endpoint returns {success: false, error: 'dns_unresolvable'}
         if (typeof parsed.error === 'string' && !code) code = parsed.error
+        // Top-level structured errors, e.g. the async-refresh enqueue
+        // failure {"code":"DB_UNAVAILABLE","reason":"Too many connections"}.
+        // Without this, the raw JSON leaked into toasts and banners.
+        if (!code && typeof parsed.code === 'string') code = parsed.code
+        if (!code && typeof parsed.reason === 'string') code = parsed.reason
+        // If there's a human 'reason' but no mapped code, prefer it over
+        // the raw JSON wrapper as the fallback detail.
+        if (detail === raw && typeof parsed.reason === 'string') detail = parsed.reason
     } catch { /* not JSON, use raw */ }
 
     if (code) {
@@ -193,9 +205,33 @@ export function friendlyError(raw: string): string {
         return FRIENDLY_BY_CODE.tls_handshake
     if (lower.includes('connection reset') || lower.includes('broken pipe'))
         return `Connection was reset by the server. This may indicate a protocol mismatch or that TLS is required but not enabled.`
+    // Redis/FalkorDB operational states that used to leak raw driver text
+    // into the UI (issues: stale "Out of Memory", raw "-LOADING", the
+    // async-refresh "too many connections" enqueue failure).
+    if (lower.includes('too many connections') || lower.includes('max number of clients'))
+        return FRIENDLY_BY_CODE.db_unavailable
+    if (lower.includes('out of memory') || lower.includes('oom command') || lower.includes("'maxmemory'"))
+        return FRIENDLY_BY_CODE.out_of_memory
+    if (lower.includes('loading the dataset') || lower.includes('-loading') || lower.includes('is loading'))
+        return FRIENDLY_BY_CODE.provider_loading
 
     // Fallback: return cleaned detail without the JSON wrapper.
     return detail
+}
+
+/**
+ * True when a provider error describes a *transient warming/loading*
+ * state (the DB is reachable but still loading its dataset) rather than
+ * a hard failure. Callers use this to show a calm "warming up" affordance
+ * instead of an alarming red "unreachable" banner.
+ */
+export function isWarmingError(raw: string | null | undefined): boolean {
+    if (!raw) return false
+    const lower = raw.toLowerCase()
+    return lower.includes('loading the dataset')
+        || lower.includes('-loading')
+        || lower.includes('is loading')
+        || lower.includes('warming up')
 }
 
 async function request<T>(

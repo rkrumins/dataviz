@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { Server, Layers, Activity, DatabaseZap } from 'lucide-react'
+import { Server, Layers, Activity, DatabaseZap, BellOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
 import { workspaceService } from '@/services/workspaceService'
+import { useProviderSnooze } from '@/store/providerStatus'
 import { usePermission, useAnyWorkspacePermission } from '@/store/auth'
 import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
@@ -27,6 +28,14 @@ const ALL_TABS: TabDef[] = [
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
 ]
 
+/** "until 3:45 PM" for a same-day snooze, "until Wed 8:00 AM" otherwise. */
+function formatSnoozeUntil(ts: number): string {
+    const d = new Date(ts)
+    const sameDay = d.toDateString() === new Date().toDateString()
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+    return sameDay ? `until ${time}` : `until ${d.toLocaleDateString([], { weekday: 'short' })} ${time}`
+}
+
 export function IngestionPage() {
     const navigate = useNavigate()
     const [searchParams, setSearchParams] = useSearchParams()
@@ -42,6 +51,11 @@ export function IngestionPage() {
     const hasCatalogRead = useAnyWorkspacePermission('workspace:catalog:read')
     const canReadProviders = isPlatformAdmin || hasProviderRead
     const canReadCatalog = isPlatformAdmin || hasCatalogRead
+
+    // Provider-alert snooze (set from the status banner). Surfaced here so
+    // it's discoverable and undoable — the banner hides itself while snoozed.
+    const { snoozeUntil, unsnooze } = useProviderSnooze()
+    const providerSnoozed = snoozeUntil != null && snoozeUntil > Date.now()
 
     // Visible tabs reflect what the current claim set can actually use.
     // Non-readers (no workspace bindings) skip Providers entirely.
@@ -152,6 +166,18 @@ export function IngestionPage() {
                             <h1 className="text-xl font-bold text-ink leading-tight">Data Ingestion</h1>
                             <p className="text-[11px] text-ink-muted">Connect providers, register assets, and monitor your pipeline</p>
                         </div>
+                        {providerSnoozed && (
+                            <div className="ml-auto flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 pl-3 pr-1.5 py-1 text-xs text-amber-700 dark:text-amber-300">
+                                <BellOff className="w-3.5 h-3.5" />
+                                <span>Provider alerts snoozed {formatSnoozeUntil(snoozeUntil!)}</span>
+                                <button
+                                    onClick={() => unsnooze()}
+                                    className="rounded-full px-2 py-0.5 font-semibold text-amber-800 dark:text-amber-200 hover:bg-amber-500/20 transition-colors"
+                                >
+                                    Resume
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     {loadError && (
