@@ -284,7 +284,7 @@ export function OverviewPanel({
             label="Data Sources"
             value={assignmentCount}
             accent="bg-amber-50 dark:bg-amber-950/30 text-amber-500"
-            onClick={() => onNavigateTab('adoption')}
+            onClick={() => onNavigateTab('usage')}
           />
         </div>
       </section>

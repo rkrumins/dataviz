@@ -48,6 +48,14 @@ class DimensionAdoption:
     def exact_instances(self) -> int:
         return sum(e.count for e in self.exact)
 
+    @property
+    def drift_instances(self) -> int:
+        return sum(x.count for x in self.case_drift)
+
+    @property
+    def unmapped_instances(self) -> int:
+        return sum(u.count for u in self.unmapped)
+
 
 @dataclass
 class SourceAdoption:

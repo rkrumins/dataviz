@@ -544,17 +544,26 @@ async def get_ontology_coverage(
 @router.get("/{ontology_id}/adoption")
 async def get_ontology_adoption(
     ontology_id: str = Path(...),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    filter: str = Query("all", pattern="^(all|drift|unmapped|unprofiled|exact)$"),
+    sort: str = Query("match", pattern="^(match|issues|label|freshness)$"),
     session: AsyncSession = Depends(get_db_session),
     claims: PermissionClaims = Depends(get_permission_claims),
     _auth=Depends(_REQUIRES_ONTOLOGY_READ),
 ):
-    """Per-data-source declared-vs-physical type match for every data source using this
+    """Per-data-source declared-vs-physical type match for the data sources using this
     ontology, computed from the CACHED profiling stats (the insights service).
 
-    Strategic + performant: one assignments query + one bulk stats read, then pure
-    in-process classification — NO live graph queries. Each physical type is classified
-    exact / case-drift / unmapped (see ``adoption.py``); the platform built-in edges
-    (AGGREGATED) are injected into the declared set so they never read as unmapped.
+    Strategic + performant + browsable at scale (100s of sources): one assignments query
+    + one bulk stats read, then pure in-process classification — NO live graph queries.
+    The AGGREGATE (hero) and FACETS (filter counts) are computed over ALL sources so they
+    stay accurate; ``search``/``filter``/``sort`` then narrow the set and only one page
+    (``limit``/``offset``) of sources is returned. ``filter=drift|unmapped`` and the
+    worst-first default sort surface mismatches immediately. Each physical type is
+    classified exact / case-drift / unmapped (``adoption.py``); the platform built-in
+    edges (AGGREGATED) are injected into the declared set so they never read as unmapped.
     """
     import json as _json
 
@@ -575,8 +584,9 @@ async def get_ontology_adoption(
         session, [a["dataSourceId"] for a in assignments])
     stats_by_ds = {s.data_source_id: s for s in stats_rows}
 
-    sources: list = []
+    records: list = []
     agg_exact = agg_total = agg_exact_types = agg_total_types = 0
+    agg_drift_inst = agg_unmap_inst = 0
     drift_count = unmapped_count = profiled_count = 0
 
     for a in assignments:
@@ -584,11 +594,14 @@ async def get_ontology_adoption(
             "dataSourceId": a["dataSourceId"], "dataSourceLabel": a["dataSourceLabel"],
             "workspaceId": a["workspaceId"], "workspaceName": a["workspaceName"],
         }
+        searchable = f"{a['dataSourceLabel']} {a['workspaceName']}".lower()
         st = stats_by_ds.get(a["dataSourceId"])
         raw = getattr(st, "schema_stats", None) if st else None
         if not raw:
-            sources.append({**base, "profiled": False, "schemaUpdatedAt": None,
-                            "matchWeighted": None, "matchByType": None, "nodes": None, "edges": None})
+            wire = {**base, "profiled": False, "schemaUpdatedAt": None,
+                    "matchWeighted": None, "matchByType": None, "nodes": None, "edges": None}
+            records.append({"wire": wire, "profiled": False, "match": None, "drift": 0,
+                            "unmapped": 0, "search": searchable, "label": a["dataSourceLabel"], "updated": ""})
             continue
         try:
             schema_stats = _json.loads(raw)
@@ -600,16 +613,61 @@ async def get_ontology_adoption(
         agg_total += adopt.nodes.total_instances + adopt.edges.total_instances
         agg_exact_types += len(adopt.nodes.exact) + len(adopt.edges.exact)
         agg_total_types += adopt.nodes.total_types + adopt.edges.total_types
-        drift_count += len(adopt.nodes.case_drift) + len(adopt.edges.case_drift)
-        unmapped_count += len(adopt.nodes.unmapped) + len(adopt.edges.unmapped)
-        sources.append({
+        d = len(adopt.nodes.case_drift) + len(adopt.edges.case_drift)
+        u = len(adopt.nodes.unmapped) + len(adopt.edges.unmapped)
+        drift_count += d
+        unmapped_count += u
+        agg_drift_inst += adopt.nodes.drift_instances + adopt.edges.drift_instances
+        agg_unmap_inst += adopt.nodes.unmapped_instances + adopt.edges.unmapped_instances
+        wire = {
             **base, "profiled": True, "schemaUpdatedAt": getattr(st, "schema_updated_at", None),
             "matchWeighted": adopt.match_weighted, "matchByType": adopt.match_by_type,
             "nodes": dimension_to_wire(adopt.nodes), "edges": dimension_to_wire(adopt.edges),
-        })
+        }
+        records.append({"wire": wire, "profiled": True, "match": adopt.match_weighted, "drift": d,
+                        "unmapped": u, "search": searchable, "label": a["dataSourceLabel"],
+                        "updated": getattr(st, "schema_updated_at", None) or ""})
 
     def _pct(part: float, whole: float) -> float:
         return round(part / whole * 100, 1) if whole else 100.0
+
+    # Facet counts over ALL sources (drive the filter chips, always accurate).
+    facets = {
+        "all": len(records),
+        "drift": sum(1 for r in records if r["drift"] > 0),
+        "unmapped": sum(1 for r in records if r["unmapped"] > 0),
+        "unprofiled": sum(1 for r in records if not r["profiled"]),
+        "exact": sum(1 for r in records if r["profiled"] and r["drift"] == 0 and r["unmapped"] == 0),
+    }
+
+    q = search.strip().lower()
+
+    def _keep(r: dict) -> bool:
+        if q and q not in r["search"]:
+            return False
+        if filter == "drift":
+            return r["drift"] > 0
+        if filter == "unmapped":
+            return r["unmapped"] > 0
+        if filter == "unprofiled":
+            return not r["profiled"]
+        if filter == "exact":
+            return r["profiled"] and r["drift"] == 0 and r["unmapped"] == 0
+        return True
+
+    filtered = [r for r in records if _keep(r)]
+
+    if sort == "issues":                                   # most mismatches first
+        filtered.sort(key=lambda r: (-(r["drift"] + r["unmapped"]), r["match"] if r["match"] is not None else 101))
+    elif sort == "label":
+        filtered.sort(key=lambda r: r["label"].lower())
+    elif sort == "freshness":                              # most recently profiled first
+        filtered.sort(key=lambda r: r["updated"], reverse=True)
+    else:                                                  # match — worst first, unprofiled last
+        filtered.sort(key=lambda r: (0 if r["profiled"] else 1, r["match"] if r["match"] is not None else 101))
+
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
 
     return {
         "ontologyId": ontology_id,
@@ -619,7 +677,19 @@ async def get_ontology_adoption(
         "matchByType": _pct(agg_exact_types, agg_total_types),
         "driftTypeCount": drift_count,
         "unmappedTypeCount": unmapped_count,
-        "sources": sources,
+        "segments": {
+            "weighted": {"exact": agg_exact, "drift": agg_drift_inst, "unmapped": agg_unmap_inst},
+            "byType": {
+                "exact": agg_exact_types,
+                "drift": drift_count,
+                "unmapped": unmapped_count,
+            },
+        },
+        "facets": facets,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sources": [r["wire"] for r in page],
     }
 
 

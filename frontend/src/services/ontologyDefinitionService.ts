@@ -210,10 +210,21 @@ export const ontologyDefinitionService = {
 
     /**
      * Per-data-source declared-vs-physical type match, from the cached profiling stats.
-     * One batched, cache-only call — no live graph queries.
+     * One batched, cache-only call — no live graph queries. The aggregate hero + facet
+     * counts are computed over ALL sources server-side; ``params`` only narrow + page the
+     * returned per-source list, so filtering/searching stays cheap at 100s of sources.
      */
-    adoption(id: string): Promise<OntologyAdoptionResponse> {
-        return request<OntologyAdoptionResponse>(`${ADMIN_API}/${id}/adoption`)
+    adoption(id: string, params: AdoptionParams = {}): Promise<OntologyAdoptionResponse> {
+        const qs = new URLSearchParams()
+        if (params.limit != null) qs.set('limit', String(params.limit))
+        if (params.offset != null) qs.set('offset', String(params.offset))
+        if (params.search) qs.set('search', params.search)
+        if (params.filter && params.filter !== 'all') qs.set('filter', params.filter)
+        if (params.sort && params.sort !== 'match') qs.set('sort', params.sort)
+        const query = qs.toString()
+        return request<OntologyAdoptionResponse>(
+            `${ADMIN_API}/${id}/adoption${query ? `?${query}` : ''}`,
+        )
     },
 
     suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologySuggestResponse> {
@@ -310,6 +321,26 @@ export interface AdoptionSource {
     nodes: AdoptionDimension | null
     edges: AdoptionDimension | null
 }
+export type AdoptionFilter = 'all' | 'drift' | 'unmapped' | 'unprofiled' | 'exact'
+export type AdoptionSort = 'match' | 'issues' | 'label' | 'freshness'
+export interface AdoptionParams {
+    limit?: number
+    offset?: number
+    search?: string
+    filter?: AdoptionFilter
+    sort?: AdoptionSort
+}
+/** Instance/type segment split for the aggregate hero ring. */
+export interface AdoptionSegmentSet { exact: number; drift: number; unmapped: number }
+export interface AdoptionSegments { weighted: AdoptionSegmentSet; byType: AdoptionSegmentSet }
+/** Per-filter source counts (over ALL sources) that drive the filter chips. */
+export interface AdoptionFacets {
+    all: number
+    drift: number
+    unmapped: number
+    unprofiled: number
+    exact: number
+}
 export interface OntologyAdoptionResponse {
     ontologyId: string
     sourceCount: number
@@ -318,6 +349,12 @@ export interface OntologyAdoptionResponse {
     matchByType: number
     driftTypeCount: number
     unmappedTypeCount: number
+    segments: AdoptionSegments
+    facets: AdoptionFacets
+    /** Count AFTER search/filter (page count = sources.length). */
+    total: number
+    limit: number
+    offset: number
     sources: AdoptionSource[]
 }
 

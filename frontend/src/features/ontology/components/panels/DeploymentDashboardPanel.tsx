@@ -1103,7 +1103,7 @@ function DataSourceRow({
   onNavigateToOntology: (ontId: string) => void
   onSuggest: (wsId: string, dsId: string) => void
   onUnassign: (wsId: string, dsId: string) => void
-  onNavigateSchemaTab: (ontId: string, tab: 'adoption' | 'history') => void
+  onNavigateSchemaTab: (ontId: string, tab: 'health' | 'history') => void
 }) {
   const style = entry.ontologyStatus ? STATUS_STYLES[entry.ontologyStatus] : null
   const StatusIcon = entry.ontologyStatus ? STATUS_ICON[entry.ontologyStatus] : null
@@ -1206,8 +1206,8 @@ function DataSourceRow({
                   />
                   <MenuItem
                     icon={Network}
-                    label="View adoption"
-                    onClick={() => { setMenuOpen(false); onNavigateSchemaTab(entry.ontologyId!, 'adoption') }}
+                    label="View health"
+                    onClick={() => { setMenuOpen(false); onNavigateSchemaTab(entry.ontologyId!, 'health') }}
                   />
                   <MenuItem
                     icon={GitBranch}
@@ -1308,7 +1308,7 @@ function OntologyGroupCard({
   onRowClick: (wsId: string, dsId: string) => void
   onSuggest: (wsId: string, dsId: string) => void
   onUnassign: (wsId: string, dsId: string) => void
-  onNavigateSchemaTab: (ontId: string, tab: 'adoption' | 'history') => void
+  onNavigateSchemaTab: (ontId: string, tab: 'health' | 'history') => void
   keyOf: (e: DeploymentEntry) => string
   isAssigning: boolean
 }) {
