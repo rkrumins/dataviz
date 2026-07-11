@@ -9,7 +9,7 @@ import { Link } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
-    CircleDot, ArrowRightLeft, Layers, BarChart3, AlertTriangle, Loader2,
+    BarChart3, AlertTriangle, Loader2,
     GitBranch, Star, Clock, Compass, Save, RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -23,6 +23,7 @@ import { usePermission } from '@/store/auth'
 import { DataSourceVersioningTab } from '@/features/versioning/components/DataSourceVersioningTab'
 import { VocabAlignmentWarning } from './VocabAlignmentWarning'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
+import { DataSourceProfile, type DataSourceProfileContext } from '@/components/insights/DataSourceProfile'
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -64,12 +65,6 @@ interface DataSourceDetailPanelProps {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 
-function compactNum(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`
-    return String(n)
-}
-
 const AGG_STATUS_META: Record<string, { label: string; dot: string; text: string }> = {
     ready: { label: 'Ready', dot: 'bg-emerald-400', text: 'text-emerald-600 dark:text-emerald-400' },
     running: { label: 'Running', dot: 'bg-indigo-400 animate-pulse', text: 'text-indigo-600 dark:text-indigo-400' },
@@ -82,23 +77,6 @@ const AGG_STATUS_META: Record<string, { label: string; dot: string; text: string
 // ─────────────────────────────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────
-
-function MiniKpi({ icon: Icon, value, label, color }: {
-    icon: React.ComponentType<{ className?: string }>
-    value: string | number
-    label: string
-    color: string
-}) {
-    return (
-        <div className="flex-1 p-3 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
-            <div className="flex items-center gap-2 mb-1">
-                <Icon className={cn("w-3.5 h-3.5", color)} />
-                <span className="text-lg font-bold text-ink">{value}</span>
-            </div>
-            <span className="text-[10px] text-ink-muted uppercase tracking-wide">{label}</span>
-        </div>
-    )
-}
 
 function TabBtn({ active, icon: Icon, label, count, onClick }: {
     active: boolean
@@ -131,24 +109,6 @@ function TabBtn({ active, icon: Icon, label, count, onClick }: {
     )
 }
 
-function DetailRow({ icon: Icon, label, children }: {
-    icon: React.ComponentType<{ className?: string }>
-    label: string
-    children: React.ReactNode
-}) {
-    return (
-        <div className="flex items-start gap-3">
-            <div className="w-7 h-7 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] flex items-center justify-center shrink-0 mt-0.5">
-                <Icon className="h-3.5 w-3.5 text-ink-muted" />
-            </div>
-            <div className="min-w-0 flex-1">
-                <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-0.5">{label}</span>
-                <div className="text-sm font-medium text-ink">{children}</div>
-            </div>
-        </div>
-    )
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // DataSourceDetailPanel (Drawer)
 // ─────────────────────────────────────────────────────────────────────
@@ -157,7 +117,6 @@ export function DataSourceDetailPanel({
     ds,
     wsId,
     isOpen,
-    stats,
     providerInfo,
     ontologyName,
     ontologyId,
@@ -354,66 +313,14 @@ export function DataSourceDetailPanel({
                         <div className="flex-1 overflow-y-auto custom-scrollbar px-6 py-5">
                             {/* ─── Insights Tab ─────────────────────────── */}
                             {activeTab === 'insights' && (
-                                <div className="space-y-5">
-                                    {stats ? (
-                                        <>
-                                            <div className="flex gap-3">
-                                                <MiniKpi icon={CircleDot} value={compactNum(stats.nodeCount)} label="Nodes" color="text-indigo-500" />
-                                                <MiniKpi icon={ArrowRightLeft} value={compactNum(stats.edgeCount)} label="Edges" color="text-violet-500" />
-                                                <MiniKpi icon={Layers} value={stats.entityTypes.length} label="Entity Types" color="text-emerald-500" />
-                                            </div>
-
-                                            {/* Key details */}
-                                            <div className="space-y-3">
-                                                <DetailRow icon={Database} label="Catalog Item">
-                                                    <span className="font-mono text-xs">{ds.catalogItemId}</span>
-                                                </DetailRow>
-                                                {ontologyName && (
-                                                    <DetailRow icon={GitBranch} label="Ontology">
-                                                        <Link to={ontologyId ? `/schema/${ontologyId}` : '/schema'} className="text-indigo-500 hover:underline">
-                                                            {ontologyName}
-                                                        </Link>
-                                                    </DetailRow>
-                                                )}
-                                                <DetailRow icon={Clock} label="Updated">
-                                                    {new Date(ds.updatedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                                                </DetailRow>
-                                            </div>
-
-                                            {stats.entityTypes.length > 0 && (
-                                                <div>
-                                                    <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider mb-2">Entity Type Breakdown</h6>
-                                                    <div className="flex flex-wrap gap-1.5">
-                                                        {stats.entityTypes.sort().map(type => (
-                                                            <span key={type} className="px-2.5 py-1 text-[11px] font-medium rounded-lg bg-black/5 dark:bg-white/5 text-ink-secondary border border-glass-border hover:bg-indigo-500/5 hover:border-indigo-500/20 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-default">
-                                                                {type}
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {(stats.nodeCount > 0 || stats.edgeCount > 0) && (
-                                                <div>
-                                                    <h6 className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider mb-2">Node / Edge Ratio</h6>
-                                                    <div className="flex h-2 rounded-full overflow-hidden bg-black/5 dark:bg-white/5">
-                                                        <div className="bg-gradient-to-r from-indigo-500 to-indigo-400 rounded-l-full" style={{ width: `${Math.round(stats.nodeCount / (stats.nodeCount + stats.edgeCount) * 100)}%` }} />
-                                                        <div className="bg-gradient-to-r from-violet-500 to-violet-400 rounded-r-full" style={{ width: `${Math.round(stats.edgeCount / (stats.nodeCount + stats.edgeCount) * 100)}%` }} />
-                                                    </div>
-                                                    <div className="flex justify-between mt-1 text-[10px] text-ink-muted">
-                                                        <span>Nodes: {Math.round(stats.nodeCount / (stats.nodeCount + stats.edgeCount) * 100)}%</span>
-                                                        <span>Edges: {Math.round(stats.edgeCount / (stats.nodeCount + stats.edgeCount) * 100)}%</span>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </>
-                                    ) : (
-                                        <div className="py-6 text-center text-xs text-ink-muted">
-                                            <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                                            No statistics available for this data source
-                                        </div>
-                                    )}
-                                </div>
+                                ds.catalogItemId ? (
+                                    <DataSourceProfile
+                                        catalogId={ds.catalogItemId}
+                                        context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName } satisfies DataSourceProfileContext}
+                                    />
+                                ) : (
+                                    <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
+                                )
                             )}
 
                             {/* ─── Aggregation Tab ──────────────────────── */}
