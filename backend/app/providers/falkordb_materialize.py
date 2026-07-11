@@ -85,6 +85,12 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.common.providers.pair_rules import (
+    ancestor_closure,
+    boundary_pairs,
+    cube_pairs,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -358,9 +364,19 @@ class AggregationPipeline:
         # Cube (full ancestor cross-product) vs boundary — decided per
         # run by _decide_materialization_mode.
         self._cube_mode: Optional[bool] = None
-        # Memoized (rank, id) ancestor rep-chains keyed by non-leaf node
-        # — bounded by container count; reset when the parent map reloads.
-        self._rep_chain_cache: Dict[int, Tuple[Tuple[int, int], ...]] = {}
+        # Memoized ancestor closures ({ancestor_or_self: depth}) keyed by
+        # CONTAINER id only — bounded by container count (every strict
+        # ancestor is a containment parent); leaf closures are derived
+        # from their parents' cached closures and never stored. Reset
+        # when the parent map reloads.
+        self._closure_memo: Dict[int, Dict[int, int]] = {}
+        # Containment depth per node (roots 0, child = 1 + max over
+        # parents) — one int per touched node; feeds ranks, the
+        # sourceDepth/targetDepth stamps and the auto-mode estimate.
+        self._depth_memo: Dict[int, int] = {}
+        # Deepest depth stamped onto any written endpoint this run —
+        # persisted as _AggMeta.maxDepth for the structural readers.
+        self._max_stamped_depth = 0
         self._fine_merges_skipped = 0
         # Level map re-keyed by observed label spellings, built lazily —
         # see _levels_by_observed_label.
@@ -372,7 +388,10 @@ class AggregationPipeline:
         self._effective_types: List[str] = []
         self._type_bit: Dict[str, int] = {}
         self._values = _PairValues(1)
-        self._parents: Dict[int, int] = {}
+        # Containment DAG: child id → ALL parent ids. Multi-parent nodes
+        # keep every parent — each ancestry gets its rollups (the
+        # longest-chain collapse silently dropped the others).
+        self._parents: Dict[int, Tuple[int, ...]] = {}
         self._acc: Dict[int, int] = {}       # pair key → packed (weight, mask)
         self._flushed: Set[int] = set()      # keys early-applied this run
         self._writes = 0                     # AGGREGATED edges written this run
@@ -519,22 +538,16 @@ class AggregationPipeline:
     # -- shared helpers ------------------------------------------------------
 
     def _pair_bucket(self, node_id: int) -> str:
-        """Histogram bucket for one endpoint: the TYPE level when the
-        ontology maps its label (L2), else its containment depth (d2) —
-        self-nesting types have no distinguishing type level."""
-        lv = self._nonleaf_type_level.get(node_id)
-        if lv is not None:
-            return f"L{lv}"
-        rk = (self._nonleaf_levels or {}).get(node_id)
-        return f"d{rk}" if rk is not None else "leaf"
+        """Histogram bucket for one endpoint: containment DEPTH — the
+        dimension pair selection actually runs on, meaningful on any
+        graph shape (type levels are degenerate for self-nesting types)."""
+        return f"d{self._depth_of(node_id)}"
 
     def _snapshot_pairs_by_level(self) -> None:
-        """Rank-pair histogram of the computed result, persisted into
+        """Depth-pair histogram of the computed result, persisted into
         run_stats — makes a MISSING rank (e.g. no domain→domain pairs
-        because the domain label didn't match the graph) visible in the
-        job detail instead of requiring a graph query to diagnose."""
-        if self._nonleaf_levels is None:
-            return
+        because the containment types didn't match the graph) visible in
+        the job detail instead of requiring a graph query to diagnose."""
         counts: Dict[str, int] = {}
         for key in set(self._acc) | self._flushed:
             sid, tid = _unpack(key)
@@ -870,9 +883,9 @@ class AggregationPipeline:
         lattice into the final accumulator — all in worker memory."""
         from backend.app.providers.falkordb_provider import _sanitize_label
 
-        # ---- containment → parent map (child_id → parent_id) ----
-        multi_parents: Dict[int, List[int]] = {}
-        parents: Dict[int, int] = {}
+        # ---- containment → parent DAG (child_id → all parent_ids) ----
+        parent_lists: Dict[int, List[int]] = {}
+        multi_parent_count = 0
         for ctype in sorted({str(t) for t in self._containment if t}):
             safe = _sanitize_label(ctype)
             async for _lo, rows in self._scan_type_ranges(safe):
@@ -880,22 +893,25 @@ class AggregationPipeline:
                     if parent_id is None or child_id is None:
                         continue
                     parent_id, child_id = int(parent_id), int(child_id)
-                    existing = parents.get(child_id)
+                    existing = parent_lists.get(child_id)
                     if existing is None:
-                        parents[child_id] = parent_id
-                    elif existing != parent_id:
-                        candidates = multi_parents.setdefault(child_id, [existing])
-                        if parent_id not in candidates:
-                            candidates.append(parent_id)
-        if multi_parents:
-            self._resolve_multi_parents(parents, multi_parents)
+                        parent_lists[child_id] = [parent_id]
+                    elif parent_id not in existing:
+                        if len(existing) == 1:
+                            multi_parent_count += 1
+                        existing.append(parent_id)
+        parents: Dict[int, Tuple[int, ...]] = {
+            c: tuple(ps) for c, ps in parent_lists.items()
+        }
         self._break_cycles(parents)
         self._parents = parents
-        self._rep_chain_cache = {}  # chains derive from the fresh parent map
+        # Closures/depths derive from the fresh parent map.
+        self._closure_memo = {}
+        self._depth_memo = {}
         logger.info(
             "aggregation pipeline on %s: containment loaded — %d child→parent "
-            "entries (%d multi-parent nodes resolved by longest chain).",
-            self.p._graph_name, len(parents), len(multi_parents),
+            "entries (%d multi-parent nodes, every ancestry kept).",
+            self.p._graph_name, len(parents), multi_parent_count,
         )
 
         # ---- materialization mode + structural boundary ----
@@ -953,204 +969,175 @@ class AggregationPipeline:
             PHASE_AGGREGATE, self._scanned, phase_label="computing",
         )
 
-    def _resolve_multi_parents(
-        self, parents: Dict[int, int], multi: Dict[int, List[int]],
-    ) -> None:
-        """Longest-chain rule for multi-parent nodes — parity with the
-        legacy ``_compute_ancestor_chain``'s ``ORDER BY length(path) DESC``
-        (ties broken deterministically by smaller node id)."""
-        def chain_depth(node: int) -> int:
-            depth = 0
-            seen: Set[int] = set()
-            cur: Optional[int] = node
-            while cur is not None and cur not in seen:
-                seen.add(cur)
-                cur = parents.get(cur)
-                if cur is not None:
-                    depth += 1
-            return depth
-
-        for child, candidates in multi.items():
-            best = max(candidates, key=lambda c: (chain_depth(c), -c))
-            parents[child] = best
-
     @staticmethod
-    def _break_cycles(parents: Dict[int, int]) -> None:
-        """Defensively break containment cycles (bad data) so chain walks
-        terminate. Removes the link that closes any detected cycle."""
-        state: Dict[int, int] = {}  # 0 = on current path, 1 = done
+    def _break_cycles(parents: Dict[int, Tuple[int, ...]]) -> None:
+        """Defensively break containment cycles (bad data) so DAG walks
+        terminate. Removes exactly the parent LINK that closes each
+        detected cycle — other parents of the same child survive."""
+        state: Dict[int, int] = {}  # 0 = on current DFS path, 1 = done
         for start in list(parents.keys()):
             if state.get(start) == 1:
                 continue
-            path: List[int] = []
-            cur: Optional[int] = start
-            while cur is not None:
-                s = state.get(cur)
-                if s == 1:
+            state[start] = 0
+            stack: List[Tuple[int, Any]] = [
+                (start, iter(parents.get(start, ()))),
+            ]
+            while stack:
+                cur, it = stack[-1]
+                advanced = False
+                for p in it:
+                    s = state.get(p)
+                    if s == 0 or p == cur:
+                        # ``cur → p`` closes a cycle (or self-parents) — cut
+                        # this one link only.
+                        remaining = tuple(x for x in parents[cur] if x != p)
+                        if remaining:
+                            parents[cur] = remaining
+                        else:
+                            del parents[cur]
+                        logger.warning(
+                            "aggregation pipeline: containment cycle detected "
+                            "at node %d; breaking parent link %d→%d.",
+                            p, cur, p,
+                        )
+                        continue
+                    if s == 1:
+                        continue
+                    if p not in parents:
+                        state[p] = 1  # root: nothing above to explore
+                        continue
+                    state[p] = 0
+                    stack.append((p, iter(parents[p])))
+                    advanced = True
                     break
-                if s == 0:
-                    # ``path[-1] → cur`` closed a cycle — cut it.
-                    del parents[path[-1]]
-                    logger.warning(
-                        "aggregation pipeline: containment cycle detected at "
-                        "node %d; breaking parent link of node %d.",
-                        cur, path[-1],
-                    )
-                    break
-                state[cur] = 0
-                path.append(cur)
-                cur = parents.get(cur)
-            for n in path:
-                state[n] = 1
+                if not advanced:
+                    stack.pop()
+                    state[cur] = 1
 
     async def _rollup_base(self, base: Dict[int, int]) -> None:
         """Merge every materialized cell derived from one (partial) base
         map into the run accumulator.
 
         With the boundary active (``self._nonleaf_levels`` loaded), each
-        raw pair produces its CANONICAL LEVEL-BRIDGED pairs: for every
-        ontology level L present on either ancestor chain, the pair of
-        each side's deepest non-leaf ancestor at level ≤ L. On aligned
-        chains this is exactly the same-level diagonal (table→table,
-        domain→domain). On RAGGED chains (a column hanging directly
-        under a domain, skipping table/schema) it yields the mixed-level
-        cell the canvas shows at each granularity (table→domain) — the
-        cell a pure level-equality filter silently drops. Either way the
-        bound is at most one pair per level per raw edge. Cross-level
-        raw lineage (a raw table→database edge) falls out of the same
-        rule — no special base-cell case.
+        raw pair produces its CANONICAL DEPTH-BRIDGED pairs via the shared
+        ``pair_rules.boundary_pairs`` rule: for every containment depth
+        present on either side's non-leaf ancestry, pair each side's reps
+        at its deepest depth ≤ that rank. On aligned single-parent chains
+        this is exactly the same-depth diagonal (table→table,
+        domain→domain); ragged chains yield the mixed-depth cell the
+        canvas shows at each granularity; multi-parent nodes contribute a
+        rep SET per depth, so every ancestry is linked.
 
-        Without the boundary (legacy full-cube mode) the original
-        ancestor-lattice roll produces every cross-product cell; the
-        (0,0) raw mirror is merged only when
-        ``AGGREGATION_MATERIALIZE_LEAF_PAIRS`` is on. Equal-endpoint
-        pairs are excluded from output in both modes (legacy
-        ``if sa == ta: continue`` parity).
+        Without the boundary (cube mode) ``pair_rules.cube_pairs`` merges
+        the full ancestor-closure cross-product; the (0,0) raw mirror is
+        included only when ``AGGREGATION_MATERIALIZE_LEAF_PAIRS`` is on.
+        Closures have SET semantics, so a diamond's shared grandparent
+        receives each raw edge's weight exactly once. Equal-endpoint
+        pairs are excluded in both modes (legacy ``sa == ta`` parity).
         """
         if not base:
             return
         values = self._values
-        parents = self._parents
-        nonleaf = self._nonleaf_levels  # None = boundary inactive
 
-        if nonleaf is not None:
+        if self._nonleaf_levels is not None:
             await self._merge_canonical_pairs(base)
             return
 
-        def roll(cell: Dict[int, int], *, source_side: bool) -> Dict[int, int]:
-            out: Dict[int, int] = {}
-            for key, val in cell.items():
-                sid, tid = _unpack(key)
-                p = parents.get(sid if source_side else tid)
-                if p is None:
-                    continue
-                nk = _pack(p, tid) if source_side else _pack(sid, p)
-                cur = out.get(nk)
-                out[nk] = val if cur is None else values.merge(
+        include_mirror = self._knob_bool(
+            "materialize_leaf_pairs", _materialize_leaf_pairs,
+        )
+        acc = self._acc
+        n = 0
+        for key, val in base.items():
+            sid, tid = _unpack(key)
+            s_cl = self._closure(sid)
+            t_cl = self._closure(tid)
+            for sp, tp in cube_pairs(
+                s_cl, t_cl, include_leaf_mirror=include_mirror, s=sid, t=tid,
+            ):
+                nk = _pack(sp, tp)
+                cur = acc.get(nk)
+                acc[nk] = val if cur is None else values.merge(
                     cur, values.weight(val), values.mask(val),
                 )
-            return out
-
-        async def merge_cell(cell: Dict[int, int]) -> None:
-            acc = self._acc
-            for key, val in cell.items():
-                sid, tid = _unpack(key)
-                if sid == tid:
-                    continue
-                cur = acc.get(key)
-                acc[key] = val if cur is None else values.merge(
-                    cur, values.weight(val), values.mask(val),
-                )
-            await self._maybe_overflow_flush()
-
-        if self._knob_bool("materialize_leaf_pairs", _materialize_leaf_pairs):
-            await merge_cell(base)
-
-        row = base
-        while True:
-            # Target-side roll-ups of the current row: cells (i, 1..k).
-            cell = row
-            while True:
-                cell = roll(cell, source_side=False)
-                if not cell:
-                    break
-                await merge_cell(cell)
+            n += 1
+            if n % 1024 == 0:
+                await self._maybe_overflow_flush()
+                # The flush swaps self._acc for a fresh dict — rebind or
+                # every later merge lands in the orphaned snapshot and is
+                # silently discarded (missing edges, undercounted weights).
+                acc = self._acc
                 await asyncio.sleep(0)  # yield during long CPU stretches
-            # Next source-side row: cell (i+1, 0).
-            row = roll(row, source_side=True)
-            if not row:
-                break
-            await merge_cell(row)
-            await asyncio.sleep(0)
+        await self._maybe_overflow_flush()
 
-    def _rep_chain(self, node: int) -> Tuple[Tuple[int, int], ...]:
-        """(level, id) of every non-leaf ancestor-or-self of ``node``,
-        deepest (largest level) first. Memoized per non-leaf node —
-        bounded by container count, shared by every leaf underneath."""
-        nonleaf = self._nonleaf_levels
+    def _closure(self, node: int) -> Dict[int, int]:
+        """Ancestors-or-self → containment depth for ``node``. Container
+        closures are memoized (every strict ancestor is a containment
+        parent, so the memo is bounded by container count); a leaf's own
+        entry is evicted after the call so leaf-count never inflates it."""
+        struct = self._struct_parents or set()
+        closure = ancestor_closure(self._parents, node, memo=self._closure_memo)
+        if node not in struct:
+            self._closure_memo.pop(node, None)
+        return closure
+
+    def _depth_of(self, node: int) -> int:
+        """Containment depth of ANY node (roots and uncontained nodes 0,
+        child = 1 + max over parents — the same rule the closures use).
+        One int per touched node; feeds the boundary ranks and the
+        sourceDepth/targetDepth stamps in both modes. Assumes
+        ``_break_cycles`` already ran (the parent map is acyclic)."""
+        memo = self._depth_memo
+        hit = memo.get(node)
+        if hit is not None:
+            return hit
         parents = self._parents
-        cache = self._rep_chain_cache
-        # Leaf/unknown endpoints climb to their first non-leaf ancestor;
-        # visited-guard bounds dirty-data containment cycles.
-        cur: Optional[int] = node
-        visited: Set[int] = set()
-        while cur is not None and cur not in nonleaf:
-            if cur in visited:
-                return ()
-            visited.add(cur)
-            cur = parents.get(cur)
-        if cur is None:
-            return ()
-        # Walk upward from the first non-leaf rep until a cache hit,
-        # skipping ancestors with no ontology level (unknown labels) —
-        # the legacy lattice rolled straight through such gaps too.
-        path: List[int] = []
-        while cur is not None and cur not in cache:
-            if cur in visited:
-                break
-            visited.add(cur)
-            path.append(cur)
-            nxt = parents.get(cur)
-            while nxt is not None and nxt not in nonleaf:
-                if nxt in visited:
-                    nxt = None
-                    break
-                visited.add(nxt)
-                nxt = parents.get(nxt)
-            cur = nxt
-        tail: Tuple[Tuple[int, int], ...] = cache.get(cur, ()) if cur is not None else ()
-        for n in reversed(path):
-            tail = ((nonleaf[n], n),) + tail
-            cache[n] = tail
-        return tail
+        stack: List[int] = [node]
+        while stack:
+            cur = stack[-1]
+            if cur in memo:
+                stack.pop()
+                continue
+            pending = [
+                p for p in parents.get(cur, ())
+                if p != cur and p not in memo
+            ]
+            if pending:
+                stack.extend(pending)
+                continue
+            ps = [p for p in parents.get(cur, ()) if p != cur]
+            memo[cur] = 1 + max(memo[p] for p in ps) if ps else 0
+            stack.pop()
+        return memo[node]
+
+    def _rep_set(self, node: int) -> Dict[int, int]:
+        """Non-leaf ancestors-or-self of ``node`` with containment depths
+        — one side's input to the shared ``boundary_pairs`` rule. Leaf
+        endpoints contribute their full container ancestry (the closure
+        walks through leaf-only gaps); isolated leaves yield {}."""
+        struct = self._struct_parents or set()
+        return {
+            a: d for a, d in self._closure(node).items() if a in struct
+        }
 
     async def _merge_canonical_pairs(self, base: Dict[int, int]) -> None:
-        """Boundary-mode rollup: canonical level-bridged pairs per raw
-        pair. Weight semantics: each raw pair's value contributes ONCE
-        to each distinct canonical pair (a pair repeated across levels —
-        the ragged case — is merged once)."""
+        """Boundary-mode rollup: canonical depth-bridged pairs per raw
+        pair via the shared rule. Weight semantics: each raw pair's value
+        contributes ONCE to each distinct canonical pair (a pair repeated
+        across ranks — the ragged case — is merged once; a diamond's
+        shared ancestor is merged once)."""
         values = self._values
         acc = self._acc
         skipped = 0
         n = 0
         for key, val in base.items():
             sid, tid = _unpack(key)
-            cs = self._rep_chain(sid)
-            ct = self._rep_chain(tid)
-            if not cs or not ct:
-                skipped += 1
-                continue
-            pairs: Set[int] = set()
-            for level in {l for l, _ in cs} | {l for l, _ in ct}:
-                sp = next((i for l, i in cs if l <= level), None)
-                tp = next((i for l, i in ct if l <= level), None)
-                if sp is None or tp is None or sp == tp:
-                    continue
-                pairs.add(_pack(sp, tp))
+            pairs = boundary_pairs(self._rep_set(sid), self._rep_set(tid))
             if not pairs:
                 skipped += 1
                 continue
-            for nk in pairs:
+            for sp, tp in pairs:
+                nk = _pack(sp, tp)
                 cur = acc.get(nk)
                 acc[nk] = val if cur is None else values.merge(
                     cur, values.weight(val), values.mask(val),
@@ -1244,7 +1231,9 @@ class AggregationPipeline:
         (ancestors(tgt)+1) — a conservative upper bound on distinct cube
         cells (dedupe only shrinks it), so auto can never pick a cube
         that terminally exceeds the budget."""
-        self._struct_parents = set(self._parents.values())
+        self._struct_parents = {
+            p for ps in self._parents.values() for p in ps
+        }
         if not self._struct_parents and self._containment:
             # Containment types are DECLARED but matched zero edges. If
             # the graph holds rollup cells, EITHER mode would recompute a
@@ -1279,15 +1268,31 @@ class AggregationPipeline:
         cnt_memo: Dict[int, int] = {}
 
         def anc_count(node: int) -> int:
-            path: List[int] = []
-            cur: Optional[int] = node
-            while cur is not None and cur not in cnt_memo:
-                path.append(cur)
-                cur = parents.get(cur)
-            base = cnt_memo.get(cur, 0) if cur is not None else 0
-            for n in reversed(path):
-                base += 1
-                cnt_memo[n] = base
+            """Upper bound on |ancestors-or-self| over the containment DAG:
+            1 + Σ over parents. Exact on single-parent chains; diamonds
+            overcount shared ancestors, which only PUSHES the estimate up —
+            auto can still never pick a cube that exceeds the budget, and
+            an int-per-node memo keeps the counting scan linear."""
+            hit = cnt_memo.get(node)
+            if hit is not None:
+                return hit
+            stack: List[int] = [node]
+            while stack:
+                cur = stack[-1]
+                if cur in cnt_memo:
+                    stack.pop()
+                    continue
+                pending = [
+                    p for p in parents.get(cur, ())
+                    if p != cur and p not in cnt_memo
+                ]
+                if pending:
+                    stack.extend(pending)
+                    continue
+                cnt_memo[cur] = 1 + sum(
+                    cnt_memo[p] for p in parents.get(cur, ()) if p != cur
+                )
+                stack.pop()
             return cnt_memo[node]
 
         from backend.app.providers.falkordb_provider import _sanitize_label
@@ -1336,24 +1341,8 @@ class AggregationPipeline:
             return
         if not self._fine_filter_active():
             return
-        parents = self._parents
 
-        # Containment depth per container, memoized root-walks (roots = 0).
-        depth_memo: Dict[int, int] = {}
-
-        def depth_of(node: int) -> int:
-            path: List[int] = []
-            cur: Optional[int] = node
-            while cur is not None and cur not in depth_memo:
-                path.append(cur)
-                cur = parents.get(cur)
-            base = depth_memo.get(cur, -1) if cur is not None else -1
-            for n in reversed(path):
-                base += 1
-                depth_memo[n] = base
-            return depth_memo[node]
-
-        ranks = {cid: depth_of(cid) for cid in self._struct_parents}
+        ranks = {cid: self._depth_of(cid) for cid in self._struct_parents}
 
         # One bounded pass over the node matrix: keep (urn, label) for the
         # container ids only — memory scales with CONTAINER count.
@@ -1442,10 +1431,7 @@ class AggregationPipeline:
         counts: Dict[str, int] = {}
         for key in list(self._acc) + list(self._flushed):
             sid, tid = _unpack(key)
-            name = (
-                f"{self._pair_bucket(sid)}→{self._pair_bucket(tid)}"
-                if self._nonleaf_levels is not None else "leaf→leaf"
-            )
+            name = f"{self._pair_bucket(sid)}→{self._pair_bucket(tid)}"
             counts[name] = counts.get(name, 0) + 1
         top = sorted(counts.items(), key=lambda kv: -kv[1])[:5]
         return ", ".join(f"{name}: {n}" for name, n in top)
@@ -1561,6 +1547,12 @@ class AggregationPipeline:
             s_urn, s_label = s_res
             t_urn, t_label = t_res
             mask = values.mask(val)
+            sd = self._depth_of(sid)
+            td = self._depth_of(tid)
+            if sd > self._max_stamped_depth:
+                self._max_stamped_depth = sd
+            if td > self._max_stamped_depth:
+                self._max_stamped_depth = td
             items.append({
                 "s": s_urn,
                 "t": t_urn,
@@ -1571,6 +1563,11 @@ class AggregationPipeline:
                 "et": [t for i, t in enumerate(types) if mask & (1 << i)],
                 "sl": levels.get(s_label) if levels else None,
                 "tl": levels.get(t_label) if levels else None,
+                # Containment depths — the STRUCTURAL stamp dimension the
+                # readers filter on (well-defined on any graph, unlike the
+                # type levels above, which self-nesting types degenerate).
+                "sd": sd,
+                "td": td,
             })
         if dropped:
             logger.warning(
@@ -1637,6 +1634,7 @@ class AggregationPipeline:
         set_tail = (
             f"SET r.weight = {weight_expr}, r.sourceEdgeTypes = item.et, "
             "r.sourceLevel = item.sl, r.targetLevel = item.tl, "
+            "r.sourceDepth = item.sd, r.targetDepth = item.td, "
             "r.levelDigest = $digest, r.latestUpdate = timestamp()"
         )
 
@@ -1805,7 +1803,7 @@ class AggregationPipeline:
                     "WHERE ID(r) >= $lo AND ID(r) < $hi "
                     "RETURN ID(a), ID(b), r.aggKey, r.weight, r.levelDigest, "
                     "r.latestUpdate, r.sourceEdgeTypes, r.sourceLevel, "
-                    "r.targetLevel",
+                    "r.targetLevel, r.sourceDepth, r.targetDepth",
                     params={"lo": lo_, "hi": hi_},
                     timeout=_scan_timeout_s(),
                 )
@@ -1814,7 +1812,8 @@ class AggregationPipeline:
                     "MATCH (a)-[r:AGGREGATED]->(b) "
                     "WHERE ID(r) >= $lo AND ID(r) < $hi "
                     "RETURN r.aggKey, r.weight, r.levelDigest, r.latestUpdate, "
-                    "r.sourceEdgeTypes, r.sourceLevel, r.targetLevel",
+                    "r.sourceEdgeTypes, r.sourceLevel, r.targetLevel, "
+                    "r.sourceDepth, r.targetDepth",
                     params={"lo": lo_, "hi": hi_},
                     timeout=_scan_timeout_s(),
                 )
@@ -1830,13 +1829,13 @@ class AggregationPipeline:
             for row in range_rows:
                 if not dedicated:
                     (aid, bid, agg_key, weight, row_digest, latest,
-                     row_et, row_sl, row_tl) = row
+                     row_et, row_sl, row_tl, row_sd, row_td) = row
                     if aid is None or bid is None:
                         continue
                     key: Optional[int] = _pack(int(aid), int(bid))
                 else:
                     (agg_key, weight, row_digest, latest,
-                     row_et, row_sl, row_tl) = row
+                     row_et, row_sl, row_tl, row_sd, row_td) = row
                     key = key_by_aggkey.get(agg_key) if agg_key else None
                 val = self._acc.get(key) if key is not None else None
                 if val is None or key in existing:
@@ -1873,7 +1872,9 @@ class AggregationPipeline:
                 elif (
                     int(weight or 0) != values.weight(val)
                     or (row_digest or "") != digest
-                    or self._row_meta_stale(val, row_et, row_sl, row_tl, key)
+                    or self._row_meta_stale(
+                        val, row_et, row_sl, row_tl, row_sd, row_td, key,
+                    )
                 ):
                     to_overwrite.append(key)
 
@@ -1892,13 +1893,16 @@ class AggregationPipeline:
         return existing
 
     def _row_meta_stale(
-        self, val: int, row_et: Any, row_sl: Any, row_tl: Any, key: int,
+        self, val: int, row_et: Any, row_sl: Any, row_tl: Any,
+        row_sd: Any, row_td: Any, key: int,
     ) -> bool:
         """Weight-preserving drift the weight/digest comparison can't see:
         ``sourceEdgeTypes`` replaced type-for-type (same count, different
-        types — a TRANSFORMS-filtered trace would silently drop the edge)
-        or level stamps written by a pre-alias-fix build (NULL on
-        alias-variant sources, which blinds the mixed-level reader)."""
+        types — a TRANSFORMS-filtered trace would silently drop the edge),
+        level stamps written by a pre-alias-fix build (NULL on
+        alias-variant sources, which blinds the mixed-level reader), or
+        depth stamps that are NULL/stale (pre-depth generations — healed
+        in place by the overwrite path with zero weight churn)."""
         mask = self._values.mask(val)
         desired_et = {
             t for i, t in enumerate(self._effective_types) if mask & (1 << i)
@@ -1908,10 +1912,15 @@ class AggregationPipeline:
         )
         if stored_et != desired_et:
             return True
+        sid, tid = _unpack(key)
+        # Structural depth stamps apply in BOTH modes — the readers'
+        # filter dimension on any graph shape.
+        if row_sd is None or int(row_sd) != self._depth_of(sid):
+            return True
+        if row_td is None or int(row_td) != self._depth_of(tid):
+            return True
         if self._nonleaf_levels:
-            # Desired stamps are TYPE levels (the read path's filter
-            # dimension) — the structural rank drives pair SELECTION only.
-            sid, tid = _unpack(key)
+            # TYPE-level stamps survive as display metadata.
             desired_sl = self._nonleaf_type_level.get(sid)
             desired_tl = self._nonleaf_type_level.get(tid)
             if desired_sl is not None and (

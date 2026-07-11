@@ -54,7 +54,7 @@ class _FakeFalkor:
 
     def seed_aggregated(
         self, aid, bid, *, weight, digest="", latest=1000,
-        types=("FLOWS",), sl=None, tl=None, agg_key=...,
+        types=("FLOWS",), sl=None, tl=None, sd=None, td=None, agg_key=...,
     ):
         s_urn = self.nodes[aid][0]
         t_urn = self.nodes[bid][0]
@@ -67,6 +67,8 @@ class _FakeFalkor:
             "types": list(types),
             "sl": sl,
             "tl": tl,
+            "sd": sd,
+            "td": td,
         }
 
     def _alloc_rid(self):
@@ -144,7 +146,7 @@ class _FakeFalkor:
                     rows.append([
                         aid, bid, v["aggKey"], v["weight"], v["digest"],
                         v["latest"], v.get("types") or [], v.get("sl"),
-                        v.get("tl"),
+                        v.get("tl"), v.get("sd"), v.get("td"),
                     ])
             return _Result(rows)
         raise AssertionError(f"unhandled agg read: {cypher}")
@@ -172,6 +174,8 @@ class _FakeFalkor:
                 edge["types"] = item["et"]
                 edge["sl"] = item["sl"]
                 edge["tl"] = item["tl"]
+                edge["sd"] = item["sd"]
+                edge["td"] = item["td"]
                 edge["digest"] = params["digest"]
                 edge["latest"] = now_ms
             return _Result()
@@ -372,9 +376,11 @@ def test_equal_endpoint_pairs_excluded_but_rollups_kept(monkeypatch):
     assert set(fake.agg.keys()) == {(2, 1), (1, 3)}
 
 
-def test_multi_parent_longest_chain(monkeypatch):
-    """A node with two parents follows the parent with the LONGEST chain
-    (legacy ``ORDER BY length(path) DESC`` parity)."""
+def test_multi_parent_fans_out_to_every_ancestry(monkeypatch):
+    """A node with two parents links BOTH ancestries — the previous
+    longest-chain collapse silently dropped every rollup through the
+    shorter parent (a column in a table sitting in two containers must
+    aggregate into both)."""
     monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
     fake = _FakeFalkor()
     levels = {"root": 0, "mid": 1, "leaf": 2}
@@ -391,10 +397,64 @@ def test_multi_parent_longest_chain(monkeypatch):
 
     _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
 
-    # leaf's chain resolves through mid → deep_root, not shallow.
-    assert (2, 5) in fake.agg
-    assert (1, 5) in fake.agg
-    assert (3, 5) not in fake.agg
+    # Every ancestor of leaf pairs with the target — through mid AND
+    # through shallow — each with the raw edge's weight exactly once.
+    assert fake.agg[(2, 5)]["weight"] == 1
+    assert fake.agg[(1, 5)]["weight"] == 1
+    assert fake.agg[(3, 5)]["weight"] == 1
+    # Depth stamps are structural: deep_root/shallow are roots (0), mid
+    # is depth 1; the uncontained target leaf is depth 0. (The raw
+    # leaf↔leaf mirror (4, 5) stays excluded by default.)
+    assert fake.agg[(1, 5)]["sd"] == 0 and fake.agg[(1, 5)]["td"] == 0
+    assert fake.agg[(2, 5)]["sd"] == 1 and fake.agg[(2, 5)]["td"] == 0
+    assert (4, 5) not in fake.agg
+
+
+def test_diamond_containment_counts_shared_grandparent_once(monkeypatch):
+    """leaf under X and Y, both under G: G's rollup must receive the raw
+    edge's weight ONCE (set-semantics closure), not once per path."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = {"root": 0, "mid": 1, "leaf": 2}
+    fake.add_node(1, "urn:G", "root")
+    fake.add_node(2, "urn:X", "mid")
+    fake.add_node(3, "urn:Y", "mid")
+    fake.add_node(4, "urn:leaf", "leaf")
+    fake.add_node(5, "urn:other", "leaf")
+    fake.add_edge("CONTAINS", 0, 1, 2)   # G > X
+    fake.add_edge("CONTAINS", 1, 1, 3)   # G > Y
+    fake.add_edge("CONTAINS", 2, 2, 4)   # X > leaf
+    fake.add_edge("CONTAINS", 3, 3, 4)   # Y > leaf
+    fake.add_edge("FLOWS", 10, 4, 5)
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    assert fake.agg[(1, 5)]["weight"] == 1  # G once, not twice
+    assert fake.agg[(2, 5)]["weight"] == 1
+    assert fake.agg[(3, 5)]["weight"] == 1
+
+
+def test_multi_parent_boundary_mode_links_both_ancestries():
+    """The depth-diagonal (boundary) rule fans out too: a leaf under two
+    containers at the same depth pairs BOTH with the target's rep."""
+    fake = _FakeFalkor()
+    levels = {"root": 0, "leaf": 1}
+    fake.add_node(1, "urn:src_a", "root")
+    fake.add_node(2, "urn:src_b", "root")
+    fake.add_node(3, "urn:leaf_s", "leaf")
+    fake.add_node(11, "urn:tgt", "root")
+    fake.add_node(13, "urn:leaf_t", "leaf")
+    fake.add_edge("CONTAINS", 0, 1, 3)   # src_a > leaf_s
+    fake.add_edge("CONTAINS", 1, 2, 3)   # src_b > leaf_s (second parent)
+    fake.add_edge("CONTAINS", 2, 11, 13)
+    fake.add_edge("FLOWS", 10, 3, 13)
+    p = _make_provider(fake, levels)
+
+    _run(_materialize(p))
+
+    agg = {k: v["weight"] for k, v in fake.agg.items()}
+    assert agg == {(1, 11): 1, (2, 11): 1}, agg
 
 
 # ── diff apply / reconcile ──────────────────────────────────────────────
@@ -678,6 +738,29 @@ def test_reconcile_heals_stale_source_edge_types_and_level_stamps():
     assert fake.agg[(1, 11)]["sl"] == 0 and fake.agg[(1, 11)]["tl"] == 0
 
 
+def test_reconcile_heals_null_depth_stamps_without_deletes():
+    """Stamp upgrade: a pre-depth generation (correct weights/types/
+    digest/levels, NULL sourceDepth/targetDepth) is re-stamped in place
+    by the overwrite path — zero deletes, zero weight churn."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    for pair, (sl, tl) in {(1, 11): (0, 0), (2, 12): (1, 1)}.items():
+        fake.seed_aggregated(
+            pair[0], pair[1], weight=2, digest="digest-1", latest=1000,
+            types=("FLOWS",), sl=sl, tl=tl, sd=None, td=None,
+        )
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p))
+
+    assert result["deletes"] == 0
+    assert fake.deleted_pairs == []
+    assert fake.agg[(1, 11)]["sd"] == 0 and fake.agg[(1, 11)]["td"] == 0
+    assert fake.agg[(2, 12)]["sd"] == 1 and fake.agg[(2, 12)]["td"] == 1
+    assert fake.agg[(1, 11)]["weight"] == 2
+    assert fake.agg[(2, 12)]["weight"] == 2
+
+
 def test_legacy_null_aggkey_edges_healed_in_chunks():
     """Edges from generations that predate the aggKey contract can never
     be reconciled by the keyed delete — the healing pass must remove
@@ -893,9 +976,10 @@ def test_top_level_domain_cross_product_is_complete():
     }
     for pair in dom_pairs:
         assert fake.agg[pair]["weight"] == 1
-    # And the diagnostics report the same picture.
-    assert result["run_stats"]["pairs_by_level"]["L0->L0"] == 4
-    assert result["run_stats"]["pairs_by_level"]["L1->L1"] == 4
+    # And the diagnostics report the same picture (depth buckets — the
+    # dimension pair selection actually runs on).
+    assert result["run_stats"]["pairs_by_level"]["d0->d0"] == 4
+    assert result["run_stats"]["pairs_by_level"]["d1->d1"] == 4
 
 
 def test_ragged_chain_materializes_canonical_bridged_pairs():
