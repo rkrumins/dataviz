@@ -271,7 +271,7 @@ def _log_converted_stats(cg, schema) -> None:
         logger.info(f"  edge {t}: {c}")
 
 
-async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bulk=True):
+async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bulk=True, append=False):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     import redis.asyncio as _aioredis
     provider = FalkorDBProvider(
@@ -284,6 +284,17 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bu
     _r = _aioredis.Redis(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")))
+
+    # REPLACE the target graph by default: a re-run of a bulk load should overwrite, not MERGE
+    # into a stale copy. Without this, re-running (e.g. a perf load) merges millions of rows into
+    # the existing graph — slow (existence checks against a full graph) and it accumulates, which
+    # is exactly what bloated the instance and made every reload crawl. --append opts into merge.
+    if not append:
+        try:
+            await _r.execute_command("GRAPH.DELETE", graph_name)
+            logger.info(f"Replaced existing graph '{graph_name}' (delete-before-load; --append to merge).")
+        except Exception:
+            pass  # graph didn't exist — nothing to replace
 
     # Bulk mode (default): PAUSE AOF + RDB persistence for the duration of the load. Writing
     # millions of MERGE commands through the AOF (appendfsync everysec, auto-rewrite at 80%)
@@ -388,6 +399,10 @@ Examples:
                              "which pauses persistence for the load so the AOF can't balloon and "
                              "fill the disk (restored + compacted afterwards). Use this only if you "
                              "need durability against a crash mid-load.")
+    parser.add_argument("--append", action="store_true",
+                        help="Merge into the existing graph instead of replacing it. Default is to "
+                             "REPLACE (delete-before-load) so re-running doesn't merge into a stale "
+                             "copy and accumulate.")
     parser.add_argument("--schema", type=str, default=None,
                         help="Conversion schema (preset name or JSON path) mapping the Solidatus "
                              "roles onto a custom ontology, e.g. 'roots_node'. Omit for the "
@@ -447,7 +462,7 @@ Examples:
             # Declared labels for the default path = the hierarchy types the builder can emit.
             asyncio.run(push_to_falkordb(
                 builder, args.graph, declared_labels=set(PREFIX_TO_TYPE.values()),
-                bulk=not args.keep_persistence))
+                bulk=not args.keep_persistence, append=args.append))
         sys.exit(0)
 
     # ── Schema path: convert into the custom ontology ────────────────────────
@@ -481,4 +496,4 @@ Examples:
         # Declared labels for the schema path = the mapping's entityTypes (e.g. Roots, Node).
         asyncio.run(push_to_falkordb(
             cg, args.graph, declared_labels=set(schema.entity_map.values()),
-            bulk=not args.keep_persistence))
+            bulk=not args.keep_persistence, append=args.append))
