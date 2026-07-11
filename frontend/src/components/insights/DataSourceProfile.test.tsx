@@ -9,7 +9,7 @@ vi.mock('@/hooks/useDataSourceProfile', () => ({
     stats: { nodeCount: 67870, edgeCount: 568001, entityTypeCounts: { Party: 4000 }, edgeTypeCounts: { HOLDS: 5000 } },
     meta: { status: 'fresh', updated_at: new Date().toISOString(), refreshing: false, provider_health: 'ok' },
     consumers: { catalogItems: [], workspaces: [{ id: 'w', name: 'Analytics', type: 'workspace' }], views: [{ id: 'v', name: 'Revenue', type: 'view' }] },
-    isLoading: false, notFound: false,
+    isLoading: false, statsLoading: false, consumersLoading: false, notFound: false,
   }),
 }))
 vi.mock('@/store/providerHealthModel', () => ({

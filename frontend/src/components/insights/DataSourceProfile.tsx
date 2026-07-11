@@ -179,7 +179,7 @@ export function DataSourceProfile({ catalogId, context: _context }: {
     catalogId: string
     context?: DataSourceProfileContext | null
 }) {
-    const { item, provider, stats, meta, consumers, isLoading, notFound } = useDataSourceProfile(catalogId)
+    const { item, provider, stats, meta, consumers, statsLoading, consumersLoading, notFound } = useDataSourceProfile(catalogId)
 
     const health = useProviderHealth(item?.providerId)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
@@ -266,10 +266,10 @@ export function DataSourceProfile({ catalogId, context: _context }: {
 
             {/* ── Metric tiles ─────────────────────────────────── */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
-                <StatTile icon={Boxes} label="Nodes" value={compactNum(stats?.nodeCount)} tint="bg-indigo-500/10 text-indigo-500" loading={isLoading} />
-                <StatTile icon={Spline} label="Edges" value={compactNum(stats?.edgeCount)} tint="bg-violet-500/10 text-violet-500" loading={isLoading} />
-                <StatTile icon={Tag} label="Entity Types" value={compactNum(stats ? Object.keys(stats.entityTypeCounts).length : undefined)} tint="bg-emerald-500/10 text-emerald-500" loading={isLoading} />
-                <StatTile icon={Waypoints} label="Edge Types" value={compactNum(stats ? Object.keys(stats.edgeTypeCounts).length : undefined)} tint="bg-amber-500/10 text-amber-500" loading={isLoading} />
+                <StatTile icon={Boxes} label="Nodes" value={compactNum(stats?.nodeCount)} tint="bg-indigo-500/10 text-indigo-500" loading={statsLoading} />
+                <StatTile icon={Spline} label="Edges" value={compactNum(stats?.edgeCount)} tint="bg-violet-500/10 text-violet-500" loading={statsLoading} />
+                <StatTile icon={Tag} label="Entity Types" value={compactNum(stats ? Object.keys(stats.entityTypeCounts).length : undefined)} tint="bg-emerald-500/10 text-emerald-500" loading={statsLoading} />
+                <StatTile icon={Waypoints} label="Edge Types" value={compactNum(stats ? Object.keys(stats.edgeTypeCounts).length : undefined)} tint="bg-amber-500/10 text-amber-500" loading={statsLoading} />
             </div>
 
             {/* ── Body ─────────────────────────────────────────── */}
@@ -279,12 +279,12 @@ export function DataSourceProfile({ catalogId, context: _context }: {
                     <Card>
                         <CardHeader icon={Tag} title="Entity types" />
                         {stats ? <TypeBreakdown counts={stats.entityTypeCounts} accent="bg-emerald-500" />
-                            : <p className="px-5 pb-5 text-xs text-ink-muted">{isLoading ? 'Loading…' : 'No stats available.'}</p>}
+                            : <p className="px-5 pb-5 text-xs text-ink-muted">{statsLoading ? 'Loading…' : 'No stats available.'}</p>}
                     </Card>
                     <Card>
                         <CardHeader icon={Waypoints} title="Relationship types" />
                         {stats ? <TypeBreakdown counts={stats.edgeTypeCounts} accent="bg-amber-500" />
-                            : <p className="px-5 pb-5 text-xs text-ink-muted">{isLoading ? 'Loading…' : 'No stats available.'}</p>}
+                            : <p className="px-5 pb-5 text-xs text-ink-muted">{statsLoading ? 'Loading…' : 'No stats available.'}</p>}
                     </Card>
 
                     {/* Quality & connectivity */}
@@ -311,7 +311,7 @@ export function DataSourceProfile({ catalogId, context: _context }: {
                     {/* Used by — freed from the delete dialog */}
                     <Card>
                         <CardHeader icon={Building2} title="Used by" action={
-                            isLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted" /> : undefined
+                            consumersLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted" /> : undefined
                         } />
                         <div className="px-5 pb-5 space-y-4">
                             <UsedByList

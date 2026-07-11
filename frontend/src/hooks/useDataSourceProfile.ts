@@ -11,6 +11,8 @@ export interface DataSourceProfileData {
   meta: InsightsMeta | undefined
   consumers: ProviderImpactResponse | undefined
   isLoading: boolean
+  statsLoading: boolean
+  consumersLoading: boolean
   notFound: boolean
 }
 
@@ -48,6 +50,8 @@ export function useDataSourceProfile(catalogId: string | null): DataSourceProfil
     meta: statsQuery.data?.meta,
     consumers: impactQuery.data,
     isLoading: itemQuery.isLoading,
+    statsLoading: statsQuery.isLoading,
+    consumersLoading: impactQuery.isLoading,
     notFound: itemQuery.isError,
   }
 }
