@@ -15,6 +15,7 @@
 - All reads via React Query; permission-gated at the service layer (services already `silent403`).
 - `tsc --noEmit` must stay at the repo baseline (currently 65 pre-existing errors, none in touched files). **Run `tsc`, not just vitest, after adding any test file** — vitest (esbuild) does not type-check.
 - Plain-language, non-technical microcopy (see `premium-nontechnical-ui-principle`). No jargon in section titles.
+- **Leverage the Insights Service primitives for ALL data + freshness — do NOT reinvent.** Specifically: stats/composition come from `useAssetStats` → `AssetStatsPayload` (node/edge counts, `entityTypeCounts`, `edgeTypeCounts`); freshness/staleness/provider-health from `StatusChip` + the `InsightsMeta` envelope (`meta.status`, `meta.updated_at`, `meta.refreshing`, `meta.provider_health`); the "Refresh now" action reuses `providerService.refreshAssetStats(providerId, assetName)` + `queryClient.invalidateQueries([ASSET_STATS_QUERY_KEY_PREFIX, …])` (or the existing `RefreshControl` component), NOT a new refresh path; any polling cadence from `useInsightsConfig`. Before writing a data/freshness/refresh element, check `frontend/src/components/insights/` and `frontend/src/hooks/useAssetStats.ts`/`useInsightsConfig.ts`/`useInsightsJob.ts` for an existing piece and reuse it.
 - Spec: `docs/superpowers/specs/2026-07-11-data-source-profile-design.md`.
 
 ---
