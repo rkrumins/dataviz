@@ -53,7 +53,17 @@ services:
       # aggregation run then correctly produced zero cells). AOF bounds the
       # loss window to ~1s; aof-load-truncated tolerates a torn tail after
       # a crash instead of refusing to start.
-      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes
+      #
+      # FAST RECOVERY (2026-07-11): a restart replays the AOF *incremental*
+      # command-by-command (slow — ~minutes/GB), while the AOF *base* (an RDB)
+      # bulk-loads fast (~74MB/s). So recovery time is bounded by the incr
+      # SIZE. The Redis defaults (rewrite at +100% of a large base, i.e. only
+      # once the incr exceeds ~2GB) let a single big import leave a multi-GB
+      # incr that takes ~an hour to replay. Refresh the base sooner (rewrite
+      # at +80% but never below 256MB) so the incr — and thus restart time —
+      # stays small. The acute case (a bulk import) is compacted explicitly by
+      # the importer via BGREWRITEAOF right after the push.
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb
     volumes:
       # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
       # symlinks /data/data → there). Mounting the volume at /data would
@@ -65,6 +75,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+      # Grace period while the AOF base RDB loads on (re)start — otherwise a
+      # normal multi-GB load reports LOADING past the 10×5s window and Docker
+      # flaps the container unhealthy mid-recovery.
+      start_period: 120s
 
   # ── Redis (Message Broker) ─────────────────────────────────────────
   # Dedicated Redis 7 for aggregation job dispatch (Redis Streams) and

@@ -297,6 +297,20 @@ async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
     await provider.ensure_indices()
     logger.info("Push complete!")
 
+    # Compact the AOF so a subsequent FalkorDB restart reloads from the fast RDB base
+    # instead of replaying this whole import command-by-command (which is ~minutes/GB and
+    # can leave the instance stuck 'LOADING'). Best-effort; the graph is already durable.
+    try:
+        import redis.asyncio as _aioredis
+        _r = _aioredis.Redis(
+            host=os.getenv("FALKORDB_HOST", "localhost"),
+            port=int(os.getenv("FALKORDB_PORT", "6379")))
+        await _r.execute_command("BGREWRITEAOF")
+        await _r.aclose()
+        logger.info("Triggered BGREWRITEAOF — the AOF will compact so restarts stay fast.")
+    except Exception as exc:
+        logger.warning("BGREWRITEAOF trigger failed (non-fatal, graph still durable): %s", exc)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CLI
