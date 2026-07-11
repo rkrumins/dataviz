@@ -9,6 +9,7 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
+import { useQuery } from '@tanstack/react-query'
 import {
     Database, Layers, GitBranch, Compass,
     Boxes, Spline, Tag, Waypoints, Building2, Eye, Clock, ExternalLink,
@@ -19,6 +20,8 @@ import { useDataSourceProfile } from '@/hooks/useDataSourceProfile'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { StatusChip } from '@/components/insights/StatusChip'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { aggregationService } from '@/services/aggregationService'
+import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
 
 export interface DataSourceProfileContext {
     wsId: string
@@ -173,9 +176,37 @@ function UsedByList({ icon: Icon, label, items, href, empty }: {
     )
 }
 
+/** Read-only aggregation readiness for the data source's workspace binding. */
+function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: string }) {
+    const { data } = useQuery({
+        queryKey: ['ds-readiness', dataSourceId],
+        queryFn: () => aggregationService.getReadiness(dataSourceId),
+        staleTime: 30_000,
+    })
+    if (!data) return null
+    return (
+        <Card className="p-5">
+            <div className="flex items-center gap-2 mb-3">
+                <Waypoints className="w-4 h-4 text-ink-muted" />
+                <h3 className="text-sm font-bold text-ink">Aggregation</h3>
+            </div>
+            <div className="space-y-1.5 text-xs">
+                <DetailRow label="Status" value={data.aggregationStatus ?? '—'} />
+                <DetailRow label="Rolled-up edges" value={compactNum(data.aggregationEdgeCount ?? 0)} />
+                <DetailRow label="Last aggregated" value={timeAgo(data.lastAggregatedAt)} />
+                {data.driftDetected && (
+                    <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
+                        Source changed since last aggregation — re-aggregate from the workspace to refresh.
+                    </p>
+                )}
+            </div>
+        </Card>
+    )
+}
+
 // ── component ────────────────────────────────────────────────────────────
 
-export function DataSourceProfile({ catalogId, context: _context }: {
+export function DataSourceProfile({ catalogId, context }: {
     catalogId: string
     context?: DataSourceProfileContext | null
 }) {
@@ -366,6 +397,29 @@ export function DataSourceProfile({ catalogId, context: _context }: {
                             </div>
                         )}
                     </Card>
+
+                    {/* ── Enhanced (workspace-context) sections ───────── */}
+                    {context && (
+                        <>
+                            <Card className="p-5">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Layers className="w-4 h-4 text-ink-muted" />
+                                    <h3 className="text-sm font-bold text-ink">Semantic layer</h3>
+                                </div>
+                                {context.ontologyId ? (
+                                    <Link to={`/schema/${context.ontologyId}`} className="text-sm font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                                        {context.ontologyName ?? 'View ontology'}
+                                    </Link>
+                                ) : (
+                                    <p className="text-xs text-ink-muted/80">No semantic layer assigned.</p>
+                                )}
+                            </Card>
+
+                            <AggregationStatusCard dataSourceId={context.dataSourceId} wsId={context.wsId} />
+
+                            <VocabAlignmentWarning wsId={context.wsId} dataSourceId={context.dataSourceId} />
+                        </>
+                    )}
                 </div>
             </div>
         </>

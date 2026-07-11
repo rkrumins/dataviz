@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('@/hooks/useDataSourceProfile', () => ({
@@ -17,8 +18,17 @@ vi.mock('@/store/providerHealthModel', () => ({
   PROVIDER_HEALTH_META: { ready: { dot: 'bg-emerald-400', label: 'Healthy' } },
 }))
 vi.mock('@/components/insights/StatusChip', () => ({ StatusChip: () => <span data-testid="chip" /> }))
+vi.mock('@/services/aggregationService', () => ({
+  aggregationService: { getReadiness: vi.fn().mockResolvedValue({ aggregationStatus: 'ready', lastAggregatedAt: new Date().toISOString(), aggregationEdgeCount: 1234, driftDetected: false }) },
+}))
+vi.mock('@/components/admin/workspace/VocabAlignmentWarning', () => ({ VocabAlignmentWarning: () => <div data-testid="vocab" /> }))
 
 import { DataSourceProfile } from './DataSourceProfile'
+
+function wrapper({ children }: { children: React.ReactNode }) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+}
 
 describe('DataSourceProfile', () => {
   it('renders core sections: name, metrics, and consumers', async () => {
@@ -34,5 +44,13 @@ describe('DataSourceProfile', () => {
   it('does not render enhanced sections without context', () => {
     render(<MemoryRouter><DataSourceProfile catalogId="cat-1" /></MemoryRouter>)
     expect(screen.queryByText('Semantic layer')).not.toBeInTheDocument()
+  })
+
+  it('renders enhanced sections when workspace context is provided', async () => {
+    const ctx = { wsId: 'w', dataSourceId: 'ds-1', ontologyId: 'o-1', ontologyName: 'Core Ontology' }
+    render(<MemoryRouter><DataSourceProfile catalogId="cat-1" context={ctx} /></MemoryRouter>, { wrapper })
+    expect(await screen.findByText('Semantic layer')).toBeInTheDocument()
+    expect(screen.getByText('Core Ontology')).toBeInTheDocument()
+    expect(screen.getByTestId('vocab')).toBeInTheDocument()
   })
 })
