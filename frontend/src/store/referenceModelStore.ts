@@ -52,6 +52,12 @@ type AssignmentStatus = 'idle' | 'loading' | 'success' | 'error'
 export interface ComputeAssignmentsParams {
     assignments: Record<string, LayerAssignmentEntry>
     entityScope: 'all' | 'curated'
+    /** URNs of the entities currently loaded in the view (top-level nodes,
+     *  plus any lazily-expanded children). The compute is scoped to and reads
+     *  exactly this set — the canvas is lazy-loaded for million-node graphs,
+     *  so assignment must cover the rendered view, never scan the whole graph
+     *  (which would be slow AND, when capped, silently drop entities). */
+    entityIds?: string[]
 }
 
 // ============================================
@@ -611,6 +617,11 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
 
                 return {
                     scopeFilter: state.scopeFilter ?? undefined,
+                    // Scope the compute to the loaded view (deduped). Empty →
+                    // omit so the backend falls back to the placed entities.
+                    urns: params.entityIds && params.entityIds.length > 0
+                        ? Array.from(new Set(params.entityIds))
+                        : undefined,
                     layers: state.layers.map(layer => ({
                         id: layer.id, // Backend expects 'id'
                         name: layer.name,

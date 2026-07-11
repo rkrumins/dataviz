@@ -796,9 +796,17 @@ export function ContextViewCanvas({
     // buildAssignmentRequest fills the backend EntityAssignmentConfig fields.
     const view = useSchemaStore.getState().getActiveView()
     const norm = normalizeReferenceLayout(view?.layout?.referenceLayout)
+    // Scope the assignment compute to the loaded view (top-level nodes now,
+    // plus whatever the user has lazily expanded). The backend reads exactly
+    // this set — never the whole graph — so million-node graphs stay fast and
+    // no rendered entity is dropped by a truncating cap.
+    const loadedUrns = nodes
+      .map(n => (n.data?.urn as string) || n.id)
+      .filter(Boolean)
     computeAssignments(provider, {
       assignments: norm.assignments,
       entityScope: deriveEntityScope(view?.content, norm),
+      entityIds: loadedUrns,
     })
   }, [nodes.length, provider, computeAssignments, assignmentStatus, storeLayers, activeView?.id])
 

@@ -1122,4 +1122,12 @@ export interface LayerAssignmentRequest {
     assignments?: Record<string, EntityAssignmentConfig>;
     /** The active view's scope ('all' | 'curated'). */
     entityScope?: 'all' | 'curated';
+    /**
+     * URNs of the entities currently loaded in the view. The compute is
+     * scoped to and reads exactly this set — the canvas is lazy-loaded, so
+     * assignment covers the rendered view (top-level nodes + expanded
+     * children), never the whole graph. Omit to fall back to the placed
+     * entities (``assignments`` keys). See assignment_engine.py.
+     */
+    urns?: string[];
 }
