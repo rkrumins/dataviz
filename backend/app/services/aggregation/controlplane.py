@@ -37,7 +37,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import (
-    Depends, FastAPI, HTTPException, Query, Request, Response, status,
+    Body, Depends, FastAPI, HTTPException, Query, Request, Response, status,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,6 +105,8 @@ async def lifespan(app: FastAPI):
         session_factory=get_jobs_session,
         ontology_service=ontology_svc,
     )
+    from .service import set_active_service
+    set_active_service(svc)
 
     # 6. Crash recovery — OFF the startup critical path. It re-dispatches
     # interrupted jobs with a per-job exponential backoff sleep, which can
@@ -121,10 +123,27 @@ async def lifespan(app: FastAPI):
 
     recovery_task = asyncio.create_task(_run_crash_recovery())
 
-    # 7. Start scheduler (drift detection)
-    scheduler = AggregationScheduler(get_jobs_session, registry)
+    # 7. Start scheduler (drift detection). With the job-bus Redis in
+    # hand its stale-job watchdog stands down in favor of the reconciler.
+    scheduler = AggregationScheduler(
+        get_jobs_session, registry, redis_client=redis_client,
+    )
     scheduler_task = asyncio.create_task(scheduler.start())
     logger.info("Aggregation scheduler started")
+
+    # 8. Stuck-job reconciler — the control plane is its home in the
+    # split topology. Workers ACK stream messages BEFORE executing
+    # (crash recovery is THIS loop's lock-aware re-dispatch, not stream
+    # redelivery), so without it a dead worker's job stayed 'running'
+    # forever with no auto-resume. The sweep's advisory lock keeps a
+    # dev-role monolith or HA replicas from double-running it.
+    from .reconciler import run_reconciler
+    reconciler_shutdown = asyncio.Event()
+    reconciler_task = asyncio.create_task(
+        run_reconciler(get_jobs_session, reconciler_shutdown, redis_client),
+        name="aggregation-stuck-job-reconciler",
+    )
+    logger.info("Stuck-job reconciler started")
 
     # Store in app state
     app.state.aggregation_service = svc
@@ -136,6 +155,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    reconciler_shutdown.set()
+    if not reconciler_task.done():
+        try:
+            await asyncio.wait_for(reconciler_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            reconciler_task.cancel()
     await scheduler.stop()
     scheduler_task.cancel()
     recovery_task.cancel()
@@ -185,12 +210,16 @@ async def _get_session(request: Request):
 
 from .schemas import (  # noqa: E402
     AggregationTriggerRequest,
+    AggregationSettingsRequest,
+    AggregationSettingsResponse,
     AggregationSkipRequest,
     AggregationScheduleRequest,
     AggregationJobResponse,
     PaginatedJobsResponse,
     DataSourceReadinessResponse,
     DriftCheckResponse,
+    ResumeOverrides,
+    WorkersResponse,
 )
 from .service import ConflictError, NotFoundError  # noqa: E402
 
@@ -347,11 +376,15 @@ async def get_job(
 async def resume_job(
     ds_id: str,
     job_id: str,
+    overrides: Optional[ResumeOverrides] = Body(default=None),
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
 ):
+    # The overrides body was previously dropped here, so resume tunables
+    # (timeout / retries / tuning) silently never applied in proxy
+    # deployments — accept and forward it.
     try:
-        return await svc.resume(ds_id, job_id, session)
+        return await svc.resume(ds_id, job_id, session, overrides=overrides)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -411,6 +444,7 @@ async def purge_aggregation(
     response: Response,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(_get_session),
+    skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
 ):
     """Claim a purge slot and hand off to the insights-service worker.
     The provider DELETE runs as a Redis Streams job with retry, DLQ,
@@ -418,7 +452,9 @@ async def purge_aggregation(
     from backend.insights_service.enqueue import enqueue_purge_job_safe
 
     try:
-        job = await svc.claim_purge_job(ds_id, session)
+        job = await svc.claim_purge_job(
+            ds_id, session, skip_reaggregate=skip_reaggregate,
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:
@@ -455,6 +491,46 @@ async def skip_aggregation(
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── GET/PUT /aggregation/settings — global tuning defaults ──────────
+
+@app.get(
+    "/aggregation/settings",
+    response_model=AggregationSettingsResponse,
+    summary="Get global aggregation tuning defaults",
+)
+async def get_settings(
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    return await svc.get_settings(session)
+
+
+@app.put(
+    "/aggregation/settings",
+    response_model=AggregationSettingsResponse,
+    summary="Replace global aggregation tuning defaults",
+)
+async def put_settings(
+    body: AggregationSettingsRequest,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    return await svc.put_settings(session, body.tuning)
+
+
+# ── GET /aggregation/workers — worker fleet + queue depth ───────────
+
+@app.get(
+    "/aggregation/workers",
+    response_model=WorkersResponse,
+    summary="List live aggregation workers and job-queue depth",
+)
+async def list_workers():
+    from .fleet import read_fleet
+
+    return await read_fleet()
 
 
 # ── PUT /aggregation/data-sources/{ds_id}/schedule ───────────────────

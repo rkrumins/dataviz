@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import socket
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -562,30 +563,36 @@ async def lifespan(_app: FastAPI):
         "AGGREGATION_PROXY_ENABLED", "false"
     ).lower() == "true"
 
+    # Event listener: whenever a job bus exists (REDIS_URL), aggregation
+    # jobs execute on the worker fleet and publish their terminal events
+    # to the bus — SOMEONE in this process must consume them or the local
+    # workspace_data_sources row never syncs (observed live: a graph held
+    # 1,840 rollups while the row said status=none/count=0, because the
+    # listener only started in proxy mode while dispatch had long moved
+    # to the Redis stream for every topology with a bus). It also
+    # invalidates the aggregated-edge graph cache on job completion.
+    _agg_event_listener = None
+    if os.getenv("REDIS_URL"):
+        try:
+            from .services.aggregation.redis_client import get_redis
+            from .services.aggregation.event_listener import AggregationEventListener
+            _agg_event_listener = AggregationEventListener(
+                redis_client=get_redis(),
+                session_factory=get_jobs_session,
+            )
+            _app.state._agg_event_listener = _agg_event_listener
+            _app.state._agg_event_listener_task = asyncio.create_task(
+                _agg_event_listener.start()
+            )
+            logger.info("Aggregation event listener started (syncs status + invalidates caches)")
+        except Exception as exc:
+            logger.warning("Aggregation event listener startup failed: %s", exc)
+
     if aggregation_proxy_enabled:
         logger.info(
             "Aggregation: proxy mode enabled — all endpoints forwarded to %s",
             os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091"),
         )
-        # Start event listener to sync aggregation status from Control Plane
-        # into local workspace_data_sources table.
-        _agg_event_listener = None
-        redis_url = os.getenv("REDIS_URL")
-        if redis_url:
-            try:
-                from .services.aggregation.redis_client import get_redis
-                from .services.aggregation.event_listener import AggregationEventListener
-                _agg_event_listener = AggregationEventListener(
-                    redis_client=get_redis(),
-                    session_factory=get_jobs_session,
-                )
-                _app.state._agg_event_listener = _agg_event_listener
-                _app.state._agg_event_listener_task = asyncio.create_task(
-                    _agg_event_listener.start()
-                )
-                logger.info("Aggregation event listener started (syncs status from Control Plane)")
-            except Exception as exc:
-                logger.warning("Aggregation event listener startup failed: %s", exc)
     else:
         try:
             from .services.aggregation import (
@@ -620,8 +627,14 @@ async def lifespan(_app: FastAPI):
                 agg_dispatcher = PostgresDispatcher(get_jobs_session)
                 logger.info("Aggregation dispatch: PostgresDispatcher (legacy standalone worker)")
             elif dispatch_mode == "auto":
-                # Auto-detect: if REDIS_URL is set and role is not worker, use Redis
-                if os.getenv("REDIS_URL") and not runs_worker():
+                # Auto-detect. Aggregation EXECUTION belongs to the
+                # dedicated worker service — whenever a job bus exists
+                # (REDIS_URL), dispatch to the stream regardless of this
+                # process's role. The previous role-based branch put
+                # dev-role processes on InProcessDispatcher even when a
+                # worker fleet was consuming the stream, so UI-triggered
+                # jobs silently executed inside the viz-service.
+                if os.getenv("REDIS_URL"):
                     from .services.aggregation.redis_client import get_redis
                     from .services.aggregation.dispatcher import RedisStreamDispatcher
                     agg_dispatcher = RedisStreamDispatcher(get_redis())
@@ -630,14 +643,45 @@ async def lifespan(_app: FastAPI):
                     agg_dispatcher = PostgresDispatcher(get_jobs_session)
                     logger.info("Aggregation dispatch: PostgresDispatcher (auto — no REDIS_URL)")
                 else:
-                    agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+                    agg_worker = AggregationWorker(
+                        get_jobs_session, provider_manager,
+                        worker_id=f"inprocess-{socket.gethostname()}",
+                    )
                     agg_dispatcher = InProcessDispatcher(agg_worker)
                     logger.info("Aggregation dispatch: InProcessDispatcher (auto — worker role)")
+            elif os.getenv("REDIS_URL"):
+                # inprocess (or unknown) REQUESTED, but a job bus exists.
+                # Aggregation execution belongs to the worker service —
+                # in-process execution inside the viz-service is what
+                # caused invisible shadow runs contending on the graph
+                # lease, and a stale env (container restarted without
+                # being recreated) kept re-selecting it. With REDIS_URL
+                # present, the stream ALWAYS wins.
+                from .services.aggregation.redis_client import get_redis
+                from .services.aggregation.dispatcher import RedisStreamDispatcher
+                agg_dispatcher = RedisStreamDispatcher(get_redis())
+                logger.warning(
+                    "Aggregation dispatch: AGGREGATION_DISPATCH_MODE=%s "
+                    "requested but REDIS_URL is set — dispatching to the "
+                    "Redis stream instead (in-process execution in this "
+                    "process is disabled whenever a job bus exists; run "
+                    "the dedicated worker: python -m "
+                    "backend.app.services.aggregation).", dispatch_mode,
+                )
             else:
-                # inprocess or unknown — dev/single-process mode
-                agg_worker = AggregationWorker(get_jobs_session, provider_manager)
+                # inprocess with NO job bus — true single-process dev.
+                # worker_id attribution makes the execution location visible
+                # in the job detail UI instead of a blank Worker cell.
+                agg_worker = AggregationWorker(
+                    get_jobs_session, provider_manager,
+                    worker_id=f"inprocess-{socket.gethostname()}",
+                )
                 agg_dispatcher = InProcessDispatcher(agg_worker)
-                logger.info("Aggregation dispatch: InProcessDispatcher (all-in-one dev mode)")
+                logger.warning(
+                    "Aggregation dispatch: InProcessDispatcher — jobs will "
+                    "execute INSIDE this process (no REDIS_URL, so no "
+                    "worker fleet can exist)."
+                )
 
             # Get ontology service reference for monolith-mode resolution.
             #
@@ -676,6 +720,10 @@ async def lifespan(_app: FastAPI):
 
             # Register as app state for endpoint access
             _app.state.aggregation_service = agg_service
+            # Process-wide handle for non-HTTP callers (read-path backfill
+            # triggers a REAL job instead of shadow in-process work).
+            from .services.aggregation.service import set_active_service
+            set_active_service(agg_service)
 
             # Recovery and scheduler only run on control-plane / dev roles.
             # Web tier never starts background tasks — it is fully stateless.
@@ -684,8 +732,20 @@ async def lifespan(_app: FastAPI):
                 if recovered:
                     logger.info("Recovered %d interrupted aggregation jobs", recovered)
 
+            from .services.aggregation.redis_client import get_redis as _get_redis_for_recon
+            try:
+                _recon_redis = _get_redis_for_recon()
+            except Exception:
+                _recon_redis = None
+
             if runs_scheduler():
-                agg_scheduler = AggregationScheduler(get_jobs_session, provider_manager)
+                # With the job-bus Redis in hand the scheduler's coarse
+                # mark-failed watchdog stands down — the lock-aware
+                # reconciler below owns liveness.
+                agg_scheduler = AggregationScheduler(
+                    get_jobs_session, provider_manager,
+                    redis_client=_recon_redis,
+                )
                 asyncio.create_task(agg_scheduler.start())
                 logger.info("Aggregation scheduler started")
 
@@ -697,11 +757,6 @@ async def lifespan(_app: FastAPI):
             # marked cancelled. Falls back to staleness→failed if Redis is
             # unavailable.
             from .services.aggregation.reconciler import run_reconciler
-            from .services.aggregation.redis_client import get_redis as _get_redis_for_recon
-            try:
-                _recon_redis = _get_redis_for_recon()
-            except Exception:
-                _recon_redis = None
             _app.state._reconciler_shutdown = asyncio.Event()
             _app.state._reconciler_task = asyncio.create_task(
                 run_reconciler(

@@ -65,11 +65,18 @@ services:
       - --reload-dir
       - /app/backend
     environment:
-      # Single-process dev mode: aggregation runs in-process, no proxy
-      # hop to the controlplane. Overrides the prod values.
+      # Dev mode: direct aggregation API (no proxy hop) but dispatch to
+      # the Redis stream — this compose file RUNS the dedicated
+      # aggregation-worker container, so jobs must execute there, never
+      # inside the viz-service process. ``inprocess`` here contradicted
+      # the worker container: UI-triggered jobs silently ran in the
+      # viz-service while the worker (and its fleet panel) sat idle,
+      # and the two executors collided on the per-graph write lease.
+      # Use ``inprocess`` only when running uvicorn standalone without
+      # the worker container.
       SYNODIC_ROLE: dev
       AGGREGATION_PROXY_ENABLED: "false"
-      AGGREGATION_DISPATCH_MODE: inprocess
+      AGGREGATION_DISPATCH_MODE: redis
 
   aggregation-controlplane:
     volumes:

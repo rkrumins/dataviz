@@ -32,12 +32,18 @@ services:
       - "6379:6379"
       - "3000:3000"
     environment:
-      FALKORDB_ARGS: THREAD_COUNT 4
+      FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50
+      # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
+      # without maxmemory the dataset itself can still OOM-kill the container.
+      # noeviction = writes fail loudly at the ceiling instead of silent eviction.
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # LOADING = alive and replaying AOF/RDB — see docker-compose.yml.
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 120s
 
   # ── Visualization Service (SQLite, no PostgreSQL needed) ────────────
   viz-service:

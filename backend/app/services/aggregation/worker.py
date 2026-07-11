@@ -38,6 +38,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.adapters import ProviderUnavailable, ProviderBusy
+from backend.app.providers.falkordb_materialize import (
+    MaterializationBudgetExceeded,
+    MaterializationPreconditionFailed,
+)
 
 from backend.app.jobs import (
     JobScope as PlatformJobScope,
@@ -54,7 +58,14 @@ logger = logging.getLogger(__name__)
 
 _CHECKPOINT_MAX_INTERVAL_SECS: float = 2.0
 _CHECKPOINT_MAX_BATCHES: int = 5
-_JOB_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_JOB_TIMEOUT_SECS", "7200"))
+# Progress-aware watchdog (replaces the old fixed AGGREGATION_JOB_TIMEOUT_SECS
+# kill that terminated 3h+ jobs at 2h regardless of forward progress):
+# a job is killed only when it makes NO forward progress for the stall
+# window, or exceeds the (very generous) wall-clock safety net.
+# ``job.timeout_secs`` — when set on the job row — overrides the stall
+# window, preserving the column's "how long may this hang" intent.
+_STALL_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_STALL_TIMEOUT_SECS", "900"))
+_MAX_WALL_SECS: int = int(os.getenv("AGGREGATION_JOB_MAX_WALL_SECS", "86400"))
 
 
 def _now() -> str:
@@ -75,10 +86,12 @@ class AggregationWorker:
         session_factory: Any,
         registry: Any,
         event_publisher: Any = None,
+        worker_id: Optional[str] = None,
     ) -> None:
         self._session_factory = session_factory
         self._registry = registry
         self._events = event_publisher
+        self._worker_id = worker_id
 
     async def run(self, job_id: str) -> None:
         """Full materialization pipeline.
@@ -105,10 +118,27 @@ class AggregationWorker:
                 logger.error("Aggregation job %s not found", job_id)
                 return
 
+            if job.trigger_source == "purge":
+                # A purge row must never run the aggregation pipeline —
+                # it belongs to the insights purge stream. Checked BEFORE
+                # any mutation: the old in-pipeline guard flipped the
+                # purge row to running and then failed it, corrupting the
+                # purge's own state whenever a mis-dispatch happened.
+                logger.error(
+                    "Aggregation job %s is a PURGE row mis-dispatched to "
+                    "the aggregation worker (trigger_source=purge) — "
+                    "ignoring without touching the row. Find and fix the "
+                    "dispatcher that sent it here.", job_id,
+                )
+                return
+
             # Transition to running
             job.status = "running"
             job.started_at = job.started_at or _now()
             job.updated_at = _now()
+            # Which worker executed this job — fleet attribution for the UI.
+            if self._worker_id and hasattr(job, "worker_id"):
+                job.worker_id = self._worker_id
             await session.commit()
 
             # Register a cooperative cancel event before any heavy work so
@@ -118,6 +148,8 @@ class AggregationWorker:
             # block below.
             cancel_registry = get_cancel_registry()
             cancel_event = cancel_registry.register(job_id)
+            provider = None
+            admission_attached = False
 
             # Platform JobEmitter — the only path for live progress
             # updates. Seed its per-job sequence counter from the
@@ -165,7 +197,15 @@ class AggregationWorker:
                 )
 
                 if not lineage_types:
-                    raise ValueError("No lineage edge types configured — cannot aggregate")
+                    # Self-heal instead of failing a doomed row: re-freeze
+                    # the edge-type lists from the pinned ontology at
+                    # pickup. Whatever entry path produced a row without
+                    # frozen types (legacy row, partial write, manual
+                    # insert), the pinned ontology is still the source of
+                    # truth the trigger would have used.
+                    containment_types, lineage_types, entity_type_levels = (
+                        await self._refreeze_edge_types(session, job)
+                    )
 
                 # Worker-side gate re-validation. Closes the trigger →
                 # pickup race: if the user edited the ontology between
@@ -280,18 +320,40 @@ class AggregationWorker:
                             "index if any): %s", job.id, exc,
                         )
 
+                # Distributed write-admission control: N workers × M pods
+                # share one write budget per FalkorDB endpoint (per-graph
+                # lease + per-endpoint slots) instead of each pod throttling
+                # only itself. Best-effort: without it the provider's
+                # per-process gates still apply.
+                if hasattr(provider, "set_admission_controller"):
+                    try:
+                        from .admission import AggregationAdmission
+                        from .redis_client import get_redis
+                        provider.set_admission_controller(
+                            AggregationAdmission(get_redis())
+                        )
+                        admission_attached = True
+                    except Exception as exc:
+                        logger.warning(
+                            "Aggregation job %s: admission controller not "
+                            "attached (continuing with per-process limits): %s",
+                            job.id, exc,
+                        )
+
                 # Compute fingerprint before aggregation
                 job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
                 await session.commit()
 
-                # Run cursor-based batch materialization with retry + timeout.
-                # On transient provider failures (AggregationBatchAbort, connection
-                # errors), retry up to max_retries times with exponential backoff.
-                # The overall job is wrapped in a timeout to catch hung queries.
-                # Use per-job timeout if set, otherwise global default
-                job_timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
+                # Run materialization with retries under a progress-aware
+                # watchdog: the job is killed only when it stops making
+                # forward progress for the stall window (checkpoints and
+                # intra-batch heartbeats both count as progress), or when
+                # it exceeds the wall-clock safety net. A steadily
+                # progressing multi-hour job is never killed by a timer.
+                stall_timeout = job.timeout_secs or _STALL_TIMEOUT_SECS
+                progress_marker = {"at": time.monotonic()}
 
-                result = await asyncio.wait_for(
+                materialize_task = asyncio.create_task(
                     self._materialize_with_retries(
                         session=session,
                         job=job,
@@ -301,21 +363,85 @@ class AggregationWorker:
                         cancel_event=cancel_event,
                         emitter=emitter,
                         scope=scope,
-                    ),
-                    timeout=job_timeout,
+                        progress_marker=progress_marker,
+                    )
                 )
+                wall_start = time.monotonic()
+                timeout_reason = ""
+                try:
+                    while True:
+                        done, _ = await asyncio.wait(
+                            {materialize_task}, timeout=10.0,
+                        )
+                        if done:
+                            result = materialize_task.result()
+                            break
+                        now = time.monotonic()
+                        stalled_for = now - progress_marker["at"]
+                        if stalled_for > stall_timeout:
+                            timeout_reason = (
+                                f"no forward progress for {int(stalled_for)}s "
+                                f"(stall timeout {stall_timeout}s)"
+                            )
+                        elif now - wall_start > _MAX_WALL_SECS:
+                            timeout_reason = (
+                                f"exceeded wall-clock safety net {_MAX_WALL_SECS}s"
+                            )
+                        if timeout_reason:
+                            materialize_task.cancel()
+                            try:
+                                await materialize_task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as inner_exc:
+                                # Surface the task's REAL terminal error
+                                # alongside the watchdog reason instead of
+                                # misreporting it as a pure timeout.
+                                timeout_reason += f" (task error: {inner_exc})"
+                            raise asyncio.TimeoutError(timeout_reason)
+                except asyncio.CancelledError:
+                    # run() itself was cancelled (exec-lock lost, consumer
+                    # drain). asyncio.wait does NOT propagate cancellation
+                    # into the awaited task — without this, the pipeline
+                    # keeps writing as an orphan whose lease-renew task
+                    # holds the per-graph write lease indefinitely while
+                    # the reconciler re-dispatches the job elsewhere.
+                    materialize_task.cancel()
+                    try:
+                        await materialize_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
 
                 # Success
                 job.status = "completed"
                 job.progress = 100
                 job.completed_at = _now()
+                # Clear transient park/retry text — without this, a job
+                # that quiesce-parked once ("write lease held ...") shows
+                # that message as a red error FOREVER after completing.
+                job.error_message = None
                 job.created_edges = result.get("aggregated_edges_affected", 0)
+                # Durable per-phase timings + write/delete counters for the
+                # job detail UI (best-effort; NULL on legacy providers).
+                if hasattr(job, "run_stats") and isinstance(result.get("run_stats"), dict):
+                    try:
+                        job.run_stats = json.dumps(result["run_stats"])
+                    except (TypeError, ValueError):
+                        pass
                 job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
 
                 # Update aggregation-owned data source state
                 await self._update_ds_state(
                     session,
                     job.data_source_id,
+                    aggregation_status="ready",
+                    last_aggregated_at=job.completed_at,
+                    aggregation_edge_count=job.created_edges,
+                    graph_fingerprint=job.graph_fingerprint_after,
+                )
+                await self._sync_workspace_ds_row(
+                    session, job,
                     aggregation_status="ready",
                     last_aggregated_at=job.completed_at,
                     aggregation_edge_count=job.created_edges,
@@ -360,6 +486,7 @@ class AggregationWorker:
                 )
 
                 # Publish event for viz-service to sync its own tables
+                # and invalidate its aggregated-edge graph cache.
                 if self._events:
                     await self._events.job_completed(
                         job_id=job_id,
@@ -367,6 +494,7 @@ class AggregationWorker:
                         edge_count=job.created_edges,
                         fingerprint=job.graph_fingerprint_after,
                         completed_at=job.completed_at,
+                        workspace_id=job.workspace_id,
                     )
 
                 # Aggregated-edge materialization changed the graph's edge
@@ -381,17 +509,20 @@ class AggregationWorker:
                     job_id, job.processed_edges, job.created_edges,
                 )
 
-            except asyncio.TimeoutError:
-                timeout = job.timeout_secs or _JOB_TIMEOUT_SECS
+            except asyncio.TimeoutError as timeout_exc:
+                reason = str(timeout_exc) or "watchdog timeout"
                 job.status = "failed"
                 job.error_message = (
-                    f"Job timed out after {timeout}s. "
+                    f"Job killed by watchdog: {reason}. "
                     f"Progress: {job.processed_edges}/{job.total_edges} edges. "
                     f"Resume from last_cursor is possible."
                 )
-                logger.error("Aggregation job %s timed out after %ds", job_id, timeout)
+                logger.error(
+                    "Aggregation job %s killed by watchdog: %s", job_id, reason,
+                )
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
 
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
@@ -443,6 +574,7 @@ class AggregationWorker:
                 )
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="cancelled")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="none")
 
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
@@ -482,6 +614,7 @@ class AggregationWorker:
                 logger.error("Aggregation job %s failed: %s", job_id, e, exc_info=True)
 
                 await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
 
                 terminal_seq = emitter.current_sequence(job_id) + 1
                 await record_terminal(
@@ -515,6 +648,14 @@ class AggregationWorker:
                 # uncaught exceptions, so a future job re-using this
                 # job_id (resume) starts with a fresh event.
                 cancel_registry.unregister(job_id)
+                # Detach the per-job admission controller from the shared
+                # provider instance so a non-aggregation caller never runs
+                # under a stale job's admission gates.
+                if admission_attached and provider is not None:
+                    try:
+                        provider.set_admission_controller(None)
+                    except Exception:
+                        pass
 
     async def _update_ds_state(
         self,
@@ -543,6 +684,135 @@ class AggregationWorker:
         except Exception as e:
             logger.warning("Failed to update data source state for %s: %s", data_source_id, e)
 
+    async def _sync_workspace_ds_row(
+        self,
+        session: AsyncSession,
+        job: Any,
+        **fields: Any,
+    ) -> None:
+        """Best-effort DIRECT sync of the viz-service's
+        ``workspace_data_sources`` row in the same transaction as the
+        job's terminal state — covers single-DB topologies where no
+        aggregation event listener runs (the observed gap: a graph held
+        1,840 rollups while the row said status=none/count=0). In
+        split-DB topologies the table is absent from the jobs DB, the
+        get fails harmlessly and the event listener owns the sync."""
+        try:
+            from backend.app.db.models import WorkspaceDataSourceORM
+
+            ds = await session.get(WorkspaceDataSourceORM, job.data_source_id)
+            if ds is None:
+                return
+            for key, value in fields.items():
+                if value is not None and hasattr(ds, key):
+                    setattr(ds, key, value)
+        except Exception as e:
+            logger.debug(
+                "workspace_data_sources direct sync skipped for %s: %s",
+                job.data_source_id, e,
+            )
+
+    async def _break_zombie_lease(
+        self, session: AsyncSession, provider: Any, my_job_id: str,
+    ) -> bool:
+        """True when the graph lease was held by a job whose row is
+        already terminal and we cleared it (atomically, value-compared —
+        a freshly acquired live lease is never touched)."""
+        admission = getattr(provider, "_admission_controller", None)
+        if admission is None:
+            return False
+        try:
+            holder = await admission.get_lease_holder(provider)
+            if not holder:
+                return True  # already expired — retry immediately
+            holder_job_id, holder_value = holder
+            if not holder_job_id or holder_job_id in ("unattributed", my_job_id):
+                return False
+            row = await session.get(AggregationJobORM, holder_job_id)
+            if row is None or row.status in ("completed", "failed", "cancelled"):
+                broken = await admission.break_lease_if_holder(
+                    provider, holder_value,
+                )
+                if broken:
+                    logger.warning(
+                        "Aggregation job %s: broke ZOMBIE graph lease held "
+                        "by %s (job row status=%s) — retrying immediately.",
+                        my_job_id, holder_job_id,
+                        row.status if row else "missing",
+                    )
+                return broken
+        except Exception as exc:
+            logger.warning(
+                "Aggregation job %s: zombie-lease check failed: %s",
+                my_job_id, exc,
+            )
+        return False
+
+    async def _refreeze_edge_types(
+        self, session: AsyncSession, job: AggregationJobORM,
+    ) -> tuple:
+        """Re-derive (containment, lineage, levels) from the job's pinned
+        ontology when the frozen lists are empty, persisting them back
+        onto the row so a resume stays stable. Raises ValueError when no
+        ontology is pinned or it yields no lineage types — with enough
+        context to identify the entry path that produced the bad row."""
+        if not job.ontology_id:
+            raise ValueError(
+                "No lineage edge types configured — cannot aggregate "
+                f"(trigger_source={job.trigger_source!r}, no pinned "
+                "ontology to re-freeze from; retrigger this data source)"
+            )
+        from backend.app.db.models import OntologyORM
+        from backend.app.ontology.resolver import (
+            parse_entity_definitions,
+            parse_relationship_definitions,
+            derive_flat_lists,
+        )
+        from backend.app.services.ontology_levels import derive_level_map
+        from types import SimpleNamespace
+
+        pinned = await session.get(OntologyORM, job.ontology_id)
+        if pinned is None:
+            raise ValueError(
+                f"No lineage edge types configured and pinned ontology "
+                f"{job.ontology_id!r} no longer exists — retrigger"
+            )
+        entity_defs = parse_entity_definitions(
+            json.loads(pinned.entity_type_definitions or "{}")
+        )
+        rel_defs = parse_relationship_definitions(
+            json.loads(pinned.relationship_type_definitions or "{}")
+        )
+        flat = derive_flat_lists(entity_defs, rel_defs)
+        if not flat.lineage_edge_types:
+            raise ValueError(
+                "No lineage edge types configured — the pinned ontology "
+                f"{job.ontology_id!r} classifies no relationship as "
+                "lineage (trigger_source="
+                f"{job.trigger_source!r})"
+            )
+        levels = derive_level_map(
+            SimpleNamespace(entity_type_definitions=entity_defs)
+        )
+        job.containment_edge_types = json.dumps(list(flat.containment_edge_types))
+        job.lineage_edge_types = json.dumps(list(flat.lineage_edge_types))
+        if hasattr(job, "entity_type_levels"):
+            job.entity_type_levels = json.dumps(levels)
+        job.updated_at = _now()
+        await session.commit()
+        logger.warning(
+            "Aggregation job %s had no frozen edge types "
+            "(trigger_source=%r) — re-froze from pinned ontology %s "
+            "(%d lineage, %d containment types)",
+            job.id, job.trigger_source, job.ontology_id,
+            len(flat.lineage_edge_types), len(flat.containment_edge_types),
+        )
+        return (
+            list(flat.containment_edge_types),
+            list(flat.lineage_edge_types),
+            levels,
+        )
+
     async def _materialize_with_retries(
         self,
         session: AsyncSession,
@@ -553,6 +823,7 @@ class AggregationWorker:
         cancel_event: asyncio.Event,
         emitter: Any,
         scope: PlatformJobScope,
+        progress_marker: Optional[dict] = None,
     ) -> dict:
         """Retry wrapper around _materialize_with_checkpoints.
 
@@ -582,6 +853,7 @@ class AggregationWorker:
         # the job forever — after the cap the job moves to ``failed``.
         max_quiesce_events = int(os.getenv("AGGREGATION_MAX_QUIESCE_EVENTS", "20"))
         quiesce_event_count = 0
+        zombie_breaks = 0
 
         # Progress-aware retry budget: a job that keeps moving forward past
         # transient FalkorDB connection resets must survive arbitrarily many
@@ -593,6 +865,14 @@ class AggregationWorker:
         # on transient resets alone.
         attempt = 0
         last_progress = job.processed_edges or 0
+
+        def _mark_alive() -> None:
+            # Deliberate waiting (quiesce park, retry backoff) is not a
+            # stall — keep the watchdog's progress marker fresh so it only
+            # fires on genuine hangs.
+            if progress_marker is not None:
+                progress_marker["at"] = time.monotonic()
+
         while True:
             try:
                 return await self._materialize_with_checkpoints(
@@ -604,6 +884,7 @@ class AggregationWorker:
                     cancel_event=cancel_event,
                     emitter=emitter,
                     scope=scope,
+                    progress_marker=progress_marker,
                 )
             except JobCancelled:
                 # Cooperative cancel — control-flow signal, not a transient
@@ -611,7 +892,26 @@ class AggregationWorker:
                 # outer run() handler, which marks the job 'cancelled' and
                 # emits the terminal event with last_cursor preserved.
                 raise
+            except (MaterializationBudgetExceeded, MaterializationPreconditionFailed):
+                # Both are deterministic — every retry recomputes the same
+                # outcome and burns another full EXTRACT+COMPUTE pass. Fail
+                # terminally with the guidance message intact.
+                raise
             except ProviderBusy as e:
+                # ZOMBIE-LEASE takeover: if the park is a graph-lease
+                # conflict and the named holder's job row is already
+                # TERMINAL (crashed before releasing, or an orphan from a
+                # pre-cancellation-fix build renewing forever), break the
+                # lease atomically and retry immediately instead of
+                # parking 30s at a time on a lease nobody living holds.
+                if (
+                    "write lease held" in (e.reason or "")
+                    and zombie_breaks < 3
+                    and await self._break_zombie_lease(session, provider, job.id)
+                ):
+                    zombie_breaks += 1
+                    _mark_alive()
+                    continue
                 # Phase 2 — park-and-resume on quiesce. NOT a retry:
                 # don't increment ``retry_count``, don't consume the
                 # ``max_attempts`` budget. Effectively re-runs the same
@@ -646,53 +946,16 @@ class AggregationWorker:
                     attempt + 1, e,
                 )
                 await asyncio.sleep(delay)
-                # Rewind the attempt counter so the iteration ahead doesn't
-                # consume retry budget. Python ``range`` iterators can't
-                # be rewound, so emulate by re-entering: we decrement a
-                # synthetic offset that lets us read the loop variable
-                # but the natural next iteration will still be ``attempt+1``
-                # — instead we ``continue`` and the original ``attempt``
-                # value is lost. Workaround: spin until the call succeeds
-                # or another exception fires. This nested-call form
-                # achieves "don't count quiesce" without restructuring.
-                while True:
-                    try:
-                        return await self._materialize_with_checkpoints(
-                            session=session,
-                            job=job,
-                            provider=provider,
-                            containment_types=containment_types,
-                            lineage_types=lineage_types,
-                            cancel_event=cancel_event,
-                            emitter=emitter,
-                            scope=scope,
-                        )
-                    except ProviderBusy as e2:
-                        quiesce_event_count += 1
-                        if quiesce_event_count > max_quiesce_events:
-                            logger.error(
-                                "Aggregation job %s: hit %d quiesce events; abandoning.",
-                                job.id, max_quiesce_events,
-                            )
-                            job.error_message = (
-                                f"Provider {e2.provider_name} stayed quiesced for "
-                                f"{max_quiesce_events} cooldown windows — abandoned."
-                            )[:2000]
-                            job.updated_at = _now()
-                            await session.commit()
-                            raise
-                        delay = (e2.retry_after_seconds or 30) + random.uniform(0, 2)
-                        logger.info(
-                            "Aggregation job %s: quiesce park (event %d/%d) — %s",
-                            job.id, quiesce_event_count, max_quiesce_events, e2,
-                        )
-                        await asyncio.sleep(delay)
-                        # Loop again — still NOT a retry.
-                        continue
-                    # Any other exception breaks out of the quiesce park
-                    # loop and is re-raised so the outer for-loop's
-                    # standard handlers (ProviderUnavailable / generic)
-                    # apply their retry-budget logic.
+                _mark_alive()
+                # Re-enter the OUTER loop without consuming the retry
+                # budget (``attempt`` is only incremented by the failure
+                # handlers below). The previous nested re-call loop only
+                # caught ProviderBusy, so any other exception raised
+                # inside it propagated OUT of this handler and skipped
+                # every retry-budget handler — with graph-lease parks now
+                # routine, the first transient error after a park
+                # terminally failed the job with zero retries.
+                continue
             except ProviderUnavailable as e:
                 last_error = e
                 if (job.processed_edges or 0) > last_progress:
@@ -743,6 +1006,7 @@ class AggregationWorker:
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
                     await asyncio.sleep(delay)
+                    _mark_alive()
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
@@ -770,6 +1034,7 @@ class AggregationWorker:
                         job.id, attempt + 1, job.max_retries, delay, e,
                     )
                     await asyncio.sleep(delay)
+                    _mark_alive()
                     attempt += 1
                 else:
                     # Final attempt exhausted — let the caller handle it
@@ -788,6 +1053,7 @@ class AggregationWorker:
         cancel_event: asyncio.Event,
         emitter: Any,
         scope: PlatformJobScope,
+        progress_marker: Optional[dict] = None,
     ) -> dict:
         """Run batch materialization with coalesced DB checkpointing.
 
@@ -811,6 +1077,8 @@ class AggregationWorker:
         async def checkpoint(
             processed: int, total: int, cursor: Optional[str],
             aggregated: int = 0, phase: Optional[str] = None,
+            *, progress_pct: Optional[int] = None,
+            stats: Optional[dict] = None,
         ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
             # Cooperative cancel point at the outer-batch boundary. The
@@ -820,21 +1088,31 @@ class AggregationWorker:
             # completed cleanly, and resume from ``cursor`` is sound.
             if cancel_event.is_set():
                 raise JobCancelled(job.id, _now())
+            # Any checkpoint is forward progress — feed the watchdog.
+            if progress_marker is not None:
+                progress_marker["at"] = time.monotonic()
             job.processed_edges = processed
             job.total_edges = total
             job.last_cursor = cursor
             if aggregated > 0:
                 job.created_edges = aggregated
-            # Phase 1.7 — surface the active phase to the UI. Providers
-            # that emit phase signals (FalkorDB bulk-rebuild) pass a
-            # short ID; legacy paths leave it None so the existing
-            # generic UI label keeps working.
+            # Surface the active phase to the UI. The pipeline passes a
+            # short ID (extracting/computing/reconciling/applying); None
+            # keeps the generic UI label working.
             if phase is not None:
                 job.current_phase = phase
-            # Clamp to [0, 100]: the streaming path drives ``total`` off a
-            # cheap (possibly stale) estimate, so ``processed`` can exceed
-            # it late in a run. Without the clamp the bar would read >100%.
-            job.progress = min(100, int((processed / total) * 100)) if total > 0 else 0
+            # The pipeline supplies a phase-weighted 0-100 percentage so
+            # the bar is monotonic across phases; without it, fall back to
+            # the processed/total ratio (clamped — ``total`` can lag when
+            # driven off a stale estimate). Clamped monotonic per job row:
+            # a transient-failure retry restarts the (cheap) extract phase
+            # from zero, and without the floor the UI bar would snap from
+            # 45% back to 0% on every retry.
+            if progress_pct is not None:
+                computed_pct = max(0, min(100, int(progress_pct)))
+            else:
+                computed_pct = min(100, int((processed / total) * 100)) if total > 0 else 0
+            job.progress = max(job.progress or 0, computed_pct)
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
             batches_since_commit += 1
@@ -873,7 +1151,8 @@ class AggregationWorker:
                 batches_since_commit = 0
                 is_first_checkpoint = False
                 logger.info(
-                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d materialized) [committed seq=%d]",
+                    "Aggregation job %s checkpoint: %d/%d edges (%d%%, %d written this run; "
+                    "diff apply skips unchanged edges) [committed seq=%d]",
                     job.id, processed, total, job.progress, job.created_edges, job.last_sequence,
                 )
             except Exception as commit_exc:
@@ -912,6 +1191,9 @@ class AggregationWorker:
                     "created_edges": job.created_edges,
                     "progress": job.progress,
                     "last_cursor": cursor or "",
+                    "current_phase": job.current_phase or "",
+                    "writes": (stats or {}).get("writes"),
+                    "deletes": (stats or {}).get("deletes"),
                 },
                 live_state={
                     "status": "running",
@@ -921,6 +1203,9 @@ class AggregationWorker:
                     "progress": job.progress,
                     "last_cursor": cursor or "",
                     "last_checkpoint_at": job.last_checkpoint_at or "",
+                    "current_phase": job.current_phase or "",
+                    "writes": (stats or {}).get("writes", 0) or 0,
+                    "deletes": (stats or {}).get("deletes", 0) or 0,
                 },
             )
 
@@ -939,6 +1224,8 @@ class AggregationWorker:
             those advance only at the boundary between outer batches
             and live in PG.
             """
+            if progress_marker is not None:
+                progress_marker["at"] = time.monotonic()
             await emitter.publish(
                 job_id=job.id,
                 kind="aggregation",
@@ -954,8 +1241,8 @@ class AggregationWorker:
                 },
             )
 
-        # Cooperative cancel hook handed to the provider. FalkorDB's
-        # ``_materialize_edges_batched`` checks this between MERGE
+        # Cooperative cancel hook handed to the provider. The pipeline
+        # checks this between scan ranges and write
         # sub-batches inside a single outer batch; True there raises
         # JobCancelled out of the provider, which the worker's outer
         # try/except catches and converts to a terminal ``cancelled``.
@@ -964,10 +1251,16 @@ class AggregationWorker:
         def should_cancel() -> bool:
             return cancel_event.is_set()
 
+        try:
+            job_tuning = json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+        except (TypeError, ValueError):
+            job_tuning = {}
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,
             lineage_edge_types=lineage_types,
             batch_size=job.batch_size,
+            tuning=job_tuning,
+            job_id=job.id,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,
             intra_batch_callback=intra_batch_heartbeat,

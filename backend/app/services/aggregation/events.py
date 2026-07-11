@@ -118,10 +118,14 @@ class AggregationEventPublisher:
         edge_count: int,
         fingerprint: Optional[str],
         completed_at: str,
+        workspace_id: Optional[str] = None,
     ) -> None:
         await self.publish("job.completed", {
             "job_id": job_id,
             "data_source_id": data_source_id,
+            # Scopes the listener's graph-cache invalidation (the cache
+            # keys are workspace-scoped).
+            "workspace_id": workspace_id,
             "status": "ready",
             "edge_count": edge_count,
             "fingerprint": fingerprint,
@@ -146,6 +150,25 @@ class AggregationEventPublisher:
             "job_id": job_id,
             "data_source_id": data_source_id,
             "status": "cancelled",
+        })
+
+    async def purge_completed(
+        self,
+        job_id: str,
+        data_source_id: str,
+        workspace_id: Optional[str],
+        deleted_edges: int,
+    ) -> None:
+        """A purge rewrote the :AGGREGATED layer — listeners must sync
+        status AND invalidate the aggregated read caches, exactly like a
+        completed aggregation run (a purge is the same event with the
+        opposite sign)."""
+        await self.publish("purge.completed", {
+            "job_id": job_id,
+            "data_source_id": data_source_id,
+            "workspace_id": workspace_id,
+            "status": "none",
+            "deleted_edges": deleted_edges,
         })
 
     async def state_updated(

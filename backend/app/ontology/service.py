@@ -18,6 +18,8 @@ from .defaults import (
     SYSTEM_DEFAULT_ONTOLOGY_VERSION,
     SYSTEM_ENTITY_TYPES,
     SYSTEM_RELATIONSHIP_TYPES,
+    with_system_edge_types,
+    with_system_entity_types,
 )
 from .models import (
     CoverageReport,
@@ -156,8 +158,13 @@ class LocalOntologyService:
         if not data:
             return CoverageReport(coverage_percent=0.0)
 
-        entity_defs = parse_entity_definitions(data.entity_type_definitions)
-        rel_defs = parse_relationship_definitions(data.relationship_type_definitions)
+        # Inject the platform's built-in types (e.g. the aggregation worker's :AGGREGATED
+        # edge) so coverage never flags them as "undefined" — they ARE defined, as built-ins.
+        # Same contract the resolution gate and Adoption view use, so all three agree.
+        entity_defs = parse_entity_definitions(
+            with_system_entity_types(data.entity_type_definitions))
+        rel_defs = parse_relationship_definitions(
+            with_system_edge_types(data.relationship_type_definitions))
 
         graph_entity_ids = [s.id for s in introspected_stats.entity_type_stats]
         graph_rel_ids = [s.id for s in introspected_stats.edge_type_stats]

@@ -256,8 +256,24 @@ class SolidatusGraphBuilder:
 # FALKORDB PUSH
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
+def _log_converted_stats(cg, schema) -> None:
+    """Log node/edge type counts for a schema-converted graph (payload spellings)."""
+    node_counts: Dict[str, int] = {}
+    for n in cg.nodes:
+        node_counts[n.entity_type] = node_counts.get(n.entity_type, 0) + 1
+    edge_counts: Dict[str, int] = {}
+    for e in cg.edges:
+        edge_counts[e.edge_type] = edge_counts.get(e.edge_type, 0) + 1
+    logger.info(f"Schema '{schema.name}': {len(cg.nodes)} nodes, {len(cg.edges)} edges")
+    for t, c in sorted(node_counts.items()):
+        logger.info(f"  node {t}: {c}")
+    for t, c in sorted(edge_counts.items()):
+        logger.info(f"  edge {t}: {c}")
+
+
+async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bulk=True, append=False):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
+    import redis.asyncio as _aioredis
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
@@ -265,19 +281,93 @@ async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
     )
     await provider._ensure_connected()
 
-    CHUNK = 10_000
-    logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}'...")
-    for i in range(0, len(builder.nodes), CHUNK):
-        await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
-        logger.info(f"  Nodes: {min(i + CHUNK, len(builder.nodes))}/{len(builder.nodes)}")
+    _r = _aioredis.Redis(
+        host=os.getenv("FALKORDB_HOST", "localhost"),
+        port=int(os.getenv("FALKORDB_PORT", "6379")))
 
-    logger.info(f"Pushing {len(builder.edges)} edges...")
-    for i in range(0, len(builder.edges), CHUNK):
-        await provider.save_custom_graph([], builder.edges[i:i + CHUNK])
-        logger.info(f"  Edges: {min(i + CHUNK, len(builder.edges))}/{len(builder.edges)}")
+    # REPLACE the target graph by default: a re-run of a bulk load should overwrite, not MERGE
+    # into a stale copy. Without this, re-running (e.g. a perf load) merges millions of rows into
+    # the existing graph — slow (existence checks against a full graph) and it accumulates, which
+    # is exactly what bloated the instance and made every reload crawl. --append opts into merge.
+    if not append:
+        try:
+            await _r.execute_command("GRAPH.DELETE", graph_name)
+            logger.info(f"Replaced existing graph '{graph_name}' (delete-before-load; --append to merge).")
+        except Exception:
+            pass  # graph didn't exist — nothing to replace
 
-    await provider.ensure_indices()
-    logger.info("Push complete!")
+    # Bulk mode (default): PAUSE AOF + RDB persistence for the duration of the load. Writing
+    # millions of MERGE commands through the AOF (appendfsync everysec, auto-rewrite at 80%)
+    # balloons the append-only file to tens of GB and repeatedly forks to rewrite it — that is
+    # what fills the disk and leaves FalkorDB stuck 'LOADING'. With persistence paused, disk
+    # only holds the in-memory graph; re-enabling AOF at the end writes ONE compact file with
+    # the final state. Trade-off: a crash mid-load loses the partial graph — fine for a load
+    # you can just re-run. Pass --keep-persistence to keep AOF on throughout.
+    saved_aof = None
+    saved_save = ""
+    if bulk:
+        try:
+            saved_aof = (await _r.config_get("appendonly")).get("appendonly", "yes")
+            saved_save = (await _r.config_get("save")).get("save", "")
+            await _r.config_set("appendonly", "no")
+            await _r.config_set("save", "")
+            logger.info("Bulk mode: PAUSED AOF + RDB persistence for the load so the AOF can't "
+                        "fill the disk. Persistence is restored (and compacted) afterwards.")
+        except Exception as exc:
+            logger.warning("Could not pause persistence for bulk load (%s) — continuing with it on.", exc)
+            saved_aof = None
+
+    try:
+        # Index the urn on EVERY label we're about to write, BEFORE writing. Without a per-label
+        # urn index, each node MERGE and each edge endpoint MATCH is a FULL label scan (O(N) per
+        # row → O(N²) total) — the slowness and memory pressure behind the failure. `ensure_indices`
+        # otherwise only indexes a hardcoded default label set (domain/dataset/…), so the labels
+        # this load writes would never get indexed. Labels are sourced from the DECLARED model —
+        # default hierarchy (layer/object/group/attribute) or the --schema's entityTypes
+        # (e.g. Roots/Node) via ``declared_labels`` — unioned with observed node types as a safety
+        # net, declared-first so a sparse type is still indexed before its first write.
+        labels = sorted(set(declared_labels or ()) | {n.entity_type for n in builder.nodes if n.entity_type})
+        logger.info(f"Ensuring urn indices for labels {labels} before load...")
+        await provider.ensure_indices(entity_type_ids=labels)
+
+        # Batch size is tunable — smaller batches bound per-query memory/time (fewer rows in
+        # flight) at the cost of more round-trips.
+        CHUNK = int(os.getenv("SOLIDATUS_IMPORT_CHUNK", "10000"))
+        logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}' (chunk={CHUNK})...")
+        for i in range(0, len(builder.nodes), CHUNK):
+            await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
+            logger.info(f"  Nodes: {min(i + CHUNK, len(builder.nodes))}/{len(builder.nodes)}")
+
+        # Endpoint urn→label so the edge MATCH is label-qualified — now index-assisted (a seek,
+        # not a scan) since the urn index for these labels exists.
+        endpoint_labels = {n.urn: n.entity_type for n in builder.nodes}
+        logger.info(f"Pushing {len(builder.edges)} edges...")
+        for i in range(0, len(builder.edges), CHUNK):
+            await provider.save_custom_graph([], builder.edges[i:i + CHUNK], endpoint_labels=endpoint_labels)
+            logger.info(f"  Edges: {min(i + CHUNK, len(builder.edges))}/{len(builder.edges)}")
+
+        await provider.ensure_indices(entity_type_ids=labels)  # level / built-in edge indices (idempotent)
+        logger.info("Push complete!")
+    finally:
+        # Restore persistence. Re-enabling AOF triggers ONE rewrite that persists the final,
+        # compact graph, so a later restart reloads fast from the RDB base instead of replaying
+        # the whole import. When bulk was off (or pausing failed), just compact via BGREWRITEAOF.
+        try:
+            if saved_aof is not None:
+                await _r.config_set("save", saved_save or "")
+                await _r.config_set("appendonly", saved_aof)
+                logger.info("Bulk mode: restored persistence (AOF re-enabled → one compact rewrite).")
+            else:
+                await _r.execute_command("BGREWRITEAOF")
+                logger.info("Triggered BGREWRITEAOF — the AOF will compact so restarts stay fast.")
+        except Exception as exc:
+            logger.warning("Could not restore/compact persistence (%s) — if writes are rejected, run: "
+                           "redis-cli -p %s CONFIG SET appendonly yes", exc, os.getenv("FALKORDB_PORT", "6379"))
+        finally:
+            try:
+                await _r.aclose()
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -304,11 +394,48 @@ Examples:
                         help="Source system identifier for URN generation (default: solidatus)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse and print stats without pushing to FalkorDB")
+    parser.add_argument("--keep-persistence", action="store_true",
+                        help="Keep AOF/RDB persistence ON during the load. Default is bulk mode, "
+                             "which pauses persistence for the load so the AOF can't balloon and "
+                             "fill the disk (restored + compacted afterwards). Use this only if you "
+                             "need durability against a crash mid-load.")
+    parser.add_argument("--append", action="store_true",
+                        help="Merge into the existing graph instead of replacing it. Default is to "
+                             "REPLACE (delete-before-load) so re-running doesn't merge into a stale "
+                             "copy and accumulate.")
+    parser.add_argument("--schema", type=str, default=None,
+                        help="Conversion schema (preset name or JSON path) mapping the Solidatus "
+                             "roles onto a custom ontology, e.g. 'roots_node'. Omit for the "
+                             "legacy layer/object/group/attribute + HAS/FLOWS_TO output.")
+    parser.add_argument("--emit-ontology", type=str, default=None,
+                        help="Write the ontology derived from --schema to this path "
+                             "(JSON, OntologyCreateRequest shape). Requires --schema.")
+    parser.add_argument("--versioned", action="store_true",
+                        help="Ingest through the versioned service (register+publish the derived "
+                             "ontology, provision a strict manual graph, bulk-ingest, project) "
+                             "instead of a direct FalkorDB push. Requires --schema, --graph, "
+                             "--workspace-id, --provider-id.")
+    parser.add_argument("--workspace-id", type=str, default=None,
+                        help="Workspace id for --versioned ingest")
+    parser.add_argument("--provider-id", type=str, default=None,
+                        help="FalkorDB provider id for --versioned ingest")
+    parser.add_argument("--ontology-id", type=str, default=None,
+                        help="Reuse an existing published ontology instead of deriving+publishing one")
+    parser.add_argument("--no-project", action="store_true",
+                        help="Skip the FalkorDB projection in --versioned mode "
+                             "(the dev worker converges it eventually)")
 
     args = parser.parse_args()
 
     # Validate arguments
-    if not args.dry_run and not args.graph:
+    if args.emit_ontology and not args.schema:
+        parser.error("--emit-ontology requires --schema")
+    if args.versioned:
+        for flag, val in (("--schema", args.schema), ("--graph", args.graph),
+                          ("--workspace-id", args.workspace_id), ("--provider-id", args.provider_id)):
+            if not val:
+                parser.error(f"--versioned requires {flag}")
+    elif not args.dry_run and not args.graph:
         parser.error("--graph is required unless --dry-run is specified")
 
     # Load JSON
@@ -322,16 +449,51 @@ Examples:
     else:
         parser.error("Provide --file or pipe JSON to stdin")
 
-    # Build graph
-    builder = SolidatusGraphBuilder(source_system=args.source_system)
-    builder.build(data)
-    builder.print_stats()
+    # ── Legacy path (no --schema): unchanged behavior ────────────────────────
+    if not args.schema:
+        builder = SolidatusGraphBuilder(source_system=args.source_system)
+        builder.build(data)
+        builder.print_stats()
+        if args.dry_run:
+            logger.info("Dry run — no data pushed.")
+            for node in builder.nodes[:5]:
+                logger.info(f"  Sample: {node.urn}  type={node.entity_type}  name={node.display_name}")
+        else:
+            # Declared labels for the default path = the hierarchy types the builder can emit.
+            asyncio.run(push_to_falkordb(
+                builder, args.graph, declared_labels=set(PREFIX_TO_TYPE.values()),
+                bulk=not args.keep_persistence, append=args.append))
+        sys.exit(0)
 
-    # Push or dry-run
-    if args.dry_run:
+    # ── Schema path: convert into the custom ontology ────────────────────────
+    from backend.scripts.solidatus_schema import convert_model, derive_ontology_request, load_schema
+
+    schema = load_schema(args.schema)
+    cg = convert_model(data, schema, source_system=args.source_system)
+    _log_converted_stats(cg, schema)
+
+    if args.emit_ontology:
+        req = derive_ontology_request(schema, cg, name=f"Solidatus {schema.name}")
+        with open(args.emit_ontology, "w") as f:
+            json.dump(req.model_dump(by_alias=True), f, indent=2)
+            f.write("\n")
+        logger.info(f"Wrote derived ontology to {args.emit_ontology}")
+
+    if args.versioned:
+        from backend.scripts.solidatus_schema import ingest_versioned
+        result = asyncio.run(ingest_versioned(
+            schema=schema, cg=cg, workspace_id=args.workspace_id, provider_id=args.provider_id,
+            graph_name=args.graph, ontology_id=args.ontology_id, project=not args.no_project))
+        logger.info("Versioned ingest complete: ontology=%s data_source=%s graph=%s "
+                    "canonicalized=%s ingested=%s rejected=%s",
+                    result["ontology_id"], result["data_source_id"], result["graph_id"],
+                    result["canonicalized"], result["ingested"], len(result["rejected"]))
+    elif args.dry_run:
         logger.info("Dry run — no data pushed.")
-        # Print a few sample nodes for verification
-        for node in builder.nodes[:5]:
+        for node in cg.nodes[:5]:
             logger.info(f"  Sample: {node.urn}  type={node.entity_type}  name={node.display_name}")
     else:
-        asyncio.run(push_to_falkordb(builder, args.graph))
+        # Declared labels for the schema path = the mapping's entityTypes (e.g. Roots, Node).
+        asyncio.run(push_to_falkordb(
+            cg, args.graph, declared_labels=set(schema.entity_map.values()),
+            bulk=not args.keep_persistence, append=args.append))

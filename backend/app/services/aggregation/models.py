@@ -20,6 +20,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Every value the jobs-table CHECK constraint accepts. ``purge`` marks the
+# purge lifecycle row itself (managed by the insights worker; excluded from
+# the reconciler, crash recovery and resume), so API callers may mint any
+# source EXCEPT it — ``post_purge`` is the re-aggregation fired after a
+# purge completes, ``auto`` the read-path backfill.
+TRIGGER_SOURCES = (
+    "onboarding", "manual", "schedule", "drift", "api",
+    "purge", "post_purge", "auto",
+)
+API_TRIGGER_SOURCES = tuple(s for s in TRIGGER_SOURCES if s != "purge")
+
+
 class AggregationJobORM(Base):
     """Job tracking table — the worker reads everything from this record.
 
@@ -76,18 +88,30 @@ class AggregationJobORM(Base):
     retry_count = Column(Integer, nullable=False, default=0)
     max_retries = Column(Integer, nullable=False, default=3)
 
-    # ── Phase visibility (Phase 1.7) ─────────────────────────────────
-    # Short string identifying which phase of the bulk-rebuild path is
-    # currently running. Surfaced to the UI so operators can see why
-    # FalkorDB has zero edges during the scan window even though the
-    # job is making progress. Values: 'wiping' / 'scanning' /
-    # 'resolving_labels' / 'creating' / 'finalizing'. NULL on legacy
-    # rows and on paths (Neo4j/Spanner/legacy MERGE) that don't emit
-    # phase signals — frontend falls back to a generic label.
+    # ── Phase visibility ──────────────────────────────────────────────
+    # Short string identifying which phase of the materialization
+    # pipeline is currently running. Surfaced to the UI so operators can
+    # see what a long-running job is doing. Values: 'extracting' /
+    # 'computing' / 'reconciling' / 'applying'. NULL on legacy rows and
+    # on providers that don't emit phase signals — frontend falls back
+    # to a generic label.
     current_phase = Column(Text, nullable=True)
 
     # ── Dynamic timeout (estimated from graph size at trigger time) ──
     timeout_secs = Column(Integer, nullable=True)  # None = use global default
+
+    # ── Pipeline tuning + run reporting (Iteration 2) ─────────────────
+    # tuning_json: JSON object of pipeline knob overrides (scan range
+    # width, memory cap, pacing, chunks, extract concurrency, leaf-pair
+    # toggle). Frozen at trigger time = request.tuning merged over the
+    # stored global defaults; resume overrides replace it. NULL = env
+    # defaults only (legacy rows).
+    tuning_json = Column(Text, nullable=True)
+    # run_stats: JSON written on completion — per-phase durations plus
+    # writes/deletes/pairs counters for the job detail UI.
+    run_stats = Column(Text, nullable=True)
+    # worker_id: which worker (pod/consumer) executed this job.
+    worker_id = Column(Text, nullable=True)
 
     # ── Fingerprinting (change detection) ────────────────────────────
     graph_fingerprint_before = Column(Text, nullable=True)
@@ -134,14 +158,23 @@ class AggregationJobORM(Base):
             "data_source_id",
             "idempotency_key",
             unique=True,
-            postgresql_where=text("idempotency_key IS NOT NULL"),
+            # Only ACTIVE rows participate in uniqueness (the name always
+            # promised this): the replay window is 60 min, so a key reused
+            # against a long-completed job must create a fresh run, not
+            # explode on a forever-unique tombstone.
+            postgresql_where=text(
+                "idempotency_key IS NOT NULL "
+                "AND status IN ('pending', 'running')"
+            ),
         ),
         CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
             name="ck_agg_jobs_status",
         ),
         CheckConstraint(
-            "trigger_source IN ('onboarding', 'manual', 'schedule', 'drift', 'api', 'purge')",
+            "trigger_source IN ({})".format(
+                ", ".join(f"'{s}'" for s in TRIGGER_SOURCES)
+            ),
             name="ck_agg_jobs_trigger_source",
         ),
         CheckConstraint(
@@ -170,3 +203,19 @@ class AggregationDataSourceStateORM(Base):
     aggregation_edge_count = Column(Integer, nullable=False, default=0)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
+
+
+class AggregationSettingsORM(Base):
+    """Global aggregation defaults (single row, id='global').
+
+    Stores the default pipeline tuning applied to every job at trigger
+    time (request-level tuning overrides layer on top). Editable via
+    GET/PUT /aggregation/settings and the admin Defaults dialog.
+    """
+    __tablename__ = "aggregation_settings"
+    __table_args__ = ({"schema": "aggregation"},)
+
+    id = Column(Text, primary_key=True, default="global")
+    tuning_json = Column(Text, nullable=True)  # JSON: AggregationTuning fields
+    updated_at = Column(Text, nullable=True)
+    updated_by = Column(Text, nullable=True)

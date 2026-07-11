@@ -20,10 +20,14 @@ logger = logging.getLogger(__name__)
 
 
 async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: str):
-    """(containment, lineage) edge-type sets for the graph's data source — the ontology
+    """(containment, lineage, level_map) for the graph's data source — the ontology
     input the projector needs to maintain ``:AGGREGATED`` rollups incrementally per
-    projected window. ``None`` on any failure or when the ontology defines no lineage
-    types (the projector then skips rollup maintenance for that window)."""
+    projected window. The level map lets the projector emit the same CANONICAL
+    level-bridged pairs as the aggregation worker; without it the projector's full
+    ancestor cross-product writes leaf/mixed cells the canonical boundary excludes,
+    which the on-demand reader then double-counts. ``None`` on any failure or when
+    the ontology defines no lineage types (the projector then skips rollup
+    maintenance for that window)."""
     try:
         meta = await svc.get_graph(graph_id)
         if not meta or not meta.get("data_source_id"):
@@ -43,7 +47,14 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
                 data_source_id=str(meta["data_source_id"]))
         cont = list(getattr(resolved, "containment_edge_types", None) or [])
         lin = list(getattr(resolved, "lineage_edge_types", None) or [])
-        return (cont, lin) if lin else None
+        if not lin:
+            return None
+        try:
+            from backend.app.services.ontology_levels import derive_level_map
+            levels = derive_level_map(resolved)
+        except Exception:
+            levels = {}
+        return (cont, lin, levels)
     except Exception as exc:
         logger.warning("aggregation edge-type resolution for %s skipped: %s", graph_id, exc)
         return None

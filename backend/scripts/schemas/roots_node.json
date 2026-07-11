@@ -1,0 +1,6 @@
+{
+  "name": "roots-node",
+  "entityTypes": { "layer": "Roots", "object": "Node", "group": "Node", "attribute": "Node" },
+  "edgeTypes":   { "containment": ["HAS"], "lineage": ["FLOWS_TO"] },
+  "emit":        {}
+}

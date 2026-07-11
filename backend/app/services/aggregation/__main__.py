@@ -25,7 +25,14 @@ Environment variables:
     FALKORDB_SOCKET_TIMEOUT    Socket timeout in seconds (default: 60 for worker)
     WORKER_CONCURRENCY         Max parallel jobs (default: 4)
     MAX_CONCURRENT_PER_GRAPH   Max parallel jobs per graph (default: 2)
-    AGGREGATION_JOB_TIMEOUT_SECS  Per-job timeout (default: 7200)
+    AGGREGATION_STALL_TIMEOUT_SECS  Kill a job with NO forward progress
+                               for this long (default: 900). Replaces the
+                               old fixed per-job timeout — a progressing
+                               job is never killed by a timer.
+    AGGREGATION_JOB_MAX_WALL_SECS   Absolute wall-clock safety net
+                               (default: 86400)
+    FALKORDB_ENDPOINT_WRITE_SLOTS   Cross-pod concurrent aggregation write
+                               budget per FalkorDB endpoint (default: 2)
     WORKER_HEALTH_PORT         Health endpoint port (default: 8090)
     LOG_LEVEL                  Logging level (default: INFO)
 """
@@ -76,12 +83,14 @@ class _JobConsumer:
         redis_client,
         max_concurrency: int = 4,
         max_per_graph: int = 2,
+        fleet=None,
     ):
         self._worker = worker
         self._session_factory = session_factory
         self._redis = redis_client
         self._max_concurrency = max_concurrency
         self._max_per_graph = max_per_graph
+        self._fleet = fleet
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._message_ids: dict[str, str] = {}  # job_id -> stream message_id
         self._shutdown_event = asyncio.Event()
@@ -107,6 +116,11 @@ class _JobConsumer:
         while not self._shutdown_event.is_set():
             # Clean up completed tasks
             self._reap_done_tasks()
+
+            # Fleet registry heartbeat (TTL'd) — the XREADGROUP BLOCK below
+            # bounds this loop to ~5s ticks, well inside the 30s TTL.
+            if self._fleet is not None:
+                await self._fleet.heartbeat()
 
             available_slots = self._max_concurrency - len(self._active_tasks)
             if available_slots <= 0:
@@ -146,6 +160,21 @@ class _JobConsumer:
                         logger.debug("Job %s already active — skipping duplicate", job_id)
                         await self._ack(msg_id)
                         continue
+
+                    # Memory-aware claim policy: defer work this pod cannot
+                    # safely hold (drain / RSS high-water / large-job cap) by
+                    # re-enqueueing it for an idle sibling.
+                    if self._fleet is not None:
+                        meta = await self._get_job_meta(job_id)
+                        reason = self._fleet.claim_decision(
+                            total_edges=(meta or {}).get("total_edges"),
+                        )
+                        if reason is not None:
+                            asyncio.create_task(
+                                self._requeue(job_id, msg_id, reason),
+                                name=f"agg-requeue-{job_id}",
+                            )
+                            continue
 
                     self._message_ids[job_id] = msg_id
                     task = asyncio.create_task(
@@ -242,8 +271,22 @@ class _JobConsumer:
         per-graph semaphore before executing. Jobs targeting different
         graphs run in full parallelism.
         """
-        graph_key = await self._get_graph_key(job_id)
+        meta = await self._get_job_meta(job_id)
+        graph_key = (meta or {}).get("graph_key")
+        if self._fleet is not None:
+            from .fleet import WorkerFleetMember
+            self._fleet.register_job(
+                job_id,
+                graph_name=(meta or {}).get("graph_name"),
+                large=WorkerFleetMember.is_large((meta or {}).get("total_edges")),
+            )
+        try:
+            await self._run_with_graph_limit(job_id, graph_key)
+        finally:
+            if self._fleet is not None:
+                self._fleet.unregister_job(job_id)
 
+    async def _run_with_graph_limit(self, job_id: str, graph_key) -> None:
         if graph_key:
             sem = self._graph_semaphores.setdefault(
                 graph_key, asyncio.Semaphore(self._max_per_graph),
@@ -451,6 +494,58 @@ class _JobConsumer:
         except Exception as e:
             logger.warning("Failed to mark job %s cancelled: %s", job_id, e)
 
+    async def _requeue(self, job_id: str, msg_id: str | None, reason: str) -> None:
+        """Give a job this pod cannot take back to the stream after a short
+        jittered delay (so an idle sibling wins the race), then ACK the
+        original delivery. Exec locks + cancel flags make duplicate
+        delivery safe; while we sleep the message stays in our PEL, so a
+        crash here is recovered by XAUTOCLAIM."""
+        import random as _random
+        from .redis_client import JOBS_STREAM
+
+        logger.info("Deferring job %s: %s — re-enqueueing", job_id, reason)
+        await asyncio.sleep(1.0 + _random.uniform(0, 2.0))
+        try:
+            await self._redis.xadd(JOBS_STREAM, {"job_id": job_id}, maxlen=50000)
+        except Exception as exc:
+            logger.warning(
+                "Re-enqueue of deferred job %s failed (%s) — leaving the "
+                "original delivery unACKed for PEL recovery", job_id, exc,
+            )
+            return
+        if msg_id:
+            await self._ack(msg_id)
+
+    async def _get_job_meta(self, job_id: str) -> dict | None:
+        """Job metadata for claim/limit decisions: graph key + total_edges."""
+        from sqlalchemy import text as sa_text
+
+        try:
+            async with self._session_factory() as session:
+                result = await session.execute(
+                    sa_text(
+                        "SELECT provider_id, graph_name, data_source_id, total_edges "
+                        "FROM aggregation.aggregation_jobs WHERE id = :job_id"
+                    ),
+                    {"job_id": job_id},
+                )
+                row = result.first()
+                if not row:
+                    return None
+                provider_id, graph_name, ds_id, total_edges = row
+                graph_key = (
+                    f"{provider_id}:{graph_name}"
+                    if provider_id and graph_name else ds_id
+                )
+                return {
+                    "graph_key": graph_key,
+                    "graph_name": graph_name,
+                    "total_edges": total_edges,
+                }
+        except Exception as e:
+            logger.warning("Failed to look up job meta for %s: %s", job_id, e)
+            return None
+
     async def _get_graph_key(self, job_id: str) -> str | None:
         """Look up the actual graph key (provider_id:graph_name) for a job.
 
@@ -611,8 +706,17 @@ async def main() -> None:
     from .events import AggregationEventPublisher
     event_publisher = AggregationEventPublisher(redis_client)
 
+    # Fleet registry member: heartbeats this worker's load/memory to the
+    # bus Redis and drives the memory-aware claim policy.
+    from .fleet import WorkerFleetMember
+    worker_id = f"worker-{platform.node()}-{os.getpid()}"
+    fleet = WorkerFleetMember(redis_client, worker_id, concurrency)
+
     # Create worker on the JOBS pool with event publisher
-    worker = AggregationWorker(get_jobs_session, registry, event_publisher=event_publisher)
+    worker = AggregationWorker(
+        get_jobs_session, registry, event_publisher=event_publisher,
+        worker_id=worker_id,
+    )
 
     # Create the job consumer (Redis Streams based)
     consumer = _JobConsumer(
@@ -621,6 +725,7 @@ async def main() -> None:
         redis_client=redis_client,
         max_concurrency=concurrency,
         max_per_graph=max_per_graph,
+        fleet=fleet,
     )
 
     # Start health endpoint
@@ -648,7 +753,8 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
 
     def _signal_handler():
-        logger.info("Received shutdown signal — stopping consumer...")
+        logger.info("Received shutdown signal — draining (no new claims)...")
+        fleet.drain = True
         consumer.request_shutdown()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -665,6 +771,7 @@ async def main() -> None:
         except Exception:
             pass
         await registry.evict_all()
+        await fleet.deregister()
         await close_redis()
         logger.info("=== Aggregation Worker shutdown complete ===")
 

@@ -86,6 +86,48 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 
 ---
 
+## 5a. Memory Sizing Rule (read this before raising maxmemory)
+
+`maxmemory` must fit INSIDE the machine that runs the container, with
+headroom — it is a Redis-level ceiling, not a reservation, and setting
+it above the host/VM capacity converts graceful `OOM command not
+allowed` write errors into host-level OOM kills of the whole instance
+(observed live 2026-07-11: `maxmemory 12gb` on a 12GB Docker Desktop VM
+shared with 8 other containers — the instance died repeatedly under
+load and each restart paid a multi-minute AOF replay, presenting as
+"the stack blew up and is not recovering for hours").
+
+Rule of thumb:
+
+- `maxmemory ≤ host_memory − 4GB` (other services + OS + page cache);
+- expected dataset ≤ ~60% of `maxmemory` — BGSAVE/BGREWRITEAOF fork
+  copy-on-write can spike usage well above the resident dataset while
+  writes are in flight;
+- if the dataset legitimately needs more, grow the HOST first
+  (Docker Desktop → Settings → Resources → Memory), then `maxmemory`.
+
+Recovery time is part of sizing: an AOF *incremental* replays
+command-by-command (minutes per GB) while the *base* RDB bulk-loads
+fast — keep the incremental small (see the auto-rewrite thresholds in
+the compose files) or restarts of a large instance take tens of
+minutes, during which liveness MUST NOT kill the process (see below).
+
+## 5b. Local Durability: AOF Is Mandatory
+
+Every shipped topology (compose files, k8s manifests) runs FalkorDB with
+`--appendonly yes --appendfsync everysec --aof-load-truncated yes`.
+
+Snapshot-only persistence is NOT sufficient: a restart reloads the last
+RDB and silently drops every write since it. Observed live (2026-07-11):
+a stack restart minutes after a graph import resurrected the graph with
+its containment edges but WITHOUT its lineage edges (the RDB save fired
+mid-import), after which every aggregation run correctly produced zero
+cells — presenting as "aggregation is broken" when the data layer had
+lost the input. AOF `everysec` bounds the loss window to ~1 second;
+`aof-load-truncated` tolerates a torn AOF tail after a crash instead of
+refusing to start. Keep RDB snapshots enabled alongside AOF — they
+remain the fast-restart and DR-export mechanism.
+
 ## 6. Disaster Recovery (Cross-Region)
 
 In the event of a total GCP Region loss (e.g., `us-central1` goes completely offline), standard HA mechanisms fail. The following DR strategy must be implemented proactively:
@@ -154,11 +196,32 @@ client automatically.
 
 ### 7.4 Aggregation at scale
 
-For graphs with millions of nodes/edges, enable the constant-memory
-streaming rebuild: `AGGREGATION_STREAMING_REBUILD_ENABLED=true`. It pages
-leaf lineage edges on an indexed `ID(r)` cursor, flushes per page via
-MERGE-on-`aggKey`, and is crash-resumable from `last_cursor` — eliminating
-the full-graph count, the non-indexable cursor, and the in-memory pair
-accumulation that previously timed out. `AGGREGATION_MAX_PAIRS_PER_PAGE`
-bounds high-fan-in hub pages.
+The single resumable EXTRACT → COMPUTE → RECONCILE → APPLY pipeline is
+always on (the legacy bulk/streaming strategies and their
+`AGGREGATION_*_REBUILD_ENABLED` flags were removed; rollback is a version
+rollback). Sizing, tuning knobs and provider-protection parameters live in
+`docs/AGGREGATION_PIPELINE.md`.
 5. **DNS Cutover:** Update Multi-Cluster Ingress (MCI) or global load balancer to route application traffic to the secondary region.
+
+---
+
+## Sizing & protection parameters
+
+How the deployed `FALKORDB_ARGS` values are derived:
+
+- **`THREAD_COUNT`** = ceil(pod CPU limit). **`OMP_THREAD_COUNT` = 1** — per-query
+  OpenMP fan-out must not exceed the CPU limit; left unbounded, OMP sizes itself to
+  the *node's* cores, and on a big node that causes CFS throttling and CPU spikes.
+- **`TIMEOUT_MAX`** must be set for FalkorDB to honor per-query timeouts on WRITE
+  queries (`TIMEOUT_DEFAULT` alone only covers reads). Client-side query budgets
+  must stay below `TIMEOUT_MAX` or the server rejects the timeout.
+- **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
+  instead of building a doomed backlog behind a slow query.
+- **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling
+  before the kernel OOM-kills the whole pod.
+- **`maxmemory` / `maxmemory-policy noeviction`** (via `REDIS_ARGS`, not
+  `FALKORDB_ARGS`): the INSTANCE-level ceiling. `QUERY_MEM_CAPACITY` bounds one
+  query; only `maxmemory` bounds the dataset itself, and without it graph growth
+  eventually OOM-kills the pod. Size it ~75% of the pod memory limit;
+  `noeviction` makes writes fail loudly at the ceiling (FalkorDB data must never
+  be silently evicted).

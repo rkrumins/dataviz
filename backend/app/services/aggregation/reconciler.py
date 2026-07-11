@@ -49,6 +49,20 @@ _HEARTBEAT_THRESHOLD_SECS: float = float(
     os.getenv("STUCK_JOB_HEARTBEAT_THRESHOLD_SECS", "300")
 )
 _MAX_AUTO_RESUMES: int = int(os.getenv("STUCK_JOB_MAX_AUTO_RESUMES", "5"))
+# Stale-PENDING backstop: a row dispatched onto the job stream in a
+# deployment with no aggregation-worker consumer stays 'pending' forever
+# ("queued and will start shortly" in the UI) and 409-blocks every later
+# trigger for its data source. Two signals close that hole:
+#   - no live worker registered (fleet registry empty) for a pending row
+#     older than _PENDING_NO_WORKER_SECS → fail fast with a config hint;
+#   - any pending row older than _PENDING_TIMEOUT_SECS → fail (backstop
+#     for lost stream messages even when workers exist).
+_PENDING_NO_WORKER_SECS: float = float(
+    os.getenv("AGGREGATION_PENDING_NO_WORKER_SECS", "900")
+)
+_PENDING_TIMEOUT_SECS: float = float(
+    os.getenv("AGGREGATION_PENDING_TIMEOUT_SECS", "21600")
+)
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -88,11 +102,38 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
 
     reconciled = 0
     async with session_factory() as session:
+        # Cross-replica guard: the control plane, a dev-role monolith and
+        # any HA replica may all run this loop. The xact-scoped advisory
+        # lock (held until this session's commit/close) makes each tick
+        # single-writer without coordination; the sweep itself is
+        # idempotent (INCR cap + exec-lock dedupe), so the lock only
+        # removes duplicate re-dispatch noise. Non-Postgres backends
+        # (unit fakes) simply proceed — single-instance semantics.
+        try:
+            from sqlalchemy import text as _text
+            got = (await session.execute(_text(
+                "SELECT pg_try_advisory_xact_lock("
+                "hashtextextended('agg:reconciler', 0))"
+            ))).scalar()
+            if got in (False, 0):
+                return 0
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
         running = (
             await session.execute(
                 select(AggregationJobORM).where(
                     AggregationJobORM.status == "running"
                 )
+                # Purge rows live on the INSIGHTS stream and hold no
+                # aggregation exec lock — sweeping them here re-dispatched
+                # every purge outliving one tick onto the aggregation
+                # stream, where the worker refused it ("this row belongs
+                # to the purge stream"). Purge liveness is the insights
+                # PEL/XAUTOCLAIM's job.
+                .where(AggregationJobORM.trigger_source != "purge")
             )
         ).scalars().all()
 
@@ -201,10 +242,82 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
             )
             reconciled += 1
 
+        reconciled += await _sweep_stale_pending(session, redis_client)
+
         if reconciled:
             await session.commit()
 
     return reconciled
+
+
+async def _sweep_stale_pending(session: Any, redis_client: Any) -> int:
+    """Fail pending rows that will never be picked up — see the module
+    constants for the two signals. Never raises."""
+    now = datetime.now(timezone.utc)
+    try:
+        pending = (
+            await session.execute(
+                select(AggregationJobORM)
+                .where(AggregationJobORM.status == "pending")
+                .where(AggregationJobORM.trigger_source != "purge")
+            )
+        ).scalars().all()
+        if not pending:
+            return 0
+        workers_alive: bool | None = None
+        if redis_client is not None:
+            try:
+                cursor, keys = await redis_client.scan(
+                    cursor=0, match="agg:worker:*", count=100,
+                )
+                workers_alive = bool(keys)
+                while not workers_alive and cursor:
+                    cursor, keys = await redis_client.scan(
+                        cursor=cursor, match="agg:worker:*", count=100,
+                    )
+                    workers_alive = bool(keys)
+            except Exception:
+                workers_alive = None  # unknown — don't fail rows on it
+        count = 0
+        for job in pending:
+            ref = _parse_iso(job.updated_at) or _parse_iso(job.created_at)
+            if ref is None:
+                continue
+            age = (now - ref).total_seconds()
+            if workers_alive is False and age > _PENDING_NO_WORKER_SECS:
+                reason = (
+                    f"Queued for {int(age)}s with no aggregation worker "
+                    "registered on the job bus. Check that the aggregation "
+                    "worker service is deployed and can reach REDIS_URL, "
+                    "then re-trigger."
+                )
+            elif age > _PENDING_TIMEOUT_SECS:
+                reason = (
+                    f"Queued for {int(age)}s without being picked up "
+                    f"(threshold={int(_PENDING_TIMEOUT_SECS)}s) — the "
+                    "dispatch message was likely lost. Re-trigger to "
+                    "re-enqueue."
+                )
+            else:
+                continue
+            now_iso = now.isoformat()
+            logger.error(
+                "reconciler: pending job %s ds=%s abandoned: %s",
+                job.id, job.data_source_id, reason,
+            )
+            job.status = "failed"
+            job.error_message = reason
+            job.completed_at = now_iso
+            job.updated_at = now_iso
+            metrics_increment(
+                "stuck_jobs_redispatched_total",
+                kind="aggregation", outcome="pending_abandoned",
+            )
+            count += 1
+        return count
+    except Exception as exc:
+        logger.warning("reconciler: stale-pending sweep failed: %s", exc)
+        return 0
 
 
 async def run_reconciler(

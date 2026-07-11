@@ -42,7 +42,28 @@ services:
       - "${FALKORDB_PORT:-6379}:6379"
       - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
     environment:
-      FALKORDB_ARGS: THREAD_COUNT 4
+      FALKORDB_ARGS: THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50
+      # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
+      # without maxmemory the dataset itself can still OOM-kill the container.
+      # noeviction = writes fail loudly at the ceiling instead of silent eviction.
+      # AOF everysec: with snapshot-only persistence a restart reloads the
+      # last RDB and silently DROPS every write since it (observed live
+      # 2026-07-11: a stack restart minutes after an import resurrected the
+      # graph with containment but without its lineage edges — every
+      # aggregation run then correctly produced zero cells). AOF bounds the
+      # loss window to ~1s; aof-load-truncated tolerates a torn tail after
+      # a crash instead of refusing to start.
+      #
+      # FAST RECOVERY (2026-07-11): a restart replays the AOF *incremental*
+      # command-by-command (slow — ~minutes/GB), while the AOF *base* (an RDB)
+      # bulk-loads fast (~74MB/s). So recovery time is bounded by the incr
+      # SIZE. The Redis defaults (rewrite at +100% of a large base, i.e. only
+      # once the incr exceeds ~2GB) let a single big import leave a multi-GB
+      # incr that takes ~an hour to replay. Refresh the base sooner (rewrite
+      # at +80% but never below 256MB) so the incr — and thus restart time —
+      # stays small. The acute case (a bulk import) is compacted explicitly by
+      # the importer via BGREWRITEAOF right after the push.
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb
     volumes:
       # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
       # symlinks /data/data → there). Mounting the volume at /data would
@@ -50,10 +71,16 @@ services:
       # `compose down`.
       - falkordb_data:/var/lib/falkordb/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # LOADING counts as healthy-enough: the process is alive and replaying
+      # its AOF/RDB; dependent services boot and the app surfaces a retryable
+      # "warming" state instead of the whole stack gating on a multi-minute
+      # replay (and anything auto-healing on `unhealthy` must not kill the
+      # replay — that restarts it from scratch, forever).
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 120s
 
   # ── Redis (Message Broker) ─────────────────────────────────────────
   # Dedicated Redis 7 for aggregation job dispatch (Redis Streams) and
@@ -165,10 +192,6 @@ services:
       FALKORDB_SOCKET_TIMEOUT: "5"
       FALKORDB_GRAPH_NAME: ${FALKORDB_GRAPH_NAME:-nexus_lineage}
 
-      # Constant-memory streaming rebuild (indexed ID(r) cursor, per-page
-      # flush, resume-from-cursor on every retry). Default on; set "false"
-      # to roll back to the legacy accumulate-in-memory path.
-      AGGREGATION_STREAMING_REBUILD_ENABLED: "${AGGREGATION_STREAMING_REBUILD_ENABLED:-true}"
 
       AGGREGATION_API_PORT: "8091"
       SYNODIC_ROLE: controlplane
@@ -300,11 +323,6 @@ services:
       FALKORDB_PORT: "6379"
       FALKORDB_SOCKET_TIMEOUT: "60"
 
-      # Constant-memory streaming rebuild (indexed ID(r) cursor, per-page
-      # flush, resume-from-cursor on every retry) — the path that survives
-      # the 1M+-edge memory-spike resets. Default on; "false" rolls back to
-      # the legacy accumulate-in-memory rebuild.
-      AGGREGATION_STREAMING_REBUILD_ENABLED: "${AGGREGATION_STREAMING_REBUILD_ENABLED:-true}"
 
       # Concurrency: max parallel aggregation jobs per worker replica.
       # Pool sizes are auto-computed: graph = concurrency*4+8, redis = concurrency*3+8
@@ -349,6 +367,11 @@ services:
       context: .
       dockerfile: backend/Dockerfile.insights
     environment:
+      # Post-purge auto re-aggregation triggers through the Control
+      # Plane; without this the purge worker falls back to
+      # localhost:8091 (unreachable in-container) and the trigger
+      # silently no-ops.
+      AGGREGATION_SERVICE_URL: http://aggregation-controlplane:8091
       # Management DB (polling configs + stats cache + data source catalog)
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 

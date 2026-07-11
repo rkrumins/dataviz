@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useBlocker } from 'react-router'
-import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock, AlertTriangle, Unlink } from 'lucide-react'
+import { Loader2, BookOpen, Box, GitBranch, FolderTree, BarChart3, Users, Activity, Settings, X, LayoutDashboard, Trash2, RotateCcw, Clock, AlertTriangle, Unlink } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { EntityTypeEditor } from '@/components/schema/EntityTypeEditor'
 import { RelationshipTypeEditor } from '@/components/schema/RelationshipTypeEditor'
@@ -46,7 +46,8 @@ import { EditDetailsDialog } from '@/features/ontology/components/dialogs/EditDe
 import { SchemaPanel } from '@/features/ontology/components/panels/SchemaPanel'
 import { HierarchyPanel } from '@/features/ontology/components/panels/HierarchyPanel'
 import { CoveragePanel } from '@/features/ontology/components/panels/CoveragePanel'
-import { AdoptionPanel } from '@/features/ontology/components/panels/AdoptionPanel'
+import { AdoptionMatchSection } from '@/features/ontology/components/panels/AdoptionMatchSection'
+import { UsagePanel } from '@/features/ontology/components/panels/UsagePanel'
 import { SettingsPanel } from '@/features/ontology/components/panels/SettingsPanel'
 import { DeleteConfirmDialog } from '@/features/ontology/components/dialogs/DeleteConfirmDialog'
 import { UnsavedChangesDialog } from '@/features/ontology/components/dialogs/UnsavedChangesDialog'
@@ -76,7 +77,8 @@ const TAB_DEFS: Array<{
   { id: 'schema', label: 'Schema', icon: Box },
   { id: 'hierarchy', label: 'Hierarchy', icon: FolderTree },
   { id: 'coverage', label: 'Coverage', icon: BarChart3 },
-  { id: 'adoption', label: 'Adoption', icon: Users },
+  { id: 'health', label: 'Health', icon: Activity },
+  { id: 'usage', label: 'Usage', icon: Users },
   { id: 'history', label: 'History', icon: Clock },
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
@@ -86,7 +88,8 @@ const LEGACY_TAB_MAP: Record<string, OntologyTab> = {
   entities: 'schema',
   relationships: 'schema',
   hierarchy: 'hierarchy',
-  usage: 'adoption',
+  // Old combined "Adoption" tab is now split; land on Health (the match view).
+  adoption: 'health',
   history: 'history',
 }
 
@@ -416,7 +419,14 @@ export function OntologySchemaPage() {
     try {
       const req: Record<string, unknown> = {}
       if (workingEntityDefs) req.entityTypeDefinitions = workingEntityDefs
-      if (workingRelDefs) req.relationshipTypeDefinitions = workingRelDefs
+      if (workingRelDefs) {
+        // Built-in edges (e.g. AGGREGATED) are injected on read, marked is_system, and
+        // shown read-only. Never send them back — the backend strips them too, but keeping
+        // the payload clean avoids a pointless round-trip and any reconciliation on them.
+        req.relationshipTypeDefinitions = Object.fromEntries(
+          Object.entries(workingRelDefs).filter(([, def]) => !(def as Record<string, unknown>)?.is_system)
+        )
+      }
       if (workingContainment) req.containmentEdgeTypes = workingContainment
       if (workingLineage) req.lineageEdgeTypes = workingLineage
       if (workingDetails) {
@@ -651,9 +661,18 @@ export function OntologySchemaPage() {
 
   function handleSaveRelType(relType: RelTypeWithClassifications) {
     if (!selectedOntology || !workingRelDefs) return
+    if (relType.isSystem) {
+      showToast('info', `"${relType.name}" is a built-in edge maintained by the platform — it can't be edited.`)
+      setEditorPanel(null)
+      return
+    }
     if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
 
-    const relId = relType.id.toUpperCase()
+    // Type ids are opaque identifiers — preserve the declared casing verbatim. Normalizing
+    // here (previously .toUpperCase()) corrupted any ontology whose ids aren't uppercase:
+    // it added a second, differently-cased key (Has + HAS) and pushed the uppercased id into
+    // the containment/lineage lists, which the backend then rejected as a duplicate type.
+    const relId = relType.id
     const updatedRelDefs = {
       ...workingRelDefs,
       [relId]: relSchemaToBackend(relType),
@@ -695,7 +714,7 @@ export function OntologySchemaPage() {
     if (!selectedOntology || isLocked || !workingRelDefs) return
     if (!window.confirm(`Delete relationship type "${name}"?`)) return
     const defs = { ...workingRelDefs }
-    delete defs[id.toUpperCase()]
+    delete defs[id]
     setWorkingRelDefs(defs)
     hasStagedChangesRef.current = true
     showToast('info', `"${name}" removed — save to persist`)
@@ -725,6 +744,7 @@ export function OntologySchemaPage() {
       matches: response.matchingOntologies,
       suggestedEntityCount: Object.keys(response.suggested.entityTypeDefinitions ?? {}).length,
       suggestedRelCount: Object.keys(response.suggested.relationshipTypeDefinitions ?? {}).length,
+      mergedVariants: response.mergedVariants ?? {},
       freshness,
     }
   }
@@ -1358,8 +1378,12 @@ export function OntologySchemaPage() {
                         />
                       )}
 
-                      {activeTab === 'adoption' && (
-                        <AdoptionPanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
+                      {activeTab === 'health' && (
+                        <AdoptionMatchSection ontologyId={selectedOntology.id} />
+                      )}
+
+                      {activeTab === 'usage' && (
+                        <UsagePanel ontology={selectedOntology} workspaces={workspaces} ontologies={ontologies} />
                       )}
 
                       {activeTab === 'history' && (
@@ -1435,6 +1459,7 @@ export function OntologySchemaPage() {
                         <RelationshipTypeEditor
                           relType={editorPanel.data}
                           availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
+                          existingTypeIds={relTypes.map(rt => rt.id)}
                           readOnly={isLocked}
                           onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
                           onCancel={() => setEditorPanel(null)}

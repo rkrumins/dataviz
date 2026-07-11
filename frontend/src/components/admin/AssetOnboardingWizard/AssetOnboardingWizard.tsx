@@ -26,7 +26,7 @@ import { AggregationStep } from './steps/AggregationStep'
 import { SemanticStep } from './steps/SemanticStep'
 import { SchemaReviewStep, type SchemaReviewStatusMap } from './steps/SchemaReviewStep'
 import { ReviewStep, type NavigationDestination } from './steps/ReviewStep'
-import { aggregationService } from '@/services/aggregationService'
+import { aggregationService, type AggregationTuning } from '@/services/aggregationService'
 import { useWizardKeyboard } from './hooks/useWizardKeyboard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -41,9 +41,10 @@ export interface OnboardingFormData {
     dedicatedStrategy: 'full_copy' | 'containment_only'
     dedicatedGraphName: string
     advancedConfig: {
-        batchSize: number       // 100–50,000, default 5000
+        batchSize: number       // kept for API backward-compat; inert on the self-tuning pipeline
         maxRetries: number      // 0–10, default 3
         timeoutMinutes: number | null  // null = 2hr default
+        tuning?: AggregationTuning     // optional pipeline caps/floors (seeded from admin defaults)
     }
     ontologySelections: Record<string, {
         ontologyId: string       // '' = unselected

@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import {
     aggregationService,
     type AggregationJobResponse,
+    type AggregationTuning,
     type JobHistoryFilters,
     type JobsSummary,
     type PaginatedJobsResponse,
@@ -29,7 +30,7 @@ import { useToast } from '@/components/ui/toast'
 import {
     buildDataSourceLookup,
     filtersToParams, paramsToFilters,
-    STATUS_CONFIG, PAGE_SIZE,
+    STATUS_CONFIG, PAGE_SIZE, triggerLabel,
     type DropdownOption,
 } from './job-history/shared'
 import { JobRow } from './job-history/JobRow'
@@ -45,7 +46,43 @@ const DEFAULT_TIMEOUT_SECS = 7200
 const DEFAULT_MAX_RETRIES = 3
 const DEFAULT_BATCH_SIZE = 5000
 
-function buildInitialOverridesFromJob(job: AggregationJobResponse): AggregationOverridesValue {
+/**
+ * Convert a job row's stored ``tuning`` (snake_case keys, as persisted by the
+ * pipeline) back into the camelCase request shape so a re-trigger can start
+ * from the same knobs.
+ */
+function tuningFromJob(raw: Record<string, unknown> | null | undefined): AggregationTuning | undefined {
+    if (!raw) return undefined
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+    const tuning: AggregationTuning = {}
+    const scanRangeWidth = num(raw['scan_range_width'])
+    if (scanRangeWidth !== undefined) tuning.scanRangeWidth = scanRangeWidth
+    const maxPendingPairs = num(raw['max_pending_pairs'])
+    if (maxPendingPairs !== undefined) tuning.maxPendingPairs = maxPendingPairs
+    const applyChunk = num(raw['apply_chunk'])
+    if (applyChunk !== undefined) tuning.applyChunk = applyChunk
+    const deleteChunk = num(raw['delete_chunk'])
+    if (deleteChunk !== undefined) tuning.deleteChunk = deleteChunk
+    const writePacingRatio = num(raw['write_pacing_ratio'])
+    if (writePacingRatio !== undefined) tuning.writePacingRatio = writePacingRatio
+    const extractConcurrency = num(raw['extract_concurrency'])
+    if (extractConcurrency !== undefined) tuning.extractConcurrency = extractConcurrency
+    if (typeof raw['materialize_leaf_pairs'] === 'boolean') tuning.materializeLeafPairs = raw['materialize_leaf_pairs']
+    if (typeof raw['materialize_fine_pairs'] === 'boolean') tuning.materializeFinePairs = raw['materialize_fine_pairs']
+    const maxMaterializedEdges = num(raw['max_materialized_edges'])
+    if (maxMaterializedEdges !== undefined) tuning.maxMaterializedEdges = maxMaterializedEdges
+    return Object.keys(tuning).length > 0 ? tuning : undefined
+}
+
+/** Only send ``tuning`` when the user actually set an override. */
+function tuningForRequest(tuning: AggregationTuning | undefined): AggregationTuning | undefined {
+    return tuning && Object.keys(tuning).length > 0 ? tuning : undefined
+}
+
+function buildInitialOverridesFromJob(
+    job: AggregationJobResponse,
+    defaultTuning?: AggregationTuning,
+): AggregationOverridesValue {
     // Backend's AggregationTriggerRequest enforces ``batchSize >= 100``.
     // Older purge job rows were written with ``batch_size = 0`` (now fixed
     // server-side, but rows persist), so a plain ``?? DEFAULT`` doesn't
@@ -58,15 +95,20 @@ function buildInitialOverridesFromJob(job: AggregationJobResponse): AggregationO
         projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'),
         maxRetries: job.maxRetries ?? DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round((job.timeoutSecs ?? DEFAULT_TIMEOUT_SECS) / 60),
+        tuning: tuningFromJob(job.tuning) ?? defaultTuning,
     }
 }
 
-function buildInitialOverridesForDataSource(projectionMode?: string | null): AggregationOverridesValue {
+function buildInitialOverridesForDataSource(
+    projectionMode?: string | null,
+    defaultTuning?: AggregationTuning,
+): AggregationOverridesValue {
     return {
         batchSize: DEFAULT_BATCH_SIZE,
         projectionMode: projectionMode === 'dedicated' ? 'dedicated' : 'in_source',
         maxRetries: DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
+        tuning: defaultTuning,
     }
 }
 
@@ -135,12 +177,20 @@ export function RegistryJobHistory() {
         })
     }, [setSearchParams, viewMode])
 
+    // Admin-level tuning defaults — seeds the re-trigger dialog when the job
+    // row itself carries no tuning. Best-effort: on failure the dialog simply
+    // opens with blank tuning fields (worker defaults).
+    const [defaultTuning, setDefaultTuning] = useState<AggregationTuning | undefined>(undefined)
+
     // Load reference data + summary
     useEffect(() => {
         workspaceService.list().then(setWorkspaces).catch(() => {})
         providerService.list().then(setProviders).catch(() => {})
         catalogService.list().then(setCatalogItems).catch(() => {})
         aggregationService.getJobsSummary().then(setSummary).catch(() => {})
+        aggregationService.getAggregationSettings()
+            .then(s => setDefaultTuning(s.tuning ?? undefined))
+            .catch(() => {})
     }, [])
 
     // Data source enrichment lookup
@@ -275,7 +325,7 @@ export function RegistryJobHistory() {
             chips.push({ key: 'mode', label: filters.projectionMode === 'in_source' ? 'In-Source' : 'Dedicated' })
         }
         if (filters.triggerSource) {
-            chips.push({ key: 'trigger', label: filters.triggerSource.charAt(0).toUpperCase() + filters.triggerSource.slice(1) })
+            chips.push({ key: 'trigger', label: triggerLabel(filters.triggerSource) })
         }
         for (const s of filters.status ?? []) {
             chips.push({ key: `status-${s}`, label: STATUS_CONFIG[s]?.label ?? s })
@@ -329,15 +379,15 @@ export function RegistryJobHistory() {
     // appears one frame later, which still reads as instant.
     const handleResume = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning) })
         })
-    }, [])
+    }, [defaultTuning])
 
     const handleRetrigger = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning) })
         })
-    }, [])
+    }, [defaultTuning])
 
     const handleDelete = useCallback((job: AggregationJobResponse) => {
         startTransition(() => setConfirmDelete(job))
@@ -384,6 +434,7 @@ export function RegistryJobHistory() {
                 batchSize: overrides.batchSize,
                 maxRetries: overrides.maxRetries,
                 timeoutSecs: overrides.timeoutMinutes * 60,
+                tuning: tuningForRequest(overrides.tuning),
             }, 'manual'),
             'Aggregation triggered',
         )
@@ -399,6 +450,7 @@ export function RegistryJobHistory() {
                 batchSize: overrides.batchSize,
                 maxRetries: overrides.maxRetries,
                 timeoutSecs: overrides.timeoutMinutes * 60,
+                tuning: tuningForRequest(overrides.tuning),
             }),
             'Job resumed from checkpoint',
         )
@@ -428,10 +480,10 @@ export function RegistryJobHistory() {
                 kind: 'dataSource',
                 dataSourceId,
                 dataSourceLabel: meta?.label ?? dataSourceId,
-                initialValue: buildInitialOverridesForDataSource(meta?.projectionMode),
+                initialValue: buildInitialOverridesForDataSource(meta?.projectionMode, defaultTuning),
             })
         })
-    }, [dsLookup])
+    }, [dsLookup, defaultTuning])
 
     const handlePurgeDataSource = useCallback(async (dataSourceId: string) => {
         setActionLoading(dataSourceId)
@@ -636,10 +688,15 @@ export function RegistryJobHistory() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {data.items.map(job => (
+                                        {data.items.map((job, i) => (
                                             <JobRow
                                                 key={job.id}
                                                 job={job}
+                                                previousJob={data.items.slice(i + 1).find(
+                                                    j => j.dataSourceId === job.dataSourceId
+                                                        && j.status === 'completed'
+                                                        && j.triggerSource !== 'purge'
+                                                )}
                                                 meta={dsLookup.get(job.dataSourceId)}
                                                 expanded={expandedRowId === job.id}
                                                 onToggle={handleToggleRow}
@@ -723,6 +780,7 @@ export function RegistryJobHistory() {
                     projectionMode: 'in_source',
                     maxRetries: DEFAULT_MAX_RETRIES,
                     timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
+                    tuning: defaultTuning,
                 }}
                 originatingJob={retriggerCtx?.kind === 'job' ? {
                     id: retriggerCtx.job.id,

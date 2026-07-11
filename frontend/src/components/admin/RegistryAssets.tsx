@@ -136,12 +136,13 @@ function AssetRow({
     onToggle: (name: string) => void
     onUnregister: (name: string) => void
     onReaggregate?: (name: string) => void
-    onPurge?: (name: string) => void
+    onPurge?: (name: string, opts?: { skipReaggregate?: boolean }) => void
     boundWorkspaceName?: string
 }) {
     const [expanded, setExpanded] = useState(false)
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
+    const [purgeSkipReagg, setPurgeSkipReagg] = useState(false)
     const [refreshPending, setRefreshPending] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
     const queryClient = useQueryClient()
@@ -558,6 +559,15 @@ function AssetRow({
                                             This will remove all materialized aggregated edges from the graph for this asset. This cannot be undone.
                                         </p>
                                     </div>
+                                    <label className="flex items-center gap-2 text-xs text-ink-muted cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={!purgeSkipReagg}
+                                            onChange={e => setPurgeSkipReagg(!e.target.checked)}
+                                            className="rounded border-glass-border"
+                                        />
+                                        Re-aggregate automatically after purge (recommended — container-level lineage is empty until aggregation runs)
+                                    </label>
                                     <div className="flex justify-end gap-2">
                                         <button
                                             onClick={() => setPurgeConfirm(false)}
@@ -569,7 +579,7 @@ function AssetRow({
                                         <button
                                             onClick={async () => {
                                                 setPurgeLoading(true)
-                                                try { onPurge!(assetName) } finally {
+                                                try { onPurge!(assetName, { skipReaggregate: purgeSkipReagg }) } finally {
                                                     setPurgeLoading(false)
                                                     setPurgeConfirm(false)
                                                 }
@@ -916,7 +926,11 @@ export function RegistryAssets() {
 
         showLoading('reaggregate', 'Discovering data sources…')
         try {
-            const wsList = await workspaceService.list()
+            // Admin-level tuning defaults seed the dialog; best-effort only.
+            const [wsList, settings] = await Promise.all([
+                workspaceService.list(),
+                aggregationService.getAggregationSettings().catch(() => null),
+            ])
             const dataSourcesToTrigger: Array<{ id: string; projectionMode?: string | null }> =
                 wsList.flatMap((ws: any) =>
                     ws.dataSources?.filter((ds: any) => ds.catalogItemId === item.id) || []
@@ -940,6 +954,7 @@ export function RegistryAssets() {
                     projectionMode: firstMode,
                     maxRetries: 3,
                     timeoutMinutes: 120,
+                    tuning: settings?.tuning ?? undefined,
                 },
             })
         } catch (e: any) {
@@ -957,6 +972,7 @@ export function RegistryAssets() {
         const { dataSources } = reaggregateCtx
         showLoading('reaggregate', `Triggering aggregation for ${dataSources.length} data source(s)…`)
         const timeoutSecs = overrides.timeoutMinutes * 60
+        const tuning = overrides.tuning && Object.keys(overrides.tuning).length > 0 ? overrides.tuning : undefined
         try {
             const results = await Promise.allSettled(dataSources.map(ds =>
                 aggregationService.triggerAggregation(ds.id, {
@@ -964,6 +980,7 @@ export function RegistryAssets() {
                     batchSize: overrides.batchSize,
                     maxRetries: overrides.maxRetries,
                     timeoutSecs,
+                    tuning,
                 }, 'manual')
             ))
 
@@ -989,7 +1006,7 @@ export function RegistryAssets() {
         }
     }, [reaggregateCtx, showToast, showLoading, hideLoading, setSearchParams])
 
-    const handlePurge = useCallback(async (assetName: string) => {
+    const handlePurge = useCallback(async (assetName: string, opts?: { skipReaggregate?: boolean }) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
         if (!item) return
 
@@ -1007,7 +1024,7 @@ export function RegistryAssets() {
             }
 
             const results = await Promise.allSettled(dataSources.map((ds: any) =>
-                aggregationService.purgeAggregation(ds.id)
+                aggregationService.purgeAggregation(ds.id, opts)
             ))
 
             // Purge is now asynchronous: the backend creates a `running`
@@ -1020,7 +1037,9 @@ export function RegistryAssets() {
 
             hideLoading('purge')
             if (failed === 0) {
-                showToast('success', `Purge queued for ${succeeded} data source(s). Switching to Job History to monitor…`)
+                showToast('success', opts?.skipReaggregate
+                    ? `Purge queued for ${succeeded} data source(s). Aggregation will stay empty until you re-trigger it.`
+                    : `Purge queued for ${succeeded} data source(s) — re-aggregation starts automatically when each purge completes. Switching to Job History to monitor…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else if (succeeded > 0) {
                 showToast('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)

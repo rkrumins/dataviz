@@ -226,6 +226,56 @@ async def get_jobs_summary(
     return await svc.get_jobs_summary(session)
 
 
+# ── GET/PUT /aggregation/settings — global tuning defaults ──────────
+
+@router.get(
+    "/aggregation/settings",
+    summary="Get global aggregation tuning defaults",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
+async def get_aggregation_settings(
+    request: Request,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+):
+    if _PROXY_ENABLED:
+        return await _proxy("GET", "/aggregation/settings", request)
+    return await svc.get_settings(session)
+
+
+@router.put(
+    "/aggregation/settings",
+    summary="Replace global aggregation tuning defaults",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
+async def put_aggregation_settings(
+    request: Request,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+):
+    if _PROXY_ENABLED:
+        body = await request.body()
+        return await _proxy("PUT", "/aggregation/settings", request, body=body)
+    import json as _json
+    from backend.app.services.aggregation.schemas import AggregationSettingsRequest
+    body_model = AggregationSettingsRequest(**_json.loads(await request.body()))
+    return await svc.put_settings(session, body_model.tuning)
+
+
+# ── GET /aggregation/workers — worker fleet + queue depth ───────────
+
+@router.get(
+    "/aggregation/workers",
+    summary="List live aggregation workers and job-queue depth",
+    dependencies=[Depends(_REQUIRE_SYSTEM_ADMIN)],
+)
+async def list_aggregation_workers(request: Request):
+    if _PROXY_ENABLED:
+        return await _proxy("GET", "/aggregation/workers", request)
+    from backend.app.services.aggregation.fleet import read_fleet
+    return await read_fleet()
+
+
 # ── GET /aggregation-jobs (global) ──────────────────────────────────
 
 @router.get(
@@ -810,6 +860,7 @@ async def purge_aggregation(
     response: Response,
     svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_db_session),
+    skip_reaggregate: bool = Query(False, alias="skipReaggregate"),
 ):
     """Queue a purge job. Returns 202 with the job row immediately; the
     actual ``MATCH ... DELETE`` runs as a regular insights-service
@@ -827,7 +878,9 @@ async def purge_aggregation(
 
     _, _, _, ConflictError, NotFoundError = _direct_imports()
     try:
-        job = await svc.claim_purge_job(ds_id, session)
+        job = await svc.claim_purge_job(
+            ds_id, session, skip_reaggregate=skip_reaggregate,
+        )
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ConflictError as e:

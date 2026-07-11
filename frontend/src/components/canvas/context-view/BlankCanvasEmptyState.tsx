@@ -10,12 +10,14 @@
  * - Not in a draft but can manage: a single "Start building" CTA that opens a draft.
  * - Read-only: a descriptive card with no edit controls.
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { motion } from 'framer-motion'
-import { PenLine, Plus, Shapes } from 'lucide-react'
+import { PenLine, Plus, Shapes, Info, ChevronDown } from 'lucide-react'
 import { useEntityTypes, useRootEntityTypes } from '@/store/schema'
 import type { EntityTypeSchema } from '@/types/schema'
+import { DeclaredVsPhysical } from '@/features/ontology/components/DeclaredVsPhysical'
+import { cn } from '@/lib/utils'
 
 const MAX_QUICK_TYPES = 4
 
@@ -43,6 +45,7 @@ export function BlankCanvasEmptyState({
 }: BlankCanvasEmptyStateProps) {
   const entityTypes = useEntityTypes()
   const rootTypeIds = useRootEntityTypes()
+  const [showBlueprint, setShowBlueprint] = useState(false)
 
   // Root types first (the natural tops of the containment tree); pad with the
   // lowest-level types when the ontology declares no explicit roots.
@@ -74,6 +77,28 @@ export function BlankCanvasEmptyState({
             ? <>This blank model follows the <span className="font-medium text-ink">{ontologyName}</span> blueprint — it guides which entities can go where, so everything you add stays consistent.</>
             : 'Add entities, nest them into a hierarchy, and connect them to map your data flows.'}
         </p>
+
+        {ontologyName && (
+          <div className="mt-3">
+            <button
+              onClick={() => setShowBlueprint(v => !v)}
+              className="inline-flex items-center gap-1.5 text-[11px] font-medium text-ink-muted hover:text-ink transition-colors"
+            >
+              <Info className="w-3.5 h-3.5" />
+              What does this blueprint mean?
+              <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', showBlueprint && 'rotate-180')} />
+            </button>
+            {showBlueprint && (
+              <div className="mt-2 text-left animate-in fade-in slide-in-from-top-1 duration-200">
+                <p className="text-[11px] text-ink-muted leading-relaxed mb-2">
+                  Everything you add here is written to the graph using the blueprint's own types — entity types become node labels,
+                  relationships become edge types:
+                </p>
+                <DeclaredVsPhysical entityExample={quickTypes[0]?.id || 'Customer'} />
+              </div>
+            )}
+          </div>
+        )}
 
         {isDraft ? (
           <>

@@ -15,6 +15,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { listViews, type View } from '@/services/viewApiService'
 import { useOntologyAssignments } from '../../hooks/useOntologies'
 import { useWorkspacesStore } from '@/store/workspaces'
+import { EducationalCallout } from '../EducationalCallout'
 
 interface ConfirmTarget {
   workspaceId: string
@@ -221,6 +222,13 @@ export function UsagePanel({ ontology, workspaces, ontologies }: UsagePanelProps
 
   return (
     <div className="space-y-6">
+      <EducationalCallout
+        id="edu-usage-assignment"
+        title="What assigning this ontology does"
+        description="Assigning this ontology to a data source makes it the lens for that source's graph — nodes and edges are read, nested, and validated against these declared types, and any versioned graph built here is written with them. Sources without an assignment fall back to the platform's default schema. Check the Health tab to confirm each source's real graph actually matches."
+        variant="info"
+      />
+
       {/* Summary stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <div className="border border-glass-border rounded-xl p-4 bg-canvas-elevated/50">

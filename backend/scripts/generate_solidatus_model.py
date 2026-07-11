@@ -207,12 +207,31 @@ class SolidatusModelGenerator:
         groups_chance: float = 0.2,
         transition_density: float = 0.4,
         seed: int = None,
+        depth: int = None,
+        orphans: int = 0,
+        realistic: bool = False,
+        e2e_fraction: float = 0.5,
+        fan_in: Tuple[int, int] = (1, 1),
+        fan_out: Tuple[int, int] = (1, 1),
+        table_lineage: bool = False,
     ):
         self.num_layers = num_layers
         self.objects_per_layer = objects_per_layer
         self.attrs_per_object = attrs_per_object
         self.groups_chance = groups_chance
         self.transition_density = transition_density
+        # Deterministic hierarchy shape (None = legacy groups_chance behavior):
+        #   2 = Layer→Attribute (flat); 3 = Layer→Object→Attribute;
+        #   N>3 = insert N-3 nested Group levels between Object and Attribute.
+        self.depth = depth
+        # Extra uncontained, non-root attribute nodes (the top-level/orphan edge case).
+        self.orphans = orphans
+        # Realistic-lineage mode: concepts flow through every layer (see _generate_realistic).
+        self.realistic = realistic
+        self.e2e_fraction = e2e_fraction        # fraction of concepts carried source→sink
+        self.fan_in = fan_in                    # join width on carry targets
+        self.fan_out = fan_out                  # split width on carry sources
+        self.table_lineage = table_lineage      # also emit object→object edges
 
         if seed is not None:
             random.seed(seed)
@@ -266,8 +285,166 @@ class SolidatusModelGenerator:
             entry["children"] = children
         self.entities[eid] = entry
 
+    def _build_depth_tier(self, lid: str, lname: str, li: int) -> List[str]:
+        """Build a layer's subtree with a deterministic depth.
+
+        depth 2 → attributes are direct children of the layer (flat).
+        depth ≥ 3 → objects under the layer; N-3 nested Group levels are inserted
+        between each Object and its Attributes (0 groups at depth 3). Returns the
+        layer's direct-child ids. Populates ``self._layer_attrs[lid]`` with the leaf
+        attribute ids so lineage generation is unchanged.
+        """
+        if self.depth <= 2:
+            attr_ids: List[str] = []
+            for attr_name, _, attr_props in self._pick_attributes(
+                random.randint(*self.attrs_per_object), lname
+            ):
+                aid = attribute_id()
+                self._add_entity(aid, attr_name, attr_props)
+                attr_ids.append(aid)
+                self._layer_attrs[lid].append(aid)
+            return attr_ids
+
+        num_group_levels = self.depth - 3
+        object_ids: List[str] = []
+        num_objects = random.randint(*self.objects_per_layer)
+        for oi in range(num_objects):
+            oid = object_id()
+            obj_name, owner = self._pick_object_name(lname, li * 10 + oi)
+
+            attr_ids = []
+            for attr_name, _, attr_props in self._pick_attributes(
+                random.randint(*self.attrs_per_object), obj_name
+            ):
+                aid = attribute_id()
+                self._add_entity(aid, attr_name, attr_props)
+                attr_ids.append(aid)
+                self._layer_attrs[lid].append(aid)
+
+            # Nest the attributes under a chain of groups, bottom-up.
+            child_ids = attr_ids
+            for level in range(num_group_levels, 0, -1):
+                gid = group_id()
+                self._add_entity(gid, f"{obj_name} Details {level}", {"GroupType": "metadata"}, child_ids)
+                child_ids = [gid]
+
+            self._add_entity(oid, obj_name, {"Owner": owner}, child_ids)
+            object_ids.append(oid)
+        return object_ids
+
+    def _add_orphans(self) -> None:
+        """Add uncontained, non-root attribute nodes. Each is placed in ``entities``
+        but in no ``children`` list and not in ``layers``; it joins a random layer's
+        attribute pool so lineage can still touch it (orphan-with-lineage case)."""
+        for _ in range(self.orphans):
+            aid = attribute_id()
+            attr_name, data_type = random.choice(ATTRIBUTE_TEMPLATES)
+            self._add_entity(aid, attr_name, {"DATA_TYPE": data_type, "orphan": True})
+            if self.layer_ids:
+                self._layer_attrs[random.choice(self.layer_ids)].append(aid)
+
+    def _add_transition(self, source: str, target: str, properties: Dict[str, Any] = None) -> None:
+        tid = transition_id()
+        self.transitions[tid] = {"source": source, "target": target, "properties": properties or {}}
+
+    def _concept(self, i: int) -> Tuple[str, str]:
+        """Stable (name, data_type) for concept index i — semantic and reused across layers."""
+        name, dtype = ATTRIBUTE_TEMPLATES[i % len(ATTRIBUTE_TEMPLATES)]
+        group = i // len(ATTRIBUTE_TEMPLATES)
+        return (name if group == 0 else f"{name}_{group}", dtype)
+
+    def _generate_realistic(self) -> Dict[str, Any]:
+        """Coherent, column-level, end-to-end lineage.
+
+        Models data CONCEPTS that flow through the pipeline: a concept is the same
+        named column in every layer's tables. ``e2e_fraction`` of the concept pool
+        are BACKBONE concepts present in every layer, so their carry-edges form
+        guaranteed source→sink chains of full depth with semantic correspondence
+        (email→email). ``fan_in``/``fan_out`` add join/split edges around the
+        backbone; transient concepts (the rest of the pool) appear in a subset of
+        layers and are derived from a prior-layer column with ``transition_density``
+        probability. ``table_lineage`` rolls the column edges up to object→object.
+        """
+        L = self.num_layers
+        obj_lo, obj_hi = self.objects_per_layer
+        attr_lo, attr_hi = self.attrs_per_object
+        pool = max(2, obj_hi * attr_hi)
+        n_backbone = max(1, int(self.e2e_fraction * pool))
+        backbone = list(range(n_backbone))
+        transient = list(range(n_backbone, pool))
+
+        col_of: Dict[Tuple[int, int], str] = {}   # (layer_idx, concept_idx) → attr id
+        table_of: Dict[str, str] = {}             # attr id → owning object id
+        active_by_layer: Dict[int, List[int]] = {}
+
+        for li in range(L):
+            lid = layer_id()
+            self.layer_ids.append(lid)
+            lname = self._pick_layer_name(li % len(LAYER_TEMPLATES))
+
+            k = random.randint(0, len(transient)) if transient else 0
+            active = backbone + sorted(random.sample(transient, k)) if transient else list(backbone)
+            active_by_layer[li] = active
+
+            n_obj = max(1, random.randint(obj_lo, obj_hi))
+            objects = [object_id() for _ in range(n_obj)]
+            table_cols: Dict[str, List[str]] = {oid: [] for oid in objects}
+            for cidx in active:
+                cname, dtype = self._concept(cidx)
+                oid = random.choice(objects)
+                aid = attribute_id()
+                self._add_entity(aid, cname, {"DATA_TYPE": dtype, "concept": cname})
+                table_cols[oid].append(aid)
+                col_of[(li, cidx)] = aid
+                table_of[aid] = oid
+
+            object_ids: List[str] = []
+            for oi, oid in enumerate(objects):
+                oname, owner = self._pick_object_name(lname, li * 100 + oi)
+                self._add_entity(oid, oname, {"Owner": owner}, table_cols[oid])
+                object_ids.append(oid)
+            self._add_entity(lid, lname, {}, object_ids)
+
+        table_pairs: set = set()
+        seen_cols: set = set()
+
+        def link(src: str, tgt: str, props: Dict[str, Any]) -> None:
+            if src == tgt or (src, tgt) in seen_cols:
+                return
+            seen_cols.add((src, tgt))
+            self._add_transition(src, tgt, props)
+            table_pairs.add((table_of[src], table_of[tgt]))
+
+        for li in range(L - 1):
+            cur_cols = [col_of[(li, c)] for c in active_by_layer[li]]
+            next_cols = [col_of[(li + 1, c)] for c in active_by_layer[li + 1]]
+            for cidx in active_by_layer[li + 1]:
+                tgt = col_of[(li + 1, cidx)]
+                if (li, cidx) in col_of:
+                    # carry: same concept, prior layer → this layer
+                    link(col_of[(li, cidx)], tgt, {"transformationType": "direct_copy"})
+                    # fan-in (join): extra inbound from other prior-layer columns
+                    for src in random.sample(cur_cols, min(random.randint(*self.fan_in) - 1, len(cur_cols))):
+                        link(src, tgt, {"transformationType": "join"})
+                elif cur_cols and random.random() < self.transition_density:
+                    # transient concept new in this layer → derived from a prior column
+                    link(random.choice(cur_cols), tgt, {"transformationType": "derivation"})
+            # fan-out (split): some prior columns feed extra targets
+            for src in cur_cols:
+                for tgt in random.sample(next_cols, min(random.randint(*self.fan_out) - 1, len(next_cols))):
+                    link(src, tgt, {"transformationType": "fan_out"})
+
+        if self.table_lineage:
+            for so, to in sorted(table_pairs):
+                if so != to:
+                    self._add_transition(so, to, {"level": "table"})
+
+        return {"entities": self.entities, "layers": self.layer_ids, "transitions": self.transitions}
+
     def generate(self) -> Dict[str, Any]:
         """Generate the full model and return as a dict."""
+        if self.realistic:
+            return self._generate_realistic()
 
         # ── Create layers ────────────────────────────────────────────
         layer_names_shuffled = list(range(len(LAYER_TEMPLATES)))
@@ -279,6 +456,13 @@ class SolidatusModelGenerator:
             lname = self._pick_layer_name(layer_names_shuffled[li % len(LAYER_TEMPLATES)])
 
             self._layer_attrs[lid] = []
+
+            # ── Deterministic-shape tier (--depth) ───────────────────
+            if self.depth is not None:
+                object_ids = self._build_depth_tier(lid, lname, li)
+                self._add_entity(lid, lname, {}, object_ids)
+                continue
+
             object_ids: List[str] = []
 
             # ── Create objects within this layer ─────────────────────
@@ -316,6 +500,10 @@ class SolidatusModelGenerator:
                 object_ids.append(oid)
 
             self._add_entity(lid, lname, {}, object_ids)
+
+        # ── Add orphan nodes (before lineage so they can be touched) ─
+        if self.orphans:
+            self._add_orphans()
 
         # ── Create transitions (lineage between adjacent layers) ─────
         # Data flows forward: layer[i] attributes → layer[i+1] attributes
@@ -395,6 +583,23 @@ Pipeline:
                         help="Max attributes per object (default: 8)")
     parser.add_argument("--groups-chance", type=float, default=0.2,
                         help="Probability of an object having a group (0.0-1.0, default: 0.2)")
+    parser.add_argument("--depth", type=int, default=None,
+                        help="Deterministic hierarchy depth (overrides --groups-chance): "
+                             "2=Layer->Attribute (flat), 3=Layer->Object->Attribute, "
+                             "N>3 inserts N-3 nested group levels")
+    parser.add_argument("--orphans", type=int, default=0,
+                        help="Number of extra uncontained, non-root attribute nodes (default: 0)")
+    parser.add_argument("--realistic", action="store_true",
+                        help="Coherent end-to-end lineage: data concepts flow through every layer "
+                             "(guaranteed source->sink column traces with semantic correspondence)")
+    parser.add_argument("--e2e-fraction", type=float, default=0.5,
+                        help="Fraction of concepts carried source->sink as backbones (realistic mode, default: 0.5)")
+    parser.add_argument("--fan-in", type=str, default="1-1",
+                        help="Join width MIN-MAX on carry targets (realistic mode, default: 1-1)")
+    parser.add_argument("--fan-out", type=str, default="1-1",
+                        help="Split width MIN-MAX on carry sources (realistic mode, default: 1-1)")
+    parser.add_argument("--table-lineage", action="store_true",
+                        help="Also emit object->object lineage edges (realistic mode)")
     parser.add_argument("--transition-density", type=float, default=0.4,
                         help="Probability of a target attribute having lineage (0.0-1.0, default: 0.4)")
     parser.add_argument("--seed", type=int, default=None,
@@ -406,6 +611,10 @@ Pipeline:
 
     args = parser.parse_args()
 
+    def _range(s: str) -> Tuple[int, int]:
+        lo, _, hi = s.partition("-")
+        return (int(lo), int(hi or lo))
+
     gen = SolidatusModelGenerator(
         num_layers=args.layers,
         objects_per_layer=(args.min_objects, args.max_objects),
@@ -413,6 +622,13 @@ Pipeline:
         groups_chance=args.groups_chance,
         transition_density=args.transition_density,
         seed=args.seed,
+        depth=args.depth,
+        orphans=args.orphans,
+        realistic=args.realistic,
+        e2e_fraction=args.e2e_fraction,
+        fan_in=_range(args.fan_in),
+        fan_out=_range(args.fan_out),
+        table_lineage=args.table_lineage,
     )
 
     model = gen.generate()

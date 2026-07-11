@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import type { EntityTypeSchema, EntityVisualConfig, EntityFieldDefinition } from '@/types/schema'
 import { cn } from '@/lib/utils'
 import { generateId } from '@/lib/utils'
+import { toEntityTypeId, findCaseInsensitiveCollision } from '@/features/ontology/lib/typeIds'
 
 // Common Lucide icon names for picker
 const COMMON_ICONS = [
@@ -54,9 +55,13 @@ interface EntityTypeEditorProps {
 export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOnly, onSave, onCancel }: EntityTypeEditorProps) {
   const isNew = !entityType
 
-  const [form, setForm] = useState<EntityTypeSchema>(
-    entityType || createDefaultEntityType()
-  )
+  const [form, setForm] = useState<EntityTypeSchema>(() => {
+    const base = entityType || createDefaultEntityType()
+    // New types derive their node-label id from the name up-front.
+    return entityType ? base : { ...base, id: toEntityTypeId(base.name) }
+  })
+  // Once the id is hand-edited, stop auto-deriving it from the name (slug-field pattern).
+  const [idTouched, setIdTouched] = useState(false)
 
   const [activeTab, setActiveTab] = useState<'basic' | 'visual' | 'fields' | 'hierarchy'>('basic')
 
@@ -64,11 +69,26 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
     setForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  // The physical node label is `form.id`. New types derive it from the name as PascalCase
+  // (until hand-edited); existing types keep theirs frozen so live nodes keep resolving.
+  const onNameChange = (name: string) =>
+    setForm((p) => ({ ...p, name, id: isNew && !idTouched ? toEntityTypeId(name) : p.id }))
+  const onIdChange = (raw: string) => {
+    setIdTouched(true)
+    setForm((p) => ({ ...p, id: toEntityTypeId(raw) }))
+  }
+
   const updateVisual = <K extends keyof EntityVisualConfig>(key: K, value: EntityVisualConfig[K]) => {
     setForm((prev) => ({ ...prev, visual: { ...prev.visual, [key]: value } }))
   }
 
-  const canSave = form.name.trim() && form.id.trim()
+  // Uniqueness is scoped to THIS ontology, excluding the type being edited.
+  const otherIds = useMemo(
+    () => availableEntityTypes.map((t) => t.id).filter((id) => id !== entityType?.id),
+    [availableEntityTypes, entityType?.id],
+  )
+  const collision = findCaseInsensitiveCollision(form.id, otherIds)
+  const canSave = !!form.name.trim() && !!form.id.trim() && !collision
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -108,7 +128,14 @@ export function EntityTypeEditor({ entityType, availableEntityTypes = [], readOn
         <fieldset disabled={readOnly} className={cn(readOnly && 'opacity-75')}>
           <div className="p-5">
             {activeTab === 'basic' && (
-              <BasicTab form={form} updateForm={updateForm} isNew={isNew} />
+              <BasicTab
+                form={form}
+                updateForm={updateForm}
+                isNew={isNew}
+                onNameChange={onNameChange}
+                onIdChange={onIdChange}
+                collision={collision}
+              />
             )}
             {activeTab === 'visual' && (
               <VisualTab form={form} updateVisual={updateVisual} />
@@ -170,30 +197,18 @@ function Section({ title, description, children }: { title: string; description?
 // Basic Tab
 // ---------------------------------------------------------------------------
 
-function BasicTab({ form, updateForm, isNew }: {
+function BasicTab({ form, updateForm, isNew, onNameChange, onIdChange, collision }: {
   form: EntityTypeSchema
   updateForm: <K extends keyof EntityTypeSchema>(key: K, value: EntityTypeSchema[K]) => void
   isNew: boolean
+  onNameChange: (name: string) => void
+  onIdChange: (raw: string) => void
+  collision: string | null
 }) {
   return (
     <div className="space-y-5">
       <Section title="Identification">
         <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-ink mb-1.5">
-              Type ID <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              value={form.id}
-              onChange={(e) => updateForm('id', e.target.value.toLowerCase().replace(/\s+/g, '-'))}
-              placeholder="e.g., dataset, pipeline, dashboard"
-              className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
-              disabled={!isNew}
-            />
-            <p className="text-[10px] text-ink-muted/60 mt-1">Unique identifier — cannot be changed after creation</p>
-          </div>
-
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-ink mb-1.5">
@@ -202,7 +217,7 @@ function BasicTab({ form, updateForm, isNew }: {
               <input
                 type="text"
                 value={form.name}
-                onChange={(e) => updateForm('name', e.target.value)}
+                onChange={(e) => onNameChange(e.target.value)}
                 placeholder="e.g., Dataset"
                 className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
               />
@@ -217,6 +232,43 @@ function BasicTab({ form, updateForm, isNew }: {
                 className="w-full px-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500/20 transition-all"
               />
             </div>
+          </div>
+
+          {/* Physical node label — the id written to the graph. */}
+          <div>
+            <label className="block text-xs font-semibold text-ink mb-1.5">
+              Node label <span className="text-red-500">*</span>
+              <span className="ml-1.5 font-normal text-ink-muted">— how it appears in the graph</span>
+            </label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-xs text-ink-muted/70 pointer-events-none select-none">:</span>
+              <input
+                type="text"
+                value={form.id}
+                onChange={(e) => onIdChange(e.target.value)}
+                disabled={!isNew}
+                placeholder="Dataset"
+                spellCheck={false}
+                className={cn(
+                  'w-full pl-6 pr-3 py-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border text-sm font-mono text-ink placeholder:text-ink-muted/40 focus:outline-none focus:ring-2 transition-all disabled:opacity-70',
+                  collision
+                    ? 'border-red-400/70 focus:ring-red-500/25 focus:border-red-400/40'
+                    : 'border-glass-border focus:ring-indigo-500/30 focus:border-indigo-500/20',
+                )}
+              />
+            </div>
+            {collision ? (
+              <p className="text-[11px] text-red-600 dark:text-red-400 mt-1 flex items-center gap-1">
+                <LucideIcons.AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                <span><span className="font-mono">{collision}</span> already exists in this ontology — choose a different name.</span>
+              </p>
+            ) : (
+              <p className="text-[10px] text-ink-muted/70 mt-1">
+                {isNew
+                  ? 'Auto-generated from the name (PascalCase). Unique within this ontology — other ontologies can reuse it.'
+                  : 'Fixed after creation so existing nodes keep resolving. Rename the display name freely; this stays put.'}
+              </p>
+            )}
           </div>
 
           <div>

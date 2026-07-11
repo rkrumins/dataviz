@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,13 +70,23 @@ async def collect(envelope: PurgeJobEnvelope) -> None:
     deleted edges are no-ops, and the data_source_state reset only
     needs to land once.
     """
+    reagg_job = None
     async with get_jobs_session() as session:
-        await _collect_in_session(session, envelope)
+        reagg_job = await _collect_in_session(session, envelope)
+    # Post-purge re-aggregation fires only AFTER the outer commit above
+    # has landed the purge row's ``completed`` status. Firing inside the
+    # transaction made the control plane's active-job guard see the
+    # still-``running`` purge row → 409 → the auto re-aggregation
+    # silently never happened.
+    if reagg_job is not None:
+        await _maybe_trigger_reaggregation(reagg_job)
 
 
 async def _collect_in_session(
     session: AsyncSession, envelope: PurgeJobEnvelope,
-) -> None:
+) -> "SimpleNamespace | None":
+    """Returns a detached post-purge re-aggregation payload on successful
+    completion (fired by the caller AFTER the outer commit), else None."""
     job = await session.get(AggregationJobORM, envelope.job_id)
     if job is None:
         # Producer raced a job-deletion. Nothing to update; let the
@@ -269,6 +280,63 @@ async def _collect_in_session(
         from .enqueue import mark_stats_changed
         await mark_stats_changed(envelope.data_source_id, envelope.workspace_id)
 
+        # The purge rewrote the :AGGREGATED layer — invalidate the
+        # aggregated read caches THROUGH THE SHARED CHOKE POINT (bump the
+        # scoped generation + purge the last-known-good entries). Without
+        # this a purge was invisible to the canvas: the primary cache
+        # expired in ~60s but every degraded read kept serving pre-purge
+        # LKG answers for up to its TTL ("edges still there after a
+        # verified delete"). Best-effort direct call (same-Redis
+        # topologies) + a bus event so the viz-service listener covers
+        # split topologies. Both must never fail a purge whose deletes
+        # already landed.
+        try:
+            from backend.app.services.graph_cache import invalidate_aggregated_reads
+            await invalidate_aggregated_reads(
+                envelope.workspace_id or "", envelope.data_source_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "purge.cache_invalidation_failed ds=%s: %s",
+                envelope.data_source_id, exc,
+            )
+        try:
+            from backend.app.services.aggregation.events import AggregationEventPublisher
+            from backend.app.services.aggregation.redis_client import get_redis
+            await AggregationEventPublisher(get_redis()).purge_completed(
+                job_id=job.id,
+                data_source_id=job.data_source_id,
+                workspace_id=envelope.workspace_id,
+                deleted_edges=deleted,
+            )
+        except Exception as exc:
+            logger.warning(
+                "purge.event_publish_failed ds=%s: %s",
+                envelope.data_source_id, exc,
+            )
+
+        # PURGE QUARANTINE for the opt-out case: skipping the post-purge
+        # re-aggregation is meaningless if the read path's empty-result
+        # backfill resurrects the cells on the next canvas load. Arm the
+        # backfill's own damping key (shared contract with
+        # context_engine._trigger_materialize_in_background) so a
+        # skip-reaggregate purge STAYS purged for the damping window
+        # unless the user re-aggregates explicitly.
+        await _arm_purge_quarantine(provider, job)
+
+        # Post-purge re-aggregation (default ON, opt-out rides the job
+        # row): container-level lineage is BLIND until the canonical
+        # cells are rebuilt — same-level container pairs cannot be
+        # derived on demand at scale. The caller fires the trigger AFTER
+        # the outer commit; hand it a detached snapshot of the fields it
+        # needs (the ORM row is unusable once the session closes).
+        return SimpleNamespace(
+            id=job.id,
+            data_source_id=job.data_source_id,
+            projection_mode=job.projection_mode,
+            tuning_json=getattr(job, "tuning_json", None),
+        )
+
     except JobCancelled as cancel_exc:
         # Cooperative cancel observed between DELETE batches. The
         # previous batch's MATCH ... DELETE landed cleanly in
@@ -349,6 +417,93 @@ async def record_failure(
         job.error_message = error[:2000]
         job.completed_at = _now()
         job.updated_at = _now()
+
+
+async def _arm_purge_quarantine(provider, job) -> None:
+    """When the purge row carries ``{"skip_reaggregate": true}``, damp the
+    read-path backfill for its 15-minute window by pre-setting its dedupe
+    key. Never raises."""
+    import json as _json
+    try:
+        opts = _json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+    except (TypeError, ValueError):
+        opts = {}
+    if not opts.get("skip_reaggregate"):
+        return
+    redis = getattr(provider, "_redis", None)
+    if redis is None:
+        return
+    try:
+        await redis.set(
+            f"materialize:in-flight:{job.data_source_id}",
+            "purge-quarantine", ex=900,
+        )
+        logger.info(
+            "purge.quarantine_armed ds=%s (read-path backfill damped for "
+            "15m; re-aggregate manually to rebuild)", job.data_source_id,
+        )
+    except Exception as exc:
+        logger.warning("purge.quarantine_failed ds=%s: %s", job.data_source_id, exc)
+
+
+async def _maybe_trigger_reaggregation(job: AggregationJobORM) -> None:
+    """Fire a normal aggregation job after a successful purge unless the
+    row carries ``{"skip_reaggregate": true}`` (the UI opt-out). Routed
+    through the control plane so the run is a first-class job — visible
+    in the jobs UI, on the worker fleet, holding the graph lease under
+    its own name. Never raises."""
+    import json as _json
+    import os as _os
+    try:
+        opts = _json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+    except (TypeError, ValueError):
+        opts = {}
+    if opts.get("skip_reaggregate"):
+        logger.info(
+            "purge.reaggregate_skipped job_id=%s ds=%s (user opt-out)",
+            job.id, job.data_source_id,
+        )
+        return
+    base = _os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
+    try:
+        import httpx
+        async with httpx.AsyncClient(
+            base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
+        ) as client:
+            resp = await client.post(
+                f"/aggregation/data-sources/{job.data_source_id}/jobs",
+                params={"triggerSource": "post_purge"},
+                json={
+                    "projectionMode": job.projection_mode or "in_source",
+                    "batchSize": 1000,
+                },
+            )
+        if resp.status_code in (200, 202):
+            logger.info(
+                "purge.reaggregate_triggered job_id=%s ds=%s",
+                job.id, job.data_source_id,
+            )
+        elif resp.status_code == 409:
+            logger.info(
+                "purge.reaggregate_already_active job_id=%s ds=%s",
+                job.id, job.data_source_id,
+            )
+        else:
+            logger.error(
+                "purge.reaggregate_rejected job_id=%s ds=%s status=%s body=%s "
+                "— the promised post-purge re-aggregation did NOT run; "
+                "trigger aggregation manually to restore container-level "
+                "lineage",
+                job.id, job.data_source_id, resp.status_code, resp.text[:300],
+            )
+    except Exception as exc:
+        logger.error(
+            "purge.reaggregate_failed job_id=%s ds=%s: %s — the promised "
+            "post-purge re-aggregation did NOT run (is AGGREGATION_SERVICE_URL "
+            "set for this service? base=%s); trigger aggregation manually to "
+            "restore container-level lineage",
+            job.id, job.data_source_id, exc, base,
+        )
 
 
 # Self-register with the dispatcher.

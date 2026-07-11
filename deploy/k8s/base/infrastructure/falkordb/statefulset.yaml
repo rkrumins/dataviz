@@ -30,14 +30,19 @@ spec:
               name: falkordb-ui
           env:
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 4"
+              value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
+            # Instance ceiling at 75% of the 8Gi pod limit: QUERY_MEM_CAPACITY
+            # bounds one query; the dataset itself needs maxmemory or growth
+            # OOM-kills the pod. noeviction = writes fail loudly at the ceiling.
+            - name: REDIS_ARGS
+              value: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes"
           resources:
             requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
+              cpu: "1"
               memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
           readinessProbe:
             exec:
               command: ["redis-cli", "ping"]
@@ -46,7 +51,11 @@ spec:
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              # LOADING = alive and replaying its AOF/RDB — killing it here
+              # restarts the replay from scratch and the pod NEVER recovers
+              # (observed live 2026-07-11 on a 3.9GB AOF: hours of flapping).
+              # Readiness stays strict (no traffic while loading).
+              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3

@@ -42,7 +42,9 @@ spec:
           image: {{ .Values.stores.falkordb.image | quote }}
           env:
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 4"
+              value: {{ .Values.stores.falkordb.args | quote }}
+            - name: REDIS_ARGS
+              value: {{ .Values.stores.falkordb.redisArgs | quote }}
           ports:
             - name: redis
               containerPort: 6379

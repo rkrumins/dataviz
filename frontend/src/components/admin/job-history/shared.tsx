@@ -117,7 +117,28 @@ export const TRIGGER_SOURCES = [
     { key: 'schedule', label: 'Schedule', icon: Calendar },
     { key: 'drift', label: 'Drift', icon: Activity },
     { key: 'purge', label: 'Purge', icon: Trash2 },
+    { key: 'post_purge', label: 'Post-purge', icon: Zap },
+    { key: 'auto', label: 'Auto backfill', icon: Activity },
 ] as const
+
+// Friendly labels for every trigger source the backend emits. Raw
+// values like ``post_purge`` must never render capitalized-verbatim.
+const TRIGGER_LABELS: Record<string, string> = {
+    manual: 'Manual',
+    api: 'API',
+    onboarding: 'Onboarding',
+    schedule: 'Scheduled',
+    drift: 'Drift',
+    purge: 'Purge',
+    post_purge: 'Post-purge',
+    auto: 'Auto backfill',
+}
+
+export function triggerLabel(source: string | undefined | null): string {
+    if (!source) return '\u2014'
+    return TRIGGER_LABELS[source]
+        ?? source.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase())
+}
 
 export const MODE_OPTIONS = [
     { key: 'in_source', label: 'In-Source' },

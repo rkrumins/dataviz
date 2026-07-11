@@ -35,3 +35,84 @@ SYSTEM_DEFAULT_ONTOLOGY_NAME: str = _DATA.get("name", "Synodic Default Ontology"
 SYSTEM_DEFAULT_ONTOLOGY_VERSION: int = _DATA.get("version", 1)
 SYSTEM_ENTITY_TYPES: Dict[str, Dict[str, Any]] = _DATA.get("entity_types", {})
 SYSTEM_RELATIONSHIP_TYPES: Dict[str, Dict[str, Any]] = _DATA.get("relationship_types", {})
+
+# ---------------------------------------------------------------------------
+# System-internal (built-in) edge types
+# ---------------------------------------------------------------------------
+# Edge types the PLATFORM produces, not user data: the aggregation worker writes
+# ``:AGGREGATED`` rollup edges into the graph. Every ontology implicitly includes these
+# so (a) the resolution gate never blocks aggregation on an edge the platform itself
+# emitted, and (b) the UI can always show them, marked built-in, without the user having
+# to declare an implementation detail. Keyed UPPERCASE (the case-insensitive contract).
+SYSTEM_INTERNAL_EDGE_TYPES: frozenset = frozenset({"AGGREGATED"})
+
+# The full definitions for those types, sourced from the system ontology so there is one
+# source of truth for their classification/visuals. Marked ``is_system`` for the UI.
+SYSTEM_INTERNAL_RELATIONSHIP_TYPES: Dict[str, Dict[str, Any]] = {
+    rid: {**rdef, "is_system": True}
+    for rid, rdef in SYSTEM_RELATIONSHIP_TYPES.items()
+    if rid.upper() in SYSTEM_INTERNAL_EDGE_TYPES
+}
+
+
+def is_system_edge_type(edge_type_id: str) -> bool:
+    """True if ``edge_type_id`` is a platform-built-in edge (case-insensitive)."""
+    return bool(edge_type_id) and str(edge_type_id).upper() in SYSTEM_INTERNAL_EDGE_TYPES
+
+
+def with_system_edge_types(rel_defs_raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``rel_defs_raw`` with the system-internal edge types merged in and always
+    marked ``is_system``. Makes every ontology implicitly include the platform's built-in
+    edges — for the resolution gate and for display. A user's own classification (if they
+    happened to declare one) is preserved; only the built-in marker is forced on."""
+    merged: Dict[str, Any] = {**(rel_defs_raw or {})}
+    for rid, sdef in SYSTEM_INTERNAL_RELATIONSHIP_TYPES.items():
+        existing = merged.get(rid)
+        merged[rid] = {**existing, "is_system": True} if isinstance(existing, dict) else dict(sdef)
+    return merged
+
+
+def strip_system_edge_types(rel_defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``rel_defs`` without the system-internal edge types — they are injected on
+    read, never persisted, so a save round-trip can't store (or duplicate) them."""
+    return {k: v for k, v in (rel_defs or {}).items() if not is_system_edge_type(k)}
+
+
+# ---------------------------------------------------------------------------
+# System-internal (built-in) entity types — the node counterpart of the edges above.
+# ---------------------------------------------------------------------------
+# There are none today, but the platform may one day emit built-in NODES (e.g. a synthetic
+# rollup/aggregate node) exactly as it emits ``:AGGREGATED`` edges. These helpers mirror the
+# edge ones so every coverage/adoption/gate path already injects "system nodes" — adding one
+# later is a one-line change to ``SYSTEM_INTERNAL_ENTITY_TYPES``, with no code to hunt down.
+SYSTEM_INTERNAL_ENTITY_TYPES: frozenset = frozenset()
+
+SYSTEM_INTERNAL_ENTITY_TYPE_DEFS: Dict[str, Dict[str, Any]] = {
+    eid: {**edef, "is_system": True}
+    for eid, edef in SYSTEM_ENTITY_TYPES.items()
+    if eid.upper() in {t.upper() for t in SYSTEM_INTERNAL_ENTITY_TYPES}
+}
+
+
+def is_system_entity_type(entity_type_id: str) -> bool:
+    """True if ``entity_type_id`` is a platform-built-in node type (case-insensitive)."""
+    return bool(entity_type_id) and str(entity_type_id).upper() in {
+        t.upper() for t in SYSTEM_INTERNAL_ENTITY_TYPES
+    }
+
+
+def with_system_entity_types(entity_defs_raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``entity_defs_raw`` with the system-internal entity types merged in and marked
+    ``is_system`` — the node analogue of :func:`with_system_edge_types`. No-op today (there
+    are no built-in nodes); wired everywhere so a future one is covered automatically."""
+    merged: Dict[str, Any] = {**(entity_defs_raw or {})}
+    for eid, sdef in SYSTEM_INTERNAL_ENTITY_TYPE_DEFS.items():
+        existing = merged.get(eid)
+        merged[eid] = {**existing, "is_system": True} if isinstance(existing, dict) else dict(sdef)
+    return merged
+
+
+def strip_system_entity_types(entity_defs: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``entity_defs`` without the system-internal entity types (injected on read,
+    never persisted)."""
+    return {k: v for k, v in (entity_defs or {}).items() if not is_system_entity_type(k)}

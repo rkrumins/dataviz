@@ -113,10 +113,27 @@ class AggregationEventListener:
                     aggregation_edge_count=payload.get("edge_count"),
                     graph_fingerprint=payload.get("fingerprint"),
                 )
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
+                )
+            case "purge.completed":
+                await self._sync_data_source(
+                    data_source_id,
+                    aggregation_status="none",
+                    aggregation_edge_count=0,
+                )
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
+                )
             case "job.failed":
                 await self._sync_data_source(
                     data_source_id,
                     aggregation_status="failed",
+                )
+                # A failed run may have PARTIALLY written before dying —
+                # cached pre-run answers no longer match the store.
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
                 )
             case "job.pending":
                 await self._sync_data_source(
@@ -133,6 +150,9 @@ class AggregationEventListener:
                     data_source_id,
                     aggregation_status="none",
                 )
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
+                )
             case "state.updated":
                 await self._sync_data_source(
                     data_source_id,
@@ -142,6 +162,30 @@ class AggregationEventListener:
                     graph_fingerprint=payload.get("graph_fingerprint"),
                     aggregation_schedule=payload.get("aggregation_schedule"),
                 )
+
+    async def _invalidate_aggregated_cache(
+        self, workspace_id: Any, data_source_id: str,
+    ) -> None:
+        """Any event that rewrote the :AGGREGATED layer (run completed,
+        purge, failed/cancelled mid-write) invalidates the aggregated
+        read caches through the shared choke point. Events from workers
+        that predate the workspace_id field skip silently (the cache
+        keys are workspace-scoped, so the scope can't be built without
+        it)."""
+        if not workspace_id:
+            logger.debug(
+                "aggregation event for %s carried no workspace_id — "
+                "skipping aggregated-cache invalidation", data_source_id,
+            )
+            return
+        try:
+            from backend.app.services.graph_cache import invalidate_aggregated_reads
+            await invalidate_aggregated_reads(str(workspace_id), data_source_id)
+        except Exception as e:
+            logger.warning(
+                "Aggregated-edge cache invalidation failed for %s: %s",
+                data_source_id, e,
+            )
 
     async def _sync_data_source(self, data_source_id: str, **fields: Any) -> None:
         """Update workspace_data_sources with the given fields.

@@ -637,16 +637,16 @@ export function HierarchyPanel({
                 </span>
               ))}
               {containmentRels
-                .filter(r => !containmentEdgeTypes.includes(r.id.toUpperCase()))
+                .filter(r => !containmentEdgeTypes.includes(r.id))
                 .map(r => (
                   <button
                     key={r.id}
                     disabled={isLocked}
-                    onClick={() => onUpdateContainmentEdgeTypes([...containmentEdgeTypes, r.id.toUpperCase()])}
+                    onClick={() => onUpdateContainmentEdgeTypes([...containmentEdgeTypes, r.id])}
                     className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-dashed border-glass-border text-xs font-mono text-ink-muted hover:border-indigo-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <LucideIcons.Plus className="w-3 h-3" />
-                    {r.id.toUpperCase()}
+                    {r.id}
                   </button>
                 ))}
               {containmentEdgeTypes.length === 0 && containmentRels.length === 0 && (

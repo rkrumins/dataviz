@@ -1,11 +1,31 @@
 import { authFetch } from './apiClient';
 
+/**
+ * Pipeline tuning overrides (camelCase aliases accepted by the backend).
+ * All fields optional — omitted keys fall back to the worker's AIMD
+ * self-tuning defaults. These are caps/floors, not fixed values.
+ */
+export interface AggregationTuning {
+  scanRangeWidth?: number;      // 10,000 .. 5,000,000
+  maxPendingPairs?: number;     // 50,000 .. 50,000,000
+  applyChunk?: number;          // 1,000 .. 200,000
+  deleteChunk?: number;         // 100 .. 50,000
+  writePacingRatio?: number;    // 0 .. 10
+  extractConcurrency?: number;  // 1 .. 4
+  materializeLeafPairs?: boolean;
+  /** Legacy full-cube mode: materialize leaf-involving AND mixed-level pairs (scales with raw edges; can OOM FalkorDB). */
+  materializeFinePairs?: boolean;
+  /** Hard write budget: fail the job instead of writing more :AGGREGATED edges than this. */
+  maxMaterializedEdges?: number; // 10,000 .. 50,000,000
+}
+
 export interface AggregationTriggerRequest {
   ontologyId?: string;
   projectionMode: string;
   batchSize: number;
   maxRetries?: number;
   timeoutSecs?: number;
+  tuning?: AggregationTuning;
 }
 
 export interface AggregationSkipRequest {
@@ -51,11 +71,21 @@ export interface AggregationJobResponse {
   durationSeconds?: number;
   edgeCoveragePct?: number;
   /**
-   * Phase 1.7 — short ID for the currently-active phase of the bulk-rebuild path.
-   * One of: 'wiping' | 'scanning' | 'resolving_labels' | 'creating' | 'finalizing'.
-   * Null on legacy paths (Neo4j / Spanner / legacy MERGE) — UI falls back to a generic label.
+   * Short ID for the currently-active phase of the materialization pipeline.
+   * One of: 'extracting' | 'computing' | 'reconciling' | 'applying'.
+   * Null on providers that don't emit phase signals — UI falls back to a generic label.
    */
   currentPhase?: string | null;
+  /**
+   * Effective tuning the pipeline ran with (snake_case keys: scan_range_width,
+   * max_pending_pairs, apply_chunk, delete_chunk, write_pacing_ratio,
+   * extract_concurrency, materialize_leaf_pairs). Non-null implies the job ran
+   * on the self-tuning pipeline.
+   */
+  tuning?: Record<string, unknown> | null;
+  /** Per-phase run stats (keys: extract_s, compute_s, reconcile_s, apply_s, writes, deletes, pairs, scanned_edges). */
+  runStats?: Record<string, number | string | Record<string, number>> | null;
+  workerId?: string | null;
 }
 
 export interface ResumeOverrides {
@@ -63,6 +93,7 @@ export interface ResumeOverrides {
   projectionMode?: 'in_source' | 'dedicated';
   maxRetries?: number;
   timeoutSecs?: number;
+  tuning?: AggregationTuning;
 }
 
 export interface PaginatedJobsResponse {
@@ -109,6 +140,39 @@ export interface JobsSummary {
   byStatus: Record<string, number>;
   successRate: number | null;
   avgDurationSeconds: number | null;
+}
+
+export interface AggregationSettingsResponse {
+  tuning: AggregationTuning | null;
+  updatedAt?: string | null;
+  updatedBy?: string | null;
+}
+
+export interface AggregationWorkerJob {
+  jobId: string;
+  graphName?: string | null;
+  phase?: string | null;
+  large: boolean;
+}
+
+export interface AggregationWorker {
+  workerId: string;
+  hostname?: string | null;
+  pid?: number | null;
+  startedAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  concurrency: number;
+  activeJobs: AggregationWorkerJob[];
+  largeJobsActive: number;
+  rssMb?: number | null;
+  memLimitMb?: number | null;
+  drain: boolean;
+}
+
+export interface WorkersResponse {
+  workers: AggregationWorker[];
+  queueDepth: number;
+  queuePending: number;
 }
 
 class AggregationService {
@@ -184,15 +248,24 @@ class AggregationService {
    * populated once the background task finishes. Frontend should
    * monitor progress via the standard aggregation-jobs endpoints
    * (Job History UI handles this automatically).
+   *
+   * By default a fresh aggregation job is triggered automatically when
+   * the purge completes (container-level lineage is blind until the
+   * canonical cells are rebuilt); pass `skipReaggregate: true` for a
+   * purge-and-stay-empty.
    */
-  async purgeAggregation(dataSourceId: string): Promise<{
+  async purgeAggregation(
+    dataSourceId: string,
+    opts?: { skipReaggregate?: boolean },
+  ): Promise<{
     deletedEdges: number
     dataSourceId: string
     jobId: string
     status: 'running' | 'completed' | 'failed'
   }> {
+    const qs = opts?.skipReaggregate ? '?skipReaggregate=true' : '';
     return authFetch(
-      `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation`,
+      `/api/v1/admin/data-sources/${dataSourceId}/purge-aggregation${qs}`,
       { method: 'POST' }
     );
   }
@@ -238,6 +311,28 @@ class AggregationService {
   async checkDrift(dataSourceId: string): Promise<DriftCheckResponse> {
     return authFetch<DriftCheckResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/check-drift`
+    );
+  }
+
+  async getAggregationSettings(): Promise<AggregationSettingsResponse> {
+    return authFetch<AggregationSettingsResponse>(
+      '/api/v1/admin/aggregation/settings'
+    );
+  }
+
+  async putAggregationSettings(tuning: AggregationTuning): Promise<AggregationSettingsResponse> {
+    return authFetch<AggregationSettingsResponse>(
+      '/api/v1/admin/aggregation/settings',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ tuning }),
+      }
+    );
+  }
+
+  async listAggregationWorkers(): Promise<WorkersResponse> {
+    return authFetch<WorkersResponse>(
+      '/api/v1/admin/aggregation/workers'
     );
   }
 }

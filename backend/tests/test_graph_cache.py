@@ -614,3 +614,36 @@ def test_different_scopes_yield_different_keys() -> None:
     k2 = _build_key(CacheScope("ws2", "ds1"), 0, ENDPOINT_CHILDREN, {})
     k3 = _build_key(CacheScope("ws1", "ds2"), 0, ENDPOINT_CHILDREN, {})
     assert len({k1, k2, k3}) == 3
+
+
+@pytest.mark.asyncio
+async def test_purge_lkg_deletes_scoped_entries() -> None:
+    """LKG keys survive bump_generation by design, so a data-rewriting
+    event (aggregation run completion) purges them explicitly — bounded
+    SCAN over the scope+endpoint pattern, every branch."""
+    redis = _make_redis()
+    matching = [
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1::aggregated:abc",
+        f"{graph_cache._LKG_PREFIX}:ws1:ds1:draft-1:aggregated:def",
+    ]
+    redis.scan = AsyncMock(side_effect=[(7, matching[:1]), (0, matching[1:])])
+    redis.delete = AsyncMock(return_value=1)
+    cache = GraphCache(redis)
+
+    removed = await cache.purge_lkg(
+        CacheScope("ws1", "ds1"), ENDPOINT_AGGREGATED,
+    )
+
+    assert removed == 2
+    pattern = redis.scan.await_args_list[0].kwargs["match"]
+    assert pattern == f"{graph_cache._LKG_PREFIX}:ws1:ds1:*:aggregated:*"
+    deleted = [c.args for c in redis.delete.await_args_list]
+    assert deleted == [(matching[0],), (matching[1],)]
+
+
+@pytest.mark.asyncio
+async def test_purge_lkg_swallows_redis_errors() -> None:
+    redis = _make_redis()
+    redis.scan = AsyncMock(side_effect=RedisError("down"))
+    cache = GraphCache(redis)
+    assert await cache.purge_lkg(CacheScope("ws1", "ds1"), ENDPOINT_AGGREGATED) == 0

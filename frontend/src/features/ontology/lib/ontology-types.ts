@@ -5,12 +5,15 @@ export interface RelTypeWithClassifications extends RelationshipTypeSchema {
   isLineage?: boolean
   category?: 'structural' | 'flow' | 'metadata' | 'association'
   direction?: 'source-to-target' | 'target-to-source' | 'bidirectional'
+  /** Platform built-in edge (e.g. the aggregation AGGREGATED rollup) — always present,
+   *  shown read-only. The user did not author it and cannot edit or delete it. */
+  isSystem?: boolean
 }
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export interface Toast { type: ToastType; message: string; id: number; action?: { label: string; onClick: () => void } }
 
-export type OntologyTab = 'overview' | 'schema' | 'hierarchy' | 'coverage' | 'adoption' | 'history' | 'settings'
+export type OntologyTab = 'overview' | 'schema' | 'hierarchy' | 'coverage' | 'health' | 'usage' | 'history' | 'settings'
 
 /** @deprecated — old tab IDs for URL migration */
 export type LegacyOntologyTab = 'entities' | 'relationships' | 'hierarchy' | 'usage' | 'history'

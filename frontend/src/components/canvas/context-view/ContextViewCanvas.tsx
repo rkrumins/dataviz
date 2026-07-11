@@ -44,7 +44,7 @@ import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useRevealNode } from '@/hooks/useRevealNode'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
-import { useAggregatedLineage } from '@/hooks/useAggregatedLineage'
+import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
 import { EntityDrawer } from '../../panels/EntityDrawer'
 import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
@@ -489,6 +489,9 @@ export function ContextViewCanvas({
     truncated: aggregationTruncated,
     purgeEdgesIncidentToUrns: purgeAggregatedEdgesIncidentToUrns,
   } = useAggregatedLineage({ granularity: null })
+  // Cache-epoch: part of the fetch-dedupe key so invalidations refetch even
+  // when the visible container set (and so the URN key) hasn't changed.
+  const aggregatedCacheVersion = useAggregatedEdgesCacheVersion()
 
   // Instance-level assignments from store (user drag-and-drop)
   const instanceAssignments = useInstanceAssignments()
@@ -1338,7 +1341,7 @@ export function ContextViewCanvas({
       })
 
       // Only fetch if the target set actually changed
-      const aggregationKey = aggregationTargets.sort().join(',')
+      const aggregationKey = `${aggregatedCacheVersion}:` + aggregationTargets.sort().join(',')
       if (aggregationKey === prevAggregationKeyRef.current) return
       prevAggregationKeyRef.current = aggregationKey
 
@@ -1350,7 +1353,7 @@ export function ContextViewCanvas({
             // coalesce a rapid sequence of clicks but feels live.
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, trace.isTracing])
+  }, [showLineageFlow, getVisibleContainerUrns, fetchAggregated, nodes.length, expandedNodes, trace.isTracing, aggregatedCacheVersion])
 
   // === Extracted Hooks ===
 

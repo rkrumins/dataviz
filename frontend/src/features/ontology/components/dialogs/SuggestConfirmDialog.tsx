@@ -13,10 +13,10 @@ import {
   Clock, RefreshCw, AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { OntologyMatchResult, OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import type { OntologyMatchResult, OntologyDefinitionResponse, MergedVariantSpelling } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import type { SchemaStatsFreshness } from '@/features/ontology/lib/ontology-utils'
-import { CoverageRing, MiniBar } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
+import { CoverageRing, MiniBar, MergedVariantsAdvisory } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 import { DataSourcePicker } from '../DataSourcePicker'
 
 type Phase = 'confirm' | 'analyzing' | 'recommendations'
@@ -52,6 +52,7 @@ interface SuggestConfirmDialogProps {
     matches: OntologyMatchResult[]
     suggestedEntityCount: number
     suggestedRelCount: number
+    mergedVariants?: Record<string, MergedVariantSpelling[]>
     freshness?: SchemaStatsFreshness
   }>
   /** Trigger a non-blocking background refresh of the schema cache.
@@ -84,6 +85,7 @@ export function SuggestConfirmDialog({
 }: SuggestConfirmDialogProps) {
   const [phase, setPhase] = useState<Phase>('confirm')
   const [matches, setMatches] = useState<OntologyMatchResult[]>([])
+  const [mergedVariants, setMergedVariants] = useState<Record<string, MergedVariantSpelling[]>>({})
   const [graphCounts, setGraphCounts] = useState({ entities: 0, rels: 0 })
   const [freshness, setFreshness] = useState<SchemaStatsFreshness | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -132,6 +134,7 @@ export function SuggestConfirmDialog({
     try {
       const result = await onAnalyze(pickedWsId, pickedDsId)
       setMatches(result.matches)
+      setMergedVariants(result.mergedVariants ?? {})
       setGraphCounts({ entities: result.suggestedEntityCount, rels: result.suggestedRelCount })
       setFreshness(result.freshness ?? null)
       setPhase('recommendations')
@@ -158,6 +161,7 @@ export function SuggestConfirmDialog({
   function handleSkipAnalysis() {
     if (!pickedWsId || !pickedDsId) return
     setMatches([])
+    setMergedVariants({})
     setGraphCounts({ entities: 0, rels: 0 })
     setFreshness(null)
     setPhase('recommendations')
@@ -324,6 +328,12 @@ export function SuggestConfirmDialog({
                   <span className="text-xs text-ink-secondary">Recommend the best fit or generate a new draft</span>
                 </div>
               </div>
+              <p className="text-[11px] text-ink-muted/90 leading-relaxed mt-3 pt-3 border-t border-glass-border/50">
+                A semantic layer is the <span className="font-medium text-ink-secondary">declared model</span> your graph is read and
+                enforced against. When Suggest generates one, it mirrors your graph's <span className="font-medium text-ink-secondary">exact
+                type names</span> (e.g. <code className="font-mono text-[10px]">FLOWS_TO</code>, <code className="font-mono text-[10px]">:Table</code>) — so it
+                matches the physical graph on day one and hits FalkorDB's indexes.
+              </p>
             </div>
 
             {phase === 'analyzing' && (
@@ -417,6 +427,13 @@ export function SuggestConfirmDialog({
                 </div>
               </div>
             </div>
+
+            {/* Case-drift advisory — types the graph spells more than one way */}
+            {Object.keys(mergedVariants).length > 0 && (
+              <div className="px-6 pb-3">
+                <MergedVariantsAdvisory variants={mergedVariants} />
+              </div>
+            )}
 
             {/* No matches message */}
             {sortedMatches.length === 0 && (
@@ -746,7 +763,8 @@ export function SuggestConfirmDialog({
                       <p className="text-[11px] text-ink-secondary leading-snug mb-2">
                         Generate a new semantic layer draft directly from the {graphCounts.entities} entity type{graphCounts.entities !== 1 ? 's' : ''}{' '}
                         and {graphCounts.rels} relationship{graphCounts.rels !== 1 ? 's' : ''} detected in your data source.
-                        All node and edge types will be included.
+                        The draft <span className="font-medium text-ink">mirrors your graph's exact type names</span>, so it matches on
+                        day one — check the <span className="font-medium text-ink">Health</span> tab afterward to confirm.
                       </p>
                       <div className="flex items-center gap-3">
                         <span className="inline-flex items-center gap-1 text-[11px] text-ink-muted">

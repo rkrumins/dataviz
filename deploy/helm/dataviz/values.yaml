@@ -79,10 +79,14 @@ stores:
   falkordb:
     enabled: false
     image: falkordb/falkordb:v4.16.0
+    args: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
+    # Instance ceiling at 75% of the memory limit; noeviction = writes
+    # fail loudly instead of the pod being OOM-killed by data growth.
+    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"
     storage: 10Gi
     resources:
-      requests: { cpu: 250m, memory: 512Mi }
-      limits: { cpu: "1", memory: 2Gi }
+      requests: { cpu: "1", memory: 2Gi }
+      limits: { cpu: "4", memory: 8Gi }
   redis:
     enabled: false
     image: redis:7-alpine
@@ -192,8 +196,8 @@ services:
     skipSchemaCheck: false
     terminationGracePeriodSeconds: 120
     resources:
-      requests: { cpu: 250m, memory: 256Mi }
-      limits: { cpu: "1", memory: 1Gi }
+      requests: { cpu: 250m, memory: 1Gi }
+      limits: { cpu: "1", memory: 4Gi }
   stats:
     replicas: 1
     skipSchemaCheck: false

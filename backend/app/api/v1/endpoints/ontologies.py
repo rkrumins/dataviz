@@ -90,18 +90,77 @@ async def _invalidate_ontology_caches(
 
 
 def _reject_case_insensitive_type_dupes(req) -> None:
-    """422 if the request declares two entity or relationship type ids that differ only
+    """422 if the request DECLARES two entity or relationship type ids that differ only
     by case. This is the authoring-side half of the case-insensitive normalization mandate:
     a payload's ``Has``/``HAS``/``has`` is normalized to the declared casing at the commit
     boundary, which is only well-defined when each case-folded id maps to one declared id.
-    Only fields present on the request are checked."""
+
+    Uniqueness is checked ONLY over the authoritative type-id sets — the
+    ``entity_type_definitions`` and ``relationship_type_definitions`` keys. The
+    ``containment_edge_types``/``lineage_edge_types`` lists are NOT type declarations; they
+    are references to those relationship types (a type is flagged containment/lineage by
+    appearing there). Folding them into this check conflated a reference with a declaration,
+    so a client that spelled a reference in a different case than the declared id (e.g. a
+    ``HAS`` reference against a declared ``Has``) was falsely rejected as a duplicate type.
+    ``_normalize_edge_type_references`` reconciles that casing instead. Only fields present
+    on the request are checked."""
     entity_ids = list((getattr(req, "entity_type_definitions", None) or {}).keys())
     edge_ids = list((getattr(req, "relationship_type_definitions", None) or {}).keys())
-    edge_ids += list(getattr(req, "containment_edge_types", None) or [])
-    edge_ids += list(getattr(req, "lineage_edge_types", None) or [])
     collisions = case_insensitive_type_id_collisions(entity_ids, edge_ids)
     if collisions:
         raise HTTPException(status_code=422, detail="; ".join(collisions))
+
+
+def _strip_system_types(req) -> None:
+    """Drop platform-built-in types (e.g. the AGGREGATED edge — and any future built-in
+    node) from an incoming payload — in place — so they are never persisted. They are
+    injected on read (marked ``is_system``, shown read-only in the UI), so a save round-trip
+    echoes them back; stripping here keeps the stored ontology to the user's own types and
+    stops a built-in id from being stored, duplicated, or reconciled against."""
+    from backend.app.ontology.defaults import is_system_edge_type, is_system_entity_type
+    rel_defs = getattr(req, "relationship_type_definitions", None)
+    if isinstance(rel_defs, dict):
+        req.relationship_type_definitions = {
+            k: v for k, v in rel_defs.items() if not is_system_edge_type(k)}
+    entity_defs = getattr(req, "entity_type_definitions", None)
+    if isinstance(entity_defs, dict):
+        req.entity_type_definitions = {
+            k: v for k, v in entity_defs.items() if not is_system_entity_type(k)}
+    for field in ("containment_edge_types", "lineage_edge_types"):
+        lst = getattr(req, field, None)
+        if isinstance(lst, list):
+            setattr(req, field, [t for t in lst if not is_system_edge_type(t)])
+    lst = getattr(req, "root_entity_types", None)
+    if isinstance(lst, list):
+        setattr(req, "root_entity_types", [t for t in lst if not is_system_entity_type(t)])
+
+
+def _normalize_edge_type_references(req) -> None:
+    """Reconcile ``containment_edge_types``/``lineage_edge_types`` entries to the declared
+    casing of the relationship type they reference, and de-duplicate case-insensitively —
+    in place. These lists reference relationship types by id, so an entry must match a
+    declared id exactly (FalkorDB is case-sensitive); a case variant is a spelling of the
+    same reference, not a distinct type. Mirrors ``_reconcile_relationship_endpoints``:
+    only runs when the request carries the relationship definitions to reconcile against;
+    a lists-only partial update is left untouched. Never drops an entry — an entry that
+    matches no declared type (case-insensitively) is preserved verbatim."""
+    rel_defs = getattr(req, "relationship_type_definitions", None)
+    if not rel_defs:
+        return
+    canonical = {str(k).lower(): str(k) for k in rel_defs}
+    for field in ("containment_edge_types", "lineage_edge_types"):
+        lst = getattr(req, field, None)
+        if not isinstance(lst, list):
+            continue
+        seen: set = set()
+        out: list = []
+        for t in lst:
+            resolved = canonical.get(str(t).lower(), t)
+            key = str(resolved).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(resolved)
+        setattr(req, field, out)
 
 
 def _reconcile_relationship_endpoints(req) -> None:
@@ -166,7 +225,9 @@ async def create_ontology(
     _auth=Depends(_REQUIRES_ONTOLOGY_MANAGE),
 ):
     """Create a new ontology (starts at version 1, unpublished)."""
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     result = await ontology_definition_repo.create_ontology(session, req)
     await _invalidate_ontology_caches(session, getattr(result, "id", None))
@@ -264,7 +325,9 @@ async def update_ontology(
     Update an ontology. If published, creates a new version instead.
     Returns the updated or newly created ontology.
     """
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     await ensure_ontology_visible(session, claims, ontology_id)
     ontology = await ontology_definition_repo.update_ontology(session, ontology_id, req)
@@ -485,6 +548,158 @@ async def get_ontology_coverage(
     )
 
 
+@router.get("/{ontology_id}/adoption")
+async def get_ontology_adoption(
+    ontology_id: str = Path(...),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    filter: str = Query("all", pattern="^(all|drift|unmapped|unprofiled|exact)$"),
+    sort: str = Query("match", pattern="^(match|issues|label|freshness)$"),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
+):
+    """Per-data-source declared-vs-physical type match for the data sources using this
+    ontology, computed from the CACHED profiling stats (the insights service).
+
+    Strategic + performant + browsable at scale (100s of sources): one assignments query
+    + one bulk stats read, then pure in-process classification — NO live graph queries.
+    The AGGREGATE (hero) and FACETS (filter counts) are computed over ALL sources so they
+    stay accurate; ``search``/``filter``/``sort`` then narrow the set and only one page
+    (``limit``/``offset``) of sources is returned. ``filter=drift|unmapped`` and the
+    worst-first default sort surface mismatches immediately. Each physical type is
+    classified exact / case-drift / unmapped (``adoption.py``); the platform built-in
+    edges (AGGREGATED) are injected into the declared set so they never read as unmapped.
+    """
+    import json as _json
+
+    from backend.app.db.repositories import stats_repo
+    from backend.app.ontology.adoption import build_source_adoption, dimension_to_wire
+    from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
+
+    entity_ids = set(with_system_entity_types(_json.loads(orm.entity_type_definitions or "{}")).keys())
+    edge_ids = set(with_system_edge_types(_json.loads(orm.relationship_type_definitions or "{}")).keys())
+
+    assignments = await ontology_definition_repo.get_assignments(session, ontology_id)
+    stats_rows = await stats_repo.list_data_source_stats(
+        session, [a["dataSourceId"] for a in assignments])
+    stats_by_ds = {s.data_source_id: s for s in stats_rows}
+
+    records: list = []
+    agg_exact = agg_total = agg_exact_types = agg_total_types = 0
+    agg_drift_inst = agg_unmap_inst = 0
+    drift_count = unmapped_count = profiled_count = 0
+
+    for a in assignments:
+        base = {
+            "dataSourceId": a["dataSourceId"], "dataSourceLabel": a["dataSourceLabel"],
+            "workspaceId": a["workspaceId"], "workspaceName": a["workspaceName"],
+        }
+        searchable = f"{a['dataSourceLabel']} {a['workspaceName']}".lower()
+        st = stats_by_ds.get(a["dataSourceId"])
+        raw = getattr(st, "schema_stats", None) if st else None
+        if not raw:
+            wire = {**base, "profiled": False, "schemaUpdatedAt": None,
+                    "matchWeighted": None, "matchByType": None, "nodes": None, "edges": None}
+            records.append({"wire": wire, "profiled": False, "match": None, "drift": 0,
+                            "unmapped": 0, "search": searchable, "label": a["dataSourceLabel"], "updated": ""})
+            continue
+        try:
+            schema_stats = _json.loads(raw)
+        except (ValueError, TypeError):
+            schema_stats = {}
+        adopt = build_source_adoption(entity_ids=entity_ids, edge_ids=edge_ids, schema_stats=schema_stats)
+        profiled_count += 1
+        agg_exact += adopt.nodes.exact_instances + adopt.edges.exact_instances
+        agg_total += adopt.nodes.total_instances + adopt.edges.total_instances
+        agg_exact_types += len(adopt.nodes.exact) + len(adopt.edges.exact)
+        agg_total_types += adopt.nodes.total_types + adopt.edges.total_types
+        d = len(adopt.nodes.case_drift) + len(adopt.edges.case_drift)
+        u = len(adopt.nodes.unmapped) + len(adopt.edges.unmapped)
+        drift_count += d
+        unmapped_count += u
+        agg_drift_inst += adopt.nodes.drift_instances + adopt.edges.drift_instances
+        agg_unmap_inst += adopt.nodes.unmapped_instances + adopt.edges.unmapped_instances
+        wire = {
+            **base, "profiled": True, "schemaUpdatedAt": getattr(st, "schema_updated_at", None),
+            "matchWeighted": adopt.match_weighted, "matchByType": adopt.match_by_type,
+            "nodes": dimension_to_wire(adopt.nodes), "edges": dimension_to_wire(adopt.edges),
+        }
+        records.append({"wire": wire, "profiled": True, "match": adopt.match_weighted, "drift": d,
+                        "unmapped": u, "search": searchable, "label": a["dataSourceLabel"],
+                        "updated": getattr(st, "schema_updated_at", None) or ""})
+
+    def _pct(part: float, whole: float) -> float:
+        return round(part / whole * 100, 1) if whole else 100.0
+
+    # Facet counts over ALL sources (drive the filter chips, always accurate).
+    facets = {
+        "all": len(records),
+        "drift": sum(1 for r in records if r["drift"] > 0),
+        "unmapped": sum(1 for r in records if r["unmapped"] > 0),
+        "unprofiled": sum(1 for r in records if not r["profiled"]),
+        "exact": sum(1 for r in records if r["profiled"] and r["drift"] == 0 and r["unmapped"] == 0),
+    }
+
+    q = search.strip().lower()
+
+    def _keep(r: dict) -> bool:
+        if q and q not in r["search"]:
+            return False
+        if filter == "drift":
+            return r["drift"] > 0
+        if filter == "unmapped":
+            return r["unmapped"] > 0
+        if filter == "unprofiled":
+            return not r["profiled"]
+        if filter == "exact":
+            return r["profiled"] and r["drift"] == 0 and r["unmapped"] == 0
+        return True
+
+    filtered = [r for r in records if _keep(r)]
+
+    if sort == "issues":                                   # most mismatches first
+        filtered.sort(key=lambda r: (-(r["drift"] + r["unmapped"]), r["match"] if r["match"] is not None else 101))
+    elif sort == "label":
+        filtered.sort(key=lambda r: r["label"].lower())
+    elif sort == "freshness":                              # most recently profiled first
+        filtered.sort(key=lambda r: r["updated"], reverse=True)
+    else:                                                  # match — worst first, unprofiled last
+        filtered.sort(key=lambda r: (0 if r["profiled"] else 1, r["match"] if r["match"] is not None else 101))
+
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
+
+    return {
+        "ontologyId": ontology_id,
+        "sourceCount": len(assignments),
+        "profiledCount": profiled_count,
+        "matchWeighted": _pct(agg_exact, agg_total),
+        "matchByType": _pct(agg_exact_types, agg_total_types),
+        "driftTypeCount": drift_count,
+        "unmappedTypeCount": unmapped_count,
+        "segments": {
+            "weighted": {"exact": agg_exact, "drift": agg_drift_inst, "unmapped": agg_unmap_inst},
+            "byType": {
+                "exact": agg_exact_types,
+                "drift": drift_count,
+                "unmapped": unmapped_count,
+            },
+        },
+        "facets": facets,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sources": [r["wire"] for r in page],
+    }
+
+
 @router.post("/{ontology_id}/resolution-check", response_model=OntologyResolutionResponse)
 async def check_ontology_resolution(
     ontology_id: str = Path(...),
@@ -701,7 +916,9 @@ async def import_ontology_new(
     Import a semantic layer from exported JSON, creating a new draft.
     Validates the JSON structure against the export format.
     """
+    _strip_system_types(req)
     _reject_case_insensitive_type_dupes(req)
+    _normalize_edge_type_references(req)
     _reconcile_relationship_endpoints(req)
     try:
         result = await ontology_definition_repo.import_ontology(session, req, target_id=None)
@@ -782,12 +999,16 @@ async def suggest_ontology(
     graph_rel_ids = {s.id.upper() for s in stats.edge_type_stats}
     graph_types = graph_entity_ids | graph_rel_ids
 
+    from backend.app.ontology.defaults import with_system_edge_types, with_system_entity_types
+
     matches = []
     if graph_types:
         all_ontologies = await ontology_definition_repo.list_latest_ontologies(session)
         for ont in all_ontologies:
-            ont_entity_ids = set((ont.entity_type_definitions or {}).keys())
-            ont_rel_ids = set((ont.relationship_type_definitions or {}).keys())
+            # Include the platform's built-in types so :AGGREGATED (present in every graph
+            # that's been aggregated) never reads as a "missing" type against any ontology.
+            ont_entity_ids = set(with_system_entity_types(ont.entity_type_definitions or {}).keys())
+            ont_rel_ids = set(with_system_edge_types(ont.relationship_type_definitions or {}).keys())
             ont_types = ont_entity_ids | ont_rel_ids
 
             intersection = graph_types & ont_types

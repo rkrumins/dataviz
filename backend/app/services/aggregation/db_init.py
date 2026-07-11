@@ -94,6 +94,63 @@ async def init_aggregation_db() -> None:
                 # per-label indexing without an ontology-module dependency.
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS entity_type_levels TEXT NULL",
+                # Iteration 2 (2026-07) — per-job pipeline tuning (JSON),
+                # durable per-phase run stats, and which worker ran the job.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS tuning_json TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS run_stats TEXT NULL",
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS worker_id TEXT NULL",
+                # Job-row guards (2026-07-11), mirrored in alembic
+                # 20260711_1200_agg_job_guards: the trigger-source CHECK
+                # must accept the automatic callers (post_purge, auto) or
+                # their INSERTs die as IntegrityErrors; the idempotency
+                # unique index must only cover ACTIVE rows or a key reused
+                # after the 60-min replay window 500s on a completed
+                # tombstone. Both DO-blocks re-check the live definition
+                # first, so they no-op on every boot after the first.
+                f"""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint c
+                        JOIN pg_class t ON t.oid = c.conrelid
+                        JOIN pg_namespace n ON n.oid = t.relnamespace
+                        WHERE n.nspname = '{SCHEMA_NAME}'
+                          AND t.relname = 'aggregation_jobs'
+                          AND c.conname = 'ck_agg_jobs_trigger_source'
+                          AND pg_get_constraintdef(c.oid) NOT LIKE '%post_purge%'
+                    ) THEN
+                        ALTER TABLE {SCHEMA_NAME}.aggregation_jobs
+                            DROP CONSTRAINT ck_agg_jobs_trigger_source;
+                        ALTER TABLE {SCHEMA_NAME}.aggregation_jobs
+                            ADD CONSTRAINT ck_agg_jobs_trigger_source
+                            CHECK (trigger_source IN ('onboarding', 'manual',
+                                'schedule', 'drift', 'api', 'purge',
+                                'post_purge', 'auto'));
+                    END IF;
+                END $$
+                """,
+                f"""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE schemaname = '{SCHEMA_NAME}'
+                          AND tablename = 'aggregation_jobs'
+                          AND indexname = 'ix_agg_jobs_idem_active'
+                          AND indexdef NOT LIKE '%status%'
+                    ) THEN
+                        DROP INDEX {SCHEMA_NAME}.ix_agg_jobs_idem_active;
+                        CREATE UNIQUE INDEX ix_agg_jobs_idem_active
+                            ON {SCHEMA_NAME}.aggregation_jobs
+                            (data_source_id, idempotency_key)
+                            WHERE idempotency_key IS NOT NULL
+                              AND status IN ('pending', 'running');
+                    END IF;
+                END $$
+                """,
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

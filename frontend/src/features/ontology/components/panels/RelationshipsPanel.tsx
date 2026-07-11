@@ -63,11 +63,23 @@ export function RelTypeRow({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
             <span className="font-semibold text-sm text-ink truncate">{rt.name}</span>
-            <code className="text-[10px] text-ink-muted/60 font-mono hidden sm:inline">{rt.id.toUpperCase()}</code>
-            {isChanged && (
+            <code className="text-[10px] text-ink-muted/60 font-mono hidden sm:inline">{rt.id}</code>
+            {rt.isSystem && (
+              <span
+                className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 font-medium flex-shrink-0"
+                title={rt.description || 'A built-in edge maintained by the platform — you cannot edit or delete it.'}
+              >
+                <LucideIcons.Sparkles className="w-2.5 h-2.5" />
+                Built-in
+              </span>
+            )}
+            {isChanged && !rt.isSystem && (
               <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" title="Modified" />
             )}
           </div>
+          {rt.isSystem && rt.description && (
+            <p className="text-[11px] text-ink-muted/80 italic mb-1">{rt.description}</p>
+          )}
           <div className="flex items-center gap-1.5 flex-wrap">
             {/* Source -> Target type chips */}
             {(rt.sourceTypes?.length > 0 || rt.targetTypes?.length > 0) && (
@@ -121,7 +133,7 @@ export function RelTypeRow({
           )}
 
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-            {!isLocked && (
+            {!isLocked && !rt.isSystem && (
               <button
                 onClick={e => { e.stopPropagation(); onDelete() }}
                 className="p-1.5 rounded-lg hover:bg-red-100 dark:hover:bg-red-950/30 text-ink-muted hover:text-red-500 transition-colors"
@@ -130,7 +142,9 @@ export function RelTypeRow({
                 <LucideIcons.Trash2 className="w-3.5 h-3.5" />
               </button>
             )}
-            <LucideIcons.ChevronRight className="w-4 h-4 text-ink-muted/40" />
+            {rt.isSystem
+              ? <span title="Built-in — read-only"><LucideIcons.Lock className="w-3.5 h-3.5 text-ink-muted/40" /></span>
+              : <LucideIcons.ChevronRight className="w-4 h-4 text-ink-muted/40" />}
           </div>
         </div>
       </div>
@@ -237,7 +251,7 @@ export function RelationshipsPanel({
   const filtered = useMemo(() => {
     let list = relTypes
     if (showStagedOnly && changedIds && changedIds.size > 0) {
-      list = list.filter(rt => changedIds.has(rt.id.toUpperCase()))
+      list = list.filter(rt => changedIds.has(rt.id))
     }
     if (!search) return list
     const q = search.toLowerCase()
@@ -353,11 +367,11 @@ export function RelationshipsPanel({
                   <RelTypeRow
                     key={rt.id}
                     relType={rt}
-                    graphCount={edgeStatMap.get(rt.id.toUpperCase())?.count}
-                    graphSourceTargets={edgeStatMap.get(rt.id.toUpperCase())}
+                    graphCount={edgeStatMap.get(rt.id)?.count}
+                    graphSourceTargets={edgeStatMap.get(rt.id)}
                     isLocked={isLocked}
                     isEditing={editorPanel?.kind === 'rel' && editorPanel.data?.id === rt.id}
-                    isChanged={changedIds?.has(rt.id.toUpperCase())}
+                    isChanged={changedIds?.has(rt.id)}
                     onEdit={() => onEdit(rt)}
                     onDelete={() => onDelete(rt.id, rt.name)}
                   />

@@ -31,7 +31,7 @@ import {
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
 import { useToast } from '@/components/ui/toast'
-import { CoverageRing, MiniBar, coverageColor, coverageBarClass } from './CoverageVisuals'
+import { CoverageRing, MiniBar, coverageColor, coverageBarClass, MergedVariantsAdvisory } from './CoverageVisuals'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -847,7 +847,7 @@ const SourceRecommendations = memo(function SourceRecommendations({
     const onSearchChange = useCallback((search: string) => updateSource(itemId, { search }), [updateSource, itemId])
     const onSkip = useCallback(() => skipSource(itemId), [skipSource, itemId])
     const onReanalyze = useCallback(() => analyzeSource(item), [analyzeSource, item])
-    const { matches, graphCounts, selectedId, draftName, search, error, isCreatingDraft } = state
+    const { matches, graphCounts, selectedId, draftName, search, error, isCreatingDraft, suggestResponse } = state
 
     // Filter by search query and pre-compute coverage percentages once per
     // [matches, search] change so the map below is a pure render.
@@ -892,6 +892,11 @@ const SourceRecommendations = memo(function SourceRecommendations({
                 <span className="text-xs font-bold text-ink mx-0.5">{graphCounts.rels}</span>
                 <span className="text-xs text-ink-secondary">relationship{graphCounts.rels !== 1 ? 's' : ''}</span>
             </div>
+
+            {/* Case-drift advisory — types the graph spells more than one way */}
+            {suggestResponse?.mergedVariants && Object.keys(suggestResponse.mergedVariants).length > 0 && (
+                <MergedVariantsAdvisory variants={suggestResponse.mergedVariants} />
+            )}
 
             {/* Error display */}
             {error && (

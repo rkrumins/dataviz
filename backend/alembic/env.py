@@ -155,6 +155,28 @@ def _reset_stale_alembic_version(connection) -> None:
         return  # Table exists but empty
 
     current_version = row[0]
+
+    # Renamed revisions: translate a stamped OLD id to its new id BEFORE
+    # the unknown-revision reset below — otherwise a database stamped
+    # with the old id (possible wherever the widen above ran before the
+    # rename shipped) would be reset to baseline and re-walk the entire
+    # chain against live data.
+    _RENAMED_REVISIONS = {
+        # 34 chars — over the default VARCHAR(32); shortened 2026-07-10.
+        "20260707_1400_view_layout_overlays": "20260707_1400_view_layout_ovl",
+    }
+    renamed_to = _RENAMED_REVISIONS.get(current_version)
+    if renamed_to:
+        logger.info(
+            "Translating renamed alembic revision '%s' -> '%s'.",
+            current_version, renamed_to,
+        )
+        connection.execute(text(
+            "UPDATE alembic_version SET version_num = :new"
+        ), {"new": renamed_to})
+        connection.commit()
+        current_version = renamed_to
+
     script = ScriptDirectory.from_config(config)
     try:
         script.get_revision(current_version)

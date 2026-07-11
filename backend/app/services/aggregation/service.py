@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .dispatcher import AggregationDispatcher
@@ -21,8 +22,10 @@ from .models import AggregationJobORM
 from .reservation import claim_exclusive
 from .schemas import (
     AggregationJobResponse,
+    AggregationSettingsResponse,
     AggregationSkipRequest,
     AggregationTriggerRequest,
+    AggregationTuning,
     DataSourceReadinessResponse,
     DriftCheckResponse,
     PaginatedJobsResponse,
@@ -34,6 +37,22 @@ from backend.app.ontology import runtime as ontology_runtime
 
 logger = logging.getLogger(__name__)
 
+# Process-wide handle to the wired AggregationService (set at startup by
+# main.py in direct mode / controlplane.py on the CP). Lets non-HTTP
+# callers (e.g. the read path's empty-result backfill) create REAL
+# aggregation jobs — visible in the UI, executed by the worker fleet —
+# instead of running shadow work in-process.
+_ACTIVE_SERVICE: Optional["AggregationService"] = None
+
+
+def set_active_service(svc: "AggregationService") -> None:
+    global _ACTIVE_SERVICE
+    _ACTIVE_SERVICE = svc
+
+
+def get_active_service() -> Optional["AggregationService"]:
+    return _ACTIVE_SERVICE
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -42,6 +61,31 @@ def _now() -> str:
 def _generate_id() -> str:
     import uuid
     return f"agg_{uuid.uuid4().hex[:12]}"
+
+
+def _estimate_completion(job) -> Optional[str]:
+    """ETA extrapolated from PHASE-WEIGHTED progress (0-100, monotonic
+    across EXTRACT→COMPUTE→RECONCILE→APPLY). The previous
+    processed/total extrapolation saturated the moment the extract scan
+    finished (~45%% of real work) and promised completion 'now' while
+    reconcile/apply were still running."""
+    if job.status != "running" or not job.started_at:
+        return None
+    pct = job.progress or 0
+    if pct <= 0:
+        return None
+    try:
+        started = datetime.fromisoformat(job.started_at)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        if elapsed < 5:
+            return None
+        pct = min(99, max(1, int(pct)))
+        remaining = elapsed * (100 - pct) / pct
+        return (
+            datetime.now(timezone.utc) + timedelta(seconds=remaining)
+        ).isoformat()
+    except Exception:
+        return None
 
 
 def _is_resumable(job) -> bool:
@@ -98,7 +142,20 @@ class AggregationService:
         4. DISPATCH: dispatcher.dispatch(job_id)
         5. RETURN: AggregationJobResponse
         """
-        from .models import AggregationDataSourceStateORM
+        from .models import API_TRIGGER_SOURCES, AggregationDataSourceStateORM
+
+        # Reject unknown sources HERE (ValueError → 422 at both endpoints)
+        # instead of letting the jobs-table CHECK constraint raise an
+        # IntegrityError 500 — that failure mode silently broke both
+        # automatic callers (post_purge from the purge worker, auto from
+        # the read-path backfill). 'purge' is valid in the table but not
+        # mintable through trigger(): those rows mark the purge lifecycle
+        # itself and are excluded from the reconciler/recovery/resume.
+        if trigger_source not in API_TRIGGER_SOURCES:
+            raise ValueError(
+                f"invalid trigger_source {trigger_source!r}; expected one of "
+                f"{', '.join(API_TRIGGER_SOURCES)}"
+            )
 
         # ── Phase 2.2 — idempotency early-return (read-only fast path) ──
         # Two POSTs sharing a key for the same data source within 60 min
@@ -161,6 +218,55 @@ class AggregationService:
         # point — the block below performs the first writes.
         if session.in_transaction():
             await session.rollback()
+        try:
+            job, lineage_types = await self._trigger_insert(
+                ds_id, request, trigger_source, session, idem_key, cutoff_iso,
+            )
+        except IntegrityError:
+            # Unique-index race on (data_source_id, idempotency_key): a
+            # concurrent trigger inserted the same key between our replay
+            # lookup and this commit. Return THAT job as the replay —
+            # surfacing the constraint as a 500 broke retrying callers.
+            await session.rollback()
+            if idem_key:
+                replay = (
+                    await session.execute(
+                        select(AggregationJobORM)
+                        .where(AggregationJobORM.data_source_id == ds_id)
+                        .where(AggregationJobORM.idempotency_key == idem_key)
+                        .order_by(AggregationJobORM.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if replay is not None:
+                    logger.warning(
+                        "Idempotency unique-index race for data source %s "
+                        "(key=%s) — returning existing job %s",
+                        ds_id, idem_key, replay.id,
+                    )
+                    return self._to_response(replay)
+            raise
+
+        # Dispatch AFTER commit so the worker sees the persisted row
+        await self._dispatcher.dispatch(job.id)
+
+        logger.info(
+            "Aggregation job %s created for data source %s (trigger: %s, edges: %s)",
+            job.id, ds_id, trigger_source, lineage_types,
+        )
+
+        return self._to_response(job)
+
+    async def _trigger_insert(
+        self,
+        ds_id: str,
+        request: AggregationTriggerRequest,
+        trigger_source: str,
+        session: AsyncSession,
+        idem_key: Optional[str],
+        cutoff_iso: str,
+    ):
+        """The claim + resolve + INSERT transaction body of ``trigger``."""
         async with session.begin():
             if not await claim_exclusive(session, ds_id):
                 if idem_key:
@@ -239,8 +345,13 @@ class AggregationService:
                 batch_size=request.batch_size,
                 idempotency_key=idem_key,
                 # Per-job overrides: when None, the worker / ORM defaults
-                # apply (timeout_secs → _JOB_TIMEOUT_SECS env, max_retries → 3).
+                # apply (timeout_secs → stall-timeout env, max_retries → 3).
                 timeout_secs=request.timeout_secs,
+                # Pipeline tuning: request overrides layered over the stored
+                # global defaults, frozen here so the worker stays stateless.
+                tuning_json=(lambda t: json.dumps(t) if t else None)(
+                    await self._effective_tuning(session, getattr(request, "tuning", None))
+                ),
                 created_at=_now(),
             )
             # Only set max_retries when caller supplied one, so the ORM
@@ -254,15 +365,7 @@ class AggregationService:
             await self._upsert_ds_state(session, ds_id, aggregation_status="pending")
             # session.begin() commits on context exit
 
-        # Dispatch AFTER commit so the worker sees the persisted row
-        await self._dispatcher.dispatch(job.id)
-
-        logger.info(
-            "Aggregation job %s created for data source %s (trigger: %s, edges: %s)",
-            job.id, ds_id, trigger_source, lineage_types,
-        )
-
-        return self._to_response(job)
+        return job, lineage_types
 
     # ── Skip (user opts out with double confirmation) ─────────────────
 
@@ -545,19 +648,7 @@ class AggregationService:
             coverage = round(job.processed_edges / job.total_edges * 100, 1)
 
         # Estimate completion (same logic as _to_response)
-        estimated = None
-        if job.status == "running" and job.processed_edges > 0 and job.total_edges > 0:
-            if job.started_at:
-                try:
-                    started = datetime.fromisoformat(job.started_at)
-                    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-                    rate = job.processed_edges / elapsed if elapsed > 0 else 0
-                    remaining = job.total_edges - job.processed_edges
-                    if rate > 0:
-                        eta = datetime.now(timezone.utc) + timedelta(seconds=remaining / rate)
-                        estimated = eta.isoformat()
-                except Exception:
-                    pass
+        estimated = _estimate_completion(job)
 
         return AggregationJobResponse(
             id=job.id,
@@ -593,6 +684,70 @@ class AggregationService:
             # compatible against any ORM instance that pre-dates the
             # column.
             current_phase=getattr(job, "current_phase", None),
+            tuning=AggregationService._job_tuning_dict(job),
+            run_stats=AggregationService._job_run_stats_dict(job),
+            worker_id=getattr(job, "worker_id", None),
+        )
+
+
+    # ── Global tuning defaults (settings) ─────────────────────────────
+
+    async def _effective_tuning(
+        self, session: AsyncSession, request_tuning: Optional[AggregationTuning],
+    ) -> dict:
+        """Request tuning layered over the stored global defaults. The
+        merged dict is frozen onto the job row so the worker never reads
+        the settings table (stateless jobs; consistent with the frozen
+        edge-type pattern)."""
+        from .models import AggregationSettingsORM
+
+        defaults: dict = {}
+        try:
+            row = await session.get(AggregationSettingsORM, "global")
+            if row is not None and row.tuning_json:
+                defaults = json.loads(row.tuning_json) or {}
+        except Exception as exc:
+            logger.warning(
+                "Aggregation settings read failed (using env defaults): %s", exc,
+            )
+        if request_tuning is None:
+            return defaults
+        return request_tuning.merged_over(defaults)
+
+    async def get_settings(self, session: AsyncSession) -> AggregationSettingsResponse:
+        from .models import AggregationSettingsORM
+
+        row = await session.get(AggregationSettingsORM, "global")
+        if row is None or not row.tuning_json:
+            return AggregationSettingsResponse(tuning=None)
+        try:
+            tuning = AggregationTuning(**json.loads(row.tuning_json))
+        except Exception:
+            tuning = None
+        return AggregationSettingsResponse(
+            tuning=tuning,
+            updated_at=row.updated_at,
+            updated_by=row.updated_by,
+        )
+
+    async def put_settings(
+        self,
+        session: AsyncSession,
+        tuning: AggregationTuning,
+        updated_by: Optional[str] = None,
+    ) -> AggregationSettingsResponse:
+        from .models import AggregationSettingsORM
+
+        row = await session.get(AggregationSettingsORM, "global")
+        if row is None:
+            row = AggregationSettingsORM(id="global")
+            session.add(row)
+        row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
+        row.updated_at = _now()
+        row.updated_by = updated_by
+        await session.commit()
+        return AggregationSettingsResponse(
+            tuning=tuning, updated_at=row.updated_at, updated_by=row.updated_by,
         )
 
     # ── Resume ────────────────────────────────────────────────────────
@@ -620,6 +775,12 @@ class AggregationService:
                 f"Job {job_id} is not resumable (current status: {job.status}; "
                 f"resume requires 'failed' or 'cancelled')"
             )
+        if job.trigger_source == "purge":
+            raise ValueError(
+                f"Job {job_id} is a purge job — it cannot be resumed as an "
+                "aggregation run. Re-run the purge from the data source "
+                "actions instead."
+            )
 
         # Apply optional per-job overrides (e.g. a larger timeout / batch).
         if overrides is not None:
@@ -631,6 +792,17 @@ class AggregationService:
                 job.projection_mode = overrides.projection_mode
             if overrides.max_retries is not None:
                 job.max_retries = overrides.max_retries
+            if overrides.tuning is not None:
+                # Layer the new tuning over whatever the job carries so a
+                # partial override (e.g. just writePacingRatio) keeps the
+                # rest of the frozen tuning intact.
+                try:
+                    current = json.loads(job.tuning_json or "{}")
+                except (TypeError, ValueError):
+                    current = {}
+                job.tuning_json = json.dumps(
+                    overrides.tuning.merged_over(current)
+                )
 
         # A manual resume/restart is ALWAYS allowed for a failed/cancelled job —
         # the max_retries cap bounds only AUTOMATED retries (crash recovery /
@@ -794,6 +966,7 @@ class AggregationService:
 
     async def claim_purge_job(
         self, ds_id: str, session: AsyncSession,
+        *, skip_reaggregate: bool = False,
     ) -> AggregationJobORM:
         """Reserve a ``pending`` purge slot in ``aggregation_jobs``.
 
@@ -873,6 +1046,14 @@ class AggregationService:
             batch_size=5000,
             retry_count=0,
             max_retries=0,
+            # Post-purge behavior rides the row so redelivery keeps it:
+            # by default the purge worker triggers a fresh aggregation
+            # job on completion (container-level lineage is blind until
+            # the canonical cells are rebuilt); the UI can opt out.
+            tuning_json=(
+                json.dumps({"skip_reaggregate": True})
+                if skip_reaggregate else None
+            ),
             created_at=now,
             updated_at=now,
         )
@@ -1177,24 +1358,28 @@ class AggregationService:
 
     # ── Response Helpers ─────────────────────────────────────────────
 
+
+    @staticmethod
+    def _job_tuning_dict(job) -> dict | None:
+        try:
+            raw = getattr(job, "tuning_json", None)
+            return json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _job_run_stats_dict(job) -> dict | None:
+        try:
+            raw = getattr(job, "run_stats", None)
+            return json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _to_response(job: AggregationJobORM) -> AggregationJobResponse:
         """Convert ORM to response model."""
         # Estimate completion time
-        estimated = None
-        if job.status == "running" and job.processed_edges > 0 and job.total_edges > 0:
-            if job.started_at:
-                try:
-                    started = datetime.fromisoformat(job.started_at)
-                    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-                    rate = job.processed_edges / elapsed if elapsed > 0 else 0
-                    remaining = job.total_edges - job.processed_edges
-                    if rate > 0:
-                        eta_seconds = remaining / rate
-                        eta = datetime.now(timezone.utc) + timedelta(seconds=eta_seconds)
-                        estimated = eta.isoformat()
-                except Exception:
-                    pass
+        estimated = _estimate_completion(job)
 
         return AggregationJobResponse(
             id=job.id,
@@ -1223,6 +1408,9 @@ class AggregationService:
             max_retries=job.max_retries,
             timeout_secs=job.timeout_secs,
             projection_mode=job.projection_mode,
+            tuning=AggregationService._job_tuning_dict(job),
+            run_stats=AggregationService._job_run_stats_dict(job),
+            worker_id=getattr(job, "worker_id", None),
         )
 
 

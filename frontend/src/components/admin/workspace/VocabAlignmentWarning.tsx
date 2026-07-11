@@ -43,7 +43,15 @@ async function confirmVariant(
   await fetchWithTimeout(`/api/v1/${wsId}/graph/vocab-alignment/confirm?${params}`, { method: 'POST' })
 }
 
-export function VocabAlignmentWarning({ wsId, dataSourceId }: { wsId: string; dataSourceId: string }) {
+export function VocabAlignmentWarning({ wsId, dataSourceId, className = 'mx-6 mb-3', hideMissing = false }: {
+  wsId: string; dataSourceId: string
+  /** Container layout — override when embedding outside DataSourceDetailPanel (e.g. Health). */
+  className?: string
+  /** Suppress the "defined in the ontology but not present" line. It's informational (not a
+   *  drift) and comes from a separate profile that can lag the live schema stats — surfacing
+   *  it next to a fresher presence signal (e.g. the Health tab) reads as a false warning. */
+  hideMissing?: boolean
+}) {
   const { data, refetch } = useQuery({
     queryKey: ['vocab-alignment', wsId, dataSourceId],
     queryFn: () => fetchVocabAlignment(wsId, dataSourceId),
@@ -55,7 +63,10 @@ export function VocabAlignmentWarning({ wsId, dataSourceId }: { wsId: string; da
 
   const variants = data.driftDetails.filter(d => d.kind === 'case_variant' && d.observed.length)
   const multi = data.driftDetails.filter(d => d.needsConfirmation)
-  const missing = data.driftDetails.filter(d => d.kind === 'missing_observed')
+  const missing = hideMissing ? [] : data.driftDetails.filter(d => d.kind === 'missing_observed')
+
+  // Nothing left to say once the informational "missing" line is suppressed → render nothing.
+  if (variants.length === 0 && multi.length === 0 && missing.length === 0) return null
 
   const onDecide = async (d: DriftDetail, keep: boolean) => {
     await confirmVariant(wsId, dataSourceId, d.declared, keep, d.dimension)
@@ -63,7 +74,7 @@ export function VocabAlignmentWarning({ wsId, dataSourceId }: { wsId: string; da
   }
 
   return (
-    <div className="mx-6 mb-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-700 dark:text-amber-300">
+    <div className={`rounded-lg border border-amber-500/25 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-700 dark:text-amber-300 ${className}`}>
       <div className="flex items-start gap-2">
         <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
         <div className="space-y-1.5">

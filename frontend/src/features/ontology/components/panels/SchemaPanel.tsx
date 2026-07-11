@@ -15,6 +15,7 @@ import type { EditorPanel, RelTypeWithClassifications } from '../../lib/ontology
 import { EntityTypesPanel } from './EntityTypesPanel'
 import { RelationshipsPanel } from './RelationshipsPanel'
 import { EducationalCallout } from '../EducationalCallout'
+import { DeclaredVsPhysical } from '../DeclaredVsPhysical'
 
 type SchemaSubView = 'entities' | 'relationships'
 
@@ -93,11 +94,30 @@ export function SchemaPanel({
   return (
     <div>
       <EducationalCallout
-        id="edu-entity-rel"
-        title="Entity & Relationship Types"
-        description="Entity types define the categories of nodes in your graph (e.g., Person, Company). Relationship types define the edges between them (e.g., WORKS_AT, OWNS). Each type can have visual styling, metadata fields, and hierarchy rules that control how they appear and behave in views."
-        variant="info"
-      />
+        id="edu-schema-declared-physical"
+        title="Your schema is the declared model — this is what the graph is built from"
+        variant="concept"
+      >
+        <div className="space-y-2.5">
+          <p className="text-xs text-ink-muted leading-relaxed">
+            <span className="font-medium text-ink-secondary">Entity types</span> are the categories of nodes;{' '}
+            <span className="font-medium text-ink-secondary">relationship types</span> are the edges between them. Together they are
+            the single source of truth — every graph built or read with this ontology uses <span className="italic">exactly</span> these
+            types, in this spelling.
+          </p>
+          <DeclaredVsPhysical
+            entityExample={entityTypes[0]?.id || 'Customer'}
+            edgeExample={relTypes[0]?.id || 'FLOWS_TO'}
+          />
+          <p className="text-[11px] text-ink-muted leading-relaxed">
+            Name a relationship <span className="italic">"Flows To"</span> and it's stored as the edge type{' '}
+            <code className="font-mono text-ink-secondary">FLOWS_TO</code> — the editor derives that automatically (entities become{' '}
+            <span className="font-mono text-ink-secondary">PascalCase</span> node labels the same way), so the physical graph always
+            matches the ontology and hits FalkorDB's indexes. The <span className="font-medium text-ink-secondary">Health</span> tab
+            flags any source whose real graph has drifted.
+          </p>
+        </div>
+      </EducationalCallout>
 
       {/* Sub-view pill toggle */}
       <div className="flex items-center gap-1 mb-6 p-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] w-fit">

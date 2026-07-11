@@ -9,7 +9,24 @@ import logging
 import os
 import time
 from collections import defaultdict, deque
-from typing import Awaitable, Callable, List, Optional, Dict, Any, Set, Tuple
+from typing import Awaitable, Callable, List, NamedTuple, Optional, Dict, Any, Set, Tuple
+
+
+class AggRunMeta(NamedTuple):
+    """Aggregation-run metadata resolved by ``_aggregation_run_meta``.
+
+    ``regime``: 'cube' (every ancestor combination stored) or 'boundary'
+    (canonical depth-diagonal only). ``stamp_version``: 2 = every stored
+    :AGGREGATED edge carries sourceDepth/targetDepth; 1 = legacy stamps
+    (depth unknown); 0 = env-forced, no stored contract. ``max_depth``:
+    deepest containment depth stamped by the last run (None when
+    unknown). ``last_materialized_at``: ISO timestamp of the last
+    completed run (None = never / unknown)."""
+
+    regime: str
+    stamp_version: int
+    max_depth: Optional[int]
+    last_materialized_at: Optional[str]
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -25,6 +42,13 @@ from .base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
+
+# Per-server (host, port) facts we only need to discover / report ONCE, so onboarding
+# many graphs against the same FalkorDB doesn't re-probe and re-log the same thing on
+# every graph. Whether a FalkorDB build supports a label-less property index, and whether
+# we've already logged its index-health summary, are server-level — not per-graph.
+_UNLABELED_URN_UNSUPPORTED: set = set()
+_INDEX_HEALTH_LOGGED: set = set()
 
 
 class AggregationBatchAbort(Exception):
@@ -656,14 +680,17 @@ class FalkorDBProvider(GraphDataProvider):
         # 60s vs the standard 15s ``_WRITE_TIMEOUT``: bulk writes
         # legitimately need more headroom than incremental MERGEs,
         # especially on graphs where FalkorDB is concurrently serving
-        # trace reads. Clamped to [5s, 600s].
+        # trace reads. Clamped to [5s, 170s]: the ceiling must stay below
+        # the server's TIMEOUT_MAX (180s in the shipped FALKORDB_ARGS) or
+        # FalkorDB rejects the per-query timeout and the write becomes
+        # unkillable server-side.
         _bulk_timeout_raw = os.getenv("FALKORDB_BULK_CREATE_TIMEOUT_S")
         if _bulk_timeout_raw is None:
             self._bulk_create_timeout_s: float = 60.0
         else:
             try:
                 _bulk_timeout_parsed = float(_bulk_timeout_raw)
-                self._bulk_create_timeout_s = max(5.0, min(600.0, _bulk_timeout_parsed))
+                self._bulk_create_timeout_s = max(5.0, min(170.0, _bulk_timeout_parsed))
                 if self._bulk_create_timeout_s != 60.0:
                     logger.info(
                         "FALKORDB_BULK_CREATE_TIMEOUT_S=%s (clamped to %.1fs, "
@@ -697,6 +724,13 @@ class FalkorDBProvider(GraphDataProvider):
             )
         self._write_semaphore = asyncio.Semaphore(_write_conc)
         self._write_concurrency_cap: int = _write_conc
+
+        # Distributed admission controller (aggregation writes). Injected
+        # per-job by the aggregation worker via ``set_admission_controller``
+        # so N workers × M pods share one write budget per FalkorDB
+        # endpoint instead of each pod throttling only itself. None →
+        # the per-process ``_write_semaphore`` above is the only gate.
+        self._admission_controller: Optional[Any] = None
 
         # Latency-quiesce: rolling window of last 50 write latencies (in
         # seconds), computed as p95 lazily on each write attempt. When
@@ -1405,8 +1439,14 @@ class FalkorDBProvider(GraphDataProvider):
         for label in labels:
             for prop in properties:
                 try:
+                    # Server-side timeout too — an abandoned DDL statement
+                    # must not keep burning FalkorDB CPU after the client
+                    # deadline fires.
                     await asyncio.wait_for(
-                        self._graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"),
+                        self._graph.query(
+                            f"CREATE INDEX FOR (n:{label}) ON (n.{prop})",
+                            timeout=self._db_timeout_ms(_init_timeout),
+                        ),
                         timeout=_init_timeout,
                     )
                 except Exception:
@@ -1433,7 +1473,10 @@ class FalkorDBProvider(GraphDataProvider):
         for index_cypher in aggregated_edge_indices:
             try:
                 await asyncio.wait_for(
-                    self._graph.query(index_cypher), timeout=_init_timeout,
+                    self._graph.query(
+                        index_cypher, timeout=self._db_timeout_ms(_init_timeout),
+                    ),
+                    timeout=_init_timeout,
                 )
             except Exception:
                 pass  # Older FalkorDB or already exists — ignore
@@ -1652,6 +1695,12 @@ class FalkorDBProvider(GraphDataProvider):
             old, mode, self._graph_name,
         )
 
+    def set_admission_controller(self, controller: Optional[Any]) -> None:
+        """Inject the distributed write-admission controller for aggregation
+        writes (see ``backend.app.services.aggregation.admission``). Called
+        per-job by the aggregation worker; pass None to detach."""
+        self._admission_controller = controller
+
     def set_resolved_edge_metadata(
         self,
         edge_type_metadata: Dict[str, Any],
@@ -1705,6 +1754,23 @@ class FalkorDBProvider(GraphDataProvider):
                 out.append(t)
         seen = list(dict.fromkeys(out))          # dedupe, preserve order
         return set(seen) if isinstance(types, (set, frozenset)) else seen
+
+    def _containment_hop_bound(self) -> int:
+        """Upper bound for upward containment walks. Physical depth can
+        exceed the LABEL count (recursive same-label nesting, e.g.
+        Folder⊃Folder…), so the bound is 2× the level-map size with a
+        floor of 16, overridable for pathologically deep hierarchies via
+        AGGREGATION_MAX_CONTAINMENT_HOPS. Reader walks and ancestor-chain
+        computation MUST share this bound or they disagree with the
+        writer about which ancestors exist."""
+        override = os.getenv("AGGREGATION_MAX_CONTAINMENT_HOPS")
+        if override:
+            try:
+                return max(1, min(64, int(override)))
+            except ValueError:
+                pass
+        levels = getattr(self, "_entity_type_levels", None) or {}
+        return max(2 * len(levels), 16)
 
     def _alias_rel_types(self, types):
         return self._alias_types(types, "_source_rel_aliases")
@@ -1790,6 +1856,111 @@ class FalkorDBProvider(GraphDataProvider):
 
     def _agg_last_materialized_key(self) -> str:
         return f"{self._graph_name}:agg:last_materialized_at"
+
+    def _agg_regime_key(self) -> str:
+        return f"{self._graph_name}:agg:regime"
+
+    async def _aggregation_run_meta(self) -> "AggRunMeta":
+        """Resolved aggregation-run metadata for the read paths.
+
+        Precedence: the operator's fine-pairs env escape hatch → the
+        in-graph ``_AggMeta`` singleton (written atomically by the batch
+        pipeline at run end — survives Redis loss and topology splits) →
+        the legacy Redis regime marker → a graph probe for non-conforming
+        rows (NULL aggKey or NULL level stamps — legacy strategies and
+        pre-canonical incremental writers). Cached ~5 minutes.
+
+        ``regime``: 'cube' = every ancestor combination stored (readers
+        serve purely from storage; mixed-level derivation MUST stay off
+        or every mixed weight double-counts); 'boundary' = canonical
+        depth-diagonal only (depth-keyed derivation fills the rest).
+        ``stamp_version`` >= 2 means every edge carries
+        sourceDepth/targetDepth. ``last_materialized_at`` feeds the
+        result payload + the context-engine backfill trigger, so a graph
+        that HAS materialized but lost its Redis key no longer
+        re-triggers materialization on every empty read."""
+        cached = getattr(self, "_agg_meta_cached", None)
+        now = time.monotonic()
+        if cached and now - cached[1] < 300.0:
+            return cached[0]
+        meta: Optional[AggRunMeta] = None
+        try:
+            res = await self._proj_ro_query(
+                "MATCH (m:_AggMeta {id: 'singleton'}) "
+                "RETURN m.regime, m.stampVersion, m.maxDepth, "
+                "m.lastMaterializedAt LIMIT 1",
+            )
+            rows = res.result_set or []
+            if rows and rows[0] and rows[0][0] in ("cube", "boundary"):
+                row = rows[0]
+                meta = AggRunMeta(
+                    str(row[0]),
+                    int(row[1]) if row[1] is not None else 1,
+                    int(row[2]) if row[2] is not None else None,
+                    str(row[3]) if row[3] is not None else None,
+                )
+        except Exception as e:
+            logger.debug("Aggregation _AggMeta read failed: %s", e)
+        if meta is None:
+            meta = await self._legacy_regime_meta()
+        if os.getenv(
+            "AGGREGATION_MATERIALIZE_FINE_PAIRS", "false"
+        ).strip().lower() in ("1", "true", "yes", "on"):
+            # Operator escape hatch forces the cube CONTRACT (mixed-level
+            # derivation off) without discarding the resolved timestamp
+            # or stamp version.
+            meta = meta._replace(regime="cube")
+        self._agg_meta_cached = (meta, now)
+        return meta
+
+    async def _legacy_regime_meta(self) -> "AggRunMeta":
+        """Marker/probe fallback for graphs that predate ``_AggMeta``.
+        Stamp version 1: depth stamps unknown — depth-keyed readers must
+        not trust them and fall back to stored rows only."""
+        regime: Optional[str] = None
+        last_at: Optional[str] = None
+        try:
+            if self._redis is not None:
+                raw = await self._redis.get(self._agg_regime_key())
+                if raw:
+                    val = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    if val == "boundary":
+                        regime = "boundary"
+                    elif val == "fine":
+                        regime = "cube"
+                raw = await self._redis.get(self._agg_last_materialized_key())
+                if raw is not None:
+                    last_at = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+        except Exception as e:
+            logger.debug("Aggregation regime marker read failed: %s", e)
+        if regime != "cube":
+            # The probe runs even when the marker says 'boundary':
+            # incremental writers that predate the canonical contract can
+            # add non-conforming rows AFTER the marker was stamped.
+            try:
+                res = await self._proj_ro_query(
+                    "MATCH ()-[r:AGGREGATED]->() "
+                    "WHERE r.aggKey IS NULL OR r.sourceLevel IS NULL "
+                    "RETURN 1 LIMIT 1",
+                )
+                if res.result_set:
+                    regime = "cube"
+                elif regime is None:
+                    regime = "boundary"
+            except Exception as e:
+                logger.debug("Aggregation regime probe failed: %s", e)
+                if regime is None:
+                    # Unknown state: serve stored rows only (the original
+                    # behavior) rather than risk double-counted sums.
+                    regime = "cube"
+        return AggRunMeta(regime, 1, None, last_at)
+
+    async def _aggregation_storage_regime(self) -> str:
+        """Legacy two-value view of ``_aggregation_run_meta``:
+        ``'boundary'`` when the stored set is the canonical selection,
+        ``'fine'`` when it is (or may be) a full cube."""
+        meta = await self._aggregation_run_meta()
+        return "boundary" if meta.regime == "boundary" else "fine"
 
     def _agg_in_flight_key(self, ds_id: str) -> str:
         return f"materialize:in-flight:{ds_id}"
@@ -2724,28 +2895,31 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             pass  # Index may already exist
 
-        # Unlabeled URN index for the aggregation MERGE hot path. Best-effort;
-        # supported on recent FalkorDB versions (>=2.10). On older releases
-        # the CREATE fails and the planner continues to scan — flagged for
-        # the operator via the slow-query metric exported in WS4.
-        try:
-            await self._proj_query("CREATE INDEX FOR (n) ON (n.urn)")
-        except Exception as exc:
-            logger.info(
-                "ensure_projections: unlabeled URN index not supported on this "
-                "FalkorDB version (%s); falling back to per-label indexes. "
-                "Aggregation MERGEs will scan unless every label has a URN "
-                "index in place.", exc,
-            )
+        # Label-less URN index. FalkorDB's openCypher requires a label on an index, so
+        # `CREATE INDEX FOR (n) ON (n.urn)` is unsupported on every build — AND it is no
+        # longer needed: every write/read hot path (bulk load, incremental MERGE, and the
+        # AGGREGATED upsert at projection.py) is label-qualified and served by the per-label
+        # URN indexes. Discover support ONCE PER SERVER so onboarding many graphs doesn't
+        # re-attempt and re-log the same fallback on each graph (the recurring "falling back
+        # to per-label indexes" noise).
+        server = (self._host, self._port)
+        if server not in _UNLABELED_URN_UNSUPPORTED:
+            try:
+                await self._proj_query("CREATE INDEX FOR (n) ON (n.urn)")
+            except Exception:
+                _UNLABELED_URN_UNSUPPORTED.add(server)
+                logger.info(
+                    "FalkorDB %s:%s uses the labeled-index strategy (no label-less property "
+                    "index on this build; every hot path is label-qualified and index-driven "
+                    "via the per-label URN indexes). Expected — not a degradation.",
+                    self._host, self._port,
+                )
 
-        # Smoke-probe: log which AGGREGATED-relevant indexes actually
-        # exist in the graph now. Best-effort — surfaces the silent-fail
-        # case where CREATE INDEX returned success on an older FalkorDB
-        # that ignores unsupported syntax (or where a deployment skipped
-        # _initialize_indices entirely). Two sessions of guessing at
-        # whether indexes are "really there" justifies running this
-        # explicitly at startup.
-        await self._log_aggregation_index_health()
+        # Index-health smoke probe: log the summary ONCE per server (not per onboarded
+        # graph). Surfaces a genuinely missing index without spamming every reconcile.
+        if server not in _INDEX_HEALTH_LOGGED:
+            _INDEX_HEALTH_LOGGED.add(server)
+            await self._log_aggregation_index_health()
 
     async def _log_aggregation_index_health(self) -> None:
         """Introspect the projection graph's index catalogue and log a
@@ -2847,15 +3021,36 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         if not unlabeled_urn:
-            logger.warning(
-                "Index health on %s: unlabeled URN index is missing. The "
-                "bulk-rebuild label-resolution fallback path and the "
-                "incremental MERGE path will both scan. If FalkorDB version "
-                "< 2.10, this is expected; consider upgrading or accept the "
-                "labeled-only path. If FalkorDB version >= 2.10, "
-                "investigate why CREATE INDEX FOR (n) ON (n.urn) was rejected.",
-                self._graph_name,
-            )
+            # Labeled-only is a fully supported strategy: every hot path
+            # (ancestor chains, node directory, apply MERGEs, the
+            # incremental write hook, on-demand reads) anchors on the
+            # per-label URN indexes. Health depends only on whether every
+            # ontology label is covered — warn on GAPS, not on the
+            # server lacking unlabeled-index support.
+            entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+            expected: set = set()
+            for lbl in entity_levels:
+                expected.update(self._alias_entity_types([lbl]))
+            have = set(labeled_urn)
+            missing = sorted(l for l in expected if l not in have)
+            if missing:
+                logger.warning(
+                    "Index health on %s: no unlabeled URN index (server "
+                    "does not support it) and %d ontology label(s) lack a "
+                    "URN index: %s. Queries anchored on those labels will "
+                    "scan — run ensure_indices / retrigger aggregation to "
+                    "create them.",
+                    self._graph_name, len(missing), ", ".join(missing[:8]),
+                )
+            else:
+                logger.info(
+                    "Index health on %s: labeled-only strategy active "
+                    "(server lacks unlabeled-index support; every ontology "
+                    "label has a URN index — job hot paths are index-"
+                    "driven; bounded visible-set reads may still issue "
+                    "single-scan queries).",
+                    self._graph_name,
+                )
 
     def _ancestors_cache_key(self) -> str:
         """Return the Redis Hash key for ancestor chains in this graph,
@@ -2920,25 +3115,11 @@ class FalkorDBProvider(GraphDataProvider):
         hardcoded ``*1..10`` for shallow ontologies, and extends to
         deeper ones without code edits.
         """
-        containment = list(self._get_containment_edge_types())
-        if not containment:
-            # No containment types — flat graph, no ancestors
-            return []
-        containment_cypher = "|".join(_sanitize_label(t) for t in containment)
-        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
-
-        # Variable-length path: returns ordered list of ancestor URNs
-        # nodes(path) gives [child, parent, grandparent, ...] — skip index 0 (self)
-        result = await self._ro_query(
-            f"MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(ancestor) "
-            f"WHERE child.urn = $urn "
-            f"WITH path ORDER BY length(path) DESC LIMIT 1 "
-            f"RETURN [n IN nodes(path)[1..] | n.urn] AS chain",
-            params={"urn": urn},
-        )
-        if result.result_set and result.result_set[0][0]:
-            return result.result_set[0][0]
-        return []
+        # Delegates to the label-driven bulk path — the previous
+        # unlabeled ``WHERE child.urn = $urn`` was a full node scan per
+        # call on servers without unlabeled-index support.
+        chains = await self._compute_ancestor_chains_bulk_cypher([urn])
+        return chains.get(urn, [])
 
     async def _compute_and_store_ancestors_bulk(
         self,
@@ -3054,7 +3235,7 @@ class FalkorDBProvider(GraphDataProvider):
             return out
 
         containment_cypher = "|".join(_sanitize_label(t) for t in containment)
-        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+        max_depth = self._containment_hop_bound()
 
         # Keep parameter lists bounded so a single misconfigured outer
         # batch (e.g. 10k URNs) doesn't generate a single oversized
@@ -3063,35 +3244,70 @@ class FalkorDBProvider(GraphDataProvider):
         # override via FALKORDB_ANCESTOR_CHUNK_SIZE.
         chunk_size = int(os.getenv("FALKORDB_ANCESTOR_CHUNK_SIZE", "2000"))
 
-        # ``MATCH (child) WHERE child.urn IN $urns`` is one node-scan for
-        # the whole chunk; ``UNWIND $urns AS u MATCH (child {urn:u})``
-        # was N scans (one per URN), which on a multi-million-node graph
-        # without an unlabeled URN index busts the 5s read timeout and
-        # triggers the worker retry loop. Same pathology as the original
-        # MERGE-on-relationship problem, just hiding in the ancestor
-        # lookup. URNs that don't exist in the graph simply produce no
-        # row; the caller's pre-initialization to ``[]`` handles them.
-        cypher = (
-            "MATCH (child) WHERE child.urn IN $urns "
-            f"OPTIONAL MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(a) "
-            "WITH child.urn AS u, "
-            "     [n IN nodes(path)[1..] | n.urn] AS chain_candidate, "
-            "     coalesce(length(path), 0) AS plen "
-            "ORDER BY u, plen DESC "
-            "WITH u, collect(chain_candidate) AS candidates "
-            "RETURN u, coalesce(candidates[0], []) AS chain"
-        )
+        # LABEL-DRIVEN anchoring. An unlabeled ``MATCH (child) WHERE
+        # child.urn IN $urns`` is a FULL node scan per chunk on FalkorDB
+        # versions without unlabeled-index support (observed: 1776-urn
+        # chunk timing out on a 1M-node graph, then degrading to 1776
+        # per-URN full scans). Every ontology label has a URN index, so
+        # each chunk is classified per label (indexed IN lookups) and
+        # the path expansion anchors on ``(child:Label)`` — index seeks
+        # end to end. URNs matching no ontology label sit outside the
+        # containment hierarchy and keep their pre-initialized [] chain.
+        def _chain_cypher(label_clause: str) -> str:
+            return (
+                f"MATCH (child{label_clause}) WHERE child.urn IN $urns "
+                f"OPTIONAL MATCH path = (child)<-[:{containment_cypher}*1..{max_depth}]-(a) "
+                "WITH child.urn AS u, "
+                "     [n IN nodes(path)[1..] | n.urn] AS chain_candidate, "
+                "     coalesce(length(path), 0) AS plen "
+                "ORDER BY u, plen DESC "
+                "WITH u, collect(chain_candidate) AS candidates "
+                "RETURN u, coalesce(candidates[0], []) AS chain"
+            )
+
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        labels: List[str] = []
+        for lbl in entity_levels:
+            for spelled in self._alias_entity_types([lbl]):
+                if spelled not in labels:
+                    labels.append(spelled)
 
         for i in range(0, len(urns), chunk_size):
             chunk = urns[i : i + chunk_size]
-            result = await self._ro_query(cypher, params={"urns": chunk})
-            for row in result.result_set or []:
-                urn = row[0]
-                chain = row[1] or []
-                # Preserve list-of-str shape; FalkorDB may return None
-                # entries inside the list if a node lacked .urn — drop
-                # them so callers don't have to defend against None.
-                out[urn] = [c for c in chain if c]
+            if not labels:
+                # No ontology label map — legacy single-scan chunk query.
+                result = await self._ro_query(
+                    _chain_cypher(""), params={"urns": chunk},
+                )
+                for row in result.result_set or []:
+                    out[row[0]] = [c for c in (row[1] or []) if c]
+                continue
+            remaining = set(chunk)
+            for lbl in labels:
+                if not remaining:
+                    break
+                safe = _sanitize_label(lbl)
+                members = (await self._ro_query(
+                    f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
+                    params={"urns": list(remaining)},
+                )).result_set or []
+                member_urns = [r[0] for r in members if r and r[0]]
+                if not member_urns:
+                    continue
+                remaining.difference_update(member_urns)
+                result = await self._ro_query(
+                    _chain_cypher(f":{safe}"), params={"urns": member_urns},
+                )
+                for row in result.result_set or []:
+                    # Drop None entries (node lacked .urn) so callers
+                    # don't defend against them.
+                    out[row[0]] = [c for c in (row[1] or []) if c]
+            if remaining:
+                logger.debug(
+                    "ancestor chains: %d urns matched no ontology label "
+                    "(outside the containment hierarchy) — empty chains.",
+                    len(remaining),
+                )
 
         return out
 
@@ -3115,347 +3331,6 @@ class FalkorDBProvider(GraphDataProvider):
     _MERGE_SUB_BATCH_TARGET_LOW_S = 0.8
     _MERGE_SUB_BATCH_GROW_AFTER = 5
     _MERGE_SUB_BATCH_GROW_STEP = 100
-
-    async def _materialize_edges_batched(
-        self,
-        rows: list,
-        ancestors_cache: Dict[str, List[str]],
-        *,
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        baseline_aggregated: int = 0,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> tuple[int, int]:
-        """Batch-level materialization — all Redis + Cypher ops in ~4 round-trips.
-
-        Replaces the previous per-edge loop that did 3 round-trips per edge
-        (SADD pipeline + SCARD pipeline + Cypher MERGE × N edges). Now:
-
-        1. Compute all ancestor pairs across ALL edges in memory (O(1) per
-           edge using ``ancestors_cache`` populated by bulk pre-compute).
-        2. ONE Redis SADD pipeline for all pairs across all edges.
-        3. ONE Redis SCARD pipeline for newly-added pairs only.
-        4. ONE (or a few) Cypher UNWIND+MERGE for all new pairs.
-
-        Returns (created_count, error_count).
-        Raises AggregationBatchAbort on sustained provider failure.
-        """
-        await self._ensure_connected()
-        members_key_prefix = f"{self._graph_name}:agg_members"
-
-        # Step 1: Compute all ancestor pairs across ALL edges in the batch.
-        # Each edge (s, t) with edge_id and edge_type generates pairs from
-        # s_chain × t_chain (excluding self-loops).
-        all_sadd_ops: list[tuple[str, str, str, str, str]] = []  # (redis_key, edge_id, s, t, edge_type)
-        for row in rows:
-            s_urn, t_urn, edge_type, edge_id = row[0], row[1], row[2], row[3]
-            if not edge_id:
-                edge_id = f"{s_urn}|{edge_type}|{t_urn}"
-
-            s_chain = [s_urn] + ancestors_cache.get(s_urn, [])
-            t_chain = [t_urn] + ancestors_cache.get(t_urn, [])
-
-            for s in s_chain:
-                for t in t_chain:
-                    if s != t:
-                        key = f"{members_key_prefix}:{s}:{t}"
-                        all_sadd_ops.append((key, edge_id, s, t, edge_type))
-
-        if not all_sadd_ops:
-            return 0, 0
-
-        # Step 2: ONE Redis SADD pipeline for all pairs.
-        # SADD returns 1 if the member was newly added, 0 if already present.
-        pipe = self._redis.pipeline(transaction=False)
-        for redis_key, edge_id_val, _, _, _ in all_sadd_ops:
-            pipe.execute_command("SADD", redis_key, edge_id_val)
-        sadd_results = await pipe.execute()
-
-        # Step 3: Collect newly-added pairs and their keys for SCARD.
-        # Deduplicate by (s, t) — multiple input edges may generate the
-        # same ancestor pair, but we only need one SCARD + one MERGE per pair.
-        new_pair_keys: dict[tuple[str, str], tuple[str, str]] = {}  # (s,t) -> (redis_key, edge_type)
-        for i, (redis_key, _, s, t, etype) in enumerate(all_sadd_ops):
-            if sadd_results[i] != 0:
-                pair = (s, t)
-                if pair not in new_pair_keys:
-                    new_pair_keys[pair] = (redis_key, etype)
-
-        if not new_pair_keys:
-            return 0, 0
-
-        # ONE Redis SCARD pipeline for all newly-added pairs.
-        ordered_pairs = list(new_pair_keys.items())
-        pipe = self._redis.pipeline(transaction=False)
-        for (_, _), (redis_key, _) in ordered_pairs:
-            pipe.execute_command("SCARD", redis_key)
-        scard_results = await pipe.execute()
-
-        # Step 4: Build merge batch with edge type lists per pair.
-        # Collect all distinct edge types per (s, t) pair so we can
-        # store them in sourceEdgeTypes in a single Cypher call.
-        pair_edge_types: dict[tuple[str, str], set[str]] = {}
-        for _, _, s, t, etype in all_sadd_ops:
-            if (s, t) in new_pair_keys:
-                pair_edge_types.setdefault((s, t), set()).add(etype)
-
-        # Resolve s/t levels for the level-pair fast path. Pre-fetches
-        # labels for every URN in the batch from the Redis URN→label cache
-        # (populated as a side effect of node upserts / get_node calls),
-        # then maps label → hierarchy.level via the in-process entity-type
-        # level map injected by the ContextEngine. URNs without a resolved
-        # level are left as None and the Cypher uses ``coalesce`` so a
-        # missing level never clobbers an existing one written by the
-        # backfill script.
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        url_levels: Dict[str, Optional[int]] = {}
-        if entity_levels:
-            all_urns = sorted({s for (s, _), _ in ordered_pairs}
-                              | {t for (_, t), _ in ordered_pairs})
-            if all_urns:
-                try:
-                    label_key = self._urn_label_key()
-                    label_pipe = self._redis.pipeline(transaction=False)
-                    for u in all_urns:
-                        label_pipe.hget(label_key, u)
-                    label_rows = await label_pipe.execute()
-                    for u, raw in zip(all_urns, label_rows):
-                        if not raw:
-                            continue
-                        lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                        lvl = entity_levels.get(lbl)
-                        if lvl is not None:
-                            url_levels[u] = lvl
-                except Exception as exc:
-                    # Best-effort: if Redis is down we skip the level
-                    # annotation. Backfill_aggregated_levels.py covers
-                    # any edges materialised without props.
-                    logger.warning(
-                        "materialize: level lookup pipeline failed (%d urns): %s",
-                        len(all_urns), exc,
-                    )
-
-        merge_batch: list[dict[str, Any]] = []
-        for i, ((s, t), _) in enumerate(ordered_pairs):
-            weight = scard_results[i] if scard_results[i] else 1
-            etypes = list(pair_edge_types.get((s, t), set()))
-            merge_batch.append({
-                "s": s, "t": t, "w": int(weight), "et": etypes,
-                "sl": url_levels.get(s),
-                "tl": url_levels.get(t),
-            })
-
-        # Execute the MERGE as one or more (cypher, batch) work units. In
-        # dedicated projection mode the units are LABELED node merges grouped
-        # by resolved (srcLabel, tgtLabel) so the per-label URN index serves
-        # the match — removing the dependency on the FalkorDB >=2.10 unlabeled
-        # URN index. in_source mode stays a single unlabeled unit. Each unit
-        # runs through the shared adaptive sub-batch loop.
-        work_units = await self._build_aggregated_merge_units(merge_batch)
-
-        created = 0
-        for unit_cypher, unit_batch in work_units:
-            created += await self._run_aggregated_merge_loop(
-                unit_cypher, unit_batch,
-                baseline_aggregated=baseline_aggregated,
-                running_created=created,
-                intra_batch_callback=intra_batch_callback,
-                should_cancel=should_cancel,
-            )
-
-        return created, 0
-
-    # Shared SET tail for the incremental AGGREGATED MERGE — identical for the
-    # labeled and unlabeled node-match variants. ``coalesce`` never regresses
-    # known level metadata to NULL; REDUCE unions sourceEdgeTypes in one pass.
-    _AGG_MERGE_SET = (
-        "MERGE (s)-[r:AGGREGATED]->(t) "
-        "SET r.weight = item.w, "
-        "    r.latestUpdate = timestamp(), "
-        "    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
-        "    r.targetLevel = coalesce(item.tl, r.targetLevel), "
-        "    r.sourceEdgeTypes = REDUCE(acc = "
-        "      CASE WHEN r.sourceEdgeTypes IS NULL THEN [] "
-        "           ELSE r.sourceEdgeTypes END, "
-        "      et IN item.et | "
-        "      CASE WHEN et IN acc THEN acc "
-        "           ELSE acc + et END)"
-    )
-    _AGG_MERGE_UNLABELED = (
-        "UNWIND $batch AS item MERGE (s {urn: item.s}) MERGE (t {urn: item.t}) "
-        + _AGG_MERGE_SET
-    )
-
-    async def _build_aggregated_merge_units(
-        self, merge_batch: list[dict[str, Any]],
-    ) -> list[tuple[str, list[dict[str, Any]]]]:
-        """Split an incremental MERGE batch into (cypher, batch) work units.
-
-        ``in_source`` mode → one unlabeled unit (the real entity nodes already
-        carry labels in the source graph). ``dedicated`` mode → one LABELED
-        unit per resolved ``(srcLabel, tgtLabel)`` group plus an unlabeled
-        remainder for pairs whose labels can't be resolved (correctness is
-        preserved — those few fall back rather than being dropped, unlike the
-        bulk-rebuild path). Labeled MERGE lets the per-label URN index serve
-        the node match in the synthetic projection graph, so the write path no
-        longer depends on the FalkorDB >=2.10 unlabeled URN index.
-        """
-        if not merge_batch:
-            return []
-        if self._projection_mode != "dedicated":
-            return [(self._AGG_MERGE_UNLABELED, merge_batch)]
-
-        urns = {it["s"] for it in merge_batch} | {it["t"] for it in merge_batch}
-        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
-
-        labeled: Dict[Tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-        unlabeled: list[dict[str, Any]] = []
-        for it in merge_batch:
-            sl = urn_label_map.get(it["s"])
-            tl = urn_label_map.get(it["t"])
-            if sl and tl:
-                labeled[(sl, tl)].append(it)
-            else:
-                unlabeled.append(it)
-
-        labels = {lbl for pair in labeled for lbl in pair}
-        if labels:
-            # Per-label URN indexes on the projection graph make the labeled
-            # MATCH an index seek instead of a scan.
-            await self._ensure_label_urn_indexes(labels)
-
-        units: list[tuple[str, list[dict[str, Any]]]] = []
-        for (sl, tl), items in labeled.items():
-            cypher = (
-                f"UNWIND $batch AS item "
-                f"MERGE (s:{_sanitize_label(sl)} {{urn: item.s}}) "
-                f"MERGE (t:{_sanitize_label(tl)} {{urn: item.t}}) "
-                + self._AGG_MERGE_SET
-            )
-            units.append((cypher, items))
-        if unlabeled:
-            units.append((self._AGG_MERGE_UNLABELED, unlabeled))
-        return units
-
-    async def _run_aggregated_merge_loop(
-        self,
-        merge_cypher: str,
-        merge_batch: list[dict[str, Any]],
-        *,
-        baseline_aggregated: int,
-        running_created: int,
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """Run ``merge_cypher`` over ``merge_batch`` in adaptive sub-batches.
-
-        Shared by the labeled and unlabeled incremental MERGE units:
-        cooperative cancel between sub-batches, AIMD sub-batch sizing under
-        provider load, and the intra-batch progress heartbeat. Returns the
-        count created in THIS call; the progress callback reports
-        ``baseline_aggregated + running_created + <created-so-far>`` so a job
-        spanning several units still shows a monotonic running total.
-        """
-        created = 0
-        chunk_start = 0
-        while chunk_start < len(merge_batch):
-            # Cooperative cancel between MERGE sub-batches. The previous
-            # sub-batch's MERGE has fully landed in FalkorDB before we reach
-            # this check, so raising here cannot orphan a Cypher transaction.
-            if should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<provider-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-
-            # Adaptive sub-batch size: starts at the ceiling and shrinks toward
-            # _MERGE_SUB_BATCH_MIN when MERGE latency creeps past the high
-            # target — the WS1.4 backpressure mechanism.
-            sub_batch_size = self._aggregation_sub_batch_size
-            chunk = merge_batch[chunk_start:chunk_start + sub_batch_size]
-            chunk_start += len(chunk)
-
-            t_merge_start = time.monotonic()
-            await self._proj_query(merge_cypher, params={"batch": chunk})
-            t_merge_elapsed = time.monotonic() - t_merge_start
-            created += len(chunk)
-
-            # AIMD adjustment. Shrink fast (multiplicative decrease) when
-            # latency creeps; grow slow (additive increase) only after a
-            # sustained run of healthy sub-batches. Bounds: [_MIN, _MAX].
-            current = self._aggregation_sub_batch_size
-            if t_merge_elapsed > self._MERGE_SUB_BATCH_TARGET_HIGH_S:
-                new_size = max(self._MERGE_SUB_BATCH_MIN, current // 2)
-                if new_size != current:
-                    logger.warning(
-                        "Aggregation MERGE sub-batch latency %.2fs > %.1fs "
-                        "target on %s; halving sub-batch size %d -> %d to "
-                        "relieve provider load.",
-                        t_merge_elapsed, self._MERGE_SUB_BATCH_TARGET_HIGH_S,
-                        self._graph_name, current, new_size,
-                    )
-                    self._aggregation_sub_batch_size = new_size
-                self._aggregation_sub_batch_under_target_run = 0
-            elif t_merge_elapsed < self._MERGE_SUB_BATCH_TARGET_LOW_S:
-                self._aggregation_sub_batch_under_target_run += 1
-                if (
-                    self._aggregation_sub_batch_under_target_run
-                    >= self._MERGE_SUB_BATCH_GROW_AFTER
-                    and current < self._MERGE_SUB_BATCH_SIZE
-                ):
-                    new_size = min(
-                        self._MERGE_SUB_BATCH_SIZE,
-                        current + self._MERGE_SUB_BATCH_GROW_STEP,
-                    )
-                    logger.info(
-                        "Aggregation MERGE sub-batch healthy (%d consecutive "
-                        "< %.1fs) on %s; growing sub-batch size %d -> %d.",
-                        self._aggregation_sub_batch_under_target_run,
-                        self._MERGE_SUB_BATCH_TARGET_LOW_S,
-                        self._graph_name, current, new_size,
-                    )
-                    self._aggregation_sub_batch_size = new_size
-                    self._aggregation_sub_batch_under_target_run = 0
-            else:
-                # In the steady-state band; reset growth counter so growth
-                # only triggers after a run of clearly-under-target calls.
-                self._aggregation_sub_batch_under_target_run = 0
-
-            # Intra-batch heartbeat so the worker's checkpoint can update
-            # created_edges / last_checkpoint_at during a multi-minute outer
-            # batch instead of the UI appearing frozen.
-            if intra_batch_callback is not None:
-                try:
-                    await intra_batch_callback(
-                        baseline_aggregated + running_created + created
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "Intra-batch progress callback failed at sub-batch "
-                        "ending %d (continuing): %s",
-                        chunk_start + len(chunk), cb_exc, exc_info=True,
-                    )
-        return created
-
-    # ====================================================================== #
-    # Bulk Rebuild Path (Phase 1 of aggregation hardening)                    #
-    #                                                                        #
-    # Adopts the solidatus-generator pattern: pre-dedupe pairs in worker     #
-    # memory, ensure per-label URN indexes, drop existing AGGREGATED edges,  #
-    # group pairs by (src_label, tgt_label), bulk-CREATE with label-         #
-    # qualified MATCH. Replaces MERGE-on-relationship (O(out_degree) in      #
-    # FalkorDB — no relationship-existence index) with CREATE (O(1) per      #
-    # row), eliminating the 200% CPU pathology on graphs with high-degree    #
-    # ancestor nodes.                                                        #
-    #                                                                        #
-    # Trade-off: wipe-and-rebuild semantics mean trace reads on the same     #
-    # projection graph see a partial AGGREGATED set during the rebuild       #
-    # window. Phase 3 (blue-green projection slots) eliminates this; Phase   #
-    # 1 accepts it. Recovery: bulk rebuild always restarts from cursor=NULL  #
-    # rather than resuming from a partial mid-rebuild state — the wipe      #
-    # phase cleans up any partial AGGREGATED writes from a prior attempt.    #
-    # ====================================================================== #
 
     # UNWIND batch size for bulk-CREATE. FalkorDB's documented best
     # practice is 10k–50k rows per UNWIND: large batches amortize the
@@ -3566,6 +3441,30 @@ class FalkorDBProvider(GraphDataProvider):
                 deleted, self._graph_name,
             )
 
+    async def _label_buckets(
+        self, urns: List[str],
+    ) -> List[Tuple[str, List[str]]]:
+        """Group URNs by their sanitized node label so every anchor can
+        be label-qualified into a per-label URN-index SEEK. This build
+        has no label-less URN index, so an unlabeled ``WHERE n.urn IN
+        $list`` anchor is a FULL node/relation scan with per-row IN-list
+        membership — observed live at 4-9s per query on a 2M-node graph
+        (and timing out the stored aggregated read entirely). The ``""``
+        bucket collects URNs whose label could not be resolved; callers
+        keep the unlabeled pattern for that (bounded) residue."""
+        uniq = list(dict.fromkeys(u for u in urns if u))
+        if not uniq:
+            return []
+        try:
+            labels = await self._resolve_urn_labels_bulk(uniq)
+        except Exception as exc:
+            logger.debug("label bucketing failed (%s) — unlabeled fallback", exc)
+            return [("", uniq)]
+        buckets: Dict[str, List[str]] = {}
+        for u in uniq:
+            buckets.setdefault(labels.get(u) or "", []).append(u)
+        return sorted(buckets.items())
+
     async def _resolve_urn_labels_bulk(
         self, urns: List[str],
     ) -> Dict[str, Optional[str]]:
@@ -3604,25 +3503,55 @@ class FalkorDBProvider(GraphDataProvider):
 
         if missing:
             try:
-                # Single bulk Cypher round-trip for label lookup. Uses
-                # ``WHERE n.urn IN $urns`` form (not ``UNWIND $urns AS u
-                # MATCH (n {urn:u})``) so FalkorDB plans ONE node-scan
-                # for the whole batch rather than N scans (one per
-                # UNWIND iteration). On a 5M-node graph with 1M missing
-                # URNs that's the difference between one O(N) scan and
-                # 5 trillion node comparisons — and was the bottleneck
-                # of the bulk-rebuild label-resolution phase before this
-                # change.
-                #
-                # If an unlabeled URN index exists (FalkorDB >=2.10), the
-                # planner can use it directly and the whole call becomes
-                # a multi-key index seek. If not, the single full scan
-                # is still vastly cheaper than per-row scans.
-                res = await self._ro_query(
-                    "MATCH (n) WHERE n.urn IN $urns "
-                    "RETURN n.urn AS u, labels(n)[0] AS label",
-                    params={"urns": missing},
-                )
+                # Cache-miss bootstrap via PER-LABEL index seeks. The
+                # previous single unlabeled ``WHERE n.urn IN $urns`` scan
+                # was itself the bottleneck it tried to avoid: on builds
+                # without a label-less URN index it is a FULL node scan —
+                # observed timing out on a 2M-node graph, which then
+                # dumped every reader into the unlabeled slow path
+                # (cold-cache chicken-and-egg: resolving labels needed a
+                # label). Enumerating the graph's few observed labels and
+                # seeking each label's URN index turns the bootstrap into
+                # K index-driven queries; the startup warmup caps out at
+                # 200k nodes per label, so big graphs ALWAYS hit this
+                # path for most of their nodes.
+                rows: list = []
+                try:
+                    lbl_res = await self._ro_query(
+                        "CALL db.labels() YIELD label RETURN label",
+                        timeout=5.0,
+                    )
+                    observed = [
+                        str(r[0]) for r in (lbl_res.result_set or [])
+                        if r and r[0] and not str(r[0]).startswith("_")
+                    ]
+                except Exception:
+                    observed = []
+                if observed:
+                    unresolved = list(missing)
+                    for lbl in observed:
+                        if not unresolved:
+                            break
+                        safe = _sanitize_label(lbl)
+                        res = await self._ro_query(
+                            f"MATCH (n:{safe}) WHERE n.urn IN $urns "
+                            "RETURN n.urn AS u",
+                            params={"urns": unresolved},
+                        )
+                        hit = {
+                            r[0] for r in (res.result_set or []) if r and r[0]
+                        }
+                        rows.extend([u, lbl] for u in hit)
+                        if hit:
+                            unresolved = [u for u in unresolved if u not in hit]
+                    res = type("R", (), {"result_set": rows})()
+                else:
+                    # Label enumeration unavailable — legacy single scan.
+                    res = await self._ro_query(
+                        "MATCH (n) WHERE n.urn IN $urns "
+                        "RETURN n.urn AS u, labels(n)[0] AS label",
+                        params={"urns": missing},
+                    )
                 store_pipe = self._redis.pipeline(transaction=False)
                 store_count = 0
                 for row in res.result_set or []:
@@ -3714,6 +3643,8 @@ class FalkorDBProvider(GraphDataProvider):
         for row in (res.result_set or []):
             if row and row[0]:
                 lbl = row[0].decode("utf-8") if isinstance(row[0], (bytes, bytearray)) else str(row[0])
+                if lbl.startswith("_"):
+                    continue  # system-internal labels carry no URNs
                 labels.append(lbl)
         if not labels:
             return
@@ -3780,668 +3711,6 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, total_cached, len(labels), elapsed_ms,
         )
 
-    async def _bulk_create_aggregated_edges_from_pairs(
-        self,
-        *,
-        pair_data: Dict[Tuple[str, str], Dict[str, Any]],
-        urn_label_map: Dict[str, Optional[str]],
-        level_digest: Optional[str],
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        baseline_aggregated: int = 0,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """Bulk-CREATE all AGGREGATED edges from a deduped pair set.
-
-        Groups pairs by (src_label, tgt_label) so each Cypher query has
-        a uniform shape that FalkorDB plans once and executes via index
-        seeks on both endpoint URNs. Pairs whose endpoint label could
-        not be resolved fall through to an unlabeled MATCH branch
-        (slower but rare and bounded).
-
-        Pre-dedup + CREATE is the core of the solidatus pattern: each
-        CREATE is O(1) per row vs MERGE-on-relationship's O(out_degree).
-        Caller must guarantee no duplicate pairs in ``pair_data``;
-        ``Dict`` keying by ``(src_urn, tgt_urn)`` already enforces this.
-
-        Returns total edges created.
-        """
-        if not pair_data:
-            return 0
-
-        from collections import defaultdict
-        grouped: Dict[
-            Tuple[Optional[str], Optional[str]], List[Dict[str, Any]]
-        ] = defaultdict(list)
-        for (s, t), meta in pair_data.items():
-            sl = urn_label_map.get(s)
-            tl = urn_label_map.get(t)
-            item = {
-                "s": s,
-                "t": t,
-                "w": int(meta.get("weight", 1)),
-                "et": list(meta.get("edge_types") or []),
-                "sl": meta.get("source_level"),
-                "tl": meta.get("target_level"),
-            }
-            grouped[(sl, tl)].append(item)
-
-        created = 0
-        digest_val = level_digest or ""
-
-        # Phase 1.8: drop-and-warn for pairs whose endpoint labels could
-        # not be resolved (after the URN→label warmup that ran in
-        # Phase C). The unlabeled-fallback CREATE that previously lived
-        # here was the root cause of the ``sol_xlarge_test2`` write-
-        # timeout fire: a single batch's per-row unlabeled scan can
-        # run for many minutes on a multi-million-node graph, bust
-        # the write timeout, trigger worker retries from scratch, and
-        # never make forward progress. After warmup, any URN still
-        # without a resolved label is genuinely label-less (legacy
-        # MERGE-on-node residue) or a missing-node reference — the
-        # unlabeled CREATE wouldn't have produced a usable edge for
-        # those anyway. Drop the pair, log a count + URN sample, and
-        # let the rest of the run finish cleanly.
-        dropped_pairs = 0
-        dropped_sample: List[Tuple[Optional[str], Optional[str]]] = []
-        for (sl_label, tl_label), items in grouped.items():
-            if not (sl_label and tl_label):
-                dropped_pairs += len(items)
-                if len(dropped_sample) < 10:
-                    for item in items[: 10 - len(dropped_sample)]:
-                        dropped_sample.append((item.get("s"), item.get("t")))
-                continue
-
-            cypher = (
-                f"UNWIND $batch AS item "
-                f"MATCH (a:{sl_label} {{urn: item.s}}) "
-                f"MATCH (b:{tl_label} {{urn: item.t}}) "
-                f"CREATE (a)-[r:AGGREGATED {{"
-                f"weight: item.w, "
-                f"sourceLevel: item.sl, "
-                f"targetLevel: item.tl, "
-                f"sourceEdgeTypes: item.et, "
-                f"levelDigest: $digest, "
-                f"latestUpdate: timestamp()"
-                f"}}]->(b)"
-            )
-
-            for i in range(0, len(items), self._bulk_create_batch_size):
-                if should_cancel is not None and should_cancel():
-                    from backend.app.services.aggregation.cancel import JobCancelled
-                    from datetime import datetime, timezone
-                    raise JobCancelled(
-                        job_id="<bulk-create-cancel>",
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-
-                chunk = items[i : i + self._bulk_create_batch_size]
-                t_batch_start = time.monotonic()
-                # Phase 1.8: pass a Phase-D-specific timeout (default
-                # 60s, env-tunable) rather than the 15s ``_WRITE_TIMEOUT``
-                # default. Bulk-CREATE batches against a graph under
-                # concurrent trace load can legitimately exceed 15s
-                # without indicating a stuck/runaway query.
-                await self._proj_query(
-                    cypher,
-                    params={"batch": chunk, "digest": digest_val},
-                    timeout=self._bulk_create_timeout_s,
-                )
-                t_batch = (time.monotonic() - t_batch_start) * 1000
-                created += len(chunk)
-
-                logger.debug(
-                    "Bulk CREATE chunk on %s: group=(%s,%s) size=%d "
-                    "elapsed=%.1fms total_created=%d",
-                    self._graph_name, sl_label, tl_label,
-                    len(chunk), t_batch, created,
-                )
-
-                if intra_batch_callback is not None:
-                    try:
-                        await intra_batch_callback(baseline_aggregated + created)
-                    except Exception as cb_exc:
-                        logger.error(
-                            "Intra-batch progress callback failed during bulk "
-                            "CREATE (continuing): %s", cb_exc, exc_info=True,
-                        )
-
-        if dropped_pairs > 0:
-            sample_str = ", ".join(
-                f"({s!r}→{t!r})" for s, t in dropped_sample
-            ) or "<none captured>"
-            logger.warning(
-                "Bulk CREATE on %s: dropped %d pairs with unresolvable "
-                "endpoint labels (one or both endpoints are label-less "
-                "or missing nodes — typically legacy MERGE residue or "
-                "ancestor URNs not yet hydrated into the graph). These "
-                "pairs were NOT materialised; the rest of the run "
-                "completed successfully. Sample of dropped pairs (up to "
-                "10): %s. Action: query "
-                "``MATCH (n) WHERE size(labels(n)) = 0 RETURN count(n)`` "
-                "to confirm label-less node count; consider rebuilding "
-                "those nodes with their proper entity-type labels and "
-                "re-running aggregation to materialise the dropped "
-                "pairs.",
-                self._graph_name, dropped_pairs, sample_str,
-            )
-
-        return created
-
-    async def _rebuild_idempotency_state_from_pairs(
-        self,
-        pair_data: Dict[Tuple[str, str], Dict[str, Any]],
-        *,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> None:
-        """Repopulate the Redis SADD-based contributor tracking from the
-        in-memory pair set. Required so subsequent incremental writes
-        (``on_lineage_edge_written``) see correct existing-pair state and
-        don't double-count freshly-rebuilt edges.
-
-        Issued in batched pipelines (500 keys per pipeline) so a single
-        round-trip never carries an oversized payload on million-pair
-        rebuilds.
-        """
-        members_key_prefix = f"{self._graph_name}:agg_members"
-        pipe_size = 500
-        sent = 0
-
-        pipe = self._redis.pipeline(transaction=False)
-        pipe_count = 0
-        for (s, t), meta in pair_data.items():
-            if pipe_count == 0 and should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<bulk-idem-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-            contributors = meta.get("contributors") or []
-            if not contributors:
-                continue
-            member_key = f"{members_key_prefix}:{s}:{t}"
-            pipe.execute_command("SADD", member_key, *contributors)
-            pipe_count += 1
-            if pipe_count >= pipe_size:
-                try:
-                    await pipe.execute()
-                    sent += pipe_count
-                except Exception as exc:
-                    logger.warning(
-                        "Idempotency rebuild pipeline failed (continuing — "
-                        "incremental writes for these pairs will be treated "
-                        "as net-new): %s", exc,
-                    )
-                pipe = self._redis.pipeline(transaction=False)
-                pipe_count = 0
-        if pipe_count > 0:
-            try:
-                await pipe.execute()
-                sent += pipe_count
-            except Exception as exc:
-                logger.warning(
-                    "Idempotency rebuild pipeline (tail) failed: %s", exc,
-                )
-
-        logger.info(
-            "Idempotency rebuild on %s complete: %d pair member sets "
-            "written to Redis.",
-            self._graph_name, sent,
-        )
-
-    async def _materialize_aggregated_edges_bulk_rebuild(
-        self,
-        *,
-        batch_size: int,
-        containment_edge_types: Optional[List[str]],
-        lineage_edge_types: Optional[List[str]],
-        progress_callback: Optional[Any],
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
-        should_cancel: Optional[Callable[[], bool]],
-        last_cursor: Optional[str],
-        resume_processed: int = 0,
-        resume_created: int = 0,
-    ) -> Dict[str, Any]:
-        """Bulk-rebuild orchestrator — Phase 1 of aggregation hardening.
-
-        Replaces the MERGE-based ``_materialize_edges_batched`` path with
-        wipe → accumulate-pairs-in-memory → label-resolve → ensure-
-        indexes → grouped-bulk-CREATE → idempotency-rebuild. Eliminates
-        the MERGE-on-relationship O(out_degree) cost that pegs FalkorDB
-        at 200% CPU on high-degree ancestor nodes (Domains, Platforms,
-        top-level Containers).
-
-        Recovery semantics: bulk rebuild always starts from cursor=NULL.
-        ``last_cursor`` is logged but otherwise ignored — on crash mid-
-        rebuild, the next run wipes and restarts. The wipe-first
-        ordering means partial AGGREGATED writes from a failed prior
-        attempt are cleaned up automatically.
-
-        Memory cost: ~200 bytes per (src_anc, tgt_anc) pair held until
-        the bulk-CREATE phase. Estimated ~200MB for 1M pairs, which is
-        well within worker pod memory budgets. If a future graph
-        produces enough pairs to exhaust memory, Phase 1.5 stages
-        ``pair_data`` to Redis or Postgres.
-
-        Phase 2 of aggregation hardening: by default (
-        ``AGGREGATION_STREAMING_REBUILD_ENABLED`` defaults to "true";
-        set it to "false" to roll back), delegate to the constant-memory
-        streaming rebuild — an indexed ``ID(r)`` cursor paged per lineage
-        type, per-page flush via MERGE-on-aggKey, and epoch tagging with
-        an end-of-run stale-generation sweep instead of the destructive
-        wipe-first. The streaming path is crash-resumable from
-        ``last_cursor``, does not hold the whole pair set in memory, and
-        resumes from cursor on every retry — so a transient connection
-        reset mid-run no longer restarts from 0%. The accumulate-in-memory
-        body below is preserved as the rollback escape hatch (flag off).
-        """
-        _streaming_flag = os.getenv("AGGREGATION_STREAMING_REBUILD_ENABLED", "true")
-        if str(_streaming_flag).strip().lower() in ("1", "true", "yes", "on"):
-            return await self._materialize_aggregated_edges_streaming_rebuild(
-                batch_size=batch_size,
-                containment_edge_types=containment_edge_types,
-                lineage_edge_types=lineage_edge_types,
-                progress_callback=progress_callback,
-                intra_batch_callback=intra_batch_callback,
-                should_cancel=should_cancel,
-                last_cursor=last_cursor,
-                resume_processed=resume_processed,
-                resume_created=resume_created,
-            )
-
-        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
-            else list(self._get_containment_edge_types())
-        exclude_types = list(containment) + ["AGGREGATED"]
-
-        # Filter AGGREGATED out of any explicit lineage whitelist —
-        # feeding existing AGGREGATED edges back through aggregation
-        # produces second-order edges that compound on every re-run.
-        if lineage_edge_types:
-            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
-            if not effective_lineage_types:
-                logger.warning(
-                    "bulk_rebuild: lineage_edge_types contained only AGGREGATED "
-                    "after filtering; no leaf lineage edges to process.",
-                )
-                return {
-                    "processed": 0,
-                    "aggregated_edges_affected": 0,
-                    "input_edges_processed": 0,
-                    "errors": 0,
-                }
-            type_filter = "WHERE type(r) IN $lineageEdges"
-            type_params: Dict[str, Any] = {"lineageEdges": effective_lineage_types}
-        else:
-            type_filter = "WHERE NOT type(r) IN $excludeTypes"
-            type_params = {"excludeTypes": exclude_types}
-
-        if last_cursor:
-            logger.info(
-                "bulk_rebuild on %s: ignoring last_cursor=%s — bulk rebuild "
-                "always processes from start (wipe-first semantics).",
-                self._graph_name, last_cursor,
-            )
-
-        # Total count — informational, used by progress callback.
-        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._ro_query(count_cypher, params=type_params)
-        total = count_res.result_set[0][0] if count_res.result_set else 0
-        logger.info(
-            "bulk_rebuild on %s starting: %d lineage edges to scan.",
-            self._graph_name, total,
-        )
-
-        # Initialize scan-position state up front so the phase-emit
-        # helper (defined below) sees consistent values from its first
-        # call onward. These get mutated in the Phase B scan loop;
-        # closures capture by reference so phase emits after the scan
-        # see the final state.
-        processed = 0
-        current_cursor: Optional[str] = None
-        pair_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        level_digest = getattr(self, "_level_digest", None)
-
-        # Phase 1.7 — phase-emit helper. Calls the worker's
-        # progress_callback with the current scan-state values plus the
-        # phase ID. The worker's checkpoint() updates progress fields
-        # AND conditionally updates job.current_phase when ``phase`` is
-        # non-None. We always pass aggregated=0 here so a phase
-        # boundary signal can't accidentally regress job.created_edges
-        # — the worker only updates created_edges when aggregated > 0,
-        # so 0 is a safe "leave it alone" sentinel. Best-effort: a
-        # callback failure here must never abort the run.
-        async def _emit_phase(phase_id: str) -> None:
-            if progress_callback is None:
-                return
-            try:
-                await progress_callback(
-                    processed, total, current_cursor, 0, phase_id,
-                )
-            except Exception as cb_exc:
-                logger.warning(
-                    "Phase-emit callback failed for phase=%s on %s "
-                    "(continuing): %s",
-                    phase_id, self._graph_name, cb_exc,
-                )
-
-        # ===== PHASE A: Wipe + purge idempotency =====
-        await _emit_phase("wiping")
-        t_phase_a_start = time.monotonic()
-        deleted = await self._wipe_aggregated_edges(should_cancel=should_cancel)
-        await self._purge_aggregated_idempotency_namespace()
-        t_phase_a = (time.monotonic() - t_phase_a_start) * 1000
-        logger.info(
-            "bulk_rebuild phase A (wipe): %d AGGREGATED edges deleted in %.1fms",
-            deleted, t_phase_a,
-        )
-
-        # ===== PHASE B: Stream lineage, accumulate pair_data =====
-        await _emit_phase("scanning")
-        batch_num = 0
-        t_phase_b_start = time.monotonic()
-
-        while True:
-            batch_num += 1
-            if current_cursor:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"AND (s.urn + '|' + t.urn) > $cursor "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
-            else:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "limit": batch_size}
-
-            t0 = time.monotonic()
-            res = await self._ro_query(batch_cypher, params=batch_params)
-            rows = res.result_set or []
-            t_fetch = (time.monotonic() - t0) * 1000
-
-            if not rows:
-                break
-
-            if should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id="<bulk-rebuild-scan-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-
-            # Bulk ancestor fetch — uses WS1.1 single-Cypher bulk path.
-            t0 = time.monotonic()
-            all_urns: Set[str] = set()
-            for row in rows:
-                all_urns.add(row[0])
-                all_urns.add(row[1])
-            ancestors_cache = await self._compute_and_store_ancestors_bulk(
-                list(all_urns),
-            )
-            t_ancestors = (time.monotonic() - t0) * 1000
-
-            # Python-side Cartesian + accumulate. Per leaf edge, expand
-            # (s_chain × t_chain) excluding self-loops. Dict keying by
-            # (src_anc, tgt_anc) gives free deduplication across leaf
-            # edges that share the same ancestor pair — the bulk-CREATE
-            # phase then has a guaranteed-unique input.
-            for s_urn, t_urn, edge_type, edge_id in rows:
-                if not edge_id:
-                    edge_id = f"{s_urn}|{edge_type}|{t_urn}"
-                s_chain = [s_urn] + (ancestors_cache.get(s_urn, []) or [])
-                t_chain = [t_urn] + (ancestors_cache.get(t_urn, []) or [])
-                for sa in s_chain:
-                    for ta in t_chain:
-                        if sa == ta:
-                            continue
-                        pair = (sa, ta)
-                        meta = pair_data.get(pair)
-                        if meta is None:
-                            meta = {
-                                "weight": 0,
-                                "edge_types": set(),
-                                "contributors": [],
-                                "source_level": None,
-                                "target_level": None,
-                            }
-                            pair_data[pair] = meta
-                        meta["weight"] += 1
-                        meta["edge_types"].add(edge_type)
-                        meta["contributors"].append(edge_id)
-
-            processed += len(rows)
-            last_row = rows[-1]
-            current_cursor = f"{last_row[0]}|{last_row[1]}"
-
-            logger.info(
-                "bulk_rebuild scan batch %d: %d/%d edges | fetch=%.1fms "
-                "ancestors=%.1fms | pairs_accumulated=%d",
-                batch_num, processed, total, t_fetch, t_ancestors,
-                len(pair_data),
-            )
-
-            if progress_callback is not None:
-                try:
-                    # During Phase B no edges have been written to
-                    # FalkorDB yet — they're accumulating in worker
-                    # memory. Pass 0 for aggregated so "Materialized"
-                    # stays at 0 until Phase D actually starts writing.
-                    # Phase 1.7 — also pass phase="scanning" so the UI
-                    # status label reflects what's actually happening.
-                    await progress_callback(
-                        processed, total, current_cursor, 0, "scanning",
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "bulk_rebuild progress callback failed at batch %d: %s "
-                        "(continuing)", batch_num, cb_exc, exc_info=True,
-                    )
-
-            if len(rows) < batch_size:
-                break
-
-        t_phase_b = (time.monotonic() - t_phase_b_start) * 1000
-        logger.info(
-            "bulk_rebuild phase B (scan): %d lineage edges, %d unique pairs "
-            "in %.1fms",
-            processed, len(pair_data), t_phase_b,
-        )
-
-        if not pair_data:
-            logger.info("bulk_rebuild: no pairs to materialize, exiting early.")
-            return {
-                "processed": processed,
-                "aggregated_edges_affected": 0,
-                "input_edges_processed": processed,
-                "errors": 0,
-            }
-
-        # ===== PHASE C: Resolve URN labels + ensure indexes =====
-        # Phase 1.8: warm the URN→label cache via one labeled scan per
-        # label BEFORE running the per-URN resolver. This converts what
-        # was a single unlabeled-MATCH-with-large-IN ($urns) Cypher
-        # (slow / timeout-prone on multi-million-node graphs without an
-        # unlabeled URN index) into N small index-assisted labeled
-        # scans. URNs still unresolved after warmup are label-less /
-        # missing and their pairs get dropped at the CREATE step
-        # (Phase 1.8 drop-and-warn) rather than scanning forever.
-        await _emit_phase("resolving_labels")
-        t_phase_c_start = time.monotonic()
-        await self._warmup_urn_label_cache_for_aggregation()
-
-        pair_urns: Set[str] = set()
-        for s, t in pair_data:
-            pair_urns.add(s)
-            pair_urns.add(t)
-        urn_label_map = await self._resolve_urn_labels_bulk(list(pair_urns))
-
-        # Stamp source/target level on each pair from the entity-type level map.
-        if entity_levels:
-            for (s, t), meta in pair_data.items():
-                sl = urn_label_map.get(s)
-                tl = urn_label_map.get(t)
-                if sl is not None:
-                    meta["source_level"] = entity_levels.get(sl)
-                if tl is not None:
-                    meta["target_level"] = entity_levels.get(tl)
-
-        distinct_labels = {l for l in urn_label_map.values() if l}
-        await self._ensure_label_urn_indexes(distinct_labels)
-        t_phase_c = (time.monotonic() - t_phase_c_start) * 1000
-        logger.info(
-            "bulk_rebuild phase C (labels): %d distinct labels indexed in %.1fms",
-            len(distinct_labels), t_phase_c,
-        )
-
-        # ===== PHASE D: Bulk-CREATE =====
-        #
-        # Composite per-batch callback: drives BOTH the event-bus
-        # heartbeat (intra_batch_callback) AND the durable DB
-        # checkpoint (progress_callback). Without this, the UI's
-        # "Materialized" counter would jump from 0 → final count at
-        # the very end of Phase D — which is exactly the "nothing is
-        # ever written" feeling operators reported even though Phase
-        # D was, in fact, writing edges. With this in place, the UI
-        # climbs in real time as each 10k-row CREATE batch lands in
-        # FalkorDB.
-        #
-        # Note: progress_callback is fed (total, total, cursor, running_created)
-        # rather than (processed, ...) because Phase B has already
-        # completed at this point — processed == total. The cursor
-        # stays at Phase B's final value for resume-correctness even
-        # though resume from mid-Phase-D is not implemented yet.
-        async def _phase_d_progress(running_created: int) -> None:
-            if intra_batch_callback is not None:
-                try:
-                    await intra_batch_callback(running_created)
-                except Exception as cb_exc:
-                    logger.error(
-                        "Phase D intra_batch_callback failed (continuing): %s",
-                        cb_exc, exc_info=True,
-                    )
-            if progress_callback is not None:
-                try:
-                    # Phase 1.7 — emit phase="creating" so the UI shows
-                    # "Creating aggregated edges in graph" while CREATEs
-                    # are actively landing in FalkorDB.
-                    await progress_callback(
-                        total, total, current_cursor, running_created, "creating",
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "Phase D progress_callback failed (continuing): %s",
-                        cb_exc, exc_info=True,
-                    )
-
-        # Boundary emit at the very start of Phase D — even before the
-        # first batch lands, the UI label flips to "Creating aggregated
-        # edges in graph" so operators can correlate the "started writing"
-        # signal with the FalkorDB count starting to climb.
-        await _emit_phase("creating")
-        t_phase_d_start = time.monotonic()
-        created = await self._bulk_create_aggregated_edges_from_pairs(
-            pair_data=pair_data,
-            urn_label_map=urn_label_map,
-            level_digest=level_digest,
-            intra_batch_callback=_phase_d_progress,
-            baseline_aggregated=0,
-            should_cancel=should_cancel,
-        )
-        t_phase_d = (time.monotonic() - t_phase_d_start) * 1000
-        rate = (created * 1000.0 / max(t_phase_d, 1.0))
-        logger.info(
-            "bulk_rebuild phase D (CREATE): %d AGGREGATED edges in %.1fms "
-            "(%.0f edges/s)",
-            created, t_phase_d, rate,
-        )
-
-        # ===== PHASE E: Rebuild Redis idempotency state =====
-        await _emit_phase("finalizing")
-        t_phase_e_start = time.monotonic()
-        await self._rebuild_idempotency_state_from_pairs(
-            pair_data, should_cancel=should_cancel,
-        )
-        t_phase_e = (time.monotonic() - t_phase_e_start) * 1000
-        logger.info(
-            "bulk_rebuild phase E (idempotency): %.1fms",
-            t_phase_e,
-        )
-
-        # Final progress flush so the UI's created_edges counter lands
-        # at the true CREATE count. We keep ``phase="finalizing"`` —
-        # the worker transitions the row to status=completed in its
-        # outer ``finally`` block, which is what flips the UI off
-        # the phase label naturally.
-        if progress_callback is not None:
-            try:
-                await progress_callback(
-                    processed, total, current_cursor, created, "finalizing",
-                )
-            except Exception:
-                pass
-
-        try:
-            if self._redis is not None:
-                from datetime import datetime, timezone
-                await self._redis.set(
-                    self._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
-                )
-        except Exception as e:
-            logger.warning(
-                "Failed to stamp aggregated materialization timestamp: %s", e,
-            )
-
-        return {
-            "processed": processed,
-            "aggregated_edges_affected": created,
-            "input_edges_processed": processed,
-            "errors": 0,
-        }
-
-    # ================================================================== #
-    # Streaming bulk rebuild (Phase 2 hardening)                         #
-    #                                                                    #
-    # Constant-memory, crash-resumable alternative to the accumulate-    #
-    # all-in-memory rebuild above. Pages leaf edges per lineage type on  #
-    # an indexed internal-ID cursor, expands + flushes one page at a     #
-    # time via MERGE-on-aggKey, and tags every edge with a per-run       #
-    # ``aggEpoch`` so a single end-of-run sweep retires the previous     #
-    # generation — no destructive wipe-first that breaks resume.         #
-    # ================================================================== #
-
-    _STREAM_CURSOR_PREFIX = "v2"
-
-    def _parse_stream_cursor(
-        self, last_cursor: Optional[str],
-    ) -> Optional[Tuple[int, int, int]]:
-        """Parse a streaming resume cursor ``v2:<epoch>:<type_index>:<rid>``.
-
-        Returns ``(epoch, type_index, rid)`` or ``None`` when the cursor is
-        absent or not a streaming cursor (fresh start, or a legacy cursor
-        left by the accumulate-in-memory path — which we ignore and start a
-        fresh generation).
-        """
-        if not last_cursor:
-            return None
-        parts = str(last_cursor).split(":")
-        if len(parts) != 4 or parts[0] != self._STREAM_CURSOR_PREFIX:
-            return None
-        try:
-            return int(parts[1]), int(parts[2]), int(parts[3])
-        except (ValueError, TypeError):
-            return None
-
-    @classmethod
-    def _make_stream_cursor(cls, epoch: int, type_index: int, rid: int) -> str:
-        return f"{cls._STREAM_CURSOR_PREFIX}:{epoch}:{type_index}:{rid}"
-
     async def _estimate_lineage_edge_count(
         self, lineage_types: List[str],
     ) -> int:
@@ -4495,474 +3764,151 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             return []
 
-    async def _ensure_aggregation_streaming_indexes(self) -> None:
-        """Create the ``:AGGREGATED(aggKey)`` edge index used by
-        MERGE-on-aggKey so each MERGE is an index seek rather than an
-        O(out_degree) scan. Best-effort + idempotent — older FalkorDB
-        releases without edge-property indexes still MERGE correctly,
-        just slower.
-        """
-        _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
-        # The aggKey edge index is what keeps MERGE-on-aggKey an index seek
-        # rather than an O(out_degree) scan on high-fan-in hubs — a silently
-        # missing index is the difference between fast and quadratic, so log
-        # the outcome instead of swallowing it.
-        for stmt, what in (
-            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)", "aggKey"),
-            ("CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggEpoch)", "aggEpoch"),
-        ):
-            try:
-                await asyncio.wait_for(
-                    self._proj.query(stmt), timeout=_init_timeout,
-                )
-                logger.info(
-                    "streaming_rebuild on %s: ensured AGGREGATED(%s) edge index.",
-                    self._graph_name, what,
-                )
-            except Exception as exc:
-                msg = str(exc).lower()
-                if "already" in msg or "exist" in msg:
-                    continue  # idempotent — fine
-                logger.warning(
-                    "streaming_rebuild on %s: could NOT create AGGREGATED(%s) "
-                    "edge index (%s). MERGE/sweep will be slower (O(out_degree) "
-                    "on hubs); upgrade FalkorDB if this persists.",
-                    self._graph_name, what, exc,
-                )
 
-    async def _materialize_aggregated_edges_streaming_rebuild(
+    async def _resolve_chain_levels(
         self,
-        *,
-        batch_size: int,
-        containment_edge_types: Optional[List[str]],
-        lineage_edge_types: Optional[List[str]],
-        progress_callback: Optional[Any],
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]],
-        should_cancel: Optional[Callable[[], bool]],
-        last_cursor: Optional[str],
-        resume_processed: int = 0,
-        resume_created: int = 0,
-    ) -> Dict[str, Any]:
-        """Constant-memory, crash-resumable bulk rebuild.
-
-        Pages leaf lineage edges one type at a time on an indexed
-        ``ID(r)`` cursor (the engine's physical iteration order — no
-        property index needed and no full-graph re-scan per page). For
-        each page: compute ancestor chains, expand the Cartesian product
-        in a *page-local* dict, then flush via MERGE-on-aggKey and
-        discard. Memory is bounded by ``page_size × max_chain_depth²``,
-        independent of graph size.
-
-        Every edge is stamped ``aggEpoch = <run epoch>``; MERGE-on-aggKey
-        accumulates weight for the same ancestor pair across pages within
-        a generation and resets it when reusing an edge from a prior
-        generation. A single end-of-run sweep deletes edges not stamped
-        with the current epoch — the previous generation. A crash before
-        the sweep leaves the old generation intact and queryable; resume
-        continues from ``last_cursor`` and only swaps generations once the
-        full scan completes.
-        """
-        from backend.app.services.aggregation.cancel import JobCancelled
-        from datetime import datetime, timezone
-
-        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
-            else list(self._get_containment_edge_types())
-        if lineage_edge_types:
-            effective = self._alias_rel_types([t for t in lineage_edge_types if t and t != "AGGREGATED"])
-        else:
-            effective = await self._derive_lineage_types_from_cache(containment)
-        # Stable, sorted, de-duplicated order so the cursor's type_index
-        # component is deterministic across restarts.
-        effective = sorted({str(t) for t in effective if t})
-        if not effective:
-            logger.warning(
-                "streaming_rebuild on %s: no effective lineage types; nothing "
-                "to materialize.", self._graph_name,
-            )
-            return {
-                "processed": 0,
-                "aggregated_edges_affected": 0,
-                "input_edges_processed": 0,
-                "errors": 0,
-            }
-
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        level_digest = getattr(self, "_level_digest", None) or ""
-
-        resume = self._parse_stream_cursor(last_cursor)
-        if resume is not None:
-            epoch, start_type_index, start_rid = resume
-            logger.info(
-                "streaming_rebuild on %s: resuming epoch=%d type_index=%d rid=%d",
-                self._graph_name, epoch, start_type_index, start_rid,
-            )
-        else:
-            epoch = int(time.time() * 1000)
-            start_type_index, start_rid = 0, -1
-            if last_cursor:
-                logger.info(
-                    "streaming_rebuild on %s: ignoring non-streaming cursor %r "
-                    "— starting fresh generation epoch=%d",
-                    self._graph_name, last_cursor, epoch,
-                )
-
-        # One-time setup: cheap estimate (no scan), indexes, label warmup.
-        total_estimate = await self._estimate_lineage_edge_count(effective)
-        await self._ensure_aggregation_streaming_indexes()
-        await self._warmup_urn_label_cache_for_aggregation()
-
-        max_pairs_per_page = int(os.getenv("AGGREGATION_MAX_PAIRS_PER_PAGE", "200000"))
-
-        # Seed the per-run counters from the resume baseline so a resumed job
-        # reports CUMULATIVE progress instead of resetting the bar to 0%. The
-        # scan never re-walks edges <= rid and the epoch is reused, so
-        # baseline + this-run is the correct total. Fresh runs start at 0.
-        processed = resume_processed if resume is not None else 0
-        running_created = resume_created if resume is not None else 0
-        # Loud signal if a job that HAD progress resumes with an unparseable
-        # cursor — that's a genuine restart (new epoch), not a continuation.
-        if resume is None and resume_processed > 0 and last_cursor:
-            logger.warning(
-                "streaming_rebuild on %s: resume requested with processed=%d but "
-                "cursor %r did not parse — RESTARTING from 0 under a new epoch; "
-                "the prior generation will be swept at end.",
-                self._graph_name, resume_processed, last_cursor,
-            )
-        total = max(total_estimate, processed)
-        scanned = processed  # absolute edges scanned (seeded at the baseline)
-
-        if progress_callback is not None:
-            try:
-                await progress_callback(
-                    processed, max(total, processed),
-                    last_cursor if resume else None, running_created, "scanning",
-                )
-            except Exception:
-                pass
-
-        # Cross-page accumulator. High-fan-in hub pairs (a top domain→domain pair
-        # appears under most leaves) are MERGED once per FLUSH WINDOW instead of
-        # once per page — cutting MERGE volume, and the O(out_degree) hub MERGE
-        # cost, by 1–2 orders of magnitude on deep hierarchies. Bounded by
-        # AGGREGATION_MAX_PAIRS_PER_PAGE; the flush boundary is also the
-        # checkpoint boundary so processed + cursor advance together (sound
-        # resume).
-        pending_pairs: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        checkpoint_cursor = (
-            last_cursor if resume is not None
-            else self._make_stream_cursor(epoch, start_type_index, start_rid)
-        )
-
-        async def _flush_and_checkpoint(
-            flush_type_index: int, flush_rid: int, phase: str,
-        ) -> None:
-            nonlocal pending_pairs, processed, running_created, checkpoint_cursor
-            if pending_pairs:
-                running_created += await self._flush_streaming_pairs(
-                    page_pairs=pending_pairs, entity_levels=entity_levels,
-                    level_digest=level_digest, epoch=epoch,
-                    running_created=running_created,
-                    intra_batch_callback=intra_batch_callback,
-                    should_cancel=should_cancel,
-                )
-                pending_pairs = {}
-            # Everything scanned so far is now durably MERGED → advance the
-            # persisted cursor + processed together (consistent for resume).
-            processed = scanned
-            checkpoint_cursor = self._make_stream_cursor(
-                epoch, flush_type_index, flush_rid,
-            )
-            if progress_callback is not None:
-                try:
-                    await progress_callback(
-                        processed, max(total, processed), checkpoint_cursor,
-                        running_created, phase,
-                    )
-                except Exception as cb_exc:
-                    logger.error(
-                        "streaming_rebuild checkpoint callback failed "
-                        "(continuing): %s", cb_exc, exc_info=True,
-                    )
-
-        for type_index in range(start_type_index, len(effective)):
-            etype = effective[type_index]
-            safe_type = _sanitize_label(etype)
-            rid_cursor = start_rid if type_index == start_type_index else -1
-
-            while True:
-                if should_cancel is not None and should_cancel():
-                    # Resume from the last FLUSHED boundary; the unflushed tail
-                    # re-scans on resume (idempotent via MERGE).
-                    raise JobCancelled(
-                        job_id=checkpoint_cursor,
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-
-                # Indexed cursor: typed pattern iterated in internal-ID order.
-                page_cypher = (
-                    f"MATCH (s)-[r:`{safe_type}`]->(t) WHERE ID(r) > $rid "
-                    f"RETURN ID(r) AS rid, s.urn AS s, t.urn AS t "
-                    f"ORDER BY ID(r) LIMIT $limit"
-                )
-                res = await self._ro_query(
-                    page_cypher, params={"rid": rid_cursor, "limit": batch_size},
-                )
-                rows = res.result_set or []
-                if not rows:
-                    # End of this type — flush the accumulated tail + checkpoint.
-                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
-                    break
-
-                page_urns: Set[str] = set()
-                for row in rows:
-                    if row[1]:
-                        page_urns.add(row[1])
-                    if row[2]:
-                        page_urns.add(row[2])
-                ancestors_cache = await self._compute_and_store_ancestors_bulk(
-                    list(page_urns),
-                )
-
-                # Expand (s_chain × t_chain) into the CROSS-PAGE accumulator.
-                for _rid, s_urn, t_urn in rows:
-                    if not s_urn or not t_urn:
-                        continue
-                    s_chain = [s_urn] + (ancestors_cache.get(s_urn, []) or [])
-                    t_chain = [t_urn] + (ancestors_cache.get(t_urn, []) or [])
-                    for sa in s_chain:
-                        for ta in t_chain:
-                            if sa == ta:
-                                continue
-                            meta = pending_pairs.get((sa, ta))
-                            if meta is None:
-                                meta = {"weight": 0, "edge_types": set()}
-                                pending_pairs[(sa, ta)] = meta
-                            meta["weight"] += 1
-                            meta["edge_types"].add(etype)
-
-                scanned += len(rows)
-                rid_cursor = int(rows[-1][0])
-                if total < scanned:
-                    total = scanned  # keep % monotonic when estimate is low
-
-                # Flush when the accumulator hits its memory budget (this is the
-                # checkpoint boundary). Otherwise keep accumulating across pages.
-                if len(pending_pairs) >= max_pairs_per_page:
-                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
-
-                if len(rows) < batch_size:
-                    # End of this type — flush the accumulated tail + checkpoint.
-                    await _flush_and_checkpoint(type_index, rid_cursor, "creating")
-                    break
-
-        # End-of-run generation swap. Only a fully-scanned run reaches here.
-        final_cursor = self._make_stream_cursor(epoch, len(effective), -1)
-        if progress_callback is not None:
-            try:
-                await progress_callback(
-                    processed, max(total, processed), final_cursor,
-                    running_created, "finalizing",
-                )
-            except Exception:
-                pass
-        swept = await self._sweep_stale_aggregated_generation(
-            epoch, should_cancel=should_cancel,
-        )
-        final_count = await self._count_aggregated_for_epoch(epoch)
-        logger.info(
-            "streaming_rebuild on %s complete: processed=%d new_created>=%d "
-            "final_aggregated=%d swept_stale=%d (epoch=%d)",
-            self._graph_name, processed, running_created, final_count, swept, epoch,
-        )
-
-        try:
-            if self._redis is not None:
-                await self._redis.set(
-                    self._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
-                )
-        except Exception as e:
-            logger.warning(
-                "Failed to stamp aggregated materialization timestamp: %s", e,
-            )
-
-        return {
-            "processed": processed,
-            "aggregated_edges_affected": final_count,
-            "input_edges_processed": processed,
-            "errors": 0,
-        }
-
-    async def _flush_streaming_pairs(
-        self,
-        *,
-        page_pairs: Dict[Tuple[str, str], Dict[str, Any]],
+        s_chain: List[str],
+        t_chain: List[str],
         entity_levels: Dict[str, int],
-        level_digest: str,
-        epoch: int,
-        running_created: int,
-        intra_batch_callback: Optional[Callable[[int], Awaitable[None]]] = None,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """MERGE one page's pairs into AGGREGATED edges.
-
-        Keyed on a deterministic ``aggKey = src_urn|tgt_urn`` so the same
-        ancestor pair re-expanded on a later page accumulates weight on the
-        single existing edge (within the current generation). Edges reused
-        from a prior generation are reset (weight, edge-types, epoch).
-        Returns the number of NEW edges created in this flush (the running
-        live counter; the authoritative final count is taken once at the
-        end of the run).
-
-        Crash-resume note: MERGE-on-aggKey keeps the AGGREGATED *topology*
-        exact (one edge per ancestor pair, never duplicated). The ``weight``
-        counter, however, accumulates via ON MATCH within a generation, so a
-        crash between a page's flush and its checkpoint can re-add at most
-        one page's contributions on resume — a bounded over-count on a soft
-        ranking signal that fully self-heals on the next clean rebuild (a
-        fresh epoch resets weights via the ON MATCH ``ELSE`` branch).
-        """
-        from backend.app.services.aggregation.cancel import JobCancelled
-        from datetime import datetime, timezone
-
-        if not page_pairs:
-            return 0
-
-        urns: Set[str] = set()
-        for s, t in page_pairs:
-            urns.add(s)
-            urns.add(t)
-        urn_label_map = await self._resolve_urn_labels_bulk(list(urns))
-
-        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-        dropped = 0
-        for (s, t), meta in page_pairs.items():
-            sl = urn_label_map.get(s)
-            tl = urn_label_map.get(t)
-            if not (sl and tl):
-                dropped += 1
-                continue
-            grouped[(sl, tl)].append({
-                "s": s,
-                "t": t,
-                "k": f"{s}|{t}",
-                "w": int(meta.get("weight", 1)),
-                "et": list(meta.get("edge_types") or []),
-                "sl": entity_levels.get(sl) if entity_levels else None,
-                "tl": entity_levels.get(tl) if entity_levels else None,
-            })
-
-        if dropped:
-            logger.debug(
-                "streaming flush on %s: dropped %d pairs with unresolved "
-                "endpoint labels (label-less or missing nodes).",
-                self._graph_name, dropped,
-            )
-
-        digest_val = level_digest or ""
-        created = 0
-        for (sl_label, tl_label), items in grouped.items():
-            cypher = (
-                f"UNWIND $batch AS item "
-                f"MATCH (a:{sl_label} {{urn: item.s}}) "
-                f"MATCH (b:{tl_label} {{urn: item.t}}) "
-                f"MERGE (a)-[r:AGGREGATED {{aggKey: item.k}}]->(b) "
-                f"ON CREATE SET r.weight = item.w, r.aggEpoch = $epoch, "
-                f"r.sourceEdgeTypes = item.et, r.sourceLevel = item.sl, "
-                f"r.targetLevel = item.tl, r.levelDigest = $digest, "
-                f"r.latestUpdate = timestamp() "
-                f"ON MATCH SET r.weight = CASE WHEN r.aggEpoch = $epoch "
-                f"THEN r.weight + item.w ELSE item.w END, "
-                f"r.sourceEdgeTypes = item.et, r.sourceLevel = item.sl, "
-                f"r.targetLevel = item.tl, r.aggEpoch = $epoch, "
-                f"r.levelDigest = $digest, r.latestUpdate = timestamp()"
-            )
-            for i in range(0, len(items), self._bulk_create_batch_size):
-                if should_cancel is not None and should_cancel():
-                    raise JobCancelled(
-                        job_id="<streaming-flush-cancel>",
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-                chunk = items[i : i + self._bulk_create_batch_size]
-                result = await self._proj_query(
-                    cypher,
-                    params={"batch": chunk, "epoch": epoch, "digest": digest_val},
-                    timeout=self._bulk_create_timeout_s,
-                )
-                created += int(getattr(result, "relationships_created", 0) or 0)
-                if intra_batch_callback is not None:
-                    try:
-                        await intra_batch_callback(running_created + created)
-                    except Exception as cb_exc:
-                        logger.error(
-                            "streaming flush intra_batch_callback failed "
-                            "(continuing): %s", cb_exc, exc_info=True,
-                        )
-        return created
-
-    async def _sweep_stale_aggregated_generation(
-        self,
-        epoch: int,
         *,
-        should_cancel: Optional[Callable[[], bool]] = None,
-    ) -> int:
-        """Delete AGGREGATED edges not written by the current generation, in
-        cursored chunks bounded by ``_BULK_WIPE_BATCH_SIZE`` so a single
-        DELETE can't bust the write timeout. Replaces the destructive
-        wipe-first ordering.
-        """
-        from backend.app.services.aggregation.cancel import JobCancelled
-        from datetime import datetime, timezone
+        caller: str,
+    ) -> Optional[Tuple[Dict[str, int], Dict[str, str]]]:
+        """(urn → level, urn → label) for both ancestor chains via the
+        urn→label cache — the level/label resolution SHARED by the write
+        and delete hooks so their pair selection can never diverge.
 
-        total_deleted = 0
-        while True:
-            if should_cancel is not None and should_cancel():
-                raise JobCancelled(
-                    job_id="<streaming-sweep-cancel>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-            res = await self._proj_query(
-                "MATCH ()-[r:AGGREGATED]->() "
-                "WHERE r.aggEpoch IS NULL OR r.aggEpoch <> $epoch "
-                f"WITH r LIMIT {self._BULK_WIPE_BATCH_SIZE} "
-                "DELETE r RETURN count(r) AS n",
-                params={"epoch": epoch},
-            )
-            n = 0
-            if res.result_set:
-                first = res.result_set[0]
-                n = (first[0] if first else 0) or 0
-            total_deleted += int(n)
-            if n == 0:
-                break
-            logger.info(
-                "streaming sweep on %s: chunk deleted %d stale AGGREGATED "
-                "edges (running total %d)",
-                self._graph_name, n, total_deleted,
-            )
-        return total_deleted
-
-    async def _count_aggregated_for_epoch(self, epoch: int) -> int:
-        """Authoritative count of AGGREGATED edges written by this run. One
-        scan at the very end (the result set, not the full graph) — far
-        cheaper than the per-page full-graph scans this rewrite eliminates.
-        """
+        Returns ``None`` when the hook must DEFER to the batch pipeline: a
+        partially-resolved chain silently yields non-canonical rep pairs
+        (a missing middle label makes the "deepest rep" skip a level),
+        polluting the boundary. No level map ⇒ empty maps (legacy mode)."""
+        urn_levels: Dict[str, int] = {}
+        urn_labels: Dict[str, str] = {}
+        if not entity_levels:
+            return urn_levels, urn_labels
+        chain_urns = list(dict.fromkeys(s_chain + t_chain))
+        # The urn→label cache records the graph's OBSERVED spellings;
+        # the level map is keyed by DECLARED ontology ids. Re-key by
+        # every observed spelling, or alias-variant sources resolve
+        # zero levels and the hooks defer on every single write.
+        levels_by_spelling: Dict[str, int] = {}
+        for _lbl, _lv in entity_levels.items():
+            for _sp in self._alias_entity_types([_lbl]):
+                levels_by_spelling[str(_sp)] = _lv
+            levels_by_spelling[_lbl] = _lv
         try:
-            res = await self._proj_ro_query(
-                "MATCH ()-[r:AGGREGATED]->() WHERE r.aggEpoch = $epoch "
-                "RETURN count(r) AS n",
-                params={"epoch": epoch},
-                timeout=self._bulk_create_timeout_s,
-            )
-            if res.result_set:
-                first = res.result_set[0]
-                return int((first[0] if first else 0) or 0)
+            label_key = self._urn_label_key()
+            label_pipe = self._redis.pipeline(transaction=False)
+            for u in chain_urns:
+                label_pipe.hget(label_key, u)
+            rows = await label_pipe.execute()
+            unresolved = 0
+            for u, raw in zip(chain_urns, rows):
+                if not raw:
+                    unresolved += 1
+                    continue
+                lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+                urn_labels[u] = lbl
+                lvl = levels_by_spelling.get(lbl)
+                if lvl is not None:
+                    urn_levels[u] = lvl
+            if unresolved:
+                logger.debug(
+                    "%s: %d chain member(s) not in the urn→label cache — "
+                    "deferring to the batch pipeline.", caller, unresolved,
+                )
+                return None
         except Exception as exc:
-            logger.warning(
-                "streaming_rebuild epoch count failed on %s: %s",
-                self._graph_name, exc,
-            )
-        return 0
+            logger.warning("%s: level lookup failed: %s", caller, exc)
+            return None
+        return urn_levels, urn_labels
+
+    async def _get_ancestor_dag_pair(
+        self, source_urn: str, target_urn: str,
+    ) -> Optional[Tuple[Dict[str, int], Dict[str, int], bool, bool]]:
+        """Both endpoints' ancestor CLOSURES ({ancestor_or_self: depth})
+        plus whether each endpoint is itself a container — the DAG input
+        the shared pair rules run on. Multi-parent nodes keep every
+        ancestry (the flat-chain walk collapsed them to one). Two bounded
+        label-free queries: the endpoint profile (children count + depth,
+        the WS3 shape) and the distinct-ancestor depth query. Returns
+        None when containment types are unconfigured."""
+        try:
+            containment = list(self._get_containment_edge_types())
+        except Exception:
+            return None
+        if not containment:
+            return None
+        c_pattern = "|".join(
+            _sanitize_label(t) for t in self._alias_rel_types(containment)
+        )
+        hops = self._containment_hop_bound()
+        urns = [source_urn, target_urn]
+        prof = await self._ro_query(
+            f"MATCH (n) WHERE n.urn IN $urns "
+            f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
+            f"WITH n, count(ch) AS kids "
+            f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
+            f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+            params={"urns": urns},
+        )
+        profile: Dict[str, Tuple[bool, int]] = {}
+        for row in (prof.result_set or []):
+            if row and row[0]:
+                profile[str(row[0])] = (int(row[1] or 0) > 0, int(row[2] or 0))
+        anc = await self._ro_query(
+            f"MATCH (a)-[:{c_pattern}*1..{hops}]->(child) "
+            f"WHERE child.urn IN $urns "
+            f"WITH DISTINCT child.urn AS cu, a "
+            f"OPTIONAL MATCH q = (r0)-[:{c_pattern}*1..{hops}]->(a) "
+            f"RETURN cu, a.urn, coalesce(max(length(q)), 0)",
+            params={"urns": urns},
+        )
+        closures: Dict[str, Dict[str, int]] = {u: {} for u in urns}
+        for row in (anc.result_set or []):
+            if row and row[0] and row[1]:
+                closures[str(row[0])][str(row[1])] = int(row[2] or 0)
+        s_prof = profile.get(source_urn, (False, 0))
+        t_prof = profile.get(target_urn, (False, 0))
+        s_cl = dict(closures.get(source_urn) or {})
+        t_cl = dict(closures.get(target_urn) or {})
+        s_cl[source_urn] = s_prof[1]
+        t_cl[target_urn] = t_prof[1]
+        return s_cl, t_cl, s_prof[0], t_prof[0]
+
+    def _hook_pairs(
+        self,
+        regime: str,
+        source_urn: str,
+        target_urn: str,
+        s_cl: Dict[str, int],
+        t_cl: Dict[str, int],
+        s_is_container: bool,
+        t_is_container: bool,
+    ) -> List[Tuple[str, str]]:
+        """Pair selection for the incremental hooks — the shared
+        ``pair_rules`` the batch pipeline stores, dispatched on the
+        stored regime so the hook writes exactly what the batch would:
+        boundary → canonical depth-bridged container pairs; cube → the
+        full ancestor cross-product (raw mirror excluded, matching the
+        batch default). Sorted for a deterministic Redis pipeline."""
+        from backend.common.providers.pair_rules import boundary_pairs, cube_pairs
+
+        if regime == "cube":
+            pairs = set(cube_pairs(
+                s_cl, t_cl, include_leaf_mirror=False,
+                s=source_urn, t=target_urn,
+            ))
+        else:
+            s_reps = {
+                a: d for a, d in s_cl.items()
+                if a != source_urn or s_is_container
+            }
+            t_reps = {
+                a: d for a, d in t_cl.items()
+                if a != target_urn or t_is_container
+            }
+            pairs = boundary_pairs(s_reps, t_reps)
+        return sorted(pairs)
 
     async def on_lineage_edge_written(
         self,
@@ -4974,7 +3920,7 @@ class FalkorDBProvider(GraphDataProvider):
         """Materialize AGGREGATED edges when a lineage edge is written.
 
         Used for real-time per-edge materialization on individual writes.
-        For bulk aggregation, use ``_materialize_edges_batched`` instead.
+        For bulk aggregation, use ``materialize_aggregated_edges_batch`` instead.
 
         Uses pre-computed ancestor chains instead of Cypher variable-length
         paths, eliminating the Cartesian product explosion.
@@ -4994,23 +3940,55 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
-        s_ancestors = await self._get_ancestor_chain(source_urn)
-        t_ancestors = await self._get_ancestor_chain(target_urn)
-
-        s_chain = [source_urn] + s_ancestors
-        t_chain = [target_urn] + t_ancestors
+        # DAG closures (every ancestry of a multi-parent node — the flat
+        # chain collapsed them to one and silently dropped the rest) +
+        # the stored regime, so the hook writes exactly the pair set the
+        # batch pipeline owns.
+        dag = await self._get_ancestor_dag_pair(source_urn, target_urn)
+        if dag is None:
+            logger.debug(
+                "on_lineage_edge_written: containment unresolved for "
+                "%s -> %s — deferring to the batch pipeline",
+                source_urn, target_urn,
+            )
+            return 0
+        s_cl, t_cl, s_cont, t_cont = dag
+        meta = await self._aggregation_run_meta()
 
         members_key_prefix = f"{self._graph_name}:agg_members"
 
-        # Phase 1: Redis SADD pipeline to check idempotency for all pairs at once
-        pairs_to_check = []
-        for s_urn in s_chain:
-            for t_urn in t_chain:
-                if s_urn != t_urn:
-                    pairs_to_check.append((s_urn, t_urn))
+        # Resolve ontology levels for every closure member up front (one
+        # urn→label cache pipeline) — labels anchor the MERGE on per-label
+        # URN indexes; levels survive as display stamps.
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        resolved = await self._resolve_chain_levels(
+            list(s_cl), list(t_cl), entity_levels, caller="on_lineage_edge_written",
+        )
+        if resolved is None:
+            return 0
+        urn_levels, urn_labels = resolved
+
+        if entity_levels and not urn_levels:
+            # Level map exists but no chain member resolved (cold
+            # urn→label cache). Level STAMPS would pollute the boundary;
+            # skipping only delays visibility until the next batch run
+            # reconciles.
+            logger.debug(
+                "on_lineage_edge_written: no chain levels resolved "
+                "for %s -> %s — deferring to the batch pipeline",
+                source_urn, target_urn,
+            )
+            return 0
+        # Shared pair rule, regime-dispatched — mirrors the batch
+        # pipeline on any graph shape (levels are stamps, never the
+        # selector; depth stamps come from the closures).
+        pairs_to_check = self._hook_pairs(
+            meta.regime, source_urn, target_urn, s_cl, t_cl, s_cont, t_cont,
+        )
 
         if not pairs_to_check:
             return 0
+        depth_of = {**t_cl, **s_cl}
 
         # Pipeline: SADD for all pairs.
         # Do NOT silently fallback on Redis failure — the previous
@@ -5025,48 +4003,20 @@ class FalkorDBProvider(GraphDataProvider):
             pipe.execute_command("SADD", member_key, edge_id)
         sadd_results = await pipe.execute()
 
-        # Phase 2: SCARD pipeline for pairs that were newly added
+        # Phase 2: keep only pairs this raw edge hasn't contributed to
+        # yet (SADD=1). Weight accounting is INCREMENT-BY-ONE on the
+        # graph edge itself — never an overwrite from the Redis set's
+        # SCARD, which is a separate accounting system from the batch
+        # pipeline's raw-scan weights and would clobber a
+        # pipeline-computed weight (observed class: 12,000 → 1).
         new_pairs = [(pairs_to_check[i], sadd_results[i]) for i in range(len(pairs_to_check)) if sadd_results[i] != 0]
         if not new_pairs:
             return 0
 
-        # Same rationale as SADD above — silent fallback to [1]*N
-        # produces incorrect weights. Let failures propagate.
-        pipe = self._redis.pipeline(transaction=False)
-        for (s_urn, t_urn), _ in new_pairs:
-            member_key = f"{members_key_prefix}:{s_urn}:{t_urn}"
-            pipe.execute_command("SCARD", member_key)
-        scard_results = await pipe.execute()
-
-        # Phase 3: resolve s/t levels for the level-pair fast path (best-
-        # effort via the URN→label cache + entity-type level map), then
-        # single UNWIND+MERGE for all new pairs. Same rationale as the
-        # batched materializer: coalesce in the Cypher SET preserves
-        # backfilled level values when a fresh resolution misses.
-        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        url_levels: Dict[str, Optional[int]] = {}
-        if entity_levels:
-            urn_set = {p[0] for p, _ in new_pairs} | {p[1] for p, _ in new_pairs}
-            if urn_set:
-                try:
-                    label_key = self._urn_label_key()
-                    label_pipe = self._redis.pipeline(transaction=False)
-                    ordered = list(urn_set)
-                    for u in ordered:
-                        label_pipe.hget(label_key, u)
-                    rows = await label_pipe.execute()
-                    for u, raw in zip(ordered, rows):
-                        if not raw:
-                            continue
-                        lbl = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-                        lvl = entity_levels.get(lbl)
-                        if lvl is not None:
-                            url_levels[u] = lvl
-                except Exception as exc:
-                    logger.warning(
-                        "on_lineage_edge_written: level lookup failed: %s", exc,
-                    )
-
+        # Phase 3: single UNWIND+MERGE for all new pairs, stamped with
+        # the levels resolved up front. Coalesce in the Cypher SET
+        # preserves backfilled level values when a fresh resolution
+        # misses (same rationale as the batched materializer).
         # UNKNOWN_LEVEL sentinel for endpoints whose label has no declared
         # level. Stamping -1 (instead of leaving sourceLevel NULL) keeps
         # the backfill convergent: the digest WHERE filter sees the edge
@@ -5074,12 +4024,19 @@ class FalkorDBProvider(GraphDataProvider):
         from backend.app.services.ontology_levels import UNKNOWN_LEVEL
 
         merge_batch = []
-        for i, ((s_urn, t_urn), _) in enumerate(new_pairs):
-            weight = scard_results[i] if scard_results[i] else 1
+        for (s_urn, t_urn), _ in new_pairs:
             merge_batch.append({
-                "s": s_urn, "t": t_urn, "w": int(weight),
-                "sl": url_levels.get(s_urn, UNKNOWN_LEVEL),
-                "tl": url_levels.get(t_urn, UNKNOWN_LEVEL),
+                "s": s_urn, "t": t_urn,
+                # Shared edge identity with the batch pipeline: without
+                # aggKey the two writers create PARALLEL edges for the
+                # same pair, and reconcile (which deletes by aggKey) can
+                # never remove the hook's copy.
+                "k": f"{s_urn}|{t_urn}",
+                "sl": urn_levels.get(s_urn, UNKNOWN_LEVEL),
+                "tl": urn_levels.get(t_urn, UNKNOWN_LEVEL),
+                # Structural depth stamps — the readers' filter dimension.
+                "sd": depth_of.get(s_urn),
+                "td": depth_of.get(t_urn),
             })
 
         # Stamp the current levelDigest so the cold-start probe doesn't
@@ -5096,23 +4053,53 @@ class FalkorDBProvider(GraphDataProvider):
         # failure, AggregationBatchAbort aborts the job and preserves
         # last_cursor for resume.
 
-        await self._proj_query(
-            "UNWIND $batch AS item "
-            "MERGE (s {urn: item.s}) "
-            "MERGE (t {urn: item.t}) "
-            "MERGE (s)-[r:AGGREGATED]->(t) "
-            "SET r.weight = item.w, "
+        _SET_CLAUSE = (
+            "MERGE (s)-[r:AGGREGATED {aggKey: item.k}]->(t) "
+            "SET r.weight = coalesce(r.weight, 0) + 1, "
             "r.sourceLevel = item.sl, "
             "r.targetLevel = item.tl, "
+            "r.sourceDepth = item.sd, "
+            "r.targetDepth = item.td, "
             "r.levelDigest = $digest, "
             "r.sourceEdgeTypes = CASE "
             "  WHEN r.sourceEdgeTypes IS NULL THEN [$edgeType] "
             "  WHEN NOT $edgeType IN r.sourceEdgeTypes "
             "    THEN r.sourceEdgeTypes + $edgeType "
             "  ELSE r.sourceEdgeTypes END, "
-            "r.latestUpdate = timestamp()",
-            params={"batch": merge_batch, "edgeType": edge_type, "digest": digest},
+            "r.latestUpdate = timestamp()"
         )
+        # Anchor node MERGEs on the per-label URN indexes (an unlabeled
+        # ``MERGE (s {urn: ...})`` is a full node scan per item on
+        # servers without unlabeled-index support). Canonical pairs are
+        # containers whose labels resolved above; items with unknown
+        # labels (legacy level-less graphs) keep the unlabeled pattern.
+        by_label_pair: Dict[Tuple[str, str], list] = {}
+        unlabeled_items: list = []
+        for item in merge_batch:
+            s_lbl = urn_labels.get(item["s"])
+            t_lbl = urn_labels.get(item["t"])
+            if s_lbl and t_lbl:
+                by_label_pair.setdefault(
+                    (_sanitize_label(s_lbl), _sanitize_label(t_lbl)), [],
+                ).append(item)
+            else:
+                unlabeled_items.append(item)
+        for (s_lbl, t_lbl), items in by_label_pair.items():
+            await self._proj_query(
+                "UNWIND $batch AS item "
+                f"MERGE (s:{s_lbl} {{urn: item.s}}) "
+                f"MERGE (t:{t_lbl} {{urn: item.t}}) "
+                + _SET_CLAUSE,
+                params={"batch": items, "edgeType": edge_type, "digest": digest},
+            )
+        if unlabeled_items:
+            await self._proj_query(
+                "UNWIND $batch AS item "
+                "MERGE (s {urn: item.s}) "
+                "MERGE (t {urn: item.t}) "
+                + _SET_CLAUSE,
+                params={"batch": unlabeled_items, "edgeType": edge_type, "digest": digest},
+            )
         return len(merge_batch)
 
     async def on_lineage_edge_deleted(
@@ -5123,90 +4110,91 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> None:
         """Decrement AGGREGATED edge weights when a lineage edge is removed.
 
-        Batched: single SREM pipeline → single SCARD pipeline →
-        one UNWIND+SET for weight updates + one UNWIND+DELETE for empty pairs.
+        Mirror of ``on_lineage_edge_written`` (shared chain/level
+        resolution + canonical pair selection), inverted:
+
+        * SREM is the GATE — only a pair this edge verifiably contributed
+          to via the hook (its id sat in the pair's ``agg_members`` set)
+          is touched. The batch pipeline never populates those sets, so
+          its cells are left alone for its own reconcile — the old SCARD
+          path OVERWROTE pipeline-computed weights with set cardinality
+          and DELETED any pair whose set was empty, i.e. every
+          batch-written cell (the "12,000 → 1" data-loss class).
+        * The graph write is a decrement-by-one via the
+          ``AGGREGATED(aggKey)`` edge-index seek — no node lookups at
+          all, so nothing to label-anchor; a cell reaching weight 0 is
+          deleted in the same query.
         """
         await self._ensure_connected()
 
-        s_ancestors = await self._get_ancestor_chain(source_urn)
-        t_ancestors = await self._get_ancestor_chain(target_urn)
-
-        s_chain = [source_urn] + s_ancestors
-        t_chain = [target_urn] + t_ancestors
+        dag = await self._get_ancestor_dag_pair(source_urn, target_urn)
+        if dag is None:
+            return  # defer to the batch pipeline, like the write hook
+        s_cl, t_cl, s_cont, t_cont = dag
+        meta = await self._aggregation_run_meta()
 
         members_key_prefix = f"{self._graph_name}:agg_members"
-        pairs = [(s, t) for s in s_chain for t in t_chain if s != t]
+
+        entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
+        resolved = await self._resolve_chain_levels(
+            list(s_cl), list(t_cl), entity_levels, caller="on_lineage_edge_deleted",
+        )
+        if resolved is None:
+            return  # defer to the batch pipeline, like the write hook
+        urn_levels, _urn_labels = resolved
+
+        if entity_levels and not urn_levels:
+            logger.debug(
+                "on_lineage_edge_deleted: no chain levels resolved "
+                "for %s -> %s — deferring to the batch pipeline",
+                source_urn, target_urn,
+            )
+            return
+        # Shared pair rule, regime-dispatched (write-hook parity) — the
+        # SREM gate below still limits writes to hook-tracked pairs.
+        pairs = self._hook_pairs(
+            meta.regime, source_urn, target_urn, s_cl, t_cl, s_cont, t_cont,
+        )
         if not pairs:
             return
 
-        # Phase 1: Pipeline SREM for all pairs
+        # SREM gate: 1 ⇒ this edge's contribution was tracked for the
+        # pair — its stored weight (hook-incremented OR pipeline-computed
+        # while the edge existed) includes it, so decrementing is exact.
+        # 0 ⇒ untracked (pipeline-only cell, or a Redis flush): leave it
+        # for the next batch reconcile rather than guess.
         try:
             pipe = self._redis.pipeline(transaction=False)
             for s_urn, t_urn in pairs:
-                pipe.srem(f"{members_key_prefix}:{s_urn}:{t_urn}", edge_id)
-            await pipe.execute()
-        except Exception:
-            pass
+                pipe.execute_command(
+                    "SREM", f"{members_key_prefix}:{s_urn}:{t_urn}", edge_id,
+                )
+            srem_results = await pipe.execute()
+        except Exception as exc:
+            logger.warning(
+                "on_lineage_edge_deleted: members-set SREM failed (%s) — "
+                "leaving weights for the next batch reconcile", exc,
+            )
+            return
 
-        # Phase 2: Pipeline SCARD to get remaining counts
+        keys = [
+            f"{s_urn}|{t_urn}"
+            for (s_urn, t_urn), removed in zip(pairs, srem_results)
+            if removed
+        ]
+        if not keys:
+            return
+
         try:
-            pipe = self._redis.pipeline(transaction=False)
-            for s_urn, t_urn in pairs:
-                pipe.scard(f"{members_key_prefix}:{s_urn}:{t_urn}")
-            counts = await pipe.execute()
-        except Exception:
-            return  # Can't determine counts — bail
-
-        # Phase 3: Separate into delete (count=0) vs update (count>0)
-        delete_batch = []
-        update_batch = []
-        cleanup_keys = []
-        for i, (s_urn, t_urn) in enumerate(pairs):
-            remaining = counts[i] if i < len(counts) else None
-            if remaining == 0:
-                delete_batch.append({"s": s_urn, "t": t_urn})
-                cleanup_keys.append(f"{members_key_prefix}:{s_urn}:{t_urn}")
-            elif remaining is not None:
-                update_batch.append({"s": s_urn, "t": t_urn, "w": int(remaining)})
-
-
-        if delete_batch:
-            try:
-                # nolint-unlabeled-unwind-match: pair-bounded DELETE.
-                # Rewriting to ``WHERE s.urn IN $sUrns AND t.urn IN
-                # $tUrns`` would Cartesian-delete (every edge between
-                # ANY s in sUrns and ANY t in tUrns), which is wrong
-                # semantics here — we need to delete only the specific
-                # (s, t) pairs in delete_batch. Bounded by lineage-edge
-                # deletion rate (rare in steady state).
-                await self._proj_query(
-                    "UNWIND $batch AS item "
-                    "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
-                    "DELETE r",
-                    params={"batch": delete_batch},
-                )
-                # Clean up empty Redis keys
-                pipe = self._redis.pipeline(transaction=False)
-                for key in cleanup_keys:
-                    pipe.delete(key)
-                await pipe.execute()
-            except Exception as e:
-                logger.error(f"Batched AGGREGATED DELETE failed: {e}")
-
-        if update_batch:
-            try:
-                # nolint-unlabeled-unwind-match: pair-bounded UPDATE.
-                # Same reasoning as the DELETE branch above — must
-                # update only specific (s, t) pairs from update_batch,
-                # not the Cartesian of two URN sets.
-                await self._proj_query(
-                    "UNWIND $batch AS item "
-                    "MATCH (s {urn: item.s})-[r:AGGREGATED]->(t {urn: item.t}) "
-                    "SET r.weight = item.w, r.latestUpdate = timestamp()",
-                    params={"batch": update_batch},
-                )
-            except Exception as e:
-                logger.error(f"Batched AGGREGATED weight update failed: {e}")
+            await self._proj_query(
+                "UNWIND $keys AS k "
+                "MATCH ()-[r:AGGREGATED {aggKey: k}]->() "
+                "SET r.weight = r.weight - 1, r.latestUpdate = timestamp() "
+                "WITH r WHERE r.weight <= 0 DELETE r",
+                params={"keys": keys},
+            )
+        except Exception as e:
+            logger.error(f"Batched AGGREGATED decrement failed: {e}")
 
     async def on_containment_changed(self, urn: str) -> None:
         """Invalidate ancestor cache for a node and its descendants, then rebuild.
@@ -5362,6 +4350,51 @@ class FalkorDBProvider(GraphDataProvider):
                 if cursor == 0:
                     break
 
+            # Bump the aggregation-state EPOCH — the in-graph _AggMeta
+            # FIRST: it is the readers' authoritative source (outranks
+            # the Redis marker), so a Redis-only bump is shadowed and the
+            # purge stays invisible to meta-driven readers. The regime is
+            # KEPT as 'cube': an empty store trivially satisfies the cube
+            # contract, which keeps on-demand derivation OFF — re-probing
+            # an empty store resolves 'boundary' and the structural
+            # reader would then RE-DERIVE the purged cells from raw
+            # lineage on the next canvas read (purge-then-resurrect).
+            # ``edgeCount = 0`` + ``purgedAt`` make the state inspectable.
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+            try:
+                await self._proj_query(
+                    "MATCH (m:_AggMeta {id: 'singleton'}) "
+                    "SET m.edgeCount = 0, m.regime = 'cube', "
+                    "m.lastMaterializedAt = $now, m.purgedAt = $now",
+                    params={"now": now_iso},
+                )
+                # Readers cache the resolved meta ~5 min — drop this
+                # instance's copy so it answers honestly immediately.
+                self._agg_meta_cached = None
+            except Exception as exc:
+                logger.warning(
+                    "purge_aggregated_edges: could not update the in-graph "
+                    "_AggMeta epoch: %s", exc,
+                )
+            # Redis mirror second. ``lastMaterializedAt`` rides on every
+            # aggregated-edge response and is the client caches'
+            # invalidation signal — without this bump a purge was
+            # invisible to every consumer. Best-effort — marker failures
+            # must never fail a purge whose deletes already landed.
+            try:
+                if self._redis is not None:
+                    await self._redis.set(
+                        self._agg_last_materialized_key(), now_iso,
+                    )
+                    if hasattr(self, "_agg_regime_key"):
+                        await self._redis.set(self._agg_regime_key(), "fine")
+            except Exception as exc:
+                logger.warning(
+                    "purge_aggregated_edges: could not bump the "
+                    "aggregation-state epoch marker: %s", exc,
+                )
+
             logger.info(
                 "Purged %d AGGREGATED edges and %d Redis tracking keys from %s",
                 total_deleted, cleaned, self._graph_name,
@@ -5397,248 +4430,37 @@ class FalkorDBProvider(GraphDataProvider):
         should_cancel: Optional[Callable[[], bool]] = None,
         resume_processed: int = 0,
         resume_created: int = 0,
+        tuning: Optional[Dict[str, Any]] = None,
+        job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Batch materialization using ancestor-chain approach with cursor-based pagination.
+        """Materialize :AGGREGATED rollup edges (single resumable pipeline).
 
-        ``resume_processed`` / ``resume_created`` are the job's already-committed
-        progress at resume time; the streaming rebuild seeds its per-run counters
-        from them (when the cursor parses) so a resumed job reports cumulative
-        progress instead of resetting the bar to 0%.
-
-        Instead of Cypher variable-length paths with Cartesian products,
-        this uses pre-computed ancestor chains stored in Redis Hashes.
-
-        CURSOR-BASED PAGINATION (CRIT-2):
-        - Uses stable cursor on sorted composite key (s.urn + '|' + t.urn)
-        - Eliminates O(n²) degradation from SKIP at large offsets
-        - Safe under concurrent graph mutations
-        - Resume from last_cursor after crash/restart
-
-        Args:
-            batch_size: Number of edges to process per batch
-            containment_edge_types: Structural edge types (from ontology)
-            lineage_edge_types: Functional edge types (from ontology)
-            last_cursor: Resume point — composite key of last processed edge
-            progress_callback: async fn(processed, total, cursor, created_count) for checkpointing
-            intra_batch_callback: async fn(running_aggregated_total) called after each
-                Cypher MERGE sub-batch within an outer batch. A single outer batch can
-                fan out to 100+ MERGE sub-batches running for several minutes; without
-                this hook the operator UI's ``last_checkpoint_at`` and ``created_edges``
-                would freeze for that whole window.
+        Delegates to ``backend.app.providers.falkordb_materialize`` — see
+        that module for the EXTRACT -> COMPUTE -> RECONCILE -> APPLY design,
+        the ``v3:`` cursor contract, and the tuning env vars. The legacy
+        wipe-first bulk rebuild, epoch-swept streaming rebuild, and
+        cursor-paged MERGE loop (with their AGGREGATION_BULK_REBUILD_ENABLED
+        / AGGREGATION_STREAMING_REBUILD_ENABLED flags) were removed — this
+        is the only strategy. Rollback is a version rollback.
         """
         await self._ensure_connected()
-
-        # Phase 1 of aggregation hardening: dispatch to bulk-rebuild
-        # (wipe + accumulate-in-memory + bulk-CREATE) when the env flag
-        # is set. Defaults to enabled. Operators can roll back to the
-        # legacy MERGE-per-batch path by setting
-        # AGGREGATION_BULK_REBUILD_ENABLED=false if a production
-        # regression surfaces. See plan at
-        # /Users/rkrumins/.claude/plans/i-want-you-to-merry-minsky.md.
-        _bulk_flag = os.getenv("AGGREGATION_BULK_REBUILD_ENABLED", "true")
-        if str(_bulk_flag).strip().lower() in ("1", "true", "yes", "on"):
-            return await self._materialize_aggregated_edges_bulk_rebuild(
-                batch_size=batch_size,
-                containment_edge_types=containment_edge_types,
-                lineage_edge_types=lineage_edge_types,
-                progress_callback=progress_callback,
-                intra_batch_callback=intra_batch_callback,
-                should_cancel=should_cancel,
-                last_cursor=last_cursor,
-                resume_processed=resume_processed,
-                resume_created=resume_created,
-            )
-
-        containment = self._alias_rel_types(list(containment_edge_types)) if containment_edge_types \
-            else list(self._get_containment_edge_types())
-        exclude_types = list(containment) + ["AGGREGATED"]
-
-        # Filter AGGREGATED out of any explicit lineage whitelist. The
-        # ontology can legitimately list AGGREGATED as a lineage-category
-        # relationship (it is the *result* of aggregation), but feeding
-        # existing AGGREGATED edges back into this loop produces new
-        # AGGREGATED edges from ancestor chains of the previously-
-        # aggregated pairs, compounding on every re-run. This was the
-        # cause of the API vs seed_falkordb count divergence: after the
-        # first materialization, each API run multiplied the AGGREGATED
-        # count whereas the seed-script fallback branch (``NOT IN
-        # exclude_types``) already excluded AGGREGATED correctly.
-        if lineage_edge_types:
-            effective_lineage_types = self._alias_rel_types([t for t in lineage_edge_types if t != "AGGREGATED"])
-            if not effective_lineage_types:
-                logger.warning(
-                    "materialize_aggregated_edges_batch: lineage_edge_types contained "
-                    "only AGGREGATED after filtering; no leaf lineage edges to process. "
-                    "Check the ontology's is_lineage flags."
-                )
-                return {"processed": 0, "aggregated_edges_affected": 0, "errors": 0}
-            type_filter = "WHERE type(r) IN $lineageEdges"
-            type_params: Dict[str, Any] = {"lineageEdges": effective_lineage_types}
-        else:
-            type_filter = "WHERE NOT type(r) IN $excludeTypes"
-            type_params = {"excludeTypes": exclude_types}
-
-        # Count total lineage edges
-        count_cypher = f"MATCH ()-[r]->() {type_filter} RETURN count(r)"
-        count_res = await self._ro_query(count_cypher, params=type_params)
-        total = count_res.result_set[0][0] if count_res.result_set else 0
-
-        logger.info(f"Batch materialization: {total} lineage edges to process (cursor: {last_cursor or 'start'})")
-
-        processed = 0
-        errors = 0
-        created_count = 0
-        current_cursor = last_cursor
-        batch_num = 0
-
-        while True:
-            batch_num += 1
-            # Cursor-based batch fetch — sorted composite key for stable ordering
-            if current_cursor:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"AND (s.urn + '|' + t.urn) > $cursor "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "cursor": current_cursor, "limit": batch_size}
-            else:
-                batch_cypher = (
-                    f"MATCH (s)-[r]->(t) {type_filter} "
-                    f"RETURN s.urn, t.urn, type(r), r.id "
-                    f"ORDER BY s.urn + '|' + t.urn LIMIT $limit"
-                )
-                batch_params = {**type_params, "limit": batch_size}
-
-            # Do NOT silently break on batch-fetch failure — that path
-            # lets a provider outage mid-aggregation flow through the
-            # worker as if the job completed successfully (the worker
-            # reads our ``stats`` dict, sees no exception, and marks
-            # status=completed with whatever ``processed`` count we
-            # managed before the failure). Re-raise so the worker's
-            # outer try/except transitions the job to ``failed`` and
-            # preserves ``last_cursor`` for crash-resume. The provider
-            # is either back (resume succeeds) or still down (breaker
-            # opens and triggers 503 upstream).
-            t0 = time.monotonic()
-            res = await self._ro_query(batch_cypher, params=batch_params)
-            rows = res.result_set or []
-            t_fetch = (time.monotonic() - t0) * 1000
-
-            if not rows:
-                break
-
-            # Pre-compute ancestor chains for all URNs in this batch.
-            # The returned dict maps URN → ancestor list (ordered parent
-            # to root). We pass this cache directly to the batched
-            # materializer to avoid per-edge Redis HGET round-trips.
-            t0 = time.monotonic()
-            all_urns = set()
-            for row in rows:
-                all_urns.add(row[0])
-                all_urns.add(row[1])
-            ancestors_cache = await self._compute_and_store_ancestors_bulk(list(all_urns))
-            t_ancestors = (time.monotonic() - t0) * 1000
-
-            # Batch-level materialization: all Redis pipelines + Cypher
-            # MERGE in 4 round-trips total, regardless of batch size.
-            # This replaces the previous per-edge loop that did 3 round-
-            # trips per edge (SADD + SCARD + MERGE × N edges).
-            # Cooperative cancel check at the start of each outer batch
-            # — cheap, predicate-only, no exception out of this provider
-            # if the worker hasn't asked us to bail. Inside
-            # ``_materialize_edges_batched`` the same predicate fires
-            # between MERGE sub-batches so a multi-minute outer batch
-            # can be aborted cleanly without orphaning a Cypher
-            # transaction. Importing locally keeps the provider free of
-            # an aggregation-package coupling at module load.
-            if should_cancel is not None and should_cancel():
-                from backend.app.services.aggregation.cancel import JobCancelled
-                from datetime import datetime, timezone
-                raise JobCancelled(
-                    job_id=last_cursor or "<no-cursor>",
-                    observed_at=datetime.now(timezone.utc).isoformat(),
-                )
-
-            t0 = time.monotonic()
-            # Pass ``created_count`` as the baseline so the intra-batch
-            # callback always receives the cumulative aggregated total
-            # across the whole job, not just within the current outer
-            # batch. The worker uses this as ``job.created_edges``
-            # directly so the UI sees a monotonically rising counter.
-            batch_created, batch_errors = await self._materialize_edges_batched(
-                rows, ancestors_cache,
-                intra_batch_callback=intra_batch_callback,
-                baseline_aggregated=created_count,
-                should_cancel=should_cancel,
-            )
-            created_count += batch_created
-            errors += batch_errors
-
-            t_materialize = (time.monotonic() - t0) * 1000
-
-            processed += len(rows)
-            # Update cursor to last row's composite key
-            last_row = rows[-1]
-            current_cursor = f"{last_row[0]}|{last_row[1]}"
-
-            logger.info(
-                "Batch %d: %d/%d edges | fetch=%.1fms ancestors=%.1fms "
-                "materialize=%.1fms | created=%d errors=%d",
-                batch_num, processed, total,
-                t_fetch, t_ancestors, t_materialize,
-                created_count, errors,
-            )
-
-            # Checkpoint via callback (for worker DB persistence). The
-            # callback is the only path by which the running job's
-            # progress + cursor reach the operator UI; without ``exc_info``
-            # a silent failure here meant the user saw ``processed_edges =
-            # 0`` indefinitely while AGGREGATED edges accumulated in
-            # FalkorDB. Log the full traceback so the underlying cause is
-            # diagnosable, and continue the loop — the materialisation
-            # itself is independent of progress reporting.
-            if progress_callback:
-                try:
-                    await progress_callback(processed, total, current_cursor, created_count)
-                except Exception as e:
-                    logger.error(
-                        "Progress callback failed at batch %d (processed=%d/%d, "
-                        "created=%d): %s — continuing materialisation",
-                        batch_num, processed, total, created_count, e,
-                        exc_info=True,
-                    )
-
-            # If we got fewer rows than batch_size, we've reached the end
-            if len(rows) < batch_size:
-                break
-
-        stats = {
-            "processed": processed,
-            # Historical key name — kept for back-compat with
-            # aggregation_jobs.created_edges; now correctly counts the
-            # number of AGGREGATED graph edges created or updated, not
-            # the number of input lineage edges iterated.
-            "aggregated_edges_affected": created_count,
-            # New stat so callers + dashboards can distinguish
-            # "touched N input edges" from "wrote M aggregated edges".
-            # On a clean run these two are typically proportional; when
-            # they diverge the operator has a clear signal that the
-            # Redis idempotency sets are in a surprising state.
-            "input_edges_processed": processed,
-            "errors": errors,
-        }
-        try:
-            if self._redis is not None:
-                from datetime import datetime, timezone
-                await self._redis.set(
-                    self._agg_last_materialized_key(),
-                    datetime.now(timezone.utc).isoformat(),
-                )
-        except Exception as e:
-            logger.warning("Failed to stamp aggregated materialization timestamp: %s", e)
-        logger.info(f"Batch materialization complete: {stats}")
-        return stats
+        from backend.app.providers.falkordb_materialize import (
+            materialize_aggregated_edges,
+        )
+        return await materialize_aggregated_edges(
+            self,
+            batch_size=batch_size,
+            containment_edge_types=containment_edge_types,
+            lineage_edge_types=lineage_edge_types,
+            last_cursor=last_cursor,
+            progress_callback=progress_callback,
+            intra_batch_callback=intra_batch_callback,
+            should_cancel=should_cancel,
+            resume_processed=resume_processed,
+            resume_created=resume_created,
+            tuning=tuning,
+            job_id=job_id,
+        )
 
     async def get_aggregated_edges_between(
         self,
@@ -5657,7 +4479,10 @@ class FalkorDBProvider(GraphDataProvider):
         so the caller knows to trigger a backfill.
         """
         from fastapi import HTTPException
-        from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
+        from ..config.resilience import (
+            AGGREGATED_EDGE_RESULT_CAP,
+            AGGREGATED_SOURCE_URN_BATCH_SIZE,
+        )
 
         if len(source_urns) > 100_000:
             raise HTTPException(
@@ -5671,40 +4496,60 @@ class FalkorDBProvider(GraphDataProvider):
 
         await self._ensure_connected()
 
-        if target_urns:
-            cypher = (
-                "MATCH (s)-[r:AGGREGATED]->(t) "
-                "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
-                "AND s.urn <> t.urn "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "r.weight AS weight, r.sourceEdgeTypes AS types "
-                "ORDER BY r.weight DESC"
-            )
-        else:
-            cypher = (
-                "MATCH (s)-[r:AGGREGATED]->(t) "
+        # LIMIT in the Cypher, not only at Python conversion: without it
+        # every batch materializes + weight-sorts its FULL match set on
+        # the server before the client truncates. Batched calls merge and
+        # re-truncate client-side, so the cap semantics are unchanged —
+        # only the server-side work is bounded.
+        #
+        # Anchors are LABEL-QUALIFIED per source-label bucket: without a
+        # label the planner has no URN index on this build and falls back
+        # to scanning EVERY :AGGREGATED relation with per-row IN-list
+        # membership — observed timing out (and returning an empty
+        # canvas) at 595k stored cells × 600 visible urns. With the label
+        # it is |batch| index seeks + local out-edge expansion.
+        def _cypher_for(label: str) -> str:
+            anchor = f"(s:{label})" if label else "(s)"
+            if target_urns:
+                return (
+                    f"MATCH {anchor}-[r:AGGREGATED]->(t) "
+                    "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                    "AND s.urn <> t.urn "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "r.weight AS weight, r.sourceEdgeTypes AS types "
+                    f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
+                )
+            return (
+                f"MATCH {anchor}-[r:AGGREGATED]->(t) "
                 "WHERE s.urn IN $sourceUrns "
                 "AND s.urn <> t.urn "
                 "RETURN s.urn AS sUrn, t.urn AS tUrn, "
                 "r.weight AS weight, r.sourceEdgeTypes AS types "
-                "ORDER BY r.weight DESC"
+                f"ORDER BY r.weight DESC LIMIT {AGGREGATED_EDGE_RESULT_CAP}"
             )
 
-        async def _run_batch(batch: List[str]) -> list:
+        async def _run_batch(label: str, batch: List[str]) -> list:
             params: Dict[str, Any] = {"sourceUrns": batch}
             if target_urns:
                 params["targetUrns"] = target_urns
             try:
-                result = await self._proj_ro_query(cypher, params=params, timeout=timeout)
+                result = await self._proj_ro_query(
+                    _cypher_for(label), params=params, timeout=timeout,
+                )
                 return result.result_set or []
             except Exception as e:
                 logger.warning(f"AGGREGATED edge read failed: {e}")
                 return []
 
         batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
-        if len(source_urns) > batch_size:
-            batches = [source_urns[i:i + batch_size] for i in range(0, len(source_urns), batch_size)]
-            batch_results = await asyncio.gather(*[_run_batch(b) for b in batches])
+        runs: List[Tuple[str, List[str]]] = []
+        for label, bucket in await self._label_buckets(source_urns):
+            for i in range(0, len(bucket), batch_size):
+                runs.append((label, bucket[i:i + batch_size]))
+        batch_results = await asyncio.gather(*[
+            _run_batch(lbl, b) for lbl, b in runs
+        ])
+        if len(runs) > 1:
             merged: Dict[Tuple[str, str], list] = {}
             for batch_rows in batch_results:
                 for row in batch_rows:
@@ -5719,28 +4564,499 @@ class FalkorDBProvider(GraphDataProvider):
                         existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
             rows = list(merged.values())
         else:
-            rows = await _run_batch(source_urns)
+            rows = batch_results[0] if batch_results else []
 
-        last_materialized_at: Optional[str] = None
+        # Leaf-involving pairs (column→column, column→table, column→domain,
+        # …) are no longer materialized — the full cube scales as
+        # edges × hierarchy depth and OOMs the instance on large graphs.
+        # They are computed here ON DEMAND for the requested (bounded)
+        # URN sets: raw lineage fan-out + upward containment walks, all
+        # index-driven. Canonical container pairs come from the
+        # materialized rows above with complete weights; mixed-level
+        # container pairs are derived from those cells.
+        raw_rows, mixed_rows, synth_degraded = (
+            await self._synthesize_ondemand_lineage_pairs(
+                source_urns, target_urns, containment_edges, lineage_edges,
+                timeout=timeout,
+            )
+        )
+        if raw_rows or mixed_rows:
+            rows = [list(row) for row in rows]
+            by_pair = {(row[0], row[1]): row for row in rows}
+            # Leaf-involving rows are disjoint from materialized cells by
+            # construction — a collision means a stale pre-boundary fine
+            # cell still exists (graph not yet re-aggregated); the
+            # materialized row wins until reconcile cleans it away.
+            for row in raw_rows:
+                pair = (row[0], row[1])
+                if pair not in by_pair:
+                    row = list(row)
+                    by_pair[pair] = row
+                    rows.append(row)
+            # Mixed-level derived rows carry ONLY the strictly-below-the-
+            # coarse-endpoint portion — ADD to a materialized canonical
+            # row for the same pair (disjoint provenance), else append.
+            for row in mixed_rows:
+                existing = by_pair.get((row[0], row[1]))
+                if existing is None:
+                    row = list(row)
+                    by_pair[(row[0], row[1])] = row
+                    rows.append(row)
+                    continue
+                existing[2] = (
+                    (int(existing[2]) if existing[2] else 0)
+                    + (int(row[2]) if row[2] else 0)
+                )
+                ex_types = existing[3] if isinstance(existing[3], list) else (
+                    [existing[3]] if existing[3] else []
+                )
+                new_types = row[3] if isinstance(row[3], list) else (
+                    [row[3]] if row[3] else []
+                )
+                existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
+
+        # Through the resolved run meta: the in-graph _AggMeta stamp wins,
+        # the legacy Redis key is the fallback — a graph that HAS
+        # materialized but lost its Redis key must not read as "never
+        # materialized" (that re-triggered a background materialization
+        # on every empty read).
         try:
-            if self._redis is not None:
-                raw = await self._redis.get(self._agg_last_materialized_key())
-                if raw is not None:
-                    last_materialized_at = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+            meta = await self._aggregation_run_meta()
+            last_materialized_at = meta.last_materialized_at
         except Exception as e:
+            last_materialized_at = None
             logger.warning("Failed to read aggregated materialization timestamp: %s", e)
 
-        return self._rows_to_aggregated_result(rows, last_materialized_at=last_materialized_at)
+        # The legacy single-query read returned rows weight-descending;
+        # preserve that contract now that synthesized rows are appended.
+        rows = sorted(rows, key=lambda r: -(int(r[2]) if r[2] else 0))
+        return self._rows_to_aggregated_result(
+            rows, last_materialized_at=last_materialized_at,
+            degraded=synth_degraded,
+        )
 
     # ------------------------------------------------------------------
     # Helpers for get_aggregated_edges_between
     # ------------------------------------------------------------------
+
+
+    async def _synthesize_ondemand_lineage_pairs(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        containment_edges: Optional[List[str]],
+        lineage_edges: Optional[List[str]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> Tuple[list, list, bool]:
+        """Compute leaf-involving aggregated pairs on demand for bounded
+        URN sets — the read-side half of the level-based materialization
+        boundary. Returns ``(leaf_rows, mixed_rows, degraded)``:
+        leaf-involving rows are disjoint from materialized cells
+        (dedupe-safe); mixed non-leaf rows carry ONLY the
+        strictly-below-the-coarse-endpoint portion and must be ADDED to
+        a materialized canonical row for the same pair (see
+        ``_mixed_depth_pairs``); ``degraded`` is True when any on-demand
+        sub-query failed — the response is then a PARTIAL answer and the
+        caller marks the result truncated instead of presenting it as
+        complete.
+
+        A pair involves a LEAF node (no containment children) only when
+        that node is the raw edge endpoint itself, so every such pair is
+        reachable by anchoring the leaf side's bounded ``urn IN $set``
+        lookup and walking the OTHER endpoint upward through containment
+        (``*0..k`` — one parent per hop, bound-end traversal). Cost ≈
+        fan-out(requested leaves) × hierarchy depth, independent of
+        graph size.
+
+        Classification is STRUCTURAL — leaf = no containment children,
+        the same definition the writer's boundary uses — so self-nesting
+        ontologies (one Node type containing itself, where every label
+        shares one type level) classify correctly; ontology type levels
+        are not consulted at all.
+
+        Same-depth container pairs are NOT produced here — they come
+        from the materialized canonical cells (complete weights).
+        Mixed-depth container pairs (table→domain) are derived from
+        those same cells by ``_mixed_depth_pairs``, so the sources stay
+        disjoint by construction.
+
+        Regime dispatch: under the CUBE contract every ancestor
+        combination is already stored — any derivation beyond the raw
+        leaf↔leaf mirror would double-count — so only exact-endpoint raw
+        synthesis runs. ``_mixed_depth_pairs`` additionally requires
+        stamp_version >= 2 (depth stamps present graph-wide).
+        """
+        from ..config.resilience import (
+            AGGREGATED_EDGE_RESULT_CAP,
+            AGGREGATED_SOURCE_URN_BATCH_SIZE,
+        )
+
+        ltypes = self._alias_rel_types(
+            [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
+        )
+        if not ltypes or not source_urns:
+            return [], [], False
+        meta = await self._aggregation_run_meta()
+        if meta.regime != "boundary":
+            return await self._synthesize_raw_lineage_pairs(
+                source_urns, target_urns, lineage_edges, timeout=timeout,
+            ), [], False
+        try:
+            containment = list(self._alias_rel_types(
+                [t for t in (containment_edges or []) if t]
+            ) or self._get_containment_edge_types())
+        except Exception:
+            containment = []
+        if not containment:
+            return await self._synthesize_raw_lineage_pairs(
+                source_urns, target_urns, lineage_edges, timeout=timeout,
+            ), [], False
+        c_pattern = "|".join(_sanitize_label(t) for t in containment)
+        hops = self._containment_hop_bound()
+        cap = AGGREGATED_EDGE_RESULT_CAP
+        batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
+        lt_list = list(ltypes)
+        # A failed sub-query means a PARTIAL answer: surface it via the
+        # result's truncated flag instead of silently rendering a canvas
+        # missing a whole class of edges.
+        degraded = {"v": False}
+
+        async def _run(cypher: str, params: Dict[str, Any]) -> list:
+            try:
+                res = await self._ro_query(cypher, params=params, timeout=timeout)
+                return res.result_set or []
+            except Exception as e:
+                degraded["v"] = True
+                logger.warning("On-demand lineage pair query failed: %s", e)
+                return []
+
+        async def _run_proj(cypher: str, params: Dict[str, Any]) -> list:
+            try:
+                res = await self._proj_ro_query(cypher, params=params, timeout=timeout)
+                return res.result_set or []
+            except Exception as e:
+                degraded["v"] = True
+                logger.warning("On-demand aggregated anchor query failed: %s", e)
+                return []
+
+        async def _profile(urns: List[str]) -> Dict[str, Tuple[bool, int]]:
+            """urn → (is_container, containment depth). Anchored on the
+            per-label URN indexes (label buckets from the urn→label
+            cache); the unresolved-label residue keeps the unlabeled
+            pattern. Depth = longest upward containment path — the
+            read-side measurement of the writer's max-over-parents rule."""
+            out: Dict[str, Tuple[bool, int]] = {}
+            for label, bucket in await self._label_buckets(urns):
+                anchor = f"(n:{label})" if label else "(n)"
+                for i in range(0, len(bucket), batch):
+                    for row in await _run(
+                        f"MATCH {anchor} WHERE n.urn IN $urns "
+                        f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
+                        f"WITH n, count(ch) AS kids "
+                        f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
+                        f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+                        {"urns": bucket[i:i + batch]},
+                    ):
+                        if row and row[0]:
+                            out[str(row[0])] = (
+                                int(row[1] or 0) > 0, int(row[2] or 0),
+                            )
+            return out
+
+        rows: list = []
+        mixed_rows: list = []
+
+        if target_urns:
+            src_prof = await _profile(source_urns)
+            tgt_prof = await _profile(target_urns)
+            src_leaves = [
+                u for u in source_urns if not src_prof.get(u, (False, 0))[0]
+            ]
+            tgt_leaves = [
+                u for u in target_urns if not tgt_prof.get(u, (False, 0))[0]
+            ]
+            src_containers = {
+                u: src_prof[u][1] for u in source_urns
+                if src_prof.get(u, (False, 0))[0]
+            }
+            tgt_containers = {
+                u: tgt_prof[u][1] for u in target_urns
+                if tgt_prof.get(u, (False, 0))[0]
+            }
+
+            # Q1 — requested LEAF sources: their raw fan-out, targets
+            # resolved exactly or upward to any requested node. Anchored
+            # per label bucket (index seek), unlabeled residue kept.
+            for x_label, x_bucket in await self._label_buckets(src_leaves):
+                x_anchor = f"(x:{x_label})" if x_label else "(x)"
+                for i in range(0, len(x_bucket), batch):
+                    rows.extend(await _run(
+                        f"MATCH {x_anchor}-[r]->(t) "
+                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                        f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
+                        f"WHERE y.urn IN $ys AND x.urn <> y.urn "
+                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                        f"count(DISTINCT r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch], "ys": target_urns, "lt": lt_list},
+                    ))
+            # Q2 — requested LEAF targets: their raw fan-in, sources
+            # resolved exactly or upward to any requested CONTAINER (leaf
+            # sources were fully covered by Q1 — the two stay disjoint,
+            # and container→leaf rows never collide with stored
+            # container→container cells).
+            if src_containers and tgt_leaves:
+                xs_all = list(src_containers)
+                for y_label, y_bucket in await self._label_buckets(tgt_leaves):
+                    y_anchor = f"(y:{y_label})" if y_label else "(y)"
+                    for i in range(0, len(y_bucket), batch):
+                        rows.extend(await _run(
+                            f"MATCH (s)-[r]->{y_anchor} "
+                            f"WHERE y.urn IN $ys AND type(r) IN $lt "
+                            f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
+                            f"WHERE x.urn IN $xs AND x.urn <> y.urn "
+                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                            f"count(DISTINCT r) AS weight, "
+                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                            {"ys": y_bucket[i:i + batch], "xs": xs_all, "lt": lt_list},
+                        ))
+            # Q3 — mixed-DEPTH container pairs (table→domain): only the
+            # canonical cells are materialized, so these are derived by
+            # anchoring the finer endpoint's stored fan-out/fan-in and
+            # walking the coarser endpoint upward. Requires depth stamps
+            # graph-wide (stamp_version >= 2); older graphs serve stored
+            # rows only until the next materialization re-stamps them —
+            # never the type-level arithmetic this replaces, which
+            # collapsed on self-nesting ontologies.
+            if src_containers and tgt_containers and meta.stamp_version >= 2:
+                mixed_rows = await self._mixed_depth_pairs(
+                    src_containers, tgt_containers,
+                    c_pattern=c_pattern, hops=hops, cap=cap, batch=batch,
+                    run_src=_run, run_proj=_run_proj,
+                )
+        else:
+            # Source-only mode (no target set): exact raw fan-out of the
+            # requested leaf sources. Upward resolution is skipped — with
+            # no target set to bound it, it would enumerate every ancestor.
+            src_prof = await _profile(source_urns)
+            src_leaves = [
+                u for u in source_urns if not src_prof.get(u, (False, 0))[0]
+            ]
+            for x_label, x_bucket in await self._label_buckets(src_leaves):
+                x_anchor = f"(x:{x_label})" if x_label else "(x)"
+                for i in range(0, len(x_bucket), batch):
+                    rows.extend(await _run(
+                        f"MATCH {x_anchor}-[r]->(t) "
+                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                        f"AND t.urn <> x.urn "
+                        f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
+                        f"count(r) AS weight, "
+                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch], "lt": lt_list},
+                    ))
+        return rows, mixed_rows, degraded["v"]
+
+    async def _mixed_depth_pairs(
+        self,
+        src_containers: Dict[str, int],
+        tgt_containers: Dict[str, int],
+        *,
+        c_pattern: str,
+        hops: int,
+        cap: int,
+        batch: int,
+        run_src,
+        run_proj,
+    ) -> list:
+        """Derive mixed-DEPTH container pairs (table→domain, domain→table)
+        from the materialized canonical cells, keyed on the structural
+        ``sourceDepth``/``targetDepth`` stamps — no ontology labels or
+        type levels anywhere, so self-nesting ontologies derive
+        correctly.
+
+        Inputs are the requested containers with their MEASURED
+        containment depths. For each direction: (1) anchor the FINER
+        endpoint's stored :AGGREGATED cells at the anchor's own rank —
+        ``r.targetDepth <= r.sourceDepth`` for fan-out (the anchored
+        row's sourceDepth IS the anchor's depth, so no per-anchor
+        parameter is needed; under canonical depth-bridging each raw
+        edge appears in exactly ONE such kept cell per anchor), (2)
+        resolve the far endpoints STRICTLY upward through containment,
+        (3) join against the requested strictly-coarser far side and sum
+        in Python. Bounded index-driven queries — never a subtree
+        enumeration.
+
+        The strictly-upward walk makes these sums DISJOINT from any
+        directly-materialized canonical cell for the same pair — the
+        caller must therefore ADD a derived row's weight to a
+        materialized row, not drop it.
+
+        Known bound (multi-parent diamonds only): a raw edge whose far
+        endpoint sits under TWO stored reps that both resolve up to the
+        same requested coarser node is summed once per rep — mixed-depth
+        weights can overcount on such shapes in boundary regime. Cube
+        regime (the default within budget) stores these pairs exactly.
+        """
+        cells: Dict[Tuple[str, str], list] = {}
+
+        async def _resolve_up(child_urns: List[str], anc_urns: List[str]) -> Dict[str, List[str]]:
+            """child urn → requested ancestor urns (strictly above it).
+
+            Deduped per (child, ancestor): a variable-length MATCH yields
+            one row PER PATH, so diamond containment (a child with two
+            parents under the same ancestor) would otherwise count the
+            same cell weight once per path."""
+            out: Dict[str, Set[str]] = {}
+            kids = list(dict.fromkeys(child_urns))
+            for c_label, c_bucket in await self._label_buckets(kids):
+                c_anchor = f"(c:{c_label})" if c_label else "(c)"
+                for i in range(0, len(c_bucket), batch):
+                    for row in await run_src(
+                        f"MATCH (a)-[:{c_pattern}*1..{hops}]->{c_anchor} "
+                        f"WHERE c.urn IN $cs AND a.urn IN $as_ "
+                        f"RETURN DISTINCT c.urn, a.urn LIMIT {cap}",
+                        {"cs": c_bucket[i:i + batch], "as_": anc_urns},
+                    ):
+                        if row and row[0] and row[1]:
+                            out.setdefault(row[0], set()).add(row[1])
+            return {k: sorted(v) for k, v in out.items()}
+
+        def _merge(x: str, y: str, weight, types) -> None:
+            w = int(weight) if weight else 1
+            tl = types if isinstance(types, list) else ([types] if types else [])
+            cell = cells.get((x, y))
+            if cell is None:
+                cells[(x, y)] = [w, list(tl)]
+            else:
+                cell[0] += w
+                cell[1].extend(t for t in tl if t not in cell[1])
+
+        # Fan-out: requested source containers anchored on their stored
+        # at-rank cells; far side resolved up to STRICTLY SHALLOWER
+        # requested targets. Anchors grouped by depth so each group joins
+        # only its coarser counterparts.
+        depths = sorted({d for d in src_containers.values()})
+        for dx in depths:
+            xs = [u for u, d in src_containers.items() if d == dx]
+            ys = [u for u, d in tgt_containers.items() if d < dx]
+            if not xs or not ys:
+                continue
+            fanout = []
+            for x_label, x_bucket in await self._label_buckets(xs):
+                x_anchor = f"(x:{x_label})" if x_label else "(x)"
+                for i in range(0, len(x_bucket), batch):
+                    fanout.extend(await run_proj(
+                        f"MATCH {x_anchor}-[r:AGGREGATED]->(t2) "
+                        f"WHERE x.urn IN $xs AND r.targetDepth <= r.sourceDepth "
+                        f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
+                        f"LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch]},
+                    ))
+            up = await _resolve_up([row[1] for row in fanout if row and row[1]], ys)
+            for row in fanout:
+                for y in up.get(row[1], ()):
+                    _merge(row[0], y, row[2], row[3])
+
+        # Fan-in mirror: requested target containers anchored; far side
+        # resolved up to strictly shallower requested sources.
+        depths = sorted({d for d in tgt_containers.values()})
+        for dy in depths:
+            ys = [u for u, d in tgt_containers.items() if d == dy]
+            xs = [u for u, d in src_containers.items() if d < dy]
+            if not xs or not ys:
+                continue
+            fanin = []
+            for y_label, y_bucket in await self._label_buckets(ys):
+                y_anchor = f"(y:{y_label})" if y_label else "(y)"
+                for i in range(0, len(y_bucket), batch):
+                    fanin.extend(await run_proj(
+                        f"MATCH (s2)-[r:AGGREGATED]->{y_anchor} "
+                        f"WHERE y.urn IN $ys AND r.sourceDepth <= r.targetDepth "
+                        f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
+                        f"LIMIT {cap}",
+                        {"ys": y_bucket[i:i + batch]},
+                    ))
+            up = await _resolve_up([row[1] for row in fanin if row and row[1]], xs)
+            for row in fanin:
+                for x in up.get(row[1], ()):
+                    _merge(x, row[0], row[2], row[3])
+
+        return [[x, y, w, tl] for (x, y), (w, tl) in cells.items()]
+
+    async def _synthesize_raw_lineage_pairs(
+        self,
+        source_urns: List[str],
+        target_urns: Optional[List[str]],
+        lineage_edges: Optional[List[str]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> list:
+        """Aggregate raw lineage edges between the requested URN sets into
+        the same row shape as the AGGREGATED read (sUrn, tUrn, weight,
+        types) — one row per (s, t) pair, weight = parallel-edge count.
+
+        This is the read-side replacement for the leaf↔leaf mirror pairs
+        the pipeline stopped materializing. Runs on the SOURCE graph
+        (raw lineage lives there even in dedicated projection mode) with
+        a URN-index-driven MATCH, grouped server-side.
+        """
+        from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
+
+        ltypes = self._alias_rel_types(
+            [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
+        )
+        if not ltypes:
+            return []
+
+        # Anchors label-qualified per source bucket — an unlabeled
+        # ``s.urn IN $list`` is a full scan on builds without a
+        # label-less URN index; the "" bucket keeps the unlabeled form.
+        def _cypher_for(label: str) -> str:
+            anchor = f"(s:{label})" if label else "(s)"
+            if target_urns:
+                return (
+                    f"MATCH {anchor}-[r]->(t) "
+                    "WHERE s.urn IN $sourceUrns AND t.urn IN $targetUrns "
+                    "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "count(r) AS weight, collect(DISTINCT type(r)) AS types"
+                )
+            return (
+                f"MATCH {anchor}-[r]->(t) "
+                "WHERE s.urn IN $sourceUrns "
+                "AND type(r) IN $ltypes AND s.urn <> t.urn "
+                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                "count(r) AS weight, collect(DISTINCT type(r)) AS types"
+            )
+
+        async def _run_batch(label: str, batch: List[str]) -> list:
+            params: Dict[str, Any] = {"sourceUrns": batch, "ltypes": list(ltypes)}
+            if target_urns:
+                params["targetUrns"] = target_urns
+            try:
+                result = await self._ro_query(
+                    _cypher_for(label), params=params, timeout=timeout,
+                )
+                return result.result_set or []
+            except Exception as e:
+                logger.warning(f"Raw lineage pair synthesis failed: {e}")
+                return []
+
+        batch_size = AGGREGATED_SOURCE_URN_BATCH_SIZE
+        runs: List[Tuple[str, List[str]]] = []
+        for label, bucket in await self._label_buckets(source_urns):
+            for i in range(0, len(bucket), batch_size):
+                runs.append((label, bucket[i:i + batch_size]))
+        batch_results = await asyncio.gather(*[_run_batch(l, b) for l, b in runs])
+        return [row for rows in batch_results for row in rows]
 
     def _rows_to_aggregated_result(
         self,
         rows: list,
         *,
         last_materialized_at: Optional[str] = None,
+        degraded: bool = False,
     ) -> AggregatedEdgeResult:
         """Convert raw Cypher result rows into AggregatedEdgeResult."""
         from ..config.resilience import AGGREGATED_EDGE_RESULT_CAP
@@ -5763,7 +5079,7 @@ class FalkorDBProvider(GraphDataProvider):
         return AggregatedEdgeResult(
             aggregatedEdges=aggregated,
             totalSourceEdges=total_edges,
-            truncated=len(aggregated) >= AGGREGATED_EDGE_RESULT_CAP,
+            truncated=degraded or len(aggregated) >= AGGREGATED_EDGE_RESULT_CAP,
             lastMaterializedAt=last_materialized_at,
         )
 
@@ -6430,15 +5746,35 @@ class FalkorDBProvider(GraphDataProvider):
         ctypes = self._alias_rel_types(ctypes)
         ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
 
+        # STRUCTURAL dispatch: when the expanded edge carries containment
+        # depth stamps, the drill is one containment step below the pair —
+        # each anchor's direct children, label-agnostic (self-nesting
+        # ontologies drill at every depth; the caller's type-level
+        # ``use_raw`` heuristic is ignored because it misclassifies on
+        # degenerate level maps — the agg-first + empty→raw fallback in
+        # _edges_between_sets already covers the finest grain). Edges
+        # without stamps (pre-depth generations) keep the legacy
+        # type-level descent.
+        structural = False
+        if ctypes:
+            structural = (
+                await self._edge_depth_stamps(source_urn, target_urn)
+            ) is not None
+
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a
         # pool slot for the duration. Surfaces the (now-single) failure
         # mode via truncationReason rather than aborting the expand.
         truncation_reason: Optional[str] = None
         try:
-            s_urns, t_urns = await self._collect_descendants_pair_at_level(
-                source_urn, target_urn, next_level, ctypes, max_nodes,
-            )
+            if structural:
+                s_urns, t_urns = await self._collect_children_pair(
+                    source_urn, target_urn, ctypes, max_nodes,
+                )
+            else:
+                s_urns, t_urns = await self._collect_descendants_pair_at_level(
+                    source_urn, target_urn, next_level, ctypes, max_nodes,
+                )
         except Exception:
             s_urns, t_urns = [], []
             truncation_reason = "descendants_failed"
@@ -6452,7 +5788,7 @@ class FalkorDBProvider(GraphDataProvider):
         if s_urns and t_urns and not truncation_reason:
             edges = await self._edges_between_sets(
                 s_urns, t_urns, next_level, ltypes,
-                use_raw=use_raw_edges, limit=max_nodes,
+                use_raw=use_raw_edges and not structural, limit=max_nodes,
             )
             for e in edges:
                 node_urns_in_edges.add(e.source_urn)
@@ -6792,13 +6128,31 @@ class FalkorDBProvider(GraphDataProvider):
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         use_level_filter = bool(entity_levels) and level >= 0
 
-        # Group frontier URNs by their entity-type label so each sub-query
-        # uses the per-label ``urn`` index. URNs without a known label go
-        # into the "" bucket and use a label-less fallback pattern.
-        by_label: Dict[str, List[str]] = {}
+        # STRUCTURAL peer rollup: when the stored cells carry containment
+        # depth stamps, each frontier node's peers are the cells at ITS
+        # OWN depth — `r.sourceDepth = r.targetDepth = depth(f)`. The
+        # type-level filter is degenerate on self-nesting ontologies
+        # (every container shares one type level, so it mixes every
+        # granularity into one wave); depth buckets are exact on any
+        # shape. Frontier nodes without a resolvable depth (no stamped
+        # incident cell — e.g. leaves in boundary regime) keep the legacy
+        # type/label filters.
+        depth_by_urn: Dict[str, int] = {}
+        try:
+            meta = await self._aggregation_run_meta()
+            if meta.stamp_version >= 2:
+                depth_by_urn = await self._frontier_depths_from_stamps(frontier)
+        except Exception as exc:
+            logger.debug("frontier depth resolution failed: %s", exc)
+
+        # Group frontier URNs by (entity-type label, stamped depth) so
+        # each sub-query uses the per-label ``urn`` index AND the exact
+        # depth cell filter. URNs without a known label go into the ""
+        # bucket and use a label-less fallback pattern.
+        by_label: Dict[Tuple[str, Optional[int]], List[str]] = {}
         for urn in frontier:
             lbl = frontier_labels.get(urn) or ""
-            by_label.setdefault(lbl, []).append(urn)
+            by_label.setdefault((lbl, depth_by_urn.get(urn)), []).append(urn)
 
         # Direction shapes: ``f`` is the frontier-side variable, ``other`` is
         # the neighbour we're expanding into. Edge orientation in the returned
@@ -6853,21 +6207,22 @@ class FalkorDBProvider(GraphDataProvider):
         )
 
         queries: List[tuple[str, Dict[str, Any]]] = []
-        for f_label, urns in by_label.items():
+        for (f_label, f_depth), urns in by_label.items():
             sanitized_self_label = _sanitize_label(f_label) if f_label else ""
             label_clause = f":{sanitized_self_label}" if sanitized_self_label else ""
 
             # Peer-rollup neighbour filter. Order of preference:
             #   1. Per-bucket frontier label (sanitized_self_label)
             #   2. Caller-supplied default (focus entity_type)
-            # If NEITHER is set, refuse to emit an unconstrained query —
-            # the legacy "no filter at all" path is the over-fetch bug
-            # that pulled Attributes into a Layer trace.
+            # If NEITHER is set (and no depth bucket constrains the
+            # cells), refuse to emit an unconstrained query — the legacy
+            # "no filter at all" path is the over-fetch bug that pulled
+            # Attributes into a Layer trace.
             effective_peer_label = sanitized_self_label or sanitized_default_peer
             peer_filter_clause: Optional[str] = None
             if effective_peer_label:
                 peer_filter_clause = f"labels(other)[0] = '{effective_peer_label}'"
-            else:
+            elif f_depth is None:
                 logger.warning(
                     "trace expand: no peer label for bucket=%r and no default — "
                     "skipping sub-query to avoid unconstrained over-fetch",
@@ -6877,10 +6232,16 @@ class FalkorDBProvider(GraphDataProvider):
                 # than to return every neighbour in the graph.
                 continue
 
-            # AGGREGATED branch. The level-pair fast path is the primary
-            # filter when available; otherwise label scan or peer fallback.
+            # AGGREGATED branch. The DEPTH-pair filter is the primary
+            # when this bucket's frontier depth is stamped (exact on any
+            # graph shape); else the type-level fast path; else label
+            # scan or peer fallback.
             agg_where: List[str] = []
-            if use_level_filter:
+            if f_depth is not None:
+                agg_where.append(
+                    "r.sourceDepth = $fDepth AND r.targetDepth = $fDepth"
+                )
+            elif use_level_filter:
                 agg_where.append("r.sourceLevel = $level AND r.targetLevel = $level")
             elif types:
                 agg_where.append("labels(other)[0] IN $types")
@@ -6895,7 +6256,9 @@ class FalkorDBProvider(GraphDataProvider):
                 ":AGGREGATED", where_parts=agg_where, order_by_weight=True,
             ).replace("{F_LABEL}", label_clause)
             agg_params: Dict[str, Any] = {"frontier": urns, "limit": limit}
-            if use_level_filter:
+            if f_depth is not None:
+                agg_params["fDepth"] = f_depth
+            elif use_level_filter:
                 agg_params["level"] = level
             elif types:
                 agg_params["types"] = types
@@ -6904,9 +6267,11 @@ class FalkorDBProvider(GraphDataProvider):
             queries.append((agg_cypher, agg_params))
 
             # Raw-lineage branch (only when ltypes provided). Raw edges
-            # don't carry level props, so this branch uses the type-set
-            # filter, or peer-label fallback when types is empty.
-            if ltypes:
+            # don't carry level/depth props, so this branch uses the
+            # type-set filter, or peer-label fallback when types is
+            # empty; a depth-only bucket with neither constraint skips
+            # raw rather than over-fetch.
+            if ltypes and (types or peer_filter_clause):
                 rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
                 raw_where: List[str] = []
                 if types:
@@ -7021,6 +6386,110 @@ class FalkorDBProvider(GraphDataProvider):
                     out.append(ancestor)
         return out
 
+    async def _edge_depth_stamps(
+        self, source_urn: str, target_urn: str,
+    ) -> Optional[Tuple[int, int]]:
+        """The expanded :AGGREGATED edge's own containment-depth stamps
+        (sourceDepth, targetDepth), or None when the edge is missing or
+        pre-dates the depth-stamp generation — the structural-drill
+        dispatch signal."""
+        try:
+            res = await self._proj_ro_query(
+                "MATCH (s)-[r:AGGREGATED]->(t) "
+                "WHERE s.urn = $s AND t.urn = $t "
+                "AND r.sourceDepth IS NOT NULL AND r.targetDepth IS NOT NULL "
+                "RETURN r.sourceDepth, r.targetDepth LIMIT 1",
+                params={"s": source_urn, "t": target_urn},
+            )
+            rows = res.result_set or []
+            if rows and rows[0] and rows[0][0] is not None and rows[0][1] is not None:
+                return int(rows[0][0]), int(rows[0][1])
+        except Exception as exc:
+            logger.debug("edge depth-stamp read failed: %s", exc)
+        return None
+
+    async def _frontier_depths_from_stamps(
+        self, urns: List[str],
+    ) -> Dict[str, int]:
+        """urn → containment depth, read from any stamped incident
+        :AGGREGATED cell (two bounded relation-anchored queries — no
+        containment walk). Nodes with no stamped incident cell are
+        absent; callers fall back to type/label filters for those."""
+        out: Dict[str, int] = {}
+        for f_label, bucket in await self._label_buckets(urns):
+            f_anchor = f"(f:{f_label})" if f_label else "(f)"
+            for cypher, key in (
+                (
+                    f"MATCH {f_anchor}-[r:AGGREGATED]->() "
+                    "WHERE f.urn IN $urns AND r.sourceDepth IS NOT NULL "
+                    "RETURN f.urn, max(r.sourceDepth)",
+                    "out",
+                ),
+                (
+                    f"MATCH ()-[r:AGGREGATED]->{f_anchor} "
+                    "WHERE f.urn IN $urns AND r.targetDepth IS NOT NULL "
+                    "RETURN f.urn, max(r.targetDepth)",
+                    "in",
+                ),
+            ):
+                try:
+                    res = await self._proj_ro_query(cypher, params={"urns": bucket})
+                    for row in (res.result_set or []):
+                        if row and row[0] is not None and row[1] is not None:
+                            u, d = str(row[0]), int(row[1])
+                            if out.get(u, -1) < d:
+                                out[u] = d
+                except Exception as exc:
+                    logger.debug("frontier depth-stamp read (%s) failed: %s", key, exc)
+        return out
+
+    async def _collect_children_pair(
+        self,
+        source_urn: str,
+        target_urn: str,
+        ctypes: List[str],
+        limit: int,
+    ) -> Tuple[List[str], List[str]]:
+        """STRUCTURAL drill: each anchor's DIRECT containment children —
+        one step below the expanded pair, each side advancing from its
+        own depth (ragged pairs included: a childless side stays at the
+        anchor itself). Label-agnostic, so self-nesting ontologies drill
+        correctly at every depth; on aligned type-structured trees the
+        children ARE the next type level, so behavior is unchanged."""
+        cypher = (
+            "MATCH (a {urn: $source})-[c]->(child) "
+            "WHERE type(c) IN $ctypes "
+            "WITH DISTINCT child.urn AS urn "
+            "LIMIT $limit "
+            "RETURN 's' AS side, collect(urn) AS urns "
+            "UNION "
+            "MATCH (b {urn: $target})-[c]->(child) "
+            "WHERE type(c) IN $ctypes "
+            "WITH DISTINCT child.urn AS urn "
+            "LIMIT $limit "
+            "RETURN 't' AS side, collect(urn) AS urns"
+        )
+        result = await self._ro_query(
+            cypher,
+            params={"source": source_urn, "target": target_urn,
+                    "ctypes": ctypes, "limit": limit},
+            timeout=2.0,
+        )
+        s_urns: List[str] = []
+        t_urns: List[str] = []
+        for row in (result.result_set or []):
+            if not row or len(row) < 2:
+                continue
+            urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+            if row[0] == 's':
+                s_urns.extend(urns)
+            elif row[0] == 't':
+                t_urns.extend(urns)
+        return (
+            list(dict.fromkeys(s_urns)) or [source_urn],
+            list(dict.fromkeys(t_urns)) or [target_urn],
+        )
+
     async def _collect_descendants_pair_at_level(
         self,
         source_urn: str,
@@ -7031,8 +6500,11 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> Tuple[List[str], List[str]]:
         """Collect descendants of both anchors in a SINGLE Cypher round-trip.
 
-        Bounded depth-10 containment descent; per-anchor row LIMIT applied
-        before ``collect()`` so the slice form (which previously tripped
+        LEGACY (type-level) path — used only when the expanded edge has
+        no depth stamps (``expand_aggregated`` dispatches stamped edges
+        to ``_collect_children_pair`` instead). Bounded depth-10
+        containment descent; per-anchor row LIMIT applied before
+        ``collect()`` so the slice form (which previously tripped
         FalkorDB's "expected List or Null but was Edge" planner error) is
         never used.
 
@@ -7143,6 +6615,27 @@ class FalkorDBProvider(GraphDataProvider):
         if not s_urns or not t_urns:
             return []
 
+        edges = await self._edges_between_sets_once(
+            s_urns, t_urns, ltypes, use_raw=use_raw, limit=limit,
+        )
+        if not edges and not use_raw and ltypes:
+            # The AGGREGATED read found nothing between these sets. Under
+            # the same-level materialization boundary, leaf-adjacent
+            # levels have NO stored cells — and the ``use_raw`` decision
+            # upstream compares against the ontology-wide finest level,
+            # which misclassifies when the resolved ontology mixes
+            # entity families of different depths. Raw lineage is the
+            # ground truth at fine grain; falling back costs one indexed
+            # query and only ever fires on an empty result.
+            edges = await self._edges_between_sets_once(
+                s_urns, t_urns, ltypes, use_raw=True, limit=limit,
+            )
+        return edges
+
+    async def _edges_between_sets_once(
+        self, s_urns: List[str], t_urns: List[str],
+        ltypes: Optional[List[str]], use_raw: bool, limit: int,
+    ) -> List[GraphEdge]:
         # Rewritten away from ``UNWIND $sUrns AS srcUrn MATCH (s {urn:
         # srcUrn})`` because the inner unlabeled MATCH does a node scan
         # PER UNWIND iteration when the unlabeled URN index is absent —
@@ -7471,6 +6964,12 @@ class FalkorDBProvider(GraphDataProvider):
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
+                if str(lbl).startswith("_"):
+                    # System-internal labels (_AggMeta run metadata,
+                    # _Projection scaffolding) — not user entity types;
+                    # surfacing them puts phantom types in the ontology
+                    # wizard.
+                    continue
                 cnt = row[1]
                 samples = [s for s in (row[2] or []) if s]
                 total_nodes += cnt
@@ -7767,20 +7266,152 @@ class FalkorDBProvider(GraphDataProvider):
         )
         return [self._extract_node_from_result(row) for row in (result.result_set or []) if self._extract_node_from_result(row)]
 
-    async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+    # TTL for the observed-casing maps below. Long enough to amortize the
+    # vocabulary probe across a bulk load's many calls; short enough that
+    # an out-of-band writer's new spelling is picked up quickly.
+    _TYPE_CASING_TTL_S = 60.0
+
+    async def _type_casing_maps(self) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """``casefold(name) → observed spelling`` for relationship types and
+        labels, TTL-cached per provider instance. Newly-written spellings are
+        added to the cached maps by ``_consistent_casing`` so consistency
+        holds across calls inside the TTL window. Probe failure ⇒ empty maps
+        (write-as-given) — casing consistency must never block a write."""
+        now = time.monotonic()
+        cached = getattr(self, "_casing_maps_cache", None)
+        if cached is not None and now - cached[0] < self._TYPE_CASING_TTL_S:
+            return cached[1], cached[2]
+        rels: Dict[str, str] = {}
+        labels: Dict[str, str] = {}
+        try:
+            res = await self._ro_query("CALL db.relationshipTypes()")
+            for row in (res.result_set or []):
+                if row and row[0]:
+                    rels.setdefault(str(row[0]).casefold(), str(row[0]))
+            res = await self._ro_query("CALL db.labels()")
+            for row in (res.result_set or []):
+                if row and row[0]:
+                    labels.setdefault(str(row[0]).casefold(), str(row[0]))
+        except Exception as exc:
+            logger.debug(
+                "type-casing vocabulary probe failed (%s) — writing types "
+                "as given this window", exc,
+            )
+        self._casing_maps_cache = (now, rels, labels)
+        return rels, labels
+
+    @staticmethod
+    def _consistent_casing(name: str, fold_map: Dict[str, str]) -> str:
+        """The graph's canonical spelling for ``name``: an already-observed
+        case-fold variant wins (FalkorDB matches types/labels case-
+        sensitively — a second casing fragments one logical type across two
+        relation matrices, and a differently-cased label makes MERGE mint a
+        DUPLICATE of an existing urn node); a genuinely new spelling is
+        recorded and becomes canonical for subsequent writes."""
+        got = fold_map.get(name.casefold())
+        if got is not None:
+            return got
+        fold_map[name.casefold()] = name
+        return name
+
+    async def _bulk_write_batch(self, cypher: str, params: dict, *, what: str) -> None:
+        """Execute ONE bulk-load write batch, waiting out a FalkorDB restart/loading instead
+        of dropping it.
+
+        This is the line between a resumable multi-million-row load and silently losing data.
+        A large load can OOM-restart the server (or trip an AOF rewrite); it comes back in a
+        LOADING state that rejects writes for many seconds while it replays its dataset into
+        memory. The old code caught that error, logged "batch failed", and moved on — so every
+        batch during the reload window was dropped while the caller still saw success. Here we
+        instead POLL until the server is ready and retry the SAME batch, and RAISE once the wait
+        budget is spent so the caller fails loudly with an accurate progress count. Real errors
+        (bad cypher, constraint) are never retried — they raise immediately."""
+        try:
+            max_wait = float(os.getenv("FALKORDB_LOAD_MAX_WAIT_S", "900"))   # a big graph can take minutes to reload
+        except ValueError:
+            max_wait = 900.0
+        try:
+            delay = float(os.getenv("FALKORDB_LOAD_RETRY_BASE_S", "0.5"))
+        except ValueError:
+            delay = 0.5
+        waited = 0.0
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._query(cypher, params=params)
+                if attempt > 1:
+                    logger.info(
+                        "FalkorDB %s: %s written after waiting %.0fs for the server to come back.",
+                        self.provider_id, what, waited,
+                    )
+                return
+            except Exception as exc:
+                # ProviderUnavailable covers ProviderLoading (its subclass). Anything else that
+                # is a transient connection / redis-loading error is also worth waiting out.
+                from backend.common.adapters import ProviderUnavailable
+                recoverable = (
+                    isinstance(exc, ProviderUnavailable)
+                    or _is_loading_error(exc)
+                    or _is_transient_connection_error(exc)
+                )
+                if not recoverable or waited >= max_wait:
+                    logger.error(
+                        "FalkorDB %s: %s could not be written (%s) after %.0fs — aborting the "
+                        "load instead of dropping the batch.",
+                        self.provider_id, what, type(exc).__name__, waited,
+                    )
+                    raise
+                await asyncio.sleep(delay)
+                waited += delay
+                delay = min(delay * 1.5, 5.0)
+                try:
+                    await self._ensure_connected()   # rebuild the handle a restart invalidated
+                except Exception:
+                    pass                             # the next _query re-attempts the connection
+
+    async def save_custom_graph(
+        self, nodes: List[GraphNode], edges: List[GraphEdge],
+        endpoint_labels: Optional[Dict[str, str]] = None,
+    ) -> bool:
         """Batch-save nodes and edges using UNWIND for bulk writes.
 
         Groups nodes by label (entity type) so each UNWIND+MERGE targets
         a single label — enabling index-assisted lookups. Turns N individual
         queries into ceil(N/batch_size) queries per label.
+
+        Edges are likewise grouped by (relationship type, source label, target
+        label) so the endpoint MATCH carries a label and hits the per-label urn
+        index (``Node By Index Scan``) instead of an ``All Node Scan`` — the
+        difference between ~180k and ~90 edges/s on a large graph. Endpoint
+        labels are resolved from the nodes saved in THIS call plus the optional
+        ``endpoint_labels`` (urn→entityType) the caller supplies for edges whose
+        endpoints were saved in a previous call (the importer's separate node/
+        edge passes). An endpoint with no known label falls back to a label-less
+        MATCH (correct, just unindexed) — never a dropped edge.
+
+        ``FALKORDB_SAVE_BATCH_SIZE`` tunes the UNWIND batch size (default
+        2000, clamped 100-10000): larger batches amortize parse/plan
+        overhead on multi-million-row initial loads; smaller ones bound
+        single-query time on constrained instances.
         """
         await self._ensure_connected()
-        batch_size = 500
+        try:
+            batch_size = max(100, min(10000, int(os.getenv("FALKORDB_SAVE_BATCH_SIZE", "2000"))))
+        except ValueError:
+            batch_size = 2000
+
+        # Observed-casing maps: everything this call CREATES is written in
+        # the graph's existing casing (or mints the canonical one) so one
+        # logical type/label never fragments across case variants.
+        rel_casing, label_casing = await self._type_casing_maps()
 
         # Group nodes by label for label-specific MERGE
         nodes_by_label: Dict[str, list] = defaultdict(list)
         for node in nodes:
-            label = _sanitize_label(str(node.entity_type))
+            label = self._consistent_casing(
+                _sanitize_label(str(node.entity_type)), label_casing,
+            )
             native_props, residual_blob = _split_user_properties(node.properties)
             nodes_by_label[label].append({
                 "urn": node.urn,
@@ -7800,6 +7431,20 @@ class FalkorDBProvider(GraphDataProvider):
                     node.description, native_props,
                 ),
             })
+
+        # Ensure per-label URN indexes BEFORE the writes: node MERGE and
+        # edge MATCH both look up by urn, and without the index each row
+        # is a label scan. Once per provider instance — CREATE INDEX is
+        # idempotent but there's no point re-issuing DDL per chunk.
+        if nodes_by_label and not getattr(self, "_save_indices_ensured", False):
+            try:
+                await self.ensure_indices(list(nodes_by_label.keys()))
+                self._save_indices_ensured = True
+            except Exception as exc:
+                logger.warning(
+                    "save_custom_graph: ensure_indices failed (continuing; "
+                    "writes will be slower without URN indexes): %s", exc,
+                )
 
         # Bulk-cache urn→label mappings
         label_mapping = {}
@@ -7825,7 +7470,7 @@ class FalkorDBProvider(GraphDataProvider):
                     #   pre-refactor semantics: if the engine hasn't
                     #   injected the entity-type→level map yet (seed-from-
                     #   file before ontology resolution), level stays as-is.
-                    await self._query(
+                    await self._bulk_write_batch(
                         f"UNWIND $batch AS item "
                         f"MERGE (n:{label} {{urn: item.urn}}) "
                         f"SET n.displayName = item.displayName, "
@@ -7841,17 +7486,63 @@ class FalkorDBProvider(GraphDataProvider):
                         f"n.searchableText = item.searchableText, "
                         f"n += item.nativeProps "
                         f"REMOVE n.properties",
-                        params={"batch": batch},
+                        {"batch": batch},
+                        what=f"node batch :{label}",
                     )
                 except Exception as e:
-                    logger.warning(f"Batch node merge failed for label {label}: {e}")
+                    logger.error(f"Node merge failed for label {label}: {e}")
+                    raise
         await self._cache_urn_labels_bulk(label_mapping)
 
-        # Group edges by relationship type for type-specific MERGE
-        edges_by_type: Dict[str, list] = defaultdict(list)
+        # urn → label for endpoint MATCH: same-call nodes (authoritative) over
+        # the caller-supplied map (endpoints saved in a prior call). Resolve ONLY the
+        # endpoints referenced by THIS call's edges — ``endpoint_labels`` can be the whole
+        # graph (millions of urns), so iterating/sanitizing all of it per call is O(graph)
+        # per batch (~1.4s/10k-chunk at 2M nodes → ~11min of pure Python for a 5M-edge
+        # load). A small value cache avoids re-sanitizing the handful of distinct labels.
+        referenced = {u for e in edges for u in (e.source_urn, e.target_urn)}
+        urn_label: Dict[str, str] = {}
+        _san_cache: Dict[str, str] = {}
+        for urn in referenced:
+            lbl = label_mapping.get(urn)          # already sanitized (same-call node)
+            if lbl is None and endpoint_labels:
+                raw = endpoint_labels.get(urn)
+                if raw is not None:
+                    lbl = _san_cache.get(raw)
+                    if lbl is None:
+                        lbl = _sanitize_label(str(raw))
+                        _san_cache[raw] = lbl
+            if lbl is not None:
+                urn_label[urn] = lbl
+
+        # Endpoints still unknown (edges into nodes saved in a prior call
+        # with no caller-supplied label): resolve through the urn→label
+        # cache / graph in one bulk pass so they hit the indexed MATCH
+        # too; anything unresolvable keeps the label-less fallback below.
+        unknown = list(referenced - set(urn_label))
+        if unknown:
+            try:
+                resolved = await self._resolve_urn_labels_bulk(unknown)
+                urn_label.update(
+                    {u: lbl for u, lbl in resolved.items() if lbl}
+                )
+            except Exception as exc:
+                logger.warning(
+                    "save_custom_graph: bulk urn→label resolve failed (%s) — "
+                    "%d endpoint(s) fall back to unlabeled matches",
+                    exc, len(unknown),
+                )
+
+        # Group edges by (relationship type, source label, target label) so each
+        # UNWIND's endpoint MATCH is label-qualified (index-eligible). A None label
+        # means "unknown endpoint" → label-less MATCH (correct, unindexed fallback).
+        edges_grouped: Dict[tuple, list] = defaultdict(list)
         for edge in edges:
-            rel_type = _sanitize_label(str(edge.edge_type))
-            edges_by_type[rel_type].append({
+            rel_type = self._consistent_casing(
+                _sanitize_label(str(edge.edge_type)), rel_casing,
+            )
+            key = (rel_type, urn_label.get(edge.source_urn), urn_label.get(edge.target_urn))
+            edges_grouped[key].append({
                 "src": edge.source_urn,
                 "tgt": edge.target_urn,
                 "eid": edge.id,
@@ -7859,28 +7550,31 @@ class FalkorDBProvider(GraphDataProvider):
                 "props": json.dumps(edge.properties),
             })
 
-        for rel_type, items in edges_by_type.items():
+        for (rel_type, src_label, tgt_label), items in edges_grouped.items():
+            a_pat = f"(a:{src_label} {{urn: item.src}})" if src_label else "(a {urn: item.src})"
+            b_pat = f"(b:{tgt_label} {{urn: item.tgt}})" if tgt_label else "(b {urn: item.tgt})"
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
-                try:
-                    await self._query(
-                        f"UNWIND $batch AS item "
-                        f"MATCH (a {{urn: item.src}}) "
-                        f"MATCH (b {{urn: item.tgt}}) "
-                        f"MERGE (a)-[r:{rel_type}]->(b) "
-                        f"SET r.id = item.eid, r.confidence = item.conf, "
-                        f"r.properties = item.props",
-                        params={"batch": batch},
-                    )
-                except Exception as e:
-                    logger.warning(f"Batch edge merge failed for type {rel_type}: {e}")
+                await self._bulk_write_batch(
+                    f"UNWIND $batch AS item "
+                    f"MATCH {a_pat} "
+                    f"MATCH {b_pat} "
+                    f"MERGE (a)-[r:{rel_type}]->(b) "
+                    f"SET r.id = item.eid, r.confidence = item.conf, "
+                    f"r.properties = item.props",
+                    {"batch": batch},
+                    what=f"edge batch :{rel_type}",
+                )
 
         return True
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         await self._ensure_connected()
         try:
-            label = _sanitize_label(str(node.entity_type))
+            rel_casing, label_casing = await self._type_casing_maps()
+            label = self._consistent_casing(
+                _sanitize_label(str(node.entity_type)), label_casing,
+            )
             native_props, residual_blob = _split_user_properties(node.properties)
             # Reserved fields go into the merge map alongside native user
             # props — `SET n += $p` writes them all in one pass. The native
@@ -7918,7 +7612,9 @@ class FalkorDBProvider(GraphDataProvider):
             )
             await self._cache_urn_label(node.urn, label)
             if containment_edge:
-                rel_type = _sanitize_label(str(containment_edge.edge_type))
+                rel_type = self._consistent_casing(
+                    _sanitize_label(str(containment_edge.edge_type)), rel_casing,
+                )
                 await self._query(
                     f"""
                     MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}})
@@ -7941,7 +7637,10 @@ class FalkorDBProvider(GraphDataProvider):
         """Create a single edge in FalkorDB."""
         await self._ensure_connected()
         try:
-            rel_type = _sanitize_label(str(edge.edge_type))
+            rel_casing, _ = await self._type_casing_maps()
+            rel_type = self._consistent_casing(
+                _sanitize_label(str(edge.edge_type)), rel_casing,
+            )
             await self._query(
                 f"MATCH (a {{urn: $src}}) MATCH (b {{urn: $tgt}}) "
                 f"MERGE (a)-[r:{rel_type}]->(b) "

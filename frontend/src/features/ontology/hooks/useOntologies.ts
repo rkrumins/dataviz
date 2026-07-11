@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { ontologyDefinitionService, type AdoptionParams } from '@/services/ontologyDefinitionService'
 
 export const ONTOLOGY_KEYS = {
   all: ['ontologies'] as const,
@@ -7,7 +7,20 @@ export const ONTOLOGY_KEYS = {
   detail: (id: string) => [...ONTOLOGY_KEYS.all, 'detail', id] as const,
   versions: (id: string) => [...ONTOLOGY_KEYS.all, 'versions', id] as const,
   assignments: (id: string) => [...ONTOLOGY_KEYS.all, 'assignments', id] as const,
+  adoption: (id: string, params: AdoptionParams = {}) =>
+    [...ONTOLOGY_KEYS.all, 'adoption', id, params] as const,
   audit: (id: string) => [...ONTOLOGY_KEYS.all, 'audit', id] as const,
+}
+
+export function useOntologyAdoption(id: string | undefined, params: AdoptionParams = {}) {
+  return useQuery({
+    queryKey: ONTOLOGY_KEYS.adoption(id!, params),
+    queryFn: () => ontologyDefinitionService.adoption(id!, params),
+    enabled: !!id,
+    staleTime: 30_000,
+    // Keep the previous page visible while the next page / filter loads (no flash of empty).
+    placeholderData: keepPreviousData,
+  })
 }
 
 export function useOntologies(includeDeleted = false) {
