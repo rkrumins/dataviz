@@ -15,6 +15,8 @@ def _make_provider(graph_name: str = "demo_graph") -> FalkorDBProvider:
     + ``_ancestors_cache_key`` without provider config / connections."""
     p = FalkorDBProvider.__new__(FalkorDBProvider)
     p._graph_name = graph_name  # type: ignore[attr-defined]
+    p._host = "testhost"  # type: ignore[attr-defined]
+    p._port = 6379  # type: ignore[attr-defined]
     return p
 
 
@@ -80,8 +82,8 @@ def test_cache_key_namespaces_by_graph_name():
     p2.set_containment_edge_types(["CONTAINS"], from_ontology=True)
     assert p1._ancestors_cache_key() != p2._ancestors_cache_key()
     # Both must follow the documented prefix convention.
-    assert p1._ancestors_cache_key().startswith("graph_one:ancestors:")
-    assert p2._ancestors_cache_key().startswith("graph_two:ancestors:")
+    assert p1._ancestors_cache_key().startswith("testhost:6379:graph_one:ancestors:")
+    assert p2._ancestors_cache_key().startswith("testhost:6379:graph_two:ancestors:")
 
 
 def test_cache_key_handles_unset_types():
@@ -90,7 +92,7 @@ def test_cache_key_handles_unset_types():
     Prevents AttributeError on cold-start callers."""
     p = _make_provider()
     k = p._ancestors_cache_key()
-    assert k.startswith("demo_graph:ancestors:")
+    assert k.startswith("testhost:6379:demo_graph:ancestors:")
     # Match the empty-set key after explicit empty assignment.
     p.set_containment_edge_types([], from_ontology=True)
     assert p._ancestors_cache_key() == k

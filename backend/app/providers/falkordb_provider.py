@@ -1922,14 +1922,43 @@ class FalkorDBProvider(GraphDataProvider):
 
     # ---- URN → label cache (Redis Hash) ----
 
+    @property
+    def _cache_ns(self) -> str:
+        """Namespace for ALL provider-level Redis cache keys (urn→label,
+        ancestor chains, ontology/stats/regime markers, agg-membership).
+
+        Must identify the PHYSICAL graph — (FalkorDB endpoint, graph name)
+        — NOT the graph name alone. ``graph_name`` defaults to the literal
+        ``"nexus_lineage"`` when unset and the DB uniqueness constraint is
+        (workspace, provider, graph_name), so the SAME graph_name can name
+        DIFFERENT physical graphs on different FalkorDB instances. Keying
+        caches by graph_name alone let a shared ``CACHE_REDIS_URL`` leak
+        URN labels / ancestor chains / regime across two tenants' graphs
+        that happen to share a name — wrong labels (dropped nodes), wrong
+        ancestor trees (cross-tenant rollups). host:port:graph_name keeps
+        distinct instances distinct; the same instance+graph legitimately
+        shares (it is literally the same physical graph). NOTE this is a
+        cache prefix only — the FalkorDB graph SELECTION still uses the
+        bare ``self._graph_name``.
+        """
+        host = getattr(self, "_host", "") or ""
+        port = getattr(self, "_port", "") or ""
+        return f"{host}:{port}:{self._graph_name}"
+
     def _urn_label_key(self) -> str:
-        return f"{self._graph_name}:urn_labels"
+        return f"{self._cache_ns}:urn_labels"
 
     def _agg_last_materialized_key(self) -> str:
-        return f"{self._graph_name}:agg:last_materialized_at"
+        return f"{self._cache_ns}:agg:last_materialized_at"
 
     def _agg_regime_key(self) -> str:
-        return f"{self._graph_name}:agg:regime"
+        return f"{self._cache_ns}:agg:regime"
+
+    def _agg_members_prefix(self) -> str:
+        """Prefix for the per-pair agg-membership SETs (aggregation
+        bookkeeping). A method so tests can stub it, and so the physical
+        namespace stays in one place."""
+        return f"{self._cache_ns}:agg_members"
 
     async def _aggregation_run_meta(self) -> "AggRunMeta":
         """Resolved aggregation-run metadata for the read paths.
@@ -2061,10 +2090,19 @@ class FalkorDBProvider(GraphDataProvider):
     def _agg_in_flight_key(self, ds_id: str) -> str:
         return f"materialize:in-flight:{ds_id}"
 
+    def _urn_label_ttl(self) -> int:
+        return int(os.getenv("FALKORDB_URN_LABEL_CACHE_TTL_S", "604800"))  # 7d
+
     async def _cache_urn_label(self, urn: str, label: str) -> None:
         """Store a single urn→label mapping."""
         try:
-            await self._redis.hset(self._urn_label_key(), urn, label)
+            key = self._urn_label_key()
+            await self._redis.hset(key, urn, label)
+            # TTL on EVERY write path (not only warmup): a TTL-less hash is
+            # unevictable under volatile-lru, so a fleet of warmed 2M-node
+            # graphs would wedge Redis at maxmemory. Refresh-on-write keeps
+            # active graphs warm and lets idle ones expire.
+            await self._redis.expire(key, self._urn_label_ttl())
         except Exception:
             pass  # best-effort
 
@@ -2077,6 +2115,7 @@ class FalkorDBProvider(GraphDataProvider):
             key = self._urn_label_key()
             for urn, label in mapping.items():
                 pipe.hset(key, urn, label)
+            pipe.expire(key, self._urn_label_ttl())  # keep the hash evictable
             await pipe.execute()
         except Exception:
             pass  # best-effort
@@ -3351,7 +3390,7 @@ class FalkorDBProvider(GraphDataProvider):
             types = set()
         normalised = ",".join(sorted(t.upper() for t in types))
         digest = hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:12]
-        return f"{self._graph_name}:ancestors:{digest}"
+        return f"{self._cache_ns}:ancestors:{digest}"
 
     async def _get_ancestor_chain(self, urn: str) -> List[str]:
         """Get pre-computed ancestor chain from Redis Hash, or compute + cache it.
@@ -3375,6 +3414,8 @@ class FalkorDBProvider(GraphDataProvider):
             await self._redis.execute_command(
                 "HSET", cache_key, urn, json.dumps(ancestors)
             )
+            # TTL so the ancestors hash stays evictable (see _cache_urn_label).
+            await self._redis.expire(cache_key, self._ancestor_cache_ttl())
         except Exception as e:
             logger.debug(f"Failed to cache ancestor chain for {urn}: {e}")
         return ancestors
@@ -3473,12 +3514,17 @@ class FalkorDBProvider(GraphDataProvider):
                 store_pipe.execute_command(
                     "HSET", cache_key, u, json.dumps(result.get(u, [])),
                 )
+            # TTL so the ancestors hash stays evictable (see _cache_urn_label).
+            store_pipe.expire(cache_key, self._ancestor_cache_ttl())
             try:
                 await store_pipe.execute()
             except Exception as e:
                 logger.debug(f"Failed to batch-store ancestor chains: {e}")
 
         return result
+
+    def _ancestor_cache_ttl(self) -> int:
+        return int(os.getenv("FALKORDB_ANCESTOR_CACHE_TTL_S", "604800"))  # 7d
 
     async def _compute_ancestor_chains_bulk_cypher(
         self,
@@ -3667,7 +3713,7 @@ class FalkorDBProvider(GraphDataProvider):
         would inflate weights or carry stale contributor edge_ids forward
         into the rebuilt graph.
         """
-        pattern = f"{self._graph_name}:agg_members:*"
+        pattern = f"{self._agg_members_prefix()}:*"
         cursor: int = 0
         deleted = 0
         try:
@@ -4047,7 +4093,7 @@ class FalkorDBProvider(GraphDataProvider):
         if not lineage_types or self._redis is None:
             return 0
         try:
-            cached = await self._redis.get(f"{self._graph_name}:stats_cache")
+            cached = await self._redis.get(f"{self._cache_ns}:stats_cache")
             if not cached:
                 return 0
             data = json.loads(cached)
@@ -4077,7 +4123,7 @@ class FalkorDBProvider(GraphDataProvider):
             return []
         exclude = {str(c).upper() for c in (containment or [])} | {"AGGREGATED"}
         try:
-            cached = await self._redis.get(f"{self._graph_name}:stats_cache")
+            cached = await self._redis.get(f"{self._cache_ns}:stats_cache")
             if not cached:
                 return []
             data = json.loads(cached)
@@ -4277,7 +4323,7 @@ class FalkorDBProvider(GraphDataProvider):
         s_cl, t_cl, s_cont, t_cont = dag
         meta = await self._aggregation_run_meta()
 
-        members_key_prefix = f"{self._graph_name}:agg_members"
+        members_key_prefix = self._agg_members_prefix()
 
         # Resolve ontology levels for every closure member up front (one
         # urn→label cache pipeline) — labels anchor the MERGE on per-label
@@ -4455,7 +4501,7 @@ class FalkorDBProvider(GraphDataProvider):
         s_cl, t_cl, s_cont, t_cont = dag
         meta = await self._aggregation_run_meta()
 
-        members_key_prefix = f"{self._graph_name}:agg_members"
+        members_key_prefix = self._agg_members_prefix()
 
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         resolved = await self._resolve_chain_levels(
@@ -4661,7 +4707,7 @@ class FalkorDBProvider(GraphDataProvider):
             # mid-purge crash can't leave the tracker keys cleared while
             # AGGREGATED edges still exist (which would silently no-op
             # the next materialize run).
-            pattern = f"{self._graph_name}:agg_members:*"
+            pattern = f"{self._agg_members_prefix()}:*"
             cursor = 0
             cleaned = 0
             while True:
@@ -7343,7 +7389,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
 
         # Check Redis cache (best-effort; Postgres is the source of truth)
-        cache_key = f"{self._graph_name}:stats_cache"
+        cache_key = f"{self._cache_ns}:stats_cache"
         if self._SCHEMA_CACHE_TTL > 0 and not bypass_cache:
             try:
                 cached = await self._redis.get(cache_key)
@@ -7425,7 +7471,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         try:
             await self._redis.setex(
-                f"{self._graph_name}:stats_cache",
+                f"{self._cache_ns}:stats_cache",
                 self._SCHEMA_CACHE_TTL,
                 json.dumps(stats),
             )
@@ -7526,7 +7572,7 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
-        cache_key = f"{self._graph_name}:ontology_cache"
+        cache_key = f"{self._cache_ns}:ontology_cache"
         if self._SCHEMA_CACHE_TTL > 0:
             try:
                 cached = await self._redis.get(cache_key)
@@ -7849,7 +7895,7 @@ class FalkorDBProvider(GraphDataProvider):
                 if attempt > 1:
                     logger.info(
                         "FalkorDB %s: %s written after waiting %.0fs for the server to come back.",
-                        self.provider_id, what, waited,
+                        self._graph_name, what, waited,
                     )
                 return
             except Exception as exc:
@@ -7865,7 +7911,7 @@ class FalkorDBProvider(GraphDataProvider):
                     logger.error(
                         "FalkorDB %s: %s could not be written (%s) after %.0fs — aborting the "
                         "load instead of dropping the batch.",
-                        self.provider_id, what, type(exc).__name__, waited,
+                        self._graph_name, what, type(exc).__name__, waited,
                     )
                     raise
                 await asyncio.sleep(delay)

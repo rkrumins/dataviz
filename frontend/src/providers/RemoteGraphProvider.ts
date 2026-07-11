@@ -95,6 +95,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly branchId?: string
     private readonly connectionId?: string
 
+    /** (workspace, data source, branch) identity — client caches keyed by
+     *  URN fold this in so the same URN across two graphs can't collide. */
+    get scopeKey(): string {
+        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}`
+    }
+
     /** In-flight request deduplication: identical concurrent requests share one Promise */
     private _inflight = new Map<string, Promise<unknown>>()
 

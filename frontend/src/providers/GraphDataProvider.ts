@@ -605,6 +605,14 @@ export interface GraphDataProvider {
     /** Provider name for debugging */
     readonly name: string
 
+    /**
+     * Stable identity of the (workspace, data source, branch) this provider
+     * reads. Client-side caches keyed by URN MUST fold this in, or the same
+     * URN across two graphs/data sources collides. Optional so non-scoped
+     * providers can omit it (callers default to '').
+     */
+    readonly scopeKey?: string
+
     // ==========================================
     // Node Operations
     // ==========================================
