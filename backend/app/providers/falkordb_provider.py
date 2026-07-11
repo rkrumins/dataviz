@@ -7225,6 +7225,62 @@ class FalkorDBProvider(GraphDataProvider):
         fold_map[name.casefold()] = name
         return name
 
+    async def _bulk_write_batch(self, cypher: str, params: dict, *, what: str) -> None:
+        """Execute ONE bulk-load write batch, waiting out a FalkorDB restart/loading instead
+        of dropping it.
+
+        This is the line between a resumable multi-million-row load and silently losing data.
+        A large load can OOM-restart the server (or trip an AOF rewrite); it comes back in a
+        LOADING state that rejects writes for many seconds while it replays its dataset into
+        memory. The old code caught that error, logged "batch failed", and moved on — so every
+        batch during the reload window was dropped while the caller still saw success. Here we
+        instead POLL until the server is ready and retry the SAME batch, and RAISE once the wait
+        budget is spent so the caller fails loudly with an accurate progress count. Real errors
+        (bad cypher, constraint) are never retried — they raise immediately."""
+        try:
+            max_wait = float(os.getenv("FALKORDB_LOAD_MAX_WAIT_S", "900"))   # a big graph can take minutes to reload
+        except ValueError:
+            max_wait = 900.0
+        try:
+            delay = float(os.getenv("FALKORDB_LOAD_RETRY_BASE_S", "0.5"))
+        except ValueError:
+            delay = 0.5
+        waited = 0.0
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._query(cypher, params=params)
+                if attempt > 1:
+                    logger.info(
+                        "FalkorDB %s: %s written after waiting %.0fs for the server to come back.",
+                        self.provider_id, what, waited,
+                    )
+                return
+            except Exception as exc:
+                # ProviderUnavailable covers ProviderLoading (its subclass). Anything else that
+                # is a transient connection / redis-loading error is also worth waiting out.
+                from backend.common.adapters import ProviderUnavailable
+                recoverable = (
+                    isinstance(exc, ProviderUnavailable)
+                    or _is_loading_error(exc)
+                    or _is_transient_connection_error(exc)
+                )
+                if not recoverable or waited >= max_wait:
+                    logger.error(
+                        "FalkorDB %s: %s could not be written (%s) after %.0fs — aborting the "
+                        "load instead of dropping the batch.",
+                        self.provider_id, what, type(exc).__name__, waited,
+                    )
+                    raise
+                await asyncio.sleep(delay)
+                waited += delay
+                delay = min(delay * 1.5, 5.0)
+                try:
+                    await self._ensure_connected()   # rebuild the handle a restart invalidated
+                except Exception:
+                    pass                             # the next _query re-attempts the connection
+
     async def save_custom_graph(
         self, nodes: List[GraphNode], edges: List[GraphEdge],
         endpoint_labels: Optional[Dict[str, str]] = None,
@@ -7325,7 +7381,7 @@ class FalkorDBProvider(GraphDataProvider):
                     #   pre-refactor semantics: if the engine hasn't
                     #   injected the entity-type→level map yet (seed-from-
                     #   file before ontology resolution), level stays as-is.
-                    await self._query(
+                    await self._bulk_write_batch(
                         f"UNWIND $batch AS item "
                         f"MERGE (n:{label} {{urn: item.urn}}) "
                         f"SET n.displayName = item.displayName, "
@@ -7341,10 +7397,12 @@ class FalkorDBProvider(GraphDataProvider):
                         f"n.searchableText = item.searchableText, "
                         f"n += item.nativeProps "
                         f"REMOVE n.properties",
-                        params={"batch": batch},
+                        {"batch": batch},
+                        what=f"node batch :{label}",
                     )
                 except Exception as e:
-                    logger.warning(f"Batch node merge failed for label {label}: {e}")
+                    logger.error(f"Node merge failed for label {label}: {e}")
+                    raise
         await self._cache_urn_labels_bulk(label_mapping)
 
         # urn → label for endpoint MATCH: same-call nodes (authoritative) over
@@ -7408,18 +7466,16 @@ class FalkorDBProvider(GraphDataProvider):
             b_pat = f"(b:{tgt_label} {{urn: item.tgt}})" if tgt_label else "(b {urn: item.tgt})"
             for i in range(0, len(items), batch_size):
                 batch = items[i : i + batch_size]
-                try:
-                    await self._query(
-                        f"UNWIND $batch AS item "
-                        f"MATCH {a_pat} "
-                        f"MATCH {b_pat} "
-                        f"MERGE (a)-[r:{rel_type}]->(b) "
-                        f"SET r.id = item.eid, r.confidence = item.conf, "
-                        f"r.properties = item.props",
-                        params={"batch": batch},
-                    )
-                except Exception as e:
-                    logger.warning(f"Batch edge merge failed for type {rel_type}: {e}")
+                await self._bulk_write_batch(
+                    f"UNWIND $batch AS item "
+                    f"MATCH {a_pat} "
+                    f"MATCH {b_pat} "
+                    f"MERGE (a)-[r:{rel_type}]->(b) "
+                    f"SET r.id = item.eid, r.confidence = item.conf, "
+                    f"r.properties = item.props",
+                    {"batch": batch},
+                    what=f"edge batch :{rel_type}",
+                )
 
         return True
 

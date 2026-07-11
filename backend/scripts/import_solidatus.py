@@ -271,7 +271,7 @@ def _log_converted_stats(cg, schema) -> None:
         logger.info(f"  edge {t}: {c}")
 
 
-async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
+async def push_to_falkordb(builder, graph_name: str, declared_labels=None):
     from backend.app.providers.falkordb_provider import FalkorDBProvider
     provider = FalkorDBProvider(
         host=os.getenv("FALKORDB_HOST", "localhost"),
@@ -280,21 +280,41 @@ async def push_to_falkordb(builder: SolidatusGraphBuilder, graph_name: str):
     )
     await provider._ensure_connected()
 
-    CHUNK = 10_000
-    logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}'...")
+    # Index the urn on EVERY label we're about to write, BEFORE writing. This is the single
+    # most important thing for a large load: without a per-label urn index, each node MERGE
+    # and each edge endpoint MATCH is a FULL label scan (O(N) per row → O(N²) total), which is
+    # both the slowness and the memory blow-up that OOM-restarts FalkorDB. `ensure_indices`
+    # otherwise only indexes a hardcoded default label set (domain/dataset/…), so the labels
+    # this load actually writes would never get indexed — the root cause of the multi-million-
+    # row load failing.
+    #
+    # Labels are sourced from the DECLARED model — the default hierarchy types
+    # (layer/object/group/attribute) or the --schema's entityTypes (e.g. Roots/Node) — passed
+    # in as ``declared_labels``, unioned with whatever the nodes actually carry as a safety net.
+    # Declared-first so a type that's sparse in this particular file is still indexed before its
+    # first write.
+    labels = sorted(set(declared_labels or ()) | {n.entity_type for n in builder.nodes if n.entity_type})
+    logger.info(f"Ensuring urn indices for labels {labels} before load...")
+    await provider.ensure_indices(entity_type_ids=labels)
+
+    # Batch size is tunable — smaller batches bound per-query memory/time on constrained
+    # instances (fewer rows in flight), at the cost of more round-trips.
+    CHUNK = int(os.getenv("SOLIDATUS_IMPORT_CHUNK", "10000"))
+    logger.info(f"Pushing {len(builder.nodes)} nodes to graph '{graph_name}' (chunk={CHUNK})...")
     for i in range(0, len(builder.nodes), CHUNK):
         await provider.save_custom_graph(builder.nodes[i:i + CHUNK], [])
         logger.info(f"  Nodes: {min(i + CHUNK, len(builder.nodes))}/{len(builder.nodes)}")
 
-    # Endpoint urn→label so the edge MATCH is label-qualified (uses the per-label
-    # urn index instead of a full node scan — orders of magnitude faster at scale).
+    # Endpoint urn→label so the edge MATCH is label-qualified — now index-assisted, since the
+    # urn index for these labels exists (created above), so this is a seek, not a scan.
     endpoint_labels = {n.urn: n.entity_type for n in builder.nodes}
     logger.info(f"Pushing {len(builder.edges)} edges...")
     for i in range(0, len(builder.edges), CHUNK):
         await provider.save_custom_graph([], builder.edges[i:i + CHUNK], endpoint_labels=endpoint_labels)
         logger.info(f"  Edges: {min(i + CHUNK, len(builder.edges))}/{len(builder.edges)}")
 
-    await provider.ensure_indices()
+    # Re-run to add the level / built-in edge indices too (idempotent).
+    await provider.ensure_indices(entity_type_ids=labels)
     logger.info("Push complete!")
 
     # Compact the AOF so a subsequent FalkorDB restart reloads from the fast RDB base
@@ -392,7 +412,9 @@ Examples:
             for node in builder.nodes[:5]:
                 logger.info(f"  Sample: {node.urn}  type={node.entity_type}  name={node.display_name}")
         else:
-            asyncio.run(push_to_falkordb(builder, args.graph))
+            # Declared labels for the default path = the hierarchy types the builder can emit.
+            asyncio.run(push_to_falkordb(
+                builder, args.graph, declared_labels=set(PREFIX_TO_TYPE.values())))
         sys.exit(0)
 
     # ── Schema path: convert into the custom ontology ────────────────────────
@@ -423,4 +445,6 @@ Examples:
         for node in cg.nodes[:5]:
             logger.info(f"  Sample: {node.urn}  type={node.entity_type}  name={node.display_name}")
     else:
-        asyncio.run(push_to_falkordb(cg, args.graph))
+        # Declared labels for the schema path = the mapping's entityTypes (e.g. Roots, Node).
+        asyncio.run(push_to_falkordb(
+            cg, args.graph, declared_labels=set(schema.entity_map.values())))
