@@ -129,6 +129,13 @@ _DEFAULT_TOP_LEVEL_TTL = _clamped_int_env("GRAPH_CACHE_TOP_LEVEL_TTL_S", 60, lo=
 # Layer assignment is deterministic for a given (ws, ds, request body)
 # and touches the same node/edge set as a trace. 60s matches /trace.
 _DEFAULT_LAYER_ASSIGNMENT_TTL = _clamped_int_env("GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S", 60, lo=_TTL_LO, hi=_TTL_HI)
+# Batched canvas contract (open/expand). These compose top-level +
+# aggregated + children into one entry; a canvas gesture repeats the
+# exact same request until a write bumps the generation, so a longer
+# TTL amortises the whole bootstrap/expand cost. gen-bump keeps them
+# fresh on edits.
+_DEFAULT_CANVAS_BOOTSTRAP_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
+_DEFAULT_CANVAS_EXPAND_TTL = _clamped_int_env("GRAPH_CACHE_CANVAS_EXPAND_TTL_S", 300, lo=_TTL_LO, hi=_TTL_HI)
 # Short TTL for empty/404 results — absorbs herds asking for the same
 # missing URN without committing to caching nonsense for long. Floor of
 # 5s keeps the herd-absorption property; ceiling of 5min limits damage
@@ -175,6 +182,8 @@ ENDPOINT_TRACE = "trace"
 ENDPOINT_TRACE_EXPAND = "trace-expand"
 ENDPOINT_TOP_LEVEL = "top-level"
 ENDPOINT_LAYER_ASSIGNMENT = "layer-assignment"
+ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
+ENDPOINT_CANVAS_EXPAND = "canvas-expand"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -183,6 +192,8 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_TRACE_EXPAND: _flag("GRAPH_CACHE_ENABLED_TRACE_EXPAND", default=True),
     ENDPOINT_TOP_LEVEL: _flag("GRAPH_CACHE_ENABLED_TOP_LEVEL", default=True),
     ENDPOINT_LAYER_ASSIGNMENT: _flag("GRAPH_CACHE_ENABLED_LAYER_ASSIGNMENT", default=True),
+    ENDPOINT_CANVAS_BOOTSTRAP: _flag("GRAPH_CACHE_ENABLED_CANVAS_BOOTSTRAP", default=True),
+    ENDPOINT_CANVAS_EXPAND: _flag("GRAPH_CACHE_ENABLED_CANVAS_EXPAND", default=True),
 }
 
 
@@ -535,6 +546,10 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_TOP_LEVEL_TTL
     if endpoint == ENDPOINT_LAYER_ASSIGNMENT:
         return _DEFAULT_LAYER_ASSIGNMENT_TTL
+    if endpoint == ENDPOINT_CANVAS_BOOTSTRAP:
+        return _DEFAULT_CANVAS_BOOTSTRAP_TTL
+    if endpoint == ENDPOINT_CANVAS_EXPAND:
+        return _DEFAULT_CANVAS_EXPAND_TTL
     return _DEFAULT_CHILDREN_TTL
 
 

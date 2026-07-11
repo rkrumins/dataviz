@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 
 from backend.app.auth.dependencies import requires
 from .endpoints import (
-    graph, assignments, providers, ontologies, workspaces,
+    graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, stats_admin,
     insights, me, system_status,
@@ -261,6 +261,11 @@ api_router.include_router(
 # Assignment compute (workspace-scoped)
 api_router.include_router(
     assignments.router, prefix="/{ws_id}/graph/assignments", tags=["assignments:workspace"],
+    dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
+)
+# Batched canvas contract (open/expand) — /api/v1/{ws_id}/graph/canvas/*
+api_router.include_router(
+    canvas.router, prefix="/{ws_id}/graph", tags=["canvas:workspace"],
     dependencies=[Depends(requires("workspace:datasource:read", workspace="ws_id"))],
 )
 # Asset endpoints: /api/v1/{ws_id}/assets/rule-sets
