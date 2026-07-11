@@ -3503,25 +3503,55 @@ class FalkorDBProvider(GraphDataProvider):
 
         if missing:
             try:
-                # Single bulk Cypher round-trip for label lookup. Uses
-                # ``WHERE n.urn IN $urns`` form (not ``UNWIND $urns AS u
-                # MATCH (n {urn:u})``) so FalkorDB plans ONE node-scan
-                # for the whole batch rather than N scans (one per
-                # UNWIND iteration). On a 5M-node graph with 1M missing
-                # URNs that's the difference between one O(N) scan and
-                # 5 trillion node comparisons — and was the bottleneck
-                # of the bulk-rebuild label-resolution phase before this
-                # change.
-                #
-                # If an unlabeled URN index exists (FalkorDB >=2.10), the
-                # planner can use it directly and the whole call becomes
-                # a multi-key index seek. If not, the single full scan
-                # is still vastly cheaper than per-row scans.
-                res = await self._ro_query(
-                    "MATCH (n) WHERE n.urn IN $urns "
-                    "RETURN n.urn AS u, labels(n)[0] AS label",
-                    params={"urns": missing},
-                )
+                # Cache-miss bootstrap via PER-LABEL index seeks. The
+                # previous single unlabeled ``WHERE n.urn IN $urns`` scan
+                # was itself the bottleneck it tried to avoid: on builds
+                # without a label-less URN index it is a FULL node scan —
+                # observed timing out on a 2M-node graph, which then
+                # dumped every reader into the unlabeled slow path
+                # (cold-cache chicken-and-egg: resolving labels needed a
+                # label). Enumerating the graph's few observed labels and
+                # seeking each label's URN index turns the bootstrap into
+                # K index-driven queries; the startup warmup caps out at
+                # 200k nodes per label, so big graphs ALWAYS hit this
+                # path for most of their nodes.
+                rows: list = []
+                try:
+                    lbl_res = await self._ro_query(
+                        "CALL db.labels() YIELD label RETURN label",
+                        timeout=5.0,
+                    )
+                    observed = [
+                        str(r[0]) for r in (lbl_res.result_set or [])
+                        if r and r[0] and not str(r[0]).startswith("_")
+                    ]
+                except Exception:
+                    observed = []
+                if observed:
+                    unresolved = list(missing)
+                    for lbl in observed:
+                        if not unresolved:
+                            break
+                        safe = _sanitize_label(lbl)
+                        res = await self._ro_query(
+                            f"MATCH (n:{safe}) WHERE n.urn IN $urns "
+                            "RETURN n.urn AS u",
+                            params={"urns": unresolved},
+                        )
+                        hit = {
+                            r[0] for r in (res.result_set or []) if r and r[0]
+                        }
+                        rows.extend([u, lbl] for u in hit)
+                        if hit:
+                            unresolved = [u for u in unresolved if u not in hit]
+                    res = type("R", (), {"result_set": rows})()
+                else:
+                    # Label enumeration unavailable — legacy single scan.
+                    res = await self._ro_query(
+                        "MATCH (n) WHERE n.urn IN $urns "
+                        "RETURN n.urn AS u, labels(n)[0] AS label",
+                        params={"urns": missing},
+                    )
                 store_pipe = self._redis.pipeline(transaction=False)
                 store_count = 0
                 for row in res.result_set or []:
