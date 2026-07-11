@@ -1,11 +1,14 @@
-import { useState, useCallback, type ComponentType } from 'react'
+import { useState, useCallback, type ComponentType, type ReactNode } from 'react'
 import { BookOpen, ChevronDown, ChevronUp, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface EducationalCalloutProps {
   id: string
   title: string
-  description: string
+  /** Plain-text summary. Rendered when `children` is not supplied. */
+  description?: string
+  /** Rich body — takes precedence over `description` for premium, self-explanatory content. */
+  children?: ReactNode
   icon?: ComponentType<{ className?: string }>
   variant?: 'info' | 'tip' | 'concept'
 }
@@ -39,6 +42,7 @@ export function EducationalCallout({
   id,
   title,
   description,
+  children,
   icon: Icon = BookOpen,
   variant = 'info',
 }: EducationalCalloutProps) {
@@ -112,9 +116,13 @@ export function EducationalCallout({
           )}
         >
           <div className="overflow-hidden">
-            <p className="text-xs text-ink-muted leading-relaxed mt-2">
-              {description}
-            </p>
+            {children != null ? (
+              <div className="mt-2">{children}</div>
+            ) : (
+              <p className="text-xs text-ink-muted leading-relaxed mt-2">
+                {description}
+              </p>
+            )}
           </div>
         </div>
       </div>

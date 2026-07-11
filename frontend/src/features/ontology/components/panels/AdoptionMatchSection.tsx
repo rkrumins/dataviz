@@ -22,6 +22,7 @@ import type {
   AdoptionSource,
 } from '@/services/ontologyDefinitionService'
 import { formatCount } from '../../lib/ontology-parsers'
+import { DeclaredVsPhysical } from '../DeclaredVsPhysical'
 import { cn } from '@/lib/utils'
 
 type Mode = 'weighted' | 'by-type'
@@ -478,12 +479,19 @@ export function AdoptionMatchSection({ ontologyId }: { ontologyId: string }) {
           <Icons.ChevronDown className={cn('w-4 h-4 text-ink-muted transition-transform', explainerOpen && 'rotate-180')} />
         </button>
         {explainerOpen && (
-          <div className="px-3.5 pb-3.5 pt-1 text-xs text-ink-secondary leading-relaxed animate-in fade-in slide-in-from-top-1 duration-200">
-            For each data source using this ontology, we compare its profiled graph against the declared types.
-            <span className="text-emerald-600 dark:text-emerald-400 font-medium"> Exact</span> types hit FalkorDB's labels/indices;
-            <span className="text-amber-600 dark:text-amber-400 font-medium"> case drift</span> is present-but-wrong-casing (won't hit them);
-            <span className="text-red-600 dark:text-red-400 font-medium"> unmapped</span> types aren't classified by the ontology.
-            It reads from cached profiling stats — no live graph queries — so it stays fast at hundreds of sources.
+          <div className="px-3.5 pb-3.5 pt-1 space-y-2.5 animate-in fade-in slide-in-from-top-1 duration-200">
+            <p className="text-xs text-ink-secondary leading-relaxed">
+              Your ontology declares the types; the physical graph in FalkorDB is what's actually stored. Those declared names are
+              exactly what nodes and edges become when a versioned graph is built:
+            </p>
+            <DeclaredVsPhysical footer={false} />
+            <p className="text-xs text-ink-secondary leading-relaxed">
+              This tab compares each source's profiled graph against the declared types.
+              <span className="text-emerald-600 dark:text-emerald-400 font-medium"> Exact</span> types match the declared spelling and hit FalkorDB's labels/indices;
+              <span className="text-amber-600 dark:text-amber-400 font-medium"> case drift</span> is present-but-wrong-casing, so it silently misses them;
+              <span className="text-red-600 dark:text-red-400 font-medium"> unmapped</span> types aren't classified by the ontology at all.
+              It reads from cached profiling stats — no live graph queries — so it stays fast at hundreds of sources.
+            </p>
           </div>
         )}
       </div>
