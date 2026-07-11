@@ -95,6 +95,7 @@ import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { EditViewDetailsDialog } from './EditViewDetailsDialog'
 import { ShareViewDialog } from '@/components/views/ShareViewDialog'
+import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
@@ -381,6 +382,13 @@ export function ContextViewCanvas({
     if (idsToRemove.length > 0) removeStoreEdges(idsToRemove)
     trace.resetAddedEdgeIds()
     setExpandedNodes(new Set())
+    // Clear breakers on exit-trace so a trace 504 that opened the 'trace'
+    // breaker can't linger and block a re-trace. Browse breakers are now
+    // isolated per endpoint class, so this is belt-and-suspenders; it also
+    // resets any half-open flap. (Scope-less: the per-scope vars are
+    // declared later in render order — a deliberate rare user action can
+    // safely reset all scopes' breakers, which re-open on the next failure.)
+    resetAllCircuitBreakers()
     return true
   }, [trace, removeStoreEdges])
 

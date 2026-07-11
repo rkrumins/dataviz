@@ -96,13 +96,34 @@ export class CircuitBreaker {
 }
 
 /**
- * Global registry of circuit breakers, keyed by provider scope.
- * Survives across React re-renders (module-level singleton).
+ * Endpoint class for breaker isolation. A trace 504 must not open the
+ * breaker that browse (children/aggregated/canvas) reads share — that was
+ * the "one dead endpoint blocks ALL graph reads for 15s" bug. Each class
+ * gets its own breaker per (workspace, dataSource).
+ */
+export type EndpointClass = 'trace' | 'aggregated' | 'children' | 'canvas' | 'default'
+
+/** Derive the endpoint class from a request URL. */
+export function classifyEndpoint(url: string): EndpointClass {
+  if (url.includes('/trace')) return 'trace'
+  if (url.includes('/canvas/')) return 'canvas'
+  if (url.includes('/edges/aggregated')) return 'aggregated'
+  if (url.includes('/children-with-edges') || url.includes('/edges/between')) return 'children'
+  return 'default'
+}
+
+/**
+ * Global registry of circuit breakers, keyed by (provider scope, endpoint
+ * class). Survives across React re-renders (module-level singleton).
  */
 const circuits = new Map<string, CircuitBreaker>()
 
-export function getCircuitBreaker(workspaceId?: string, dataSourceId?: string): CircuitBreaker {
-  const key = `${workspaceId ?? ''}:${dataSourceId ?? ''}`
+export function getCircuitBreaker(
+  workspaceId?: string,
+  dataSourceId?: string,
+  endpointClass: EndpointClass = 'default',
+): CircuitBreaker {
+  const key = `${workspaceId ?? ''}:${dataSourceId ?? ''}:${endpointClass}`
   let cb = circuits.get(key)
   if (!cb) {
     cb = new CircuitBreaker()
@@ -114,4 +135,16 @@ export function getCircuitBreaker(workspaceId?: string, dataSourceId?: string): 
 /** Reset all circuit breakers (call on health recovery). */
 export function resetAllCircuitBreakers(): void {
   circuits.forEach(cb => cb.reset())
+}
+
+/**
+ * Reset every endpoint-class breaker for one (workspace, dataSource) —
+ * called on exit-trace so a trace failure can't leave browse reads
+ * fast-failing, and on an explicit Retry affordance.
+ */
+export function resetCircuitBreakers(workspaceId?: string, dataSourceId?: string): void {
+  const prefix = `${workspaceId ?? ''}:${dataSourceId ?? ''}:`
+  circuits.forEach((cb, key) => {
+    if (key.startsWith(prefix)) cb.reset()
+  })
 }

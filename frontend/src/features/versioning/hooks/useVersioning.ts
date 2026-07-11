@@ -69,7 +69,12 @@ export function useResolveGraph(wsId?: string, dataSourceId?: string | null, vie
     queryKey: VERSIONING_KEYS.resolve(wsId, dataSourceId, viewId),
     queryFn: () => api.resolveGraph(wsId!, dataSourceId!, viewId),
     enabled: !!wsId && !!dataSourceId,
-    staleTime: 30_000,
+    // 5 min: a data source's versioned-graph existence changes rarely, but
+    // ≥8 components mount this hook during canvas load — a 30s window let a
+    // burst of identical 404s re-fire on every remount/invalidation. Long
+    // staleTime collapses them to one lookup per scope per 5 min.
+    staleTime: 300_000,
+    gcTime: 300_000,
     // A 404 means this data source has no versioned graph — don't hammer it.
     retry: (n, e) => !/404|not found/i.test(String((e as Error)?.message)) && n < 2,
   })
