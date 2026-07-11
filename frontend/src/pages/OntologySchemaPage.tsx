@@ -744,6 +744,7 @@ export function OntologySchemaPage() {
       matches: response.matchingOntologies,
       suggestedEntityCount: Object.keys(response.suggested.entityTypeDefinitions ?? {}).length,
       suggestedRelCount: Object.keys(response.suggested.relationshipTypeDefinitions ?? {}).length,
+      mergedVariants: response.mergedVariants ?? {},
       freshness,
     }
   }

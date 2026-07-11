@@ -47,9 +47,19 @@ export interface OntologyMatchResult {
     totalRelationshipTypes: number
 }
 
+/** One physical spelling folded into a canonical suggested type id. */
+export interface MergedVariantSpelling { spelling: string; count: number }
+
 export interface OntologySuggestResponse {
     suggested: OntologyCreateRequest
     matchingOntologies: OntologyMatchResult[]
+    /**
+     * Physical type ids the source graph spelled more than one way, folded into one
+     * canonical declared id: `{ canonicalId: [{ spelling, count }, …] }`. Only the
+     * canonical spelling hits FalkorDB's index; the other spellings are case-drift until
+     * the graph is normalized. Empty when every type was spelled consistently.
+     */
+    mergedVariants: Record<string, MergedVariantSpelling[]>
 }
 
 export interface OntologyDefinitionResponse {
