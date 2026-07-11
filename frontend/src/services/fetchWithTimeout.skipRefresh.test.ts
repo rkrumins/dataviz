@@ -6,7 +6,7 @@
  * that path — the recursion that caused the app-wide request storm. This
  * proves the guard: with the flag, a 401 makes NO /auth/refresh attempt.
  */
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { vi, describe, it, expect, afterEach } from 'vitest'
 import { fetchWithTimeout } from './fetchWithTimeout'
 
 const REFRESH_URL = '/api/v1/auth/refresh'
@@ -14,7 +14,8 @@ const realFetch = globalThis.fetch
 
 function mock401() {
     // Every request 401s; a real Response so tryRefresh's clone().json() works.
-    return vi.fn(async () => new Response('{}', { status: 401 }))
+    // Typed with fetch's params so mock.calls[n][0] (the URL) is index-safe.
+    return vi.fn(async (..._args: Parameters<typeof fetch>) => new Response('{}', { status: 401 }))
 }
 
 describe('fetchWithTimeout skipAuthRefresh', () => {
