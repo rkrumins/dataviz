@@ -4466,31 +4466,36 @@ class FalkorDBProvider(GraphDataProvider):
         (dedupe-safe); mixed non-leaf rows carry ONLY the
         strictly-below-the-coarse-endpoint portion and must be ADDED to
         a materialized canonical row for the same pair (see
-        ``_mixed_level_pairs``); ``degraded`` is True when any on-demand
+        ``_mixed_depth_pairs``); ``degraded`` is True when any on-demand
         sub-query failed — the response is then a PARTIAL answer and the
         caller marks the result truncated instead of presenting it as
         complete.
 
-        A pair involves a leaf-LEVEL node only when that node is the raw
-        edge endpoint itself (leaves have no descendants), so every such
-        pair is reachable by anchoring on the leaf side's indexed
-        ``(label {urn})`` lookup and walking the OTHER endpoint upward
-        through containment (``*0..k`` — one parent per hop, bound-end
-        traversal). Cost ≈ fan-out(requested leaves) × hierarchy depth,
-        independent of graph size — this is what makes an 8-level,
-        multi-million-edge graph answer "which domains does this column
-        reach" in milliseconds without materializing edges × depth cells.
+        A pair involves a LEAF node (no containment children) only when
+        that node is the raw edge endpoint itself, so every such pair is
+        reachable by anchoring the leaf side's bounded ``urn IN $set``
+        lookup and walking the OTHER endpoint upward through containment
+        (``*0..k`` — one parent per hop, bound-end traversal). Cost ≈
+        fan-out(requested leaves) × hierarchy depth, independent of
+        graph size.
 
-        Same-level non-leaf pairs are NOT produced here — they come from
-        the materialized diagonal cells (complete weights). Mixed-level
-        non-leaf pairs (table→domain) are derived from those same
-        materialized cells by ``_mixed_level_pairs`` (anchor the finer
-        endpoint's same-level :AGGREGATED fan-out/fan-in, walk the
-        coarser endpoint upward), so the three sources stay disjoint by
-        construction.
+        Classification is STRUCTURAL — leaf = no containment children,
+        the same definition the writer's boundary uses — so self-nesting
+        ontologies (one Node type containing itself, where every label
+        shares one type level) classify correctly; ontology type levels
+        are not consulted at all.
 
-        Falls back to exact-endpoint raw synthesis when no ontology level
-        map is injected (legacy full-cube graphs).
+        Same-depth container pairs are NOT produced here — they come
+        from the materialized canonical cells (complete weights).
+        Mixed-depth container pairs (table→domain) are derived from
+        those same cells by ``_mixed_depth_pairs``, so the sources stay
+        disjoint by construction.
+
+        Regime dispatch: under the CUBE contract every ancestor
+        combination is already stored — any derivation beyond the raw
+        leaf↔leaf mirror would double-count — so only exact-endpoint raw
+        synthesis runs. ``_mixed_depth_pairs`` additionally requires
+        stamp_version >= 2 (depth stamps present graph-wide).
         """
         from ..config.resilience import (
             AGGREGATED_EDGE_RESULT_CAP,
@@ -4502,21 +4507,18 @@ class FalkorDBProvider(GraphDataProvider):
         )
         if not ltypes or not source_urns:
             return [], [], False
-        levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
-        if not levels:
+        meta = await self._aggregation_run_meta()
+        if meta.regime != "boundary":
             return await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout,
             ), [], False
-
-        finest = max(levels.values())
-        leaf_labels = [lbl for lbl, lv in levels.items() if lv == finest]
         try:
             containment = list(self._alias_rel_types(
                 [t for t in (containment_edges or []) if t]
             ) or self._get_containment_edge_types())
         except Exception:
             containment = []
-        if not leaf_labels or not containment:
+        if not containment:
             return await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout,
             ), [], False
@@ -4529,34 +4531,6 @@ class FalkorDBProvider(GraphDataProvider):
         # result's truncated flag instead of silently rendering a canvas
         # missing a whole class of edges.
         degraded = {"v": False}
-
-        async def _classify(
-            urns: List[str], labels: List[str],
-        ) -> Dict[str, List[str]]:
-            """ontology label → member urns, via per-label indexed IN
-            lookups. Each declared label is matched under every observed
-            spelling this source uses (``_alias_entity_types``), so
-            alias-variant graphs classify correctly."""
-            out: Dict[str, List[str]] = {}
-            for lbl in labels:
-                members: List[str] = []
-                for spelled in self._alias_entity_types([lbl]):
-                    safe = _sanitize_label(spelled)
-                    for i in range(0, len(urns), batch):
-                        chunk = urns[i:i + batch]
-                        try:
-                            res = await self._ro_query(
-                                f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
-                                params={"urns": chunk},
-                                timeout=timeout,
-                            )
-                            members.extend(r[0] for r in (res.result_set or []) if r and r[0])
-                        except Exception as e:
-                            degraded["v"] = True
-                            logger.warning("On-demand pair classification failed: %s", e)
-                if members:
-                    out[lbl] = list(dict.fromkeys(members))
-            return out
 
         async def _run(cypher: str, params: Dict[str, Any]) -> list:
             try:
@@ -4576,95 +4550,71 @@ class FalkorDBProvider(GraphDataProvider):
                 logger.warning("On-demand aggregated anchor query failed: %s", e)
                 return []
 
+        async def _profile(urns: List[str]) -> Dict[str, Tuple[bool, int]]:
+            """urn → (is_container, containment depth). One bounded
+            visible-set query per batch (unlabeled ``urn IN`` — the same
+            class as the raw fallback; batches are URN-batch sized and
+            time-boxed). Depth = longest upward containment path — the
+            read-side measurement of the writer's max-over-parents rule."""
+            out: Dict[str, Tuple[bool, int]] = {}
+            uniq = list(dict.fromkeys(urns))
+            for i in range(0, len(uniq), batch):
+                for row in await _run(
+                    f"MATCH (n) WHERE n.urn IN $urns "
+                    f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
+                    f"WITH n, count(ch) AS kids "
+                    f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
+                    f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+                    {"urns": uniq[i:i + batch]},
+                ):
+                    if row and row[0]:
+                        out[str(row[0])] = (
+                            int(row[1] or 0) > 0, int(row[2] or 0),
+                        )
+            return out
+
         rows: list = []
         mixed_rows: list = []
-        src_leaf_by_label = await _classify(source_urns, leaf_labels)
-        src_leaf_set = {u for m in src_leaf_by_label.values() for u in m}
 
         if target_urns:
-            # Q1 — requested LEAF sources: their raw fan-out, targets resolved
-            # exactly or upward to any requested ancestor. Anchors iterate
-            # the source's observed label spellings (identity on governed
-            # graphs) so alias-variant graphs still index-seek.
-            for lbl, members in src_leaf_by_label.items():
-                for spelled in self._alias_entity_types([lbl]):
-                    safe = _sanitize_label(spelled)
-                    for i in range(0, len(members), batch):
-                        rows.extend(await _run(
-                            f"MATCH (x:{safe})-[r]->(t) "
-                            f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                            f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
-                            f"WHERE y.urn IN $ys AND x.urn <> y.urn "
-                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                            f"count(DISTINCT r) AS weight, "
-                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                            {"xs": members[i:i + batch], "ys": target_urns, "lt": lt_list},
-                        ))
-            # Classify the non-leaf remainder against the declared
-            # non-leaf labels. The urns matching NOTHING (entity types
-            # outside the ontology) are handled by QU below — the
-            # original full cube stored their pairs label-agnostically,
-            # so dropping them would silently lose that lineage.
-            tgt_leaf_by_label = await _classify(target_urns, leaf_labels)
-            tgt_leaf_set = {u for m in tgt_leaf_by_label.values() for u in m}
-            src_nonleaf = [u for u in source_urns if u not in src_leaf_set]
-            tgt_nonleaf = [u for u in target_urns if u not in tgt_leaf_set]
-            nonleaf_labels = [lbl for lbl, lv in levels.items() if lv < finest]
-            src_nl_by_label = (
-                await _classify(src_nonleaf, nonleaf_labels)
-                if src_nonleaf and nonleaf_labels else {}
-            )
-            tgt_nl_by_label = (
-                await _classify(tgt_nonleaf, nonleaf_labels)
-                if tgt_nonleaf and nonleaf_labels else {}
-            )
-            src_mapped = {u for m in src_nl_by_label.values() for u in m}
-            tgt_mapped = {u for m in tgt_nl_by_label.values() for u in m}
-            src_unmapped = [u for u in src_nonleaf if u not in src_mapped]
-            tgt_unmapped = [u for u in tgt_nonleaf if u not in tgt_mapped]
-            src_q2 = [u for u in src_nonleaf if u in src_mapped]
+            src_prof = await _profile(source_urns)
+            tgt_prof = await _profile(target_urns)
+            src_leaves = [
+                u for u in source_urns if not src_prof.get(u, (False, 0))[0]
+            ]
+            tgt_leaves = [
+                u for u in target_urns if not tgt_prof.get(u, (False, 0))[0]
+            ]
+            src_containers = {
+                u: src_prof[u][1] for u in source_urns
+                if src_prof.get(u, (False, 0))[0]
+            }
+            tgt_containers = {
+                u: tgt_prof[u][1] for u in target_urns
+                if tgt_prof.get(u, (False, 0))[0]
+            }
 
-            # Q2 — requested LEAF targets: their raw fan-in, sources resolved
-            # exactly or upward to any requested MAPPED non-leaf node (leaf
-            # sources were fully covered by Q1; unmapped sources are owned
-            # by QU — the three are disjoint).
-            if src_q2:
-                for lbl, members in tgt_leaf_by_label.items():
-                    for spelled in self._alias_entity_types([lbl]):
-                        safe = _sanitize_label(spelled)
-                        for i in range(0, len(members), batch):
-                            rows.extend(await _run(
-                                f"MATCH (s)-[r]->(y:{safe}) "
-                                f"WHERE y.urn IN $ys AND type(r) IN $lt "
-                                f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
-                                f"WHERE x.urn IN $xs AND x.urn <> y.urn "
-                                f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                                f"count(DISTINCT r) AS weight, "
-                                f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                                {"ys": members[i:i + batch], "xs": src_q2, "lt": lt_list},
-                            ))
-            # QU — endpoints matching NO declared ontology label. Anchored
-            # as raw endpoints via bounded IN-list matches (visible-set
-            # sized — same class as the legacy raw fallback). QU-out owns
-            # every pair whose source is unmapped; QU-in serves mapped
-            # non-leaf sources reaching an unmapped target's raw fan-in.
-            # (Residual gap, as before this change: a mapped→unmapped pair
-            # where the raw edge lands strictly BELOW the unmapped node is
-            # not derivable without enumerating the unmapped subtree.)
-            if src_unmapped:
-                for i in range(0, len(src_unmapped), batch):
-                    rows.extend(await _run(
-                        f"MATCH (x)-[r]->(t) "
-                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                        f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
-                        f"WHERE y.urn IN $ys AND x.urn <> y.urn "
-                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                        f"count(DISTINCT r) AS weight, "
-                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"xs": src_unmapped[i:i + batch], "ys": target_urns, "lt": lt_list},
-                    ))
-            if tgt_unmapped and src_q2:
-                for i in range(0, len(tgt_unmapped), batch):
+            # Q1 — requested LEAF sources: their raw fan-out, targets
+            # resolved exactly or upward to any requested node.
+            for i in range(0, len(src_leaves), batch):
+                rows.extend(await _run(
+                    f"MATCH (x)-[r]->(t) "
+                    f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                    f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
+                    f"WHERE y.urn IN $ys AND x.urn <> y.urn "
+                    f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
+                    f"count(DISTINCT r) AS weight, "
+                    f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                    {"xs": src_leaves[i:i + batch], "ys": target_urns, "lt": lt_list},
+                ))
+            # Q2 — requested LEAF targets: their raw fan-in, sources
+            # resolved exactly or upward to any requested CONTAINER (leaf
+            # sources were fully covered by Q1 — the two stay disjoint,
+            # and container→leaf rows never collide with stored
+            # container→container cells).
+            if src_containers and tgt_leaves:
+                xs_all = list(src_containers)
+                for i in range(0, len(tgt_leaves), batch):
                     rows.extend(await _run(
                         f"MATCH (s)-[r]->(y) "
                         f"WHERE y.urn IN $ys AND type(r) IN $lt "
@@ -4673,49 +4623,46 @@ class FalkorDBProvider(GraphDataProvider):
                         f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
                         f"count(DISTINCT r) AS weight, "
                         f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"ys": tgt_unmapped[i:i + batch], "xs": src_q2, "lt": lt_list},
+                        {"ys": tgt_leaves[i:i + batch], "xs": xs_all, "lt": lt_list},
                     ))
-            # Q3 — mixed-level NON-leaf pairs (table→domain, domain→table):
-            # only the same-level diagonal is materialized, so these are
-            # derived by anchoring on the FINER endpoint's same-level
-            # :AGGREGATED cells and walking the coarser endpoint upward
-            # through containment. Each raw edge appears exactly once in a
-            # node's same-level fan-out, so the summed weights are exact —
-            # but ONLY against canonical stored cells. Against a legacy /
-            # fine full cube the stored mixed rows already carry these
-            # contributions and the additive merge would double-count
-            # them, so Q3 is gated on the storage regime.
-            if src_nl_by_label and tgt_nl_by_label:
-                if await self._aggregation_storage_regime() == "boundary":
-                    mixed_rows = await self._mixed_level_pairs(
-                        src_nl_by_label, tgt_nl_by_label, levels,
-                        c_pattern=c_pattern, hops=hops, cap=cap, batch=batch,
-                        run_src=_run, run_proj=_run_proj,
-                    )
+            # Q3 — mixed-DEPTH container pairs (table→domain): only the
+            # canonical cells are materialized, so these are derived by
+            # anchoring the finer endpoint's stored fan-out/fan-in and
+            # walking the coarser endpoint upward. Requires depth stamps
+            # graph-wide (stamp_version >= 2); older graphs serve stored
+            # rows only until the next materialization re-stamps them —
+            # never the type-level arithmetic this replaces, which
+            # collapsed on self-nesting ontologies.
+            if src_containers and tgt_containers and meta.stamp_version >= 2:
+                mixed_rows = await self._mixed_depth_pairs(
+                    src_containers, tgt_containers,
+                    c_pattern=c_pattern, hops=hops, cap=cap, batch=batch,
+                    run_src=_run, run_proj=_run_proj,
+                )
         else:
             # Source-only mode (no target set): exact raw fan-out of the
-            # requested leaf sources. Upward resolution is skipped — with no
-            # target set to bound it, it would enumerate every ancestor.
-            for lbl, members in src_leaf_by_label.items():
-                for spelled in self._alias_entity_types([lbl]):
-                    safe = _sanitize_label(spelled)
-                    for i in range(0, len(members), batch):
-                        rows.extend(await _run(
-                            f"MATCH (x:{safe})-[r]->(t) "
-                            f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                            f"AND t.urn <> x.urn "
-                            f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
-                            f"count(r) AS weight, "
-                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                            {"xs": members[i:i + batch], "lt": lt_list},
-                        ))
+            # requested leaf sources. Upward resolution is skipped — with
+            # no target set to bound it, it would enumerate every ancestor.
+            src_prof = await _profile(source_urns)
+            src_leaves = [
+                u for u in source_urns if not src_prof.get(u, (False, 0))[0]
+            ]
+            for i in range(0, len(src_leaves), batch):
+                rows.extend(await _run(
+                    f"MATCH (x)-[r]->(t) "
+                    f"WHERE x.urn IN $xs AND type(r) IN $lt "
+                    f"AND t.urn <> x.urn "
+                    f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
+                    f"count(r) AS weight, "
+                    f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
+                    {"xs": src_leaves[i:i + batch], "lt": lt_list},
+                ))
         return rows, mixed_rows, degraded["v"]
 
-    async def _mixed_level_pairs(
+    async def _mixed_depth_pairs(
         self,
-        src_by_label: Dict[str, List[str]],
-        tgt_by_label: Dict[str, List[str]],
-        levels: Dict[str, int],
+        src_containers: Dict[str, int],
+        tgt_containers: Dict[str, int],
         *,
         c_pattern: str,
         hops: int,
@@ -4724,23 +4671,34 @@ class FalkorDBProvider(GraphDataProvider):
         run_src,
         run_proj,
     ) -> list:
-        """Derive mixed-level non-leaf pairs (table→domain, domain→table)
-        from the materialized canonical cells.
+        """Derive mixed-DEPTH container pairs (table→domain, domain→table)
+        from the materialized canonical cells, keyed on the structural
+        ``sourceDepth``/``targetDepth`` stamps — no ontology labels or
+        type levels anywhere, so self-nesting ontologies derive
+        correctly.
 
-        For each finer/coarser combination: (1) read the finer endpoint's
-        :AGGREGATED cells whose far side is at-or-below the finer level
-        (``targetLevel <= Ls`` / ``sourceLevel <= Lt`` — under canonical
-        level-bridging each raw edge appears in exactly ONE such cell per
-        anchored endpoint, aligned or ragged), (2) resolve the far
-        endpoints STRICTLY upward through containment on the source
-        graph, (3) join and sum in Python. Two bounded index-driven
-        queries per level combination — never a subtree enumeration.
+        Inputs are the requested containers with their MEASURED
+        containment depths. For each direction: (1) anchor the FINER
+        endpoint's stored :AGGREGATED cells at the anchor's own rank —
+        ``r.targetDepth <= r.sourceDepth`` for fan-out (the anchored
+        row's sourceDepth IS the anchor's depth, so no per-anchor
+        parameter is needed; under canonical depth-bridging each raw
+        edge appears in exactly ONE such kept cell per anchor), (2)
+        resolve the far endpoints STRICTLY upward through containment,
+        (3) join against the requested strictly-coarser far side and sum
+        in Python. Bounded index-driven queries — never a subtree
+        enumeration.
 
         The strictly-upward walk makes these sums DISJOINT from any
-        directly-materialized canonical cell for the same (finer, coarser)
-        pair (whose raw edges resolve AT the coarser endpoint, not below
-        it) — the caller must therefore ADD a derived row's weight to a
-        materialized row for the same pair, not drop it.
+        directly-materialized canonical cell for the same pair — the
+        caller must therefore ADD a derived row's weight to a
+        materialized row, not drop it.
+
+        Known bound (multi-parent diamonds only): a raw edge whose far
+        endpoint sits under TWO stored reps that both resolve up to the
+        same requested coarser node is summed once per rep — mixed-depth
+        weights can overcount on such shapes in boundary regime. Cube
+        regime (the default within budget) stores these pairs exactly.
         """
         cells: Dict[Tuple[str, str], list] = {}
 
@@ -4774,49 +4732,47 @@ class FalkorDBProvider(GraphDataProvider):
                 cell[0] += w
                 cell[1].extend(t for t in tl if t not in cell[1])
 
-        for s_lbl, xs in src_by_label.items():
-            ls = levels[s_lbl]
-            ys = [
-                u for t_lbl, members in tgt_by_label.items()
-                if levels[t_lbl] < ls for u in members
-            ]
-            if not ys:
+        # Fan-out: requested source containers anchored on their stored
+        # at-rank cells; far side resolved up to STRICTLY SHALLOWER
+        # requested targets. Anchors grouped by depth so each group joins
+        # only its coarser counterparts.
+        depths = sorted({d for d in src_containers.values()})
+        for dx in depths:
+            xs = [u for u, d in src_containers.items() if d == dx]
+            ys = [u for u, d in tgt_containers.items() if d < dx]
+            if not xs or not ys:
                 continue
             fanout = []
-            for spelled in self._alias_entity_types([s_lbl]):
-                safe = _sanitize_label(spelled)
-                for i in range(0, len(xs), batch):
-                    fanout.extend(await run_proj(
-                        f"MATCH (x:{safe})-[r:AGGREGATED]->(t2) "
-                        f"WHERE x.urn IN $xs AND r.targetLevel <= $maxTl "
-                        f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
-                        f"LIMIT {cap}",
-                        {"xs": xs[i:i + batch], "maxTl": ls},
-                    ))
+            for i in range(0, len(xs), batch):
+                fanout.extend(await run_proj(
+                    f"MATCH (x)-[r:AGGREGATED]->(t2) "
+                    f"WHERE x.urn IN $xs AND r.targetDepth <= r.sourceDepth "
+                    f"RETURN x.urn, t2.urn, r.weight, r.sourceEdgeTypes "
+                    f"LIMIT {cap}",
+                    {"xs": xs[i:i + batch]},
+                ))
             up = await _resolve_up([row[1] for row in fanout if row and row[1]], ys)
             for row in fanout:
                 for y in up.get(row[1], ()):
                     _merge(row[0], y, row[2], row[3])
 
-        for t_lbl, ys in tgt_by_label.items():
-            lt = levels[t_lbl]
-            xs = [
-                u for s_lbl, members in src_by_label.items()
-                if levels[s_lbl] < lt for u in members
-            ]
-            if not xs:
+        # Fan-in mirror: requested target containers anchored; far side
+        # resolved up to strictly shallower requested sources.
+        depths = sorted({d for d in tgt_containers.values()})
+        for dy in depths:
+            ys = [u for u, d in tgt_containers.items() if d == dy]
+            xs = [u for u, d in src_containers.items() if d < dy]
+            if not xs or not ys:
                 continue
             fanin = []
-            for spelled in self._alias_entity_types([t_lbl]):
-                safe = _sanitize_label(spelled)
-                for i in range(0, len(ys), batch):
-                    fanin.extend(await run_proj(
-                        f"MATCH (s2)-[r:AGGREGATED]->(y:{safe}) "
-                        f"WHERE y.urn IN $ys AND r.sourceLevel <= $maxSl "
-                        f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
-                        f"LIMIT {cap}",
-                        {"ys": ys[i:i + batch], "maxSl": lt},
-                    ))
+            for i in range(0, len(ys), batch):
+                fanin.extend(await run_proj(
+                    f"MATCH (s2)-[r:AGGREGATED]->(y) "
+                    f"WHERE y.urn IN $ys AND r.sourceDepth <= r.targetDepth "
+                    f"RETURN y.urn, s2.urn, r.weight, r.sourceEdgeTypes "
+                    f"LIMIT {cap}",
+                    {"ys": ys[i:i + batch]},
+                ))
             up = await _resolve_up([row[1] for row in fanin if row and row[1]], xs)
             for row in fanin:
                 for x in up.get(row[1], ()):

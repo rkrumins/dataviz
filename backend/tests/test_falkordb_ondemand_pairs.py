@@ -1,24 +1,29 @@
-"""Unit tests for the on-demand fine-pair reader
+"""Unit tests for the on-demand STRUCTURAL pair reader
 (`FalkorDBProvider._synthesize_ondemand_lineage_pairs`) — the read-side
-half of the level-based materialization boundary.
+half of the depth-based materialization boundary.
 
-Pairs involving leaf-LEVEL nodes are no longer materialized (they scale
-as edges × depth and OOM the instance); `get_aggregated_edges_between`
+In boundary regime, pairs involving structural LEAF nodes (no
+containment children) are not materialized; `get_aggregated_edges_between`
 computes them on demand by anchoring on the leaf endpoint's raw lineage
 and walking the OTHER endpoint upward through containment (``*0..k``).
-These tests simulate that traversal against an in-memory graph and
-assert the questions the boundary must keep answering:
+Classification and mixed-pair derivation are keyed on containment DEPTH
+(the ``sourceDepth``/``targetDepth`` stamps), never on ontology type
+levels — which degenerate on self-nesting types. These tests simulate
+that traversal against an in-memory graph and assert:
 
 * "which domains does this column reach" — leaf source resolved to an
   ancestor 8 levels up (Q1, upward walk on the target side);
-* the reverse direction — non-leaf source, leaf target (Q2);
+* the reverse direction — container source, leaf target (Q2);
 * source-only fan-out for a leaf node (exact raw targets);
-* mixed-level non-leaf pairs (table→domain) derived from the
-  materialized same-level diagonal (Q3: anchor the finer endpoint's
-  :AGGREGATED cells, walk the coarser endpoint upward) — exact weights;
-* same-level pairs are NOT produced here (they come from the
+* mixed-DEPTH container pairs (table→domain) derived from the
+  materialized depth-diagonal (Q3: anchor the finer endpoint's stored
+  cells at its own rank, walk the coarser endpoint upward) — exact
+  weights, self-nesting shapes included;
+* same-depth pairs are NOT produced here (they come from the
   materialized cells — the sources stay disjoint);
-* legacy fallback to exact raw synthesis when no level map is injected;
+* regime dispatch: cube regime serves only the raw leaf↔leaf mirror;
+  the in-graph _AggMeta stamp beats the legacy Redis marker and probe;
+  stamp_version < 2 keeps depth-keyed mixed derivation off;
 * `get_aggregated_edges_between` merges materialized + on-demand rows,
   deduping in favor of the materialized row.
 """
@@ -34,28 +39,32 @@ class _Result:
 
 
 _CLASSIFY_RE = re.compile(r"MATCH \(n:(\w+)\) WHERE n\.urn IN \$urns")
-_Q1_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*MATCH \(y\)-\[:")
-_Q2_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y:(\w+)\)")
-_SRC_ONLY_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r\]->\(t\) .*AND t\.urn <> x\.urn")
 _RESOLVE_UP_RE = re.compile(r"RETURN (?:DISTINCT )?c\.urn, a\.urn")
-_QU_OUT_RE = re.compile(r"MATCH \(x\)-\[r\]->\(t\) WHERE x\.urn IN \$xs")
-_QU_IN_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y\) WHERE y\.urn IN \$ys")
+_Q1_RE = re.compile(r"MATCH \(x\)-\[r\]->\(t\) WHERE x\.urn IN \$xs")
+_Q2_RE = re.compile(r"MATCH \(s\)-\[r\]->\(y\) WHERE y\.urn IN \$ys")
+_RAW_RE = re.compile(r"MATCH \(s\)-\[r\]->\(t\) WHERE s\.urn IN \$sourceUrns")
 _CHAIN_RE = re.compile(r"MATCH \(child(?::(\w+))?\) WHERE child\.urn IN \$urns")
-_AGG_FANOUT_RE = re.compile(r"MATCH \(x:(\w+)\)-\[r:AGGREGATED\]->\(t2\)")
-_AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y:(\w+)\)")
+_AGG_FANOUT_RE = re.compile(r"MATCH \(x\)-\[r:AGGREGATED\]->\(t2\)")
+_AGG_FANIN_RE = re.compile(r"MATCH \(s2\)-\[r:AGGREGATED\]->\(y\)")
 
 
 class _FakeGraph:
-    """In-memory graph answering the reader's Cypher shapes: per-label
-    URN classification, leaf-anchored raw fan-out queries with ``*0..k``
-    upward containment walks, same-level :AGGREGATED anchor queries (the
-    materialized diagonal), and the strict upward resolution query."""
+    """In-memory graph answering the STRUCTURAL reader's Cypher shapes:
+    the containment-profile query (leafness + depth per requested urn),
+    leaf-anchored raw fan-out/fan-in with ``*0..k`` upward containment
+    walks, depth-stamped :AGGREGATED anchor queries (the materialized
+    canonical cells), the strict upward resolution query, the in-graph
+    ``_AggMeta`` read and the legacy regime probe."""
 
     def __init__(self):
-        self.labels = {}       # urn -> label
+        self.labels = {}       # urn -> label (display metadata only)
         self.children = {}     # parent_urn -> set(child_urn)
         self.lineage = []      # (edge_id, src_urn, tgt_urn, type)
-        self.agg = []          # (src_urn, tgt_urn, weight, types) same-level cells
+        self.agg = []          # (src, tgt, weight, types, sd, td) canonical cells
+        # (regime, stampVersion) — None simulates a pre-_AggMeta graph
+        # (readers fall back to the legacy marker/probe, stamp_version 1,
+        # which keeps depth-keyed mixed derivation OFF).
+        self.meta = None
 
     def add_node(self, urn, label):
         self.labels[urn] = label
@@ -66,11 +75,29 @@ class _FakeGraph:
     def flow(self, eid, src, tgt, etype="FLOWS"):
         self.lineage.append((eid, src, tgt, etype))
 
-    def aggregated(self, src, tgt, weight, types=("FLOWS",), sl=None, tl=None):
-        lvl = lambda u: int(re.search(r"(\d+)", self.labels[u]).group(1))
+    def set_meta(self, regime="boundary", stamp=2):
+        self.meta = (regime, stamp)
+
+    def _parents(self):
+        out = {}
+        for par, kids in self.children.items():
+            for k in kids:
+                out.setdefault(k, set()).add(par)
+        return out
+
+    def depth(self, urn):
+        parents = self._parents()
+
+        def d(u, seen=()):
+            ps = [p for p in parents.get(u, ()) if p not in seen]
+            return 0 if not ps else 1 + max(d(p, (*seen, u)) for p in ps)
+
+        return d(urn)
+
+    def aggregated(self, src, tgt, weight, types=("FLOWS",), sd=None, td=None):
         self.agg.append((src, tgt, weight, list(types),
-                         lvl(src) if sl is None else sl,
-                         lvl(tgt) if tl is None else tl))
+                         self.depth(src) if sd is None else sd,
+                         self.depth(tgt) if td is None else td))
 
     def _descendants_or_self(self, urn):
         out, stack = {urn}, [urn]
@@ -84,27 +111,29 @@ class _FakeGraph:
     legacy_rows = False  # True simulates NULL-aggKey / NULL-stamp rows
 
     async def proj_ro_query(self, cypher, params=None, timeout=None):
-        """Projection-graph reads: same-level :AGGREGATED anchors."""
+        """Projection-graph reads: _AggMeta, regime probe, depth-stamped
+        :AGGREGATED anchors."""
         params = params or {}
+        if "_AggMeta" in cypher:
+            if self.meta is None:
+                return _Result([])
+            regime, stamp = self.meta
+            return _Result([[regime, stamp, None, "2026-07-11T00:00:00Z"]])
         if "r.aggKey IS NULL" in cypher:
             # Storage-regime probe: canonical fake cells always conform
             # unless a test explicitly simulates a legacy generation.
             return _Result([[1]] if self.legacy_rows else [])
-        m = _AGG_FANOUT_RE.search(cypher)
-        if m:
-            lbl = m.group(1)
+        if _AGG_FANOUT_RE.search(cypher):
+            assert "r.targetDepth <= r.sourceDepth" in cypher
             return _Result([
-                [s, t, w, list(ty)] for s, t, w, ty, sl, tl in self.agg
-                if s in params["xs"] and self.labels.get(s) == lbl
-                and tl <= params["maxTl"]
+                [s, t, w, list(ty)] for s, t, w, ty, sd, td in self.agg
+                if s in params["xs"] and td <= sd
             ])
-        m = _AGG_FANIN_RE.search(cypher)
-        if m:
-            lbl = m.group(1)
+        if _AGG_FANIN_RE.search(cypher):
+            assert "r.sourceDepth <= r.targetDepth" in cypher
             return _Result([
-                [t, s, w, list(ty)] for s, t, w, ty, sl, tl in self.agg
-                if t in params["ys"] and self.labels.get(t) == lbl
-                and sl <= params["maxSl"]
+                [t, s, w, list(ty)] for s, t, w, ty, sd, td in self.agg
+                if t in params["ys"] and sd <= td
             ])
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
@@ -112,6 +141,8 @@ class _FakeGraph:
         params = params or {}
         m = _CLASSIFY_RE.search(cypher)
         if m:
+            # Per-label urn classification — still used by the hooks'
+            # bulk ancestor-chain path (label-driven index anchors).
             lbl = m.group(1)
             return _Result([[u] for u in params["urns"] if self.labels.get(u) == lbl])
         m = _CHAIN_RE.search(cypher)
@@ -136,63 +167,34 @@ class _FakeGraph:
                     cur = parent.get(cur)
                 rows.append([u, chain])
             return _Result(rows)
+        if "count(ch) AS kids" in cypher:
+            # Containment profile: urn → (child count, depth).
+            return _Result([
+                [u, len(self.children.get(u, ())), self.depth(u)]
+                for u in params["urns"] if u in self.labels
+            ])
         if _RESOLVE_UP_RE.search(cypher):
             # strict upward resolution: c.urn IN $cs, a.urn IN $as_, a above c
             return _Result([
                 [c, a] for c in params["cs"] for a in params["as_"]
                 if a != c and c in self._descendants_or_self(a)
             ])
-        m = _Q1_RE.search(cypher)
-        if m:
-            # leaf sources: raw fan-out, target resolved upward to any $ys
-            lbl, cells = m.group(1), {}
-            for x in params["xs"]:
-                if self.labels.get(x) != lbl:
+        if _RAW_RE.search(cypher):
+            # Exact-endpoint raw synthesis (cube regime / no containment).
+            cells = {}
+            tgts = params.get("targetUrns")
+            for eid, s, t, et in self.lineage:
+                if s not in params["sourceUrns"] or et not in params["ltypes"]:
                     continue
-                for eid, s, t, et in self.lineage:
-                    if s != x or et not in params["lt"]:
-                        continue
-                    for y in params["ys"]:
-                        if x != y and t in self._descendants_or_self(y):
-                            eids, types = cells.setdefault((x, y), (set(), []))
-                            eids.add(eid)
-                            if et not in types:
-                                types.append(et)
-            return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
-        m = _Q2_RE.search(cypher)
-        if m:
-            # leaf targets: raw fan-in, source resolved upward to any $xs
-            lbl, cells = m.group(1), {}
-            for y in params["ys"]:
-                if self.labels.get(y) != lbl:
+                if s == t or (tgts is not None and t not in tgts):
                     continue
-                for eid, s, t, et in self.lineage:
-                    if t != y or et not in params["lt"]:
-                        continue
-                    for x in params["xs"]:
-                        if x != y and s in self._descendants_or_self(x):
-                            eids, types = cells.setdefault((x, y), (set(), []))
-                            eids.add(eid)
-                            if et not in types:
-                                types.append(et)
-            return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
-        m = _SRC_ONLY_RE.search(cypher)
-        if m:
-            lbl, cells = m.group(1), {}
-            for x in params["xs"]:
-                if self.labels.get(x) != lbl:
-                    continue
-                for eid, s, t, et in self.lineage:
-                    if s != x or et not in params["lt"] or t == x:
-                        continue
-                    eids, types = cells.setdefault((x, t), (set(), []))
-                    eids.add(eid)
-                    if et not in types:
-                        types.append(et)
-            return _Result([[x, t, len(e), ty] for (x, t), (e, ty) in cells.items()])
-        if _QU_OUT_RE.search(cypher):
-            # Unmapped-label sources: unlabeled anchor, raw fan-out with
-            # the target resolved upward to any $ys (same shape as Q1).
+                eids, types = cells.setdefault((s, t), (set(), []))
+                eids.add(eid)
+                if et not in types:
+                    types.append(et)
+            return _Result([[s, t, len(e), ty] for (s, t), (e, ty) in cells.items()])
+        if _Q1_RE.search(cypher) and "MATCH (y)-[:" in cypher:
+            # Leaf sources: raw fan-out, target resolved upward to any $ys.
             cells = {}
             for x in params["xs"]:
                 for eid, s, t, et in self.lineage:
@@ -205,9 +207,20 @@ class _FakeGraph:
                             if et not in types:
                                 types.append(et)
             return _Result([[x, y, len(e), t] for (x, y), (e, t) in cells.items()])
-        if _QU_IN_RE.search(cypher):
-            # Unmapped-label targets: unlabeled anchor, raw fan-in with
-            # the source resolved upward to any $xs (same shape as Q2).
+        if _Q1_RE.search(cypher) and "t.urn <> x.urn" in cypher:
+            # Source-only mode: exact raw fan-out of the requested leaves.
+            cells = {}
+            for x in params["xs"]:
+                for eid, s, t, et in self.lineage:
+                    if s != x or et not in params["lt"] or t == x:
+                        continue
+                    eids, types = cells.setdefault((x, t), (set(), []))
+                    eids.add(eid)
+                    if et not in types:
+                        types.append(et)
+            return _Result([[x, t, len(e), ty] for (x, t), (e, ty) in cells.items()])
+        if _Q2_RE.search(cypher):
+            # Leaf targets: raw fan-in, source resolved upward to any $xs.
             cells = {}
             for y in params["ys"]:
                 for eid, s, t, et in self.lineage:
@@ -317,6 +330,7 @@ def test_mixed_level_pair_derived_from_materialized_diagonal():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)   # materialized table→table
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
     rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
@@ -330,6 +344,7 @@ def test_mixed_level_pair_reverse_direction():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 2)
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
     rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a0"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
@@ -344,6 +359,7 @@ def test_mixed_level_pair_deep_hierarchy():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=8)
     fake.aggregated("urn:a6", "urn:b6", 2)
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
     rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a6"], ["urn:b1"], ["CONTAINS"], ["FLOWS"],
@@ -352,31 +368,43 @@ def test_mixed_level_pair_deep_hierarchy():
     assert mixed == [["urn:a6", "urn:b1", 2, ["FLOWS"]]]
 
 
-def test_alias_variant_labels_still_classify_and_anchor():
-    """Solidatus-style sources spell labels differently than the ontology
-    declares (declared 'lvl2' observed as 'LVL2_OBS'). The reader must
-    translate through the entity alias map or it silently classifies
-    nothing and mixed-granularity views lose all leaf lineage."""
+def test_label_spellings_are_irrelevant_to_classification():
+    """Classification is STRUCTURAL (leaf = no containment children), so
+    alias-variant or entirely unknown label spellings — the failure mode
+    that used to silently classify nothing and lose all leaf lineage —
+    cannot matter: no label is consulted at all."""
     fake = _FakeGraph()
     levels = {"lvl0": 0, "lvl1": 1, "lvl2": 2}
     for chain in ("a", "b"):
         for i in range(3):
-            # Graph labels use the OBSERVED spelling for the leaf level.
-            observed = f"LVL{i}_OBS" if i == 2 else f"lvl{i}"
-            fake.add_node(f"urn:{chain}{i}", observed)
+            # Observed graph spellings differ from every declared label.
+            fake.add_node(f"urn:{chain}{i}", f"LVL{i}_OBS")
             if i:
                 fake.contain(f"urn:{chain}{i-1}", f"urn:{chain}{i}")
     fake.flow(1, "urn:a2", "urn:b2")
     fake.flow(2, "urn:a2", "urn:b2")
     p = _make_provider(fake, levels)
-    p._source_entity_aliases = {"LVL2": ["LVL2_OBS"]}
     rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
 
 
-def test_missing_level_map_falls_back_to_raw_synthesis():
+def test_no_level_map_still_serves_structural_synthesis():
+    """Self-nesting and unmapped ontologies have no usable type-level
+    map; the structural reader must serve leaf-involving pairs anyway
+    (the old reader fell back to exact-endpoint raw synthesis and lost
+    every rolled-up pair)."""
+    fake = _FakeGraph()
+    _seed_deep_chains(fake, depth=3)
+    p = _make_provider(fake, levels={})
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a2"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:a2", "urn:b0", 2, ["FLOWS"]]]
+
+
+def test_no_containment_types_falls_back_to_raw_synthesis():
     fake = _FakeGraph()
     _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels={})
@@ -389,7 +417,7 @@ def test_missing_level_map_falls_back_to_raw_synthesis():
 
     p._synthesize_raw_lineage_pairs = fake_raw
     rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
-        ["urn:a2"], ["urn:b2"], ["CONTAINS"], ["FLOWS"],
+        ["urn:a2"], ["urn:b2"], [], ["FLOWS"],
     ))
     assert rows == sentinel
     assert seen["args"] == (["urn:a2"], ["urn:b2"], ["FLOWS"])
@@ -466,6 +494,7 @@ def test_progressive_topdown_drilldown_journey():
     levels = _seed_deep_chains(fake, depth=4)   # domain(0) ⊃ app(1) ⊃ table(2) ⊃ column(3)
     for i in range(3):
         fake.aggregated(f"urn:a{i}", f"urn:b{i}", 2)   # pipeline diagonal
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
 
     async def noop_connect():
@@ -609,6 +638,7 @@ def test_full_cross_product_matrix_six_levels():
     levels = _seed_deep_chains(fake, depth=6)   # a0..a5 / b0..b5, leaf=5
     for i in range(5):                          # the pipeline's diagonal
         fake.aggregated(f"urn:a{i}", f"urn:b{i}", 2)
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
 
     async def noop_connect():
@@ -654,6 +684,7 @@ def test_mixed_level_weight_sums_stored_and_derived_portions():
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 5)            # aligned diagonal
     fake.aggregated("urn:a1", "urn:b0", 1)            # ragged canonical
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
 
     async def noop_connect():
@@ -691,13 +722,14 @@ def test_get_aggregated_edges_between_merges_and_dedupes():
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
     fake.aggregated("urn:a1", "urn:b1", 5)   # materialized same-level cell
+    fake.set_meta("boundary", 2)
     p = _make_provider(fake, levels)
 
     async def noop_connect():
         return None
 
     async def proj_ro_query(cypher, params=None, timeout=None):
-        assert "AGGREGATED" in cypher
+        assert "AGGREGATED" in cypher or "_AggMeta" in cypher
         if params and "sourceUrns" in params:
             # The main materialized read: the diagonal cell plus a stale
             # pre-boundary fine cell that must win over the
@@ -826,6 +858,68 @@ def test_fine_regime_marker_skips_mixed_derivation():
         ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
     ))
     assert mixed == []
+
+
+def test_graph_meta_beats_legacy_marker_and_probe():
+    """The in-graph _AggMeta stamp is authoritative: a 'cube' meta node
+    disables mixed derivation even when a stale Redis marker says
+    'boundary' and the probe would agree — the exact desync that
+    double-counted mixed weights when the Redis stamp was lost."""
+    fake = _FakeGraph()
+    levels = _seed_deep_chains(fake, depth=3)
+    fake.aggregated("urn:a1", "urn:b1", 2)
+    fake.aggregated("urn:a1", "urn:b0", 2)    # cube already stores it
+    fake.set_meta("cube", 2)
+    p = _make_provider(fake, levels)
+
+    class _StaleMarkerRedis:
+        async def get(self, key):
+            return b"boundary" if key.endswith(":agg:regime") else None
+
+    p._redis = _StaleMarkerRedis()
+
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:a1"], ["urn:b0"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert mixed == []
+
+
+def test_self_nesting_mixed_depth_derivation():
+    """THE regression this redesign exists for: a 2-type self-nesting
+    ontology (every container shares one type label/level) in boundary
+    regime. The old type-level reader derived NOTHING below the roots —
+    'root→root renders, every expansion shows nothing'. Depth-keyed
+    derivation serves child(d1) → collapsed-root(d0) from the stored
+    depth-diagonal cells."""
+    fake = _FakeGraph()
+    # roots r_a ⊃ mid m_a ⊃ leaf l_a (all label "Node"); same for b side.
+    for side in ("a", "b"):
+        fake.add_node(f"urn:r_{side}", "Node")
+        fake.add_node(f"urn:m_{side}", "Node")
+        fake.add_node(f"urn:l_{side}", "Node")
+        fake.contain(f"urn:r_{side}", f"urn:m_{side}")
+        fake.contain(f"urn:m_{side}", f"urn:l_{side}")
+    fake.flow(1, "urn:l_a", "urn:l_b")
+    fake.flow(2, "urn:l_a", "urn:l_b")
+    # Boundary storage: the depth-diagonal only.
+    fake.aggregated("urn:r_a", "urn:r_b", 2)
+    fake.aggregated("urn:m_a", "urn:m_b", 2)
+    fake.set_meta("boundary", 2)
+    # Degenerate type-level map — every container the same level.
+    p = _make_provider(fake, {"Roots": 0, "Node": 1})
+
+    # Canvas state: side A expanded to its mid container, side B collapsed.
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:m_a"], ["urn:r_b"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == []
+    assert mixed == [["urn:m_a", "urn:r_b", 2, ["FLOWS"]]]
+
+    # And the leaf itself against the collapsed far root (Q1).
+    rows, mixed, _ = _run(p._synthesize_ondemand_lineage_pairs(
+        ["urn:l_a"], ["urn:r_b"], ["CONTAINS"], ["FLOWS"],
+    ))
+    assert rows == [["urn:l_a", "urn:r_b", 2, ["FLOWS"]]]
 
 
 def test_failed_subquery_marks_result_truncated():
