@@ -4286,6 +4286,29 @@ class FalkorDBProvider(GraphDataProvider):
                 if cursor == 0:
                     break
 
+            # Bump the aggregation-state EPOCH. ``lastMaterializedAt`` rides
+            # on every aggregated-edge response and is the client caches'
+            # invalidation signal — without this bump a purge was invisible
+            # to every consumer (canvases kept serving pre-purge answers
+            # from cache). The regime marker is dropped too: the store is
+            # empty, so readers must re-probe instead of trusting the
+            # pre-purge regime. Best-effort — marker failures must never
+            # fail a purge whose deletes already landed.
+            try:
+                if self._redis is not None:
+                    from datetime import datetime, timezone
+                    await self._redis.set(
+                        self._agg_last_materialized_key(),
+                        datetime.now(timezone.utc).isoformat(),
+                    )
+                    if hasattr(self, "_agg_regime_key"):
+                        await self._redis.delete(self._agg_regime_key())
+            except Exception as exc:
+                logger.warning(
+                    "purge_aggregated_edges: could not bump the "
+                    "aggregation-state epoch marker: %s", exc,
+                )
+
             logger.info(
                 "Purged %d AGGREGATED edges and %d Redis tracking keys from %s",
                 total_deleted, cleaned, self._graph_name,

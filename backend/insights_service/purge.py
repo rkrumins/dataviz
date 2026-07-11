@@ -280,6 +280,15 @@ async def _collect_in_session(
         from .enqueue import mark_stats_changed
         await mark_stats_changed(envelope.data_source_id, envelope.workspace_id)
 
+        # PURGE QUARANTINE for the opt-out case: skipping the post-purge
+        # re-aggregation is meaningless if the read path's empty-result
+        # backfill resurrects the cells on the next canvas load. Arm the
+        # backfill's own damping key (shared contract with
+        # context_engine._trigger_materialize_in_background) so a
+        # skip-reaggregate purge STAYS purged for the damping window
+        # unless the user re-aggregates explicitly.
+        await _arm_purge_quarantine(provider, job)
+
         # Post-purge re-aggregation (default ON, opt-out rides the job
         # row): container-level lineage is BLIND until the canonical
         # cells are rebuilt — same-level container pairs cannot be
@@ -373,6 +382,33 @@ async def record_failure(
         job.error_message = error[:2000]
         job.completed_at = _now()
         job.updated_at = _now()
+
+
+async def _arm_purge_quarantine(provider, job) -> None:
+    """When the purge row carries ``{"skip_reaggregate": true}``, damp the
+    read-path backfill for its 15-minute window by pre-setting its dedupe
+    key. Never raises."""
+    import json as _json
+    try:
+        opts = _json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+    except (TypeError, ValueError):
+        opts = {}
+    if not opts.get("skip_reaggregate"):
+        return
+    redis = getattr(provider, "_redis", None)
+    if redis is None:
+        return
+    try:
+        await redis.set(
+            f"materialize:in-flight:{job.data_source_id}",
+            "purge-quarantine", ex=900,
+        )
+        logger.info(
+            "purge.quarantine_armed ds=%s (read-path backfill damped for "
+            "15m; re-aggregate manually to rebuild)", job.data_source_id,
+        )
+    except Exception as exc:
+        logger.warning("purge.quarantine_failed ds=%s: %s", job.data_source_id, exc)
 
 
 async def _maybe_trigger_reaggregation(job: AggregationJobORM) -> None:
