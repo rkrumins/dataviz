@@ -7,7 +7,17 @@ export const ONTOLOGY_KEYS = {
   detail: (id: string) => [...ONTOLOGY_KEYS.all, 'detail', id] as const,
   versions: (id: string) => [...ONTOLOGY_KEYS.all, 'versions', id] as const,
   assignments: (id: string) => [...ONTOLOGY_KEYS.all, 'assignments', id] as const,
+  adoption: (id: string) => [...ONTOLOGY_KEYS.all, 'adoption', id] as const,
   audit: (id: string) => [...ONTOLOGY_KEYS.all, 'audit', id] as const,
+}
+
+export function useOntologyAdoption(id: string | undefined) {
+  return useQuery({
+    queryKey: ONTOLOGY_KEYS.adoption(id!),
+    queryFn: () => ontologyDefinitionService.adoption(id!),
+    enabled: !!id,
+    staleTime: 30_000,
+  })
 }
 
 export function useOntologies(includeDeleted = false) {

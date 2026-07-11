@@ -208,6 +208,14 @@ export const ontologyDefinitionService = {
         })
     },
 
+    /**
+     * Per-data-source declared-vs-physical type match, from the cached profiling stats.
+     * One batched, cache-only call — no live graph queries.
+     */
+    adoption(id: string): Promise<OntologyAdoptionResponse> {
+        return request<OntologyAdoptionResponse>(`${ADMIN_API}/${id}/adoption`)
+    },
+
     suggest(stats: Record<string, unknown>, baseOntologyId?: string): Promise<OntologySuggestResponse> {
         const url = baseOntologyId
             ? `${ADMIN_API}/suggest?base_ontology_id=${encodeURIComponent(baseOntologyId)}`
@@ -275,6 +283,42 @@ export interface OntologyCoverageResponse {
     extraEntityTypes: string[]
     coveredRelationshipTypes: string[]
     uncoveredRelationshipTypes: string[]
+}
+
+// ── Adoption (declared-vs-physical type match) ──────────────────────────────
+export interface AdoptionTypeStat { id: string; count: number }
+export interface AdoptionDrift { id: string; declared: string; count: number }
+export interface AdoptionDimension {
+    matchWeighted: number
+    matchByType: number
+    totalTypes: number
+    totalInstances: number
+    exact: AdoptionTypeStat[]
+    caseDrift: AdoptionDrift[]
+    unmapped: AdoptionTypeStat[]
+    declaredUnused: string[]
+}
+export interface AdoptionSource {
+    dataSourceId: string
+    dataSourceLabel: string
+    workspaceId: string
+    workspaceName: string
+    profiled: boolean
+    schemaUpdatedAt: string | null
+    matchWeighted: number | null
+    matchByType: number | null
+    nodes: AdoptionDimension | null
+    edges: AdoptionDimension | null
+}
+export interface OntologyAdoptionResponse {
+    ontologyId: string
+    sourceCount: number
+    profiledCount: number
+    matchWeighted: number
+    matchByType: number
+    driftTypeCount: number
+    unmappedTypeCount: number
+    sources: AdoptionSource[]
 }
 
 /** A single data source assignment returned by getAssignments(). */

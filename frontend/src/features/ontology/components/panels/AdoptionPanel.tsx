@@ -1,17 +1,17 @@
 /**
- * AdoptionPanel — unified Usage + Version History view.
- *
- * Top section: workspace/data source assignments (from UsagePanel)
- * Bottom section: collapsible version history timeline (from VersionHistoryPanel)
+ * AdoptionPanel — how this ontology is adopted across data sources:
+ *   1. Match: per-source declared-vs-physical type match (from profiling stats)
+ *   2. Usage: workspace/data-source assignments
+ *   3. Version History (collapsible)
  */
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, Clock } from 'lucide-react'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 
+import { AdoptionMatchSection } from './AdoptionMatchSection'
 import { UsagePanel } from './UsagePanel'
 import { VersionHistoryPanel } from './VersionHistoryPanel'
-import { EducationalCallout } from '../EducationalCallout'
 
 interface AdoptionPanelProps {
   ontology: OntologyDefinitionResponse
@@ -20,19 +20,17 @@ interface AdoptionPanelProps {
 }
 
 export function AdoptionPanel({ ontology, workspaces, ontologies }: AdoptionPanelProps) {
-  const [historyOpen, setHistoryOpen] = useState(true)
+  const [historyOpen, setHistoryOpen] = useState(false)
 
   return (
     <div className="space-y-8">
-      <EducationalCallout
-        id="edu-assignment"
-        title="Ontology Assignments"
-        description="Assigning an ontology to a data source tells the system to interpret that graph using these type definitions. Views, visualizations, and semantic features are all driven by the assigned ontology. Data sources without one will have limited functionality."
-        variant="info"
-      />
+      {/* Match: declared-vs-physical adoption across data sources */}
+      <AdoptionMatchSection ontologyId={ontology.id} />
 
-      {/* Usage section — rendered directly */}
-      <UsagePanel ontology={ontology} workspaces={workspaces} ontologies={ontologies} />
+      {/* Usage: assignments */}
+      <div className="border-t border-glass-border/60 pt-6">
+        <UsagePanel ontology={ontology} workspaces={workspaces} ontologies={ontologies} />
+      </div>
 
       {/* Version History — collapsible section */}
       <div className="border-t border-glass-border/60 pt-6">

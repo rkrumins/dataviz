@@ -541,6 +541,88 @@ async def get_ontology_coverage(
     )
 
 
+@router.get("/{ontology_id}/adoption")
+async def get_ontology_adoption(
+    ontology_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _auth=Depends(_REQUIRES_ONTOLOGY_READ),
+):
+    """Per-data-source declared-vs-physical type match for every data source using this
+    ontology, computed from the CACHED profiling stats (the insights service).
+
+    Strategic + performant: one assignments query + one bulk stats read, then pure
+    in-process classification — NO live graph queries. Each physical type is classified
+    exact / case-drift / unmapped (see ``adoption.py``); the platform built-in edges
+    (AGGREGATED) are injected into the declared set so they never read as unmapped.
+    """
+    import json as _json
+
+    from backend.app.db.repositories import stats_repo
+    from backend.app.ontology.adoption import build_source_adoption, dimension_to_wire
+    from backend.app.ontology.defaults import with_system_edge_types
+
+    orm = await ontology_definition_repo.get_ontology_orm(session, ontology_id)
+    if not orm:
+        raise HTTPException(status_code=404, detail=f"Ontology '{ontology_id}' not found")
+    await ensure_ontology_visible(session, claims, ontology_id)
+
+    entity_ids = set(_json.loads(orm.entity_type_definitions or "{}").keys())
+    edge_ids = set(with_system_edge_types(_json.loads(orm.relationship_type_definitions or "{}")).keys())
+
+    assignments = await ontology_definition_repo.get_assignments(session, ontology_id)
+    stats_rows = await stats_repo.list_data_source_stats(
+        session, [a["dataSourceId"] for a in assignments])
+    stats_by_ds = {s.data_source_id: s for s in stats_rows}
+
+    sources: list = []
+    agg_exact = agg_total = agg_exact_types = agg_total_types = 0
+    drift_count = unmapped_count = profiled_count = 0
+
+    for a in assignments:
+        base = {
+            "dataSourceId": a["dataSourceId"], "dataSourceLabel": a["dataSourceLabel"],
+            "workspaceId": a["workspaceId"], "workspaceName": a["workspaceName"],
+        }
+        st = stats_by_ds.get(a["dataSourceId"])
+        raw = getattr(st, "schema_stats", None) if st else None
+        if not raw:
+            sources.append({**base, "profiled": False, "schemaUpdatedAt": None,
+                            "matchWeighted": None, "matchByType": None, "nodes": None, "edges": None})
+            continue
+        try:
+            schema_stats = _json.loads(raw)
+        except (ValueError, TypeError):
+            schema_stats = {}
+        adopt = build_source_adoption(entity_ids=entity_ids, edge_ids=edge_ids, schema_stats=schema_stats)
+        profiled_count += 1
+        agg_exact += adopt.nodes.exact_instances + adopt.edges.exact_instances
+        agg_total += adopt.nodes.total_instances + adopt.edges.total_instances
+        agg_exact_types += len(adopt.nodes.exact) + len(adopt.edges.exact)
+        agg_total_types += adopt.nodes.total_types + adopt.edges.total_types
+        drift_count += len(adopt.nodes.case_drift) + len(adopt.edges.case_drift)
+        unmapped_count += len(adopt.nodes.unmapped) + len(adopt.edges.unmapped)
+        sources.append({
+            **base, "profiled": True, "schemaUpdatedAt": getattr(st, "schema_updated_at", None),
+            "matchWeighted": adopt.match_weighted, "matchByType": adopt.match_by_type,
+            "nodes": dimension_to_wire(adopt.nodes), "edges": dimension_to_wire(adopt.edges),
+        })
+
+    def _pct(part: float, whole: float) -> float:
+        return round(part / whole * 100, 1) if whole else 100.0
+
+    return {
+        "ontologyId": ontology_id,
+        "sourceCount": len(assignments),
+        "profiledCount": profiled_count,
+        "matchWeighted": _pct(agg_exact, agg_total),
+        "matchByType": _pct(agg_exact_types, agg_total_types),
+        "driftTypeCount": drift_count,
+        "unmappedTypeCount": unmapped_count,
+        "sources": sources,
+    }
+
+
 @router.post("/{ontology_id}/resolution-check", response_model=OntologyResolutionResponse)
 async def check_ontology_resolution(
     ontology_id: str = Path(...),
