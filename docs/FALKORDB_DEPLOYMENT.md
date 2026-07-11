@@ -86,6 +86,22 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 
 ---
 
+## 5b. Local Durability: AOF Is Mandatory
+
+Every shipped topology (compose files, k8s manifests) runs FalkorDB with
+`--appendonly yes --appendfsync everysec --aof-load-truncated yes`.
+
+Snapshot-only persistence is NOT sufficient: a restart reloads the last
+RDB and silently drops every write since it. Observed live (2026-07-11):
+a stack restart minutes after a graph import resurrected the graph with
+its containment edges but WITHOUT its lineage edges (the RDB save fired
+mid-import), after which every aggregation run correctly produced zero
+cells — presenting as "aggregation is broken" when the data layer had
+lost the input. AOF `everysec` bounds the loss window to ~1 second;
+`aof-load-truncated` tolerates a torn AOF tail after a crash instead of
+refusing to start. Keep RDB snapshots enabled alongside AOF — they
+remain the fast-restart and DR-export mechanism.
+
 ## 6. Disaster Recovery (Cross-Region)
 
 In the event of a total GCP Region loss (e.g., `us-central1` goes completely offline), standard HA mechanisms fail. The following DR strategy must be implemented proactively:

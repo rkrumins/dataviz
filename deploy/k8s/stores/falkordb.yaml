@@ -55,7 +55,7 @@ spec:
             # bounds one query; the dataset itself needs maxmemory or growth
             # OOM-kills the pod. noeviction = writes fail loudly at the ceiling.
             - name: REDIS_ARGS
-              value: "--maxmemory 6gb --maxmemory-policy noeviction"
+              value: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes"
           ports:
             - name: redis
               containerPort: 6379

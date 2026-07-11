@@ -46,7 +46,14 @@ services:
       # Instance-level memory ceiling: QUERY_MEM_CAPACITY bounds ONE query;
       # without maxmemory the dataset itself can still OOM-kill the container.
       # noeviction = writes fail loudly at the ceiling instead of silent eviction.
-      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction
+      # AOF everysec: with snapshot-only persistence a restart reloads the
+      # last RDB and silently DROPS every write since it (observed live
+      # 2026-07-11: a stack restart minutes after an import resurrected the
+      # graph with containment but without its lineage edges — every
+      # aggregation run then correctly produced zero cells). AOF bounds the
+      # loss window to ~1s; aof-load-truncated tolerates a torn tail after
+      # a crash instead of refusing to start.
+      REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes
     volumes:
       # FalkorDB's actual data dir is /var/lib/falkordb/data (the image
       # symlinks /data/data → there). Mounting the volume at /data would
