@@ -119,7 +119,12 @@ async function tryRefresh(): Promise<boolean> {
           try {
             const mod = await import('@/store/auth')
             const before = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
-            await mod.useAuthStore.getState().refreshPermissions()
+            // skipAuthRefresh: we JUST refreshed the token, so this
+            // re-hydrate's GET /me/permissions must NOT re-enter the
+            // 401→refresh→re-hydrate path. Without it, a /me/permissions
+            // that still 401s recurses at network speed — the app-wide
+            // request storm.
+            await mod.useAuthStore.getState().refreshPermissions({ skipAuthRefresh: true })
             const after = mod.claimsSnapshot(mod.useAuthStore.getState().permissions)
             if (before === after) return
             try {
@@ -355,9 +360,9 @@ async function runOnce(
 
 export async function fetchWithTimeout(
   input: RequestInfo | URL,
-  init?: RequestInit & { timeoutMs?: number; silent403?: boolean },
+  init?: RequestInit & { timeoutMs?: number; silent403?: boolean; skipAuthRefresh?: boolean },
 ): Promise<Response> {
-  const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, ...fetchInit } = init ?? {}
+  const { timeoutMs = TIMEOUTS.DEFAULT_MS, silent403 = false, skipAuthRefresh = false, ...fetchInit } = init ?? {}
   const method = (fetchInit.method ?? 'GET').toUpperCase()
 
   let res: Response
@@ -374,7 +379,7 @@ export async function fetchWithTimeout(
   // cookie may still be good. Attempt exactly one refresh + retry before
   // giving up. /auth/refresh itself is exempt so its own 401 doesn't
   // recurse into another refresh.
-  if (res.status === 401 && !isRefreshEndpoint(input)) {
+  if (res.status === 401 && !isRefreshEndpoint(input) && !skipAuthRefresh) {
     const refreshed = await tryRefresh()
     if (refreshed) {
       try {

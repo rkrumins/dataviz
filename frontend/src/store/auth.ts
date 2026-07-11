@@ -188,7 +188,7 @@ interface AuthState {
      *  that happened mid-session. Fire-and-forget — failures clear
      *  the claim to empty so guards fail-closed until the next page
      *  load. */
-    refreshPermissions: () => Promise<void>
+    refreshPermissions: (opts?: { skipAuthRefresh?: boolean }) => Promise<void>
     clearError: () => void
     /** Predicate helpers used by UI components. Reading the store via
      *  these instead of hand-rolling the check keeps the wildcard +
@@ -314,14 +314,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     setPermissions: (permissions) => set({ permissions }),
 
-    refreshPermissions: async () => {
+    refreshPermissions: async (opts) => {
         // Mirrors ``hydratePermissions`` but called from outside the
         // login / bootstrap flow. Used by ``fetchWithTimeout`` after
         // a successful silent refresh — the new JWT carries
         // re-resolved claims (auth_service/service.py:365) and the
         // FE store needs to catch up so route guards stop blocking
-        // a freshly-promoted admin.
-        await hydratePermissions(set)
+        // a freshly-promoted admin. ``opts.skipAuthRefresh`` is set on
+        // that post-refresh call so it can't recurse into the loop.
+        await hydratePermissions(set, opts)
     },
 
     clearError: () => set({ error: null }),
@@ -352,12 +353,19 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
  */
 async function hydratePermissions(
     set: (partial: Partial<AuthState>) => void,
+    opts?: { skipAuthRefresh?: boolean },
 ): Promise<void> {
     try {
-        const claims = await authService.myPermissions()
+        const claims = await authService.myPermissions(opts)
         set({ permissions: claims })
     } catch {
-        set({ permissions: EMPTY_CLAIMS })
+        // Keep the previous claims on a transient failure. Zeroing them
+        // to EMPTY here used to defeat the silent-refresh before/after
+        // guard (empty !== real), firing a blanket cache invalidation on
+        // every failed re-hydrate — the amplifier behind the app-wide
+        // request storm. A genuine revocation arrives as a 200 with
+        // reduced claims and still updates correctly above; an outage now
+        // leaves the last-known claims in place instead of blanking the UI.
     }
 }
 
