@@ -1979,9 +1979,19 @@ class FalkorDBProvider(GraphDataProvider):
         return meta
 
     async def _legacy_regime_meta(self) -> "AggRunMeta":
-        """Marker/probe fallback for graphs that predate ``_AggMeta``.
-        Stamp version 1: depth stamps unknown — depth-keyed readers must
-        not trust them and fall back to stored rows only."""
+        """Marker fallback for graphs that predate ``_AggMeta``. Stamp
+        version 1: depth stamps unknown — depth-keyed readers must not
+        trust them and fall back to stored rows only.
+
+        READ PATHS NEVER PROBE: the old non-conforming-row probe scanned
+        up to every :AGGREGATED relation (measured 2.0s over 1M cells on
+        the 3M graph) once per 5 minutes ON THE READ PATH. Graphs with no
+        marker now resolve to regime="unknown" — readers serve stored
+        cells + the exact raw mirror with ``stale=true`` and let the
+        auto-materialization trigger heal the graph. The probe survives
+        only in :meth:`_aggregation_storage_regime` for WRITE-hook
+        dispatch (rare, and a wrong guess there risks double-counted
+        increments, which staleness signalling cannot excuse)."""
         regime: Optional[str] = None
         last_at: Optional[str] = None
         try:
@@ -1998,34 +2008,49 @@ class FalkorDBProvider(GraphDataProvider):
                     last_at = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
         except Exception as e:
             logger.debug("Aggregation regime marker read failed: %s", e)
-        if regime != "cube":
-            # The probe runs even when the marker says 'boundary':
-            # incremental writers that predate the canonical contract can
-            # add non-conforming rows AFTER the marker was stamped.
-            try:
-                res = await self._proj_ro_query(
-                    "MATCH ()-[r:AGGREGATED]->() "
-                    "WHERE r.aggKey IS NULL OR r.sourceLevel IS NULL "
-                    "RETURN 1 LIMIT 1",
-                )
-                if res.result_set:
-                    regime = "cube"
-                elif regime is None:
-                    regime = "boundary"
-            except Exception as e:
-                logger.debug("Aggregation regime probe failed: %s", e)
-                if regime is None:
-                    # Unknown state: serve stored rows only (the original
-                    # behavior) rather than risk double-counted sums.
-                    regime = "cube"
-        return AggRunMeta(regime, 1, None, last_at)
+        return AggRunMeta(regime or "unknown", 1, None, last_at)
+
+    async def _probe_nonconforming_cells(self) -> Optional[bool]:
+        """One LIMIT-1 scan for rows missing aggKey/level stamps. None =
+        probe failed. NOT for read paths — write-hook dispatch only."""
+        try:
+            res = await self._proj_ro_query(
+                "MATCH ()-[r:AGGREGATED]->() "
+                "WHERE r.aggKey IS NULL OR r.sourceLevel IS NULL "
+                "RETURN 1 LIMIT 1",
+                op="agg.regime_probe",
+            )
+            return bool(res.result_set)
+        except Exception as e:
+            logger.debug("Aggregation regime probe failed: %s", e)
+            return None
 
     async def _aggregation_storage_regime(self) -> str:
         """Legacy two-value view of ``_aggregation_run_meta``:
         ``'boundary'`` when the stored set is the canonical selection,
-        ``'fine'`` when it is (or may be) a full cube."""
+        ``'fine'`` when it is (or may be) a full cube.
+
+        WRITE-HOOK consumer: on ``unknown`` (no _AggMeta, no marker) it
+        still probes for non-conforming rows — a wrong regime guess here
+        double-counts incremental weights, and writes are rare enough
+        that the probe is acceptable off the read path. The probe result
+        rides the 5-minute meta cache."""
         meta = await self._aggregation_run_meta()
-        return "boundary" if meta.regime == "boundary" else "fine"
+        if meta.regime == "boundary":
+            return "boundary"
+        if meta.regime == "cube":
+            return "fine"
+        # unknown → probe once (cached alongside the meta for 5 min).
+        cached = getattr(self, "_regime_probe_cached", None)
+        now = time.monotonic()
+        if cached and now - cached[1] < 300.0:
+            found = cached[0]
+        else:
+            found = await self._probe_nonconforming_cells()
+            self._regime_probe_cached = (found, now)
+        if found is False:
+            return "boundary"
+        return "fine"
 
     def _agg_in_flight_key(self, ds_id: str) -> str:
         return f"materialize:in-flight:{ds_id}"
@@ -4796,15 +4821,22 @@ class FalkorDBProvider(GraphDataProvider):
         # Leaf-involving pairs (column→column, column→table, column→domain,
         # …) are no longer materialized — the full cube scales as
         # edges × hierarchy depth and OOMs the instance on large graphs.
-        # They are computed here ON DEMAND for the requested (bounded)
-        # URN sets: raw lineage fan-out + upward containment walks, all
-        # index-driven. Canonical container pairs come from the
-        # materialized rows above with complete weights; mixed-level
-        # container pairs are derived from those cells.
-        raw_rows, mixed_rows, synth_degraded = (
+        # They are completed here for the requested (bounded) URN sets
+        # WITHOUT containment walks: exact typed raw mirrors + Redis
+        # ancestor-chain resolution in Python (see
+        # _synthesize_ondemand_lineage_pairs). Canonical container pairs
+        # come from the materialized rows above with complete weights;
+        # mixed-depth container pairs are derived from those cells via
+        # the depth-stamp indexes.
+        try:
+            meta = await self._aggregation_run_meta()
+        except Exception as e:
+            logger.warning("Failed to resolve aggregation run meta: %s", e)
+            meta = AggRunMeta("unknown", 1, None, None)
+        raw_rows, mixed_rows, synth_degraded, stale_reason = (
             await self._synthesize_ondemand_lineage_pairs(
                 source_urns, target_urns, containment_edges, lineage_edges,
-                timeout=timeout,
+                meta=meta, timeout=timeout,
             )
         )
         if raw_rows or mixed_rows:
@@ -4842,30 +4874,54 @@ class FalkorDBProvider(GraphDataProvider):
                 )
                 existing[3] = list(dict.fromkeys([*ex_types, *new_types]))
 
-        # Through the resolved run meta: the in-graph _AggMeta stamp wins,
-        # the legacy Redis key is the fallback — a graph that HAS
-        # materialized but lost its Redis key must not read as "never
-        # materialized" (that re-triggered a background materialization
-        # on every empty read).
-        try:
-            meta = await self._aggregation_run_meta()
-            last_materialized_at = meta.last_materialized_at
-        except Exception as e:
-            last_materialized_at = None
-            logger.warning("Failed to read aggregated materialization timestamp: %s", e)
+        if synth_degraded and not stale_reason:
+            stale_reason = "degraded"
 
         # The legacy single-query read returned rows weight-descending;
         # preserve that contract now that synthesized rows are appended.
         rows = sorted(rows, key=lambda r: -(int(r[2]) if r[2] else 0))
         return self._rows_to_aggregated_result(
-            rows, last_materialized_at=last_materialized_at,
+            rows, last_materialized_at=meta.last_materialized_at,
             degraded=synth_degraded,
+            stale=bool(stale_reason),
+            stale_reason=stale_reason,
+            stamp_version=meta.stamp_version,
+            regime=meta.regime,
         )
 
     # ------------------------------------------------------------------
     # Helpers for get_aggregated_edges_between
     # ------------------------------------------------------------------
 
+
+    async def _read_ancestor_chains_cached(
+        self, urns: List[str],
+    ) -> Dict[str, Optional[List[str]]]:
+        """Cache-ONLY bulk ancestor-chain read (one pipelined HMGET) —
+        urn → chain (parent→root) or None on a miss. Read paths use this
+        instead of the compute-on-miss chain helpers: the read path must
+        NEVER walk containment live. Misses are surfaced to the caller
+        (dropped pair + ``stale``) and healed by aggregation runs / trace
+        hydration, both of which back-fill this cache."""
+        uniq = list(dict.fromkeys(u for u in urns if u))
+        if not uniq or self._redis is None:
+            return {u: None for u in uniq}
+        out: Dict[str, Optional[List[str]]] = {}
+        try:
+            raw = await self._redis.execute_command(
+                "HMGET", self._ancestors_cache_key(), *uniq)
+        except Exception as e:
+            logger.debug("ancestor chain cache read failed: %s", e)
+            return {u: None for u in uniq}
+        for u, val in zip(uniq, raw or []):
+            if val is None:
+                out[u] = None
+            else:
+                try:
+                    out[u] = json.loads(val)
+                except Exception:
+                    out[u] = None
+        return out
 
     async def _synthesize_ondemand_lineage_pairs(
         self,
@@ -4874,61 +4930,68 @@ class FalkorDBProvider(GraphDataProvider):
         containment_edges: Optional[List[str]],
         lineage_edges: Optional[List[str]],
         *,
+        meta: Optional["AggRunMeta"] = None,
         timeout: Optional[float] = None,
-    ) -> Tuple[list, list, bool]:
-        """Compute leaf-involving aggregated pairs on demand for bounded
-        URN sets — the read-side half of the level-based materialization
-        boundary. Returns ``(leaf_rows, mixed_rows, degraded)``:
-        leaf-involving rows are disjoint from materialized cells
-        (dedupe-safe); mixed non-leaf rows carry ONLY the
-        strictly-below-the-coarse-endpoint portion and must be ADDED to
-        a materialized canonical row for the same pair (see
-        ``_mixed_depth_pairs``); ``degraded`` is True when any on-demand
-        sub-query failed — the response is then a PARTIAL answer and the
-        caller marks the result truncated instead of presenting it as
-        complete.
+    ) -> Tuple[list, list, bool, Optional[str]]:
+        """Complete the materialized cells for the requested (bounded) URN
+        sets WITHOUT walking containment in Cypher. Returns
+        ``(leaf_rows, mixed_rows, degraded, stale_reason)``.
 
-        A pair involves a LEAF node (no containment children) only when
-        that node is the raw edge endpoint itself, so every such pair is
-        reachable by anchoring the leaf side's bounded ``urn IN $set``
-        lookup and walking the OTHER endpoint upward through containment
-        (``*0..k`` — one parent per hop, bound-end traversal). Cost ≈
-        fan-out(requested leaves) × hierarchy depth, independent of
-        graph size.
+        The previous implementation ran, on EVERY read in boundary regime:
+        a per-node inbound path enumeration (``*1..16`` — the depth
+        profile), and ``*0..16`` upward-resolution walks for leaf and
+        mixed pairs. Measured 10-26s per canvas request on a 7.7M-element
+        graph WITH healthy stampVersion=2 cells. All replaced by:
 
-        Classification is STRUCTURAL — leaf = no containment children,
-        the same definition the writer's boundary uses — so self-nesting
-        ontologies (one Node type containing itself, where every label
-        shares one type level) classify correctly; ontology type levels
-        are not consulted at all.
+        * leaf detection — single-hop child-count probe (no walk);
+        * containment depth — max over the node's own stamped incident
+          :AGGREGATED cells (``_frontier_depths_from_stamps``,
+          depth-index-backed);
+        * upward resolution (leaf far-endpoints and Q3 mixed pairs) — the
+          Redis ancestor-chain cache, resolved in Python. A chain miss
+          DROPS the pair and reports ``stale_reason="chain_cache_miss"``
+          instead of walking live; aggregation runs and trace hydration
+          back-fill the cache.
 
-        Same-depth container pairs are NOT produced here — they come
-        from the materialized canonical cells (complete weights).
-        Mixed-depth container pairs (table→domain) are derived from
-        those same cells by ``_mixed_depth_pairs``, so the sources stay
-        disjoint by construction.
+        Regime dispatch (no probes here — see ``_aggregation_run_meta``):
+        ``cube``    → exact raw mirror only (cells are complete; anything
+                      more double-counts). Not stale.
+        ``unknown`` → exact raw mirror + stale "unmaterialized" (the
+                      trigger heals the graph).
+        ``boundary`` + stampVersion < 2 → exact raw mirror + stale
+                      "legacy_cells" (depth-keyed derivation impossible
+                      until re-materialization re-stamps).
+        ``boundary`` + stampVersion >= 2 → the structural path below.
 
-        Regime dispatch: under the CUBE contract every ancestor
-        combination is already stored — any derivation beyond the raw
-        leaf↔leaf mirror would double-count — so only exact-endpoint raw
-        synthesis runs. ``_mixed_depth_pairs`` additionally requires
-        stamp_version >= 2 (depth stamps present graph-wide).
+        Weight semantics preserved from the walk implementation: leaf
+        rows are disjoint from materialized cells; mixed rows carry only
+        the strictly-below portion and are ADDED to canonical rows.
+        Multi-parent chains resolve to every requested ancestor exactly
+        once per (pair) — same dedupe the DISTINCT walk applied.
         """
-        from ..config.resilience import (
-            AGGREGATED_EDGE_RESULT_CAP,
-            AGGREGATED_SOURCE_URN_BATCH_SIZE,
-        )
-
         ltypes = self._alias_rel_types(
             [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
         )
         if not ltypes or not source_urns:
-            return [], [], False
-        meta = await self._aggregation_run_meta()
-        if meta.regime != "boundary":
-            return await self._synthesize_raw_lineage_pairs(
+            return [], [], False, None
+        if meta is None:
+            meta = await self._aggregation_run_meta()
+
+        if meta.regime != "boundary" or meta.stamp_version < 2:
+            rows = await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout,
-            ), [], False
+            )
+            reason = None
+            if meta.regime == "unknown":
+                reason = "unmaterialized"
+            elif meta.regime == "boundary" and meta.stamp_version < 2:
+                reason = "legacy_cells"
+            return rows, [], False, reason
+
+        from ..config.resilience import (
+            AGGREGATED_EDGE_RESULT_CAP,
+            AGGREGATED_SOURCE_URN_BATCH_SIZE,
+        )
         try:
             containment = list(self._alias_rel_types(
                 [t for t in (containment_edges or []) if t]
@@ -4936,18 +4999,16 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             containment = []
         if not containment:
-            return await self._synthesize_raw_lineage_pairs(
+            rows = await self._synthesize_raw_lineage_pairs(
                 source_urns, target_urns, lineage_edges, timeout=timeout,
-            ), [], False
+            )
+            return rows, [], False, None
         c_pattern = "|".join(_sanitize_label(t) for t in containment)
-        hops = self._containment_hop_bound()
+        l_pattern = "|".join(_sanitize_label(t) for t in ltypes)
         cap = AGGREGATED_EDGE_RESULT_CAP
         batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
-        lt_list = list(ltypes)
-        # A failed sub-query means a PARTIAL answer: surface it via the
-        # result's truncated flag instead of silently rendering a canvas
-        # missing a whole class of edges.
         degraded = {"v": False}
+        chain_missed = {"v": False}
 
         async def _run(cypher: str, params: Dict[str, Any]) -> list:
             try:
@@ -4968,27 +5029,49 @@ class FalkorDBProvider(GraphDataProvider):
                 return []
 
         async def _profile(urns: List[str]) -> Dict[str, Tuple[bool, int]]:
-            """urn → (is_container, containment depth). Anchored on the
-            per-label URN indexes (label buckets from the urn→label
-            cache); the unresolved-label residue keeps the unlabeled
-            pattern. Depth = longest upward containment path — the
-            read-side measurement of the writer's max-over-parents rule."""
+            """urn → (is_container, containment depth). Leaf detection is
+            a single-hop child-count probe; depth comes from the node's
+            own stamped incident cells (depth-index seek). Nodes with no
+            stamped cell get depth 0 — they cannot contribute mixed-depth
+            derivation (no cells to derive from), which is exactly the
+            correct degradation."""
             out: Dict[str, Tuple[bool, int]] = {}
-            for label, bucket in await self._label_buckets(urns):
+            uniq = list(dict.fromkeys(u for u in urns if u))
+            if not uniq:
+                return out
+            for label, bucket in await self._label_buckets(uniq):
                 anchor = f"(n:{label})" if label else "(n)"
                 for i in range(0, len(bucket), batch):
                     for row in await _run(
                         f"MATCH {anchor} WHERE n.urn IN $urns "
                         f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
-                        f"WITH n, count(ch) AS kids "
-                        f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
-                        f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+                        f"RETURN n.urn, count(ch)",
                         {"urns": bucket[i:i + batch]},
                     ):
                         if row and row[0]:
-                            out[str(row[0])] = (
-                                int(row[1] or 0) > 0, int(row[2] or 0),
-                            )
+                            out[str(row[0])] = (int(row[1] or 0) > 0, 0)
+            depths = await self._frontier_depths_from_stamps(uniq)
+            for u, d in depths.items():
+                if u in out:
+                    out[u] = (out[u][0], int(d))
+            return out
+
+        async def _chain_resolve(
+            far_urns: List[str], requested: List[str],
+        ) -> Dict[str, List[str]]:
+            """far urn → requested urns strictly ABOVE it (ancestors from
+            the Redis chain cache; self is excluded — exact matches are
+            handled by the callers directly). Misses flag stale."""
+            req = set(requested)
+            chains = await self._read_ancestor_chains_cached(far_urns)
+            out: Dict[str, List[str]] = {}
+            for u, chain in chains.items():
+                if chain is None:
+                    chain_missed["v"] = True
+                    continue
+                hits = [a for a in dict.fromkeys(chain) if a in req and a != u]
+                if hits:
+                    out[u] = hits
             return out
 
         rows: list = []
@@ -5011,61 +5094,84 @@ class FalkorDBProvider(GraphDataProvider):
                 u: tgt_prof[u][1] for u in target_urns
                 if tgt_prof.get(u, (False, 0))[0]
             }
+            tgt_set = set(target_urns)
 
-            # Q1 — requested LEAF sources: their raw fan-out, targets
-            # resolved exactly or upward to any requested node. Anchored
-            # per label bucket (index seek), unlabeled residue kept.
+            def _merge_rows(acc: Dict[Tuple[str, str], list],
+                            x: str, y: str, weight, types) -> None:
+                w = int(weight) if weight else 1
+                tl = types if isinstance(types, list) else ([types] if types else [])
+                cell = acc.get((x, y))
+                if cell is None:
+                    acc[(x, y)] = [x, y, w, list(tl)]
+                else:
+                    cell[2] += w
+                    cell[3].extend(t for t in tl if t not in cell[3])
+
+            # Q1 — requested LEAF sources: exact typed raw fan-out; far
+            # endpoints matched exactly against the target set and/or
+            # resolved upward via cached chains. No containment Cypher.
+            leaf_acc: Dict[Tuple[str, str], list] = {}
+            q1_far: list = []
             for x_label, x_bucket in await self._label_buckets(src_leaves):
                 x_anchor = f"(x:{x_label})" if x_label else "(x)"
                 for i in range(0, len(x_bucket), batch):
-                    rows.extend(await _run(
-                        f"MATCH {x_anchor}-[r]->(t) "
-                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                        f"MATCH (y)-[:{c_pattern}*0..{hops}]->(t) "
-                        f"WHERE y.urn IN $ys AND x.urn <> y.urn "
-                        f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                        f"count(DISTINCT r) AS weight, "
-                        f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"xs": x_bucket[i:i + batch], "ys": target_urns, "lt": lt_list},
+                    q1_far.extend(await _run(
+                        f"MATCH {x_anchor}-[r:{l_pattern}]->(t) "
+                        f"WHERE x.urn IN $xs "
+                        f"RETURN x.urn, t.urn, count(r), "
+                        f"collect(DISTINCT type(r)) LIMIT {cap}",
+                        {"xs": x_bucket[i:i + batch]},
                     ))
-            # Q2 — requested LEAF targets: their raw fan-in, sources
-            # resolved exactly or upward to any requested CONTAINER (leaf
-            # sources were fully covered by Q1 — the two stay disjoint,
-            # and container→leaf rows never collide with stored
-            # container→container cells).
+            far_up = await _chain_resolve(
+                [row[1] for row in q1_far if row and row[1]], target_urns)
+            for row in q1_far:
+                if not row or not row[0] or not row[1]:
+                    continue
+                x, t = str(row[0]), str(row[1])
+                if t in tgt_set and x != t:
+                    _merge_rows(leaf_acc, x, t, row[2], row[3])
+                for y in far_up.get(t, ()):
+                    if x != y:
+                        _merge_rows(leaf_acc, x, y, row[2], row[3])
+
+            # Q2 — requested LEAF targets: exact typed raw fan-in; sources
+            # resolved upward to requested CONTAINERS only (leaf sources
+            # were fully covered by Q1 — the two stay disjoint).
             if src_containers and tgt_leaves:
-                xs_all = list(src_containers)
+                q2_far: list = []
                 for y_label, y_bucket in await self._label_buckets(tgt_leaves):
                     y_anchor = f"(y:{y_label})" if y_label else "(y)"
                     for i in range(0, len(y_bucket), batch):
-                        rows.extend(await _run(
-                            f"MATCH (s)-[r]->{y_anchor} "
-                            f"WHERE y.urn IN $ys AND type(r) IN $lt "
-                            f"MATCH (x)-[:{c_pattern}*0..{hops}]->(s) "
-                            f"WHERE x.urn IN $xs AND x.urn <> y.urn "
-                            f"RETURN x.urn AS sUrn, y.urn AS tUrn, "
-                            f"count(DISTINCT r) AS weight, "
-                            f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                            {"ys": y_bucket[i:i + batch], "xs": xs_all, "lt": lt_list},
+                        q2_far.extend(await _run(
+                            f"MATCH (s)-[r:{l_pattern}]->{y_anchor} "
+                            f"WHERE y.urn IN $ys "
+                            f"RETURN y.urn, s.urn, count(r), "
+                            f"collect(DISTINCT type(r)) LIMIT {cap}",
+                            {"ys": y_bucket[i:i + batch]},
                         ))
-            # Q3 — mixed-DEPTH container pairs (table→domain): only the
-            # canonical cells are materialized, so these are derived by
-            # anchoring the finer endpoint's stored fan-out/fan-in and
-            # walking the coarser endpoint upward. Requires depth stamps
-            # graph-wide (stamp_version >= 2); older graphs serve stored
-            # rows only until the next materialization re-stamps them —
-            # never the type-level arithmetic this replaces, which
-            # collapsed on self-nesting ontologies.
-            if src_containers and tgt_containers and meta.stamp_version >= 2:
+                src_up = await _chain_resolve(
+                    [row[1] for row in q2_far if row and row[1]],
+                    list(src_containers))
+                for row in q2_far:
+                    if not row or not row[0] or not row[1]:
+                        continue
+                    y, s = str(row[0]), str(row[1])
+                    for x in src_up.get(s, ()):
+                        if x != y:
+                            _merge_rows(leaf_acc, x, y, row[2], row[3])
+            rows = list(leaf_acc.values())
+
+            # Q3 — mixed-DEPTH container pairs derived from stored cells
+            # (depth-index-anchored), far endpoints resolved via chains.
+            if src_containers and tgt_containers:
                 mixed_rows = await self._mixed_depth_pairs(
                     src_containers, tgt_containers,
-                    c_pattern=c_pattern, hops=hops, cap=cap, batch=batch,
-                    run_src=_run, run_proj=_run_proj,
+                    cap=cap, batch=batch,
+                    run_proj=_run_proj, chain_resolve=_chain_resolve,
                 )
         else:
-            # Source-only mode (no target set): exact raw fan-out of the
-            # requested leaf sources. Upward resolution is skipped — with
-            # no target set to bound it, it would enumerate every ancestor.
+            # Source-only mode: exact typed raw fan-out of requested leaf
+            # sources (no target set to resolve upward against).
             src_prof = await _profile(source_urns)
             src_leaves = [
                 u for u in source_urns if not src_prof.get(u, (False, 0))[0]
@@ -5074,27 +5180,28 @@ class FalkorDBProvider(GraphDataProvider):
                 x_anchor = f"(x:{x_label})" if x_label else "(x)"
                 for i in range(0, len(x_bucket), batch):
                     rows.extend(await _run(
-                        f"MATCH {x_anchor}-[r]->(t) "
-                        f"WHERE x.urn IN $xs AND type(r) IN $lt "
-                        f"AND t.urn <> x.urn "
+                        f"MATCH {x_anchor}-[r:{l_pattern}]->(t) "
+                        f"WHERE x.urn IN $xs AND t.urn <> x.urn "
                         f"RETURN x.urn AS sUrn, t.urn AS tUrn, "
                         f"count(r) AS weight, "
                         f"collect(DISTINCT type(r)) AS types LIMIT {cap}",
-                        {"xs": x_bucket[i:i + batch], "lt": lt_list},
+                        {"xs": x_bucket[i:i + batch]},
                     ))
-        return rows, mixed_rows, degraded["v"]
+
+        stale_reason = None
+        if chain_missed["v"]:
+            stale_reason = "chain_cache_miss"
+        return rows, mixed_rows, degraded["v"], stale_reason
 
     async def _mixed_depth_pairs(
         self,
         src_containers: Dict[str, int],
         tgt_containers: Dict[str, int],
         *,
-        c_pattern: str,
-        hops: int,
         cap: int,
         batch: int,
-        run_src,
         run_proj,
+        chain_resolve,
     ) -> list:
         """Derive mixed-DEPTH container pairs (table→domain, domain→table)
         from the materialized canonical cells, keyed on the structural
@@ -5102,19 +5209,16 @@ class FalkorDBProvider(GraphDataProvider):
         type levels anywhere, so self-nesting ontologies derive
         correctly.
 
-        Inputs are the requested containers with their MEASURED
-        containment depths. For each direction: (1) anchor the FINER
-        endpoint's stored :AGGREGATED cells at the anchor's own rank —
-        ``r.targetDepth <= r.sourceDepth`` for fan-out (the anchored
-        row's sourceDepth IS the anchor's depth, so no per-anchor
-        parameter is needed; under canonical depth-bridging each raw
-        edge appears in exactly ONE such kept cell per anchor), (2)
-        resolve the far endpoints STRICTLY upward through containment,
-        (3) join against the requested strictly-coarser far side and sum
-        in Python. Bounded index-driven queries — never a subtree
-        enumeration.
+        For each direction: (1) anchor the FINER endpoint's stored
+        :AGGREGATED cells at the anchor's own rank
+        (``r.targetDepth <= r.sourceDepth`` for fan-out — depth-index-
+        backed after WS2), (2) resolve the far endpoints STRICTLY upward
+        via the Redis ancestor-chain cache in Python (the previous
+        ``*1..hops`` Cypher walk is gone from the read path; a chain
+        miss drops the pair and flags ``stale``), (3) join against the
+        requested strictly-coarser far side and sum.
 
-        The strictly-upward walk makes these sums DISJOINT from any
+        The strictly-upward resolution keeps these sums DISJOINT from any
         directly-materialized canonical cell for the same pair — the
         caller must therefore ADD a derived row's weight to a
         materialized row, not drop it.
@@ -5126,28 +5230,6 @@ class FalkorDBProvider(GraphDataProvider):
         regime (the default within budget) stores these pairs exactly.
         """
         cells: Dict[Tuple[str, str], list] = {}
-
-        async def _resolve_up(child_urns: List[str], anc_urns: List[str]) -> Dict[str, List[str]]:
-            """child urn → requested ancestor urns (strictly above it).
-
-            Deduped per (child, ancestor): a variable-length MATCH yields
-            one row PER PATH, so diamond containment (a child with two
-            parents under the same ancestor) would otherwise count the
-            same cell weight once per path."""
-            out: Dict[str, Set[str]] = {}
-            kids = list(dict.fromkeys(child_urns))
-            for c_label, c_bucket in await self._label_buckets(kids):
-                c_anchor = f"(c:{c_label})" if c_label else "(c)"
-                for i in range(0, len(c_bucket), batch):
-                    for row in await run_src(
-                        f"MATCH (a)-[:{c_pattern}*1..{hops}]->{c_anchor} "
-                        f"WHERE c.urn IN $cs AND a.urn IN $as_ "
-                        f"RETURN DISTINCT c.urn, a.urn LIMIT {cap}",
-                        {"cs": c_bucket[i:i + batch], "as_": anc_urns},
-                    ):
-                        if row and row[0] and row[1]:
-                            out.setdefault(row[0], set()).add(row[1])
-            return {k: sorted(v) for k, v in out.items()}
 
         def _merge(x: str, y: str, weight, types) -> None:
             w = int(weight) if weight else 1
@@ -5180,7 +5262,8 @@ class FalkorDBProvider(GraphDataProvider):
                         f"LIMIT {cap}",
                         {"xs": x_bucket[i:i + batch]},
                     ))
-            up = await _resolve_up([row[1] for row in fanout if row and row[1]], ys)
+            up = await chain_resolve(
+                [row[1] for row in fanout if row and row[1]], ys)
             for row in fanout:
                 for y in up.get(row[1], ()):
                     _merge(row[0], y, row[2], row[3])
@@ -5204,7 +5287,8 @@ class FalkorDBProvider(GraphDataProvider):
                         f"LIMIT {cap}",
                         {"ys": y_bucket[i:i + batch]},
                     ))
-            up = await _resolve_up([row[1] for row in fanin if row and row[1]], xs)
+            up = await chain_resolve(
+                [row[1] for row in fanin if row and row[1]], xs)
             for row in fanin:
                 for x in up.get(row[1], ()):
                     _merge(x, row[0], row[2], row[3])
@@ -5284,6 +5368,10 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         last_materialized_at: Optional[str] = None,
         degraded: bool = False,
+        stale: bool = False,
+        stale_reason: Optional[str] = None,
+        stamp_version: Optional[int] = None,
+        regime: Optional[str] = None,
     ) -> AggregatedEdgeResult:
         """Convert raw Cypher result rows into AggregatedEdgeResult."""
         from ..config.resilience import AGGREGATED_EDGE_RESULT_CAP
@@ -5308,6 +5396,10 @@ class FalkorDBProvider(GraphDataProvider):
             totalSourceEdges=total_edges,
             truncated=degraded or len(aggregated) >= AGGREGATED_EDGE_RESULT_CAP,
             lastMaterializedAt=last_materialized_at,
+            stale=stale or bool(stale_reason),
+            staleReason=stale_reason,
+            stampVersion=stamp_version,
+            regime=regime,
         )
 
     async def get_trace_lineage(

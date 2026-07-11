@@ -1761,11 +1761,23 @@ class ContextEngine:
             timeout=FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
         )
 
-        if (
-            len(result.aggregated_edges) == 0
-            and result.last_materialized_at is None
-            and hasattr(self.provider, "materialize_aggregated_edges_batch")
-        ):
+        # Self-heal trigger, WIDENED (the old predicate — empty result AND
+        # never materialized — let any graph whose cells exist but predate
+        # the depth-stamp contract degrade forever: reads returned rows, so
+        # nothing ever re-materialized). Fire whenever the provider reports
+        # the answer is stale for a reason a re-materialization fixes.
+        # The 15-minute SET-NX dedupe inside the trigger bounds enqueue
+        # rate; the terminal-failure key (set by the worker on budget/
+        # precondition failures) stops churn on doomed graphs.
+        heal_reasons = {"unmaterialized", "legacy_cells", "chain_cache_miss"}
+        needs_heal = (
+            (len(result.aggregated_edges) == 0 and result.last_materialized_at is None)
+            or (result.stale and (result.stale_reason in heal_reasons))
+            or (getattr(result, "stamp_version", None) is not None
+                and result.stamp_version < 2
+                and result.regime in ("boundary", "unknown"))
+        )
+        if needs_heal and hasattr(self.provider, "materialize_aggregated_edges_batch"):
             triggered = await self._trigger_materialize_in_background(
                 containment_types=list(containment_types),
                 lineage_types=list(lineage_types),
@@ -1801,6 +1813,19 @@ class ContextEngine:
         dedupe_key = f"materialize:in-flight:{ds_id}"
         if redis is not None:
             try:
+                # Terminal-failure backoff: the worker stamps this key when
+                # a run fails in a way a retry cannot fix (budget exceeded,
+                # precondition failed). While present, the widened trigger
+                # must NOT re-enqueue the identical doomed job every
+                # damping window. Cleared by TTL (6h), manual trigger, or
+                # any tuning save (the worker deletes it on those paths).
+                if await redis.get(f"materialize:terminal:{ds_id}"):
+                    logger.info(
+                        "Materialize trigger suppressed for %s: previous run "
+                        "failed terminally (materialize:terminal key present).",
+                        ds_id,
+                    )
+                    return False
                 # 15-minute damping: without it, a graph whose
                 # materialization fails terminally (budget exceeded,
                 # ontology misclassification) never stamps

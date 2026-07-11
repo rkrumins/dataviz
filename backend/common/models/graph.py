@@ -557,6 +557,17 @@ class AggregatedEdgeResult(BaseModel):
     truncated: bool = False
     last_materialized_at: Optional[str] = Field(default=None, alias="lastMaterializedAt")
     materialization_triggered: bool = Field(default=False, alias="materializationTriggered")
+    # Honest freshness signals (additive — old clients ignore them).
+    # stale=True means the answer is served from whatever cells exist but
+    # is known incomplete for this graph state; staleReason says why:
+    # "unmaterialized" (no _AggMeta / never aggregated),
+    # "legacy_cells" (cells predate depth stamps — mixed/leaf derivation off),
+    # "chain_cache_miss" (leaf/mixed resolution dropped pairs pending cache),
+    # "degraded" (an on-demand sub-query failed).
+    stale: bool = False
+    stale_reason: Optional[str] = Field(default=None, alias="staleReason")
+    stamp_version: Optional[int] = Field(default=None, alias="stampVersion")
+    regime: Optional[str] = None
 
     class Config:
         populate_by_name = True
