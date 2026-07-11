@@ -209,9 +209,13 @@ function AggregationStatusCard({ dataSourceId }: { dataSourceId: string; wsId: s
 
 // ── component ────────────────────────────────────────────────────────────
 
-export function DataSourceProfile({ catalogId, context }: {
+export function DataSourceProfile({ catalogId, context, embedded }: {
     catalogId: string
     context?: DataSourceProfileContext | null
+    /** True when a host already shows the source's identity + actions (the
+     *  workspace drawer header). Suppresses the profile's own hero, explore
+     *  card, semantic-layer link and vocab warning so nothing is duplicated. */
+    embedded?: boolean
 }) {
     const { item, provider, stats, meta, consumers, statsLoading, consumersLoading, notFound } = useDataSourceProfile(catalogId)
 
@@ -245,7 +249,9 @@ export function DataSourceProfile({ catalogId, context }: {
 
     return (
         <div className="min-w-0 space-y-4">
-            {/* ── Hero ─────────────────────────────────────────── */}
+            {/* ── Hero — suppressed when embedded (the host header already
+                shows identity + actions). ─────────────────────── */}
+            {!embedded && (
             <motion.div
                 initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className={cn('relative overflow-hidden rounded-3xl border border-glass-border bg-gradient-to-br', tint.split(' ').slice(0, 2).join(' '))}
@@ -300,6 +306,7 @@ export function DataSourceProfile({ catalogId, context }: {
                     )}
                 </div>
             </motion.div>
+            )}
 
             {/* ── Metric tiles — always 2-up, never overflows ──── */}
             <div className="grid grid-cols-2 gap-3">
@@ -341,7 +348,9 @@ export function DataSourceProfile({ catalogId, context }: {
 
             {/* ── Enhanced (workspace-context): aggregation + vocab ── */}
             {context && <AggregationStatusCard dataSourceId={context.dataSourceId} wsId={context.wsId} />}
-            {context && <VocabAlignmentWarning wsId={context.wsId} dataSourceId={context.dataSourceId} />}
+            {/* Vocab warning: the workspace drawer already shows it in its
+                header, so only render it in the standalone (non-embedded) view. */}
+            {context && !embedded && <VocabAlignmentWarning wsId={context.wsId} dataSourceId={context.dataSourceId} />}
 
             {/* ── Where it's used ──────────────────────────────── */}
             <Card>
@@ -364,7 +373,9 @@ export function DataSourceProfile({ catalogId, context }: {
                 </div>
             </Card>
 
-            {/* ── Explore lineage ──────────────────────────────── */}
+            {/* ── Explore lineage — suppressed when embedded (host header
+                has an Explorer action). ─────────────────────── */}
+            {!embedded && (
             <Card className="p-5">
                 <div className="flex items-center gap-2 mb-3">
                     <GitBranch className="w-4 h-4 text-ink-muted shrink-0" />
@@ -399,9 +410,11 @@ export function DataSourceProfile({ catalogId, context }: {
                     </div>
                 )}
             </Card>
+            )}
 
-            {/* ── Semantic layer (workspace-context) ───────────── */}
-            {context && (
+            {/* ── Semantic layer — suppressed when embedded (host header
+                shows the ontology chip). ─────────────────────── */}
+            {context && !embedded && (
                 <Card className="p-5">
                     <div className="flex items-center gap-2 mb-3">
                         <Layers className="w-4 h-4 text-ink-muted shrink-0" />

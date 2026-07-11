@@ -303,7 +303,7 @@ export function DataSourceDetailPanel({
 
                         {/* ── Tab Bar ────────────────────────────────────── */}
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
-                            <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Insights" onClick={() => setActiveTab('insights')} />
+                            <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
@@ -317,6 +317,7 @@ export function DataSourceDetailPanel({
                                     <DataSourceProfile
                                         catalogId={ds.catalogItemId}
                                         context={{ wsId, dataSourceId: ds.id, ontologyId, ontologyName } satisfies DataSourceProfileContext}
+                                        embedded
                                     />
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>

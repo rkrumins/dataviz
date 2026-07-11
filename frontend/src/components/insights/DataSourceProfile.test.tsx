@@ -53,4 +53,16 @@ describe('DataSourceProfile', () => {
     expect(screen.getByText('Core Ontology')).toBeInTheDocument()
     expect(screen.getByTestId('vocab')).toBeInTheDocument()
   })
+
+  it('suppresses hero + host-duplicated sections when embedded', () => {
+    // When embedded in a host that already shows identity + actions (the
+    // workspace drawer), the profile must not repeat the hero, explore,
+    // ontology link or vocab warning — but the insight content stays.
+    const ctx = { wsId: 'w', dataSourceId: 'ds-1', ontologyId: 'o-1', ontologyName: 'Core Ontology' }
+    render(<MemoryRouter><DataSourceProfile catalogId="cat-1" context={ctx} embedded /></MemoryRouter>, { wrapper })
+    expect(screen.queryByRole('heading', { name: 'Orders Graph', level: 1 })).not.toBeInTheDocument()
+    expect(screen.queryByText('Semantic layer')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('vocab')).not.toBeInTheDocument()
+    expect(screen.getByText('68k')).toBeInTheDocument()   // insight content still renders
+  })
 })
