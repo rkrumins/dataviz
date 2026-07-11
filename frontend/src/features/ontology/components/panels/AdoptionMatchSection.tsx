@@ -23,6 +23,7 @@ import type {
 } from '@/services/ontologyDefinitionService'
 import { formatCount } from '../../lib/ontology-parsers'
 import { DeclaredVsPhysical } from '../DeclaredVsPhysical'
+import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
 import { cn } from '@/lib/utils'
 
 type Mode = 'weighted' | 'by-type'
@@ -275,9 +276,11 @@ function SourceRow({ src, mode, index }: { src: AdoptionSource; mode: Mode; inde
           {drift > 0 && (
             <p className="text-[11px] text-amber-700 dark:text-amber-400 flex items-start gap-1.5">
               <Icons.TriangleAlert className="w-3.5 h-3.5 flex-shrink-0 mt-px" />
-              Case drift means the physical type is present but spelled differently than declared — FalkorDB is case-sensitive, so it won't hit the label/index. Align the casing (declared or physical) to fix.
+              Case drift means the physical type is present but spelled differently than declared — FalkorDB is case-sensitive, so it won't hit the label/index. It's aligned automatically below; to make the physical graph match natively, use Normalize (opt-in).
             </p>
           )}
+          {/* Align step (Tier 1) — reuses the vocab-alignment status/confirm; self-hides when no drift. */}
+          <VocabAlignmentWarning wsId={src.workspaceId} dataSourceId={src.dataSourceId} className="" />
           <DimBreakdown title="Node types" dim={src.nodes} />
           <DimBreakdown title="Edge types" dim={src.edges} />
         </div>

@@ -43,7 +43,11 @@ async function confirmVariant(
   await fetchWithTimeout(`/api/v1/${wsId}/graph/vocab-alignment/confirm?${params}`, { method: 'POST' })
 }
 
-export function VocabAlignmentWarning({ wsId, dataSourceId }: { wsId: string; dataSourceId: string }) {
+export function VocabAlignmentWarning({ wsId, dataSourceId, className = 'mx-6 mb-3' }: {
+  wsId: string; dataSourceId: string
+  /** Container layout — override when embedding outside DataSourceDetailPanel (e.g. Health). */
+  className?: string
+}) {
   const { data, refetch } = useQuery({
     queryKey: ['vocab-alignment', wsId, dataSourceId],
     queryFn: () => fetchVocabAlignment(wsId, dataSourceId),
@@ -63,7 +67,7 @@ export function VocabAlignmentWarning({ wsId, dataSourceId }: { wsId: string; da
   }
 
   return (
-    <div className="mx-6 mb-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-700 dark:text-amber-300">
+    <div className={`rounded-lg border border-amber-500/25 bg-amber-500/10 px-3.5 py-2.5 text-[12px] text-amber-700 dark:text-amber-300 ${className}`}>
       <div className="flex items-start gap-2">
         <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
         <div className="space-y-1.5">
