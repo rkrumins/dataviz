@@ -7338,19 +7338,31 @@ class FalkorDBProvider(GraphDataProvider):
         await self._cache_urn_labels_bulk(label_mapping)
 
         # urn → label for endpoint MATCH: same-call nodes (authoritative) over
-        # the caller-supplied map (endpoints saved in a prior call).
+        # the caller-supplied map (endpoints saved in a prior call). Resolve ONLY the
+        # endpoints referenced by THIS call's edges — ``endpoint_labels`` can be the whole
+        # graph (millions of urns), so iterating/sanitizing all of it per call is O(graph)
+        # per batch (~1.4s/10k-chunk at 2M nodes → ~11min of pure Python for a 5M-edge
+        # load). A small value cache avoids re-sanitizing the handful of distinct labels.
+        referenced = {u for e in edges for u in (e.source_urn, e.target_urn)}
         urn_label: Dict[str, str] = {}
-        for urn, sl in (endpoint_labels or {}).items():
-            urn_label[urn] = _sanitize_label(str(sl))
-        urn_label.update(label_mapping)  # same-call node labels win
+        _san_cache: Dict[str, str] = {}
+        for urn in referenced:
+            lbl = label_mapping.get(urn)          # already sanitized (same-call node)
+            if lbl is None and endpoint_labels:
+                raw = endpoint_labels.get(urn)
+                if raw is not None:
+                    lbl = _san_cache.get(raw)
+                    if lbl is None:
+                        lbl = _sanitize_label(str(raw))
+                        _san_cache[raw] = lbl
+            if lbl is not None:
+                urn_label[urn] = lbl
 
         # Endpoints still unknown (edges into nodes saved in a prior call
         # with no caller-supplied label): resolve through the urn→label
         # cache / graph in one bulk pass so they hit the indexed MATCH
         # too; anything unresolvable keeps the label-less fallback below.
-        unknown = list({
-            u for e in edges for u in (e.source_urn, e.target_urn)
-        } - set(urn_label))
+        unknown = list(referenced - set(urn_label))
         if unknown:
             try:
                 resolved = await self._resolve_urn_labels_bulk(unknown)
