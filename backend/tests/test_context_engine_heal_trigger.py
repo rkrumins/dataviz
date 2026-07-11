@@ -1,10 +1,17 @@
-"""Widened aggregation self-heal trigger (WS3): the read path enqueues a
-re-materialization whenever the provider reports a heal-able stale answer —
-not only on the old "empty AND never materialized" predicate, which let any
-graph whose cells predate the depth-stamp contract degrade forever (reads
-returned rows, so nothing ever re-materialized). The terminal-failure key
-(stamped by the worker on budget/precondition failures) suppresses re-enqueue
-churn on doomed graphs.
+"""Reads NEVER trigger materialization (trigger-model decision, 2026-07-12).
+
+Aggregation is event-driven — projection on merge/publish/import
+(``projection_target._hook``) and post-purge (worker) — plus manual (control
+plane) and a scheduled drift sweep. It is NEVER driven from a browse read.
+
+The removed read-path "auto" self-heal trigger fired whenever a result looked
+stale, including on the transient ``chain_cache_miss`` read-cache condition that
+nothing on the browse path ever warmed — so a browse-only user got a perpetual
+re-trigger that ran a multi-minute worker job, found "no changes", and fired
+again the next damping window. ``get_aggregated_edges`` must now return the
+provider's result — including its honest freshness fields (``stale`` /
+``stale_reason`` / ``stamp_version`` / ``regime``) so the UI can offer a
+"re-aggregate" affordance — WITHOUT enqueueing anything, whatever the staleness.
 """
 import asyncio
 
@@ -16,35 +23,20 @@ from backend.common.models.graph import (
 )
 
 
-class _FakeRedis:
-    def __init__(self):
-        self.store = {}
-
-    async def get(self, key):
-        return self.store.get(key)
-
-    async def set(self, key, value, nx=False, ex=None):
-        if nx and key in self.store:
-            return False
-        self.store[key] = value
-        return True
-
-    async def delete(self, key):
-        self.store.pop(key, None)
-
-
 class _Provider:
-    """Just enough surface for engine.get_aggregated_edges + the trigger."""
+    """Just enough surface for ``engine.get_aggregated_edges``.
+    ``materialize_aggregated_edges_batch`` is a tripwire: the read path must
+    never call it (inline or otherwise)."""
 
     def __init__(self, result):
         self._result = result
-        self._redis = _FakeRedis()
+        self._redis = None
 
     async def get_aggregated_edges_between(self, **kw):
         return self._result
 
     async def materialize_aggregated_edges_batch(self, *a, **kw):  # pragma: no cover
-        raise AssertionError("read path must never materialize inline")
+        raise AssertionError("read path must never materialize")
 
 
 def _engine(provider):
@@ -59,17 +51,6 @@ def _engine(provider):
         )
 
     e.get_ontology_metadata = _meta
-    enqueued = {"n": 0}
-
-    async def _fake_job_create():
-        enqueued["n"] += 1
-        return True
-
-    # Bypass the real aggregation-service dispatch; keep the dedupe/terminal
-    # logic in _trigger_materialize_in_background intact by stubbing only the
-    # job-creation step it awaits.
-    e._create_materialize_job = _fake_job_create  # used if refactor extracts it
-    e._enqueued = enqueued
     return e
 
 
@@ -89,58 +70,37 @@ def _request():
     )
 
 
-def _patch_trigger(e, calls):
-    async def _fake_trigger(**kw):
-        calls["n"] += 1
-        return True
-    e._trigger_materialize_in_background = _fake_trigger
-
-
-def test_trigger_fires_on_stale_legacy_cells():
+def test_stale_legacy_cells_do_not_trigger():
+    """Legacy stampVersion<2 cells are stale-but-honest — the migration
+    script heals them, not the read path."""
     p = _Provider(_result(stale=True, staleReason="legacy_cells",
                           stampVersion=1, regime="boundary",
                           lastMaterializedAt="2026-07-01T00:00:00Z"))
-    e = _engine(p)
-    calls = {"n": 0}
-    _patch_trigger(e, calls)
-    result = _run(e.get_aggregated_edges(_request()))
-    assert calls["n"] == 1
-    assert result.materialization_triggered is True
+    result = _run(_engine(p).get_aggregated_edges(_request()))
+    assert result.materialization_triggered is False
+    # honest freshness still flows through untouched
+    assert result.stale is True and result.stale_reason == "legacy_cells"
 
 
-def test_trigger_fires_on_unmaterialized_even_with_rows():
-    p = _Provider(_result(
-        aggregatedEdges=[], totalSourceEdges=0,
-        stale=True, staleReason="unmaterialized", stampVersion=1,
-        regime="unknown",
-    ))
-    e = _engine(p)
-    calls = {"n": 0}
-    _patch_trigger(e, calls)
-    _run(e.get_aggregated_edges(_request()))
-    assert calls["n"] == 1
+def test_unmaterialized_does_not_trigger():
+    """A never-materialized graph is healed by the ingest/merge projection
+    event, not by the first browse of it."""
+    p = _Provider(_result(stale=True, staleReason="unmaterialized",
+                          stampVersion=1, regime="unknown"))
+    result = _run(_engine(p).get_aggregated_edges(_request()))
+    assert result.materialization_triggered is False
+    assert result.stale is True and result.stale_reason == "unmaterialized"
 
 
-def test_no_trigger_on_healthy_result():
+def test_healthy_result_does_not_trigger():
     p = _Provider(_result(stale=False, stampVersion=2, regime="boundary",
                           lastMaterializedAt="2026-07-11T00:00:00Z"))
-    e = _engine(p)
-    calls = {"n": 0}
-    _patch_trigger(e, calls)
-    result = _run(e.get_aggregated_edges(_request()))
-    assert calls["n"] == 0
+    result = _run(_engine(p).get_aggregated_edges(_request()))
     assert result.materialization_triggered is False
+    assert result.stale is False
 
 
-def test_terminal_key_suppresses_real_trigger():
-    """The un-patched trigger path: terminal key present → no enqueue, no
-    dedupe claim consumed."""
-    p = _Provider(_result(stale=True, staleReason="legacy_cells",
-                          stampVersion=1, regime="boundary"))
-    e = _engine(p)
-    _run(p._redis.set("materialize:terminal:ds1", "budget exceeded"))
-    triggered = _run(e._trigger_materialize_in_background(
-        containment_types=["HAS"], lineage_types=["FLOWS_TO"],
-    ))
-    assert triggered is False
-    assert "materialize:in-flight:ds1" not in p._redis.store
+def test_read_path_trigger_method_is_gone():
+    """Guard against the read-path self-heal method silently reappearing —
+    its return would resurrect the browse-driven job-churn loop."""
+    assert not hasattr(ContextEngine, "_trigger_materialize_in_background")

@@ -5009,36 +5009,6 @@ class FalkorDBProvider(GraphDataProvider):
     # Helpers for get_aggregated_edges_between
     # ------------------------------------------------------------------
 
-
-    async def _read_ancestor_chains_cached(
-        self, urns: List[str],
-    ) -> Dict[str, Optional[List[str]]]:
-        """Cache-ONLY bulk ancestor-chain read (one pipelined HMGET) —
-        urn → chain (parent→root) or None on a miss. Read paths use this
-        instead of the compute-on-miss chain helpers: the read path must
-        NEVER walk containment live. Misses are surfaced to the caller
-        (dropped pair + ``stale``) and healed by aggregation runs / trace
-        hydration, both of which back-fill this cache."""
-        uniq = list(dict.fromkeys(u for u in urns if u))
-        if not uniq or self._redis is None:
-            return {u: None for u in uniq}
-        out: Dict[str, Optional[List[str]]] = {}
-        try:
-            raw = await self._redis.execute_command(
-                "HMGET", self._ancestors_cache_key(), *uniq)
-        except Exception as e:
-            logger.debug("ancestor chain cache read failed: %s", e)
-            return {u: None for u in uniq}
-        for u, val in zip(uniq, raw or []):
-            if val is None:
-                out[u] = None
-            else:
-                try:
-                    out[u] = json.loads(val)
-                except Exception:
-                    out[u] = None
-        return out
-
     async def _synthesize_ondemand_lineage_pairs(
         self,
         source_urns: List[str],
@@ -5063,11 +5033,14 @@ class FalkorDBProvider(GraphDataProvider):
         * containment depth — max over the node's own stamped incident
           :AGGREGATED cells (``_frontier_depths_from_stamps``,
           depth-index-backed);
-        * upward resolution (leaf far-endpoints and Q3 mixed pairs) — the
-          Redis ancestor-chain cache, resolved in Python. A chain miss
-          DROPS the pair and reports ``stale_reason="chain_cache_miss"``
-          instead of walking live; aggregation runs and trace hydration
-          back-fill the cache.
+        * upward resolution (leaf far-endpoints and Q3 mixed pairs) —
+          READ-THROUGH the Redis ancestor-chain cache (cache hit = free;
+          miss computes the chain bounded to this call's far set and
+          caches it), resolved in Python. The first browse of a container
+          set pays a bounded, one-time ancestor walk; subsequent reads hit
+          the cache. This decouples read-cache warming from
+          materialization — a cold cache no longer drops pairs or reports
+          a stale condition that would (pointlessly) re-trigger a job.
 
         Regime dispatch (no probes here — see ``_aggregation_run_meta``):
         ``cube``    → exact raw mirror only (cells are complete; anything
@@ -5124,7 +5097,6 @@ class FalkorDBProvider(GraphDataProvider):
         cap = AGGREGATED_EDGE_RESULT_CAP
         batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
         degraded = {"v": False}
-        chain_missed = {"v": False}
 
         async def _run(cypher: str, params: Dict[str, Any]) -> list:
             try:
@@ -5175,17 +5147,26 @@ class FalkorDBProvider(GraphDataProvider):
         async def _chain_resolve(
             far_urns: List[str], requested: List[str],
         ) -> Dict[str, List[str]]:
-            """far urn → requested urns strictly ABOVE it (ancestors from
-            the Redis chain cache; self is excluded — exact matches are
-            handled by the callers directly). Misses flag stale."""
+            """far urn → requested urns strictly ABOVE it (self excluded —
+            exact matches are handled by callers directly).
+
+            READ-THROUGH the ancestor-chain cache: a cache hit is free; a
+            miss computes the chain (bounded to this call's far set) and
+            caches it. The previous cache-ONLY read dropped the pair and
+            flagged ``chain_cache_miss`` on every miss — and NOTHING on the
+            browse path warmed the cache (only trace did; the materializer
+            does not), so a browse-only user got a PERPETUAL
+            chain_cache_miss that re-triggered a no-op re-materialization
+            every few minutes. Read-through warms progressively: the first
+            browse of a container set pays a bounded, one-time ancestor
+            walk; every subsequent read hits the cache. This is NOT the old
+            full-graph synthesis (10-26s) — it is bounded to the visible
+            far-endpoints and cached."""
             req = set(requested)
-            chains = await self._read_ancestor_chains_cached(far_urns)
+            chains = await self._compute_and_store_ancestors_bulk(far_urns)
             out: Dict[str, List[str]] = {}
             for u, chain in chains.items():
-                if chain is None:
-                    chain_missed["v"] = True
-                    continue
-                hits = [a for a in dict.fromkeys(chain) if a in req and a != u]
+                hits = [a for a in dict.fromkeys(chain or []) if a in req and a != u]
                 if hits:
                     out[u] = hits
             return out
@@ -5304,10 +5285,11 @@ class FalkorDBProvider(GraphDataProvider):
                         {"xs": x_bucket[i:i + batch]},
                     ))
 
-        stale_reason = None
-        if chain_missed["v"]:
-            stale_reason = "chain_cache_miss"
-        return rows, mixed_rows, degraded["v"], stale_reason
+        # Chain resolution is now read-THROUGH (computes + caches on miss),
+        # so container roll-up pairs always resolve — there is no
+        # chain_cache_miss staleness and nothing to self-heal here. A true
+        # sub-query failure is surfaced via ``degraded`` instead.
+        return rows, mixed_rows, degraded["v"], None
 
     async def _mixed_depth_pairs(
         self,

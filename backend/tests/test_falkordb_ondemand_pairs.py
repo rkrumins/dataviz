@@ -259,11 +259,11 @@ def _make_provider(fake, levels):
             by.setdefault(fake.labels.get(u) or "", []).append(u)
         return sorted(by.items())
 
-    async def _chains_cached(urns):
-        # The Redis ancestor-chain cache, as aggregation populates it:
-        # urn → [parent, …, root]. chain_cache_down simulates a cold cache.
-        if fake.chain_cache_down:
-            return {u: None for u in dict.fromkeys(urns)}
+    async def _ancestors_read_through(urns):
+        # Read-THROUGH ancestor resolution, exactly as the reader now calls
+        # it: a cache hit is free, a miss COMPUTES (and caches) the chain —
+        # it never returns a miss, so chain_cache_down (a cold cache) does
+        # NOT suppress resolution. urn → [parent, …, root].
         parent = {}
         for par, kids in fake.children.items():
             for k in kids:
@@ -289,7 +289,7 @@ def _make_provider(fake, levels):
 
     p._get_cached_label = _cached_label
     p._label_buckets = _buckets
-    p._read_ancestor_chains_cached = _chains_cached
+    p._compute_and_store_ancestors_bulk = _ancestors_read_through
     p._frontier_depths_from_stamps = _stamp_depths
     return p
 
@@ -1059,20 +1059,28 @@ def test_boundary_stamp1_reports_legacy_cells():
     assert reason == "legacy_cells"
 
 
-def test_chain_cache_miss_drops_pair_and_reports_stale():
-    """Cold ancestor-chain cache: the reader must NOT fall back to a live
-    containment walk — it drops the unresolvable rolled-up pair and
-    reports chain_cache_miss (exact same-node pairs still serve)."""
+def test_cold_chain_cache_resolves_rolled_up_pair_via_read_through():
+    """Read-THROUGH ancestor resolution (trigger-model redesign): a cold
+    ancestor-chain cache no longer DROPS the rolled-up pair. The chain is
+    computed on miss — bounded to the far endpoints, cached — so a2→b0
+    resolves alongside the exact a2→b2, and the result is NOT flagged
+    chain_cache_miss. This is what decouples read-cache warming from
+    materialization and stops the browse-driven re-trigger loop.
+
+    (Still no live containment WALK on the read path: the bound is the
+    visible far set, not the graph — that guarantee is unchanged.)"""
     fake = _FakeGraph()
     levels = _seed_deep_chains(fake, depth=3)
-    fake.chain_cache_down = True
+    fake.chain_cache_down = True  # cold cache — read-through computes anyway
     p = _make_provider(fake, levels)
     rows, mixed, degraded, reason = _run(p._synthesize_ondemand_lineage_pairs(
         ["urn:a2"], ["urn:b0", "urn:b2"], ["CONTAINS"], ["FLOWS"],
     ))
-    # Exact pair (a2→b2) still present; rolled-up (a2→b0) dropped.
-    assert {(r[0], r[1]) for r in rows} == {("urn:a2", "urn:b2")}
-    assert reason == "chain_cache_miss"
+    # Exact pair (a2→b2) AND rolled-up (a2→b0) both resolve; nothing dropped.
+    assert {(r[0], r[1], r[2]) for r in rows} == {
+        ("urn:a2", "urn:b2", 2), ("urn:a2", "urn:b0", 2),
+    }
+    assert reason is None
 
 
 def test_entry_result_carries_freshness_fields():

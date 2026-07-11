@@ -89,11 +89,11 @@ def _run(coro):
 
 def test_merge_dedupes_and_ors_stale():
     a = _agg([("x", "y", 2)], stale=False, regime="boundary", stampVersion=2)
-    b = _agg([("x", "y", 2), ("z", "y", 3)], stale=True, staleReason="chain_cache_miss")
+    b = _agg([("x", "y", 2), ("z", "y", 3)], stale=True, staleReason="unmaterialized")
     merged = _merge_aggregated([a, b])
     pairs = {(e.source_urn, e.target_urn): e.edge_count for e in merged.aggregated_edges}
     assert pairs == {("x", "y"): 2, ("z", "y"): 3}  # deduped
-    assert merged.stale is True and merged.stale_reason == "chain_cache_miss"
+    assert merged.stale is True and merged.stale_reason == "unmaterialized"
     assert merged.regime == "boundary"
 
 

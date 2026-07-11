@@ -1770,174 +1770,20 @@ class ContextEngine:
             timeout=FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
         )
 
-        # Self-heal trigger, WIDENED (the old predicate — empty result AND
-        # never materialized — let any graph whose cells exist but predate
-        # the depth-stamp contract degrade forever: reads returned rows, so
-        # nothing ever re-materialized). Fire whenever the provider reports
-        # the answer is stale for a reason a re-materialization fixes.
-        # The 15-minute SET-NX dedupe inside the trigger bounds enqueue
-        # rate; the terminal-failure key (set by the worker on budget/
-        # precondition failures) stops churn on doomed graphs.
-        heal_reasons = {"unmaterialized", "legacy_cells", "chain_cache_miss"}
-        needs_heal = (
-            (len(result.aggregated_edges) == 0 and result.last_materialized_at is None)
-            or (result.stale and (result.stale_reason in heal_reasons))
-            or (getattr(result, "stamp_version", None) is not None
-                and result.stamp_version < 2
-                and result.regime in ("boundary", "unknown"))
-        )
-        if needs_heal and hasattr(self.provider, "materialize_aggregated_edges_batch"):
-            triggered = await self._trigger_materialize_in_background(
-                containment_types=list(containment_types),
-                lineage_types=list(lineage_types),
-            )
-            if triggered:
-                result.materialization_triggered = True
-
+        # Reads NEVER trigger materialization. Aggregation is event-driven
+        # — projection on merge/publish/import (projection_target._hook) and
+        # post-purge (worker) — plus manual (control plane) and a scheduled
+        # drift sweep. A browse must not enqueue a multi-minute worker job:
+        # the removed read-path "auto" trigger fired on transient read-cache
+        # conditions (chain_cache_miss) and, because nothing on the browse
+        # path warmed that cache, looped "verified · no changes" every
+        # damping window on perfectly healthy graphs. Freshness is still
+        # reported honestly on the result (stale / stale_reason /
+        # stamp_version / regime) so the UI can surface a "re-aggregate"
+        # affordance; the one-time migration heals the legacy
+        # stampVersion<2 backlog. See readpath-perf plan, trigger-model
+        # decision (2026-07-12).
         return result
-
-    async def _trigger_materialize_in_background(
-        self,
-        *,
-        containment_types: List[str],
-        lineage_types: List[str],
-    ) -> bool:
-        """Request a re-materialization as a REAL aggregation job, deduped
-        via Redis SET-NX. Returns True when a job was created (or one is
-        already in flight), False when nothing could be scheduled.
-
-        The read path never writes. The previous implementation ran
-        ``materialize_aggregated_edges_batch`` inline in this process —
-        a shadow run invisible to the jobs UI that held the cross-pod
-        graph write lease, parking every user-triggered worker job on an
-        anonymous "lease held" error. Routing through the aggregation
-        service gives the run a job row (UI-visible, cancellable),
-        worker-fleet placement, watchdog, tuning, and admission — the
-        same lifecycle as any other job.
-        """
-        ds_id = self._data_source_id
-        if not ds_id:
-            return False
-        redis = getattr(self.provider, "_redis", None)
-        dedupe_key = f"materialize:in-flight:{ds_id}"
-        if redis is not None:
-            try:
-                # Terminal-failure backoff: the worker stamps this key when
-                # a run fails in a way a retry cannot fix (budget exceeded,
-                # precondition failed). While present, the widened trigger
-                # must NOT re-enqueue the identical doomed job every
-                # damping window. Cleared by TTL (6h), manual trigger, or
-                # any tuning save (the worker deletes it on those paths).
-                if await redis.get(f"materialize:terminal:{ds_id}"):
-                    logger.info(
-                        "Materialize trigger suppressed for %s: previous run "
-                        "failed terminally (materialize:terminal key present).",
-                        ds_id,
-                    )
-                    return False
-                # 15-minute damping: without it, a graph whose
-                # materialization fails terminally (budget exceeded,
-                # ontology misclassification) never stamps
-                # last_materialized_at, so every empty read re-triggers a
-                # full EXTRACT+COMPUTE that fails again — an unbounded,
-                # browsing-driven job-churn loop.
-                claimed = bool(await redis.set(dedupe_key, "1", nx=True, ex=900))
-                if not claimed:
-                    return True
-            except Exception as e:
-                logger.warning(
-                    "Materialize dedupe-claim failed (%s) — skipping "
-                    "read-path backfill rather than risking a trigger "
-                    "storm without damping.", e,
-                )
-                return False
-
-        async def _shorten_damping() -> None:
-            # The TRIGGER itself failed — no job exists, so the full
-            # 15-minute damping window would black out backfill over a
-            # possibly transient error (control plane restarting, DB
-            # blip). Shrink the claim to a short cool-down; the damping
-            # window at full length is only for jobs that actually ran.
-            if redis is None:
-                return
-            try:
-                await redis.expire(dedupe_key, 60)
-            except Exception:
-                pass
-
-        from backend.app.services.aggregation.service import get_active_service
-        from backend.app.services.aggregation.schemas import (
-            AggregationTriggerRequest,
-        )
-        projection_mode = getattr(self.provider, "_projection_mode", None) or "in_source"
-        request = AggregationTriggerRequest(projectionMode=projection_mode, batchSize=1000)
-
-        svc = get_active_service()
-        if svc is not None:
-            try:
-                async with svc._session_factory() as session:
-                    job = await svc.trigger(ds_id, request, "auto", session)
-                logger.info(
-                    "Read-path backfill: triggered aggregation job %s for %s",
-                    getattr(job, "id", "?"), ds_id,
-                )
-                return True
-            except Exception as e:
-                # ConflictError = a job is already active — mission
-                # accomplished. Anything else (unresolved ontology, DS
-                # missing) is logged, never raised into the read path.
-                logger.info(
-                    "Read-path backfill trigger for %s not scheduled: %s",
-                    ds_id, e,
-                )
-                if type(e).__name__ == "ConflictError":
-                    return True
-                await _shorten_damping()
-                return False
-
-        # Proxy deployment: this process has no aggregation service —
-        # POST to the control plane's trigger endpoint instead.
-        import os as _os
-        if _os.getenv("AGGREGATION_PROXY_ENABLED", "false").lower() == "true":
-            import httpx
-            base = _os.getenv("AGGREGATION_SERVICE_URL", "http://localhost:8091")
-            try:
-                async with httpx.AsyncClient(
-                    base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
-                ) as client:
-                    resp = await client.post(
-                        f"/aggregation/data-sources/{ds_id}/jobs",
-                        params={"triggerSource": "auto"},
-                        json=request.model_dump(by_alias=True, exclude_none=True),
-                    )
-                if resp.status_code in (200, 202):
-                    logger.info(
-                        "Read-path backfill: triggered aggregation job via "
-                        "control plane for %s", ds_id,
-                    )
-                    return True
-                if resp.status_code == 409:
-                    return True  # a job is already active
-                logger.info(
-                    "Read-path backfill trigger for %s rejected by control "
-                    "plane (%s): %s", ds_id, resp.status_code, resp.text[:300],
-                )
-                await _shorten_damping()
-                return False
-            except Exception as e:
-                logger.warning(
-                    "Read-path backfill trigger for %s failed to reach the "
-                    "control plane: %s", ds_id, e,
-                )
-                await _shorten_damping()
-                return False
-
-        logger.info(
-            "Read-path backfill for %s skipped: no aggregation service in "
-            "this process and proxy mode is disabled.", ds_id,
-        )
-        await _shorten_damping()
-        return False
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
         """
