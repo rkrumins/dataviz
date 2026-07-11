@@ -4286,23 +4286,45 @@ class FalkorDBProvider(GraphDataProvider):
                 if cursor == 0:
                     break
 
-            # Bump the aggregation-state EPOCH. ``lastMaterializedAt`` rides
-            # on every aggregated-edge response and is the client caches'
-            # invalidation signal — without this bump a purge was invisible
-            # to every consumer (canvases kept serving pre-purge answers
-            # from cache). The regime marker is dropped too: the store is
-            # empty, so readers must re-probe instead of trusting the
-            # pre-purge regime. Best-effort — marker failures must never
-            # fail a purge whose deletes already landed.
+            # Bump the aggregation-state EPOCH — the in-graph _AggMeta
+            # FIRST: it is the readers' authoritative source (outranks
+            # the Redis marker), so a Redis-only bump is shadowed and the
+            # purge stays invisible to meta-driven readers. The regime is
+            # KEPT as 'cube': an empty store trivially satisfies the cube
+            # contract, which keeps on-demand derivation OFF — re-probing
+            # an empty store resolves 'boundary' and the structural
+            # reader would then RE-DERIVE the purged cells from raw
+            # lineage on the next canvas read (purge-then-resurrect).
+            # ``edgeCount = 0`` + ``purgedAt`` make the state inspectable.
+            from datetime import datetime, timezone
+            now_iso = datetime.now(timezone.utc).isoformat()
+            try:
+                await self._proj_query(
+                    "MATCH (m:_AggMeta {id: 'singleton'}) "
+                    "SET m.edgeCount = 0, m.regime = 'cube', "
+                    "m.lastMaterializedAt = $now, m.purgedAt = $now",
+                    params={"now": now_iso},
+                )
+                # Readers cache the resolved meta ~5 min — drop this
+                # instance's copy so it answers honestly immediately.
+                self._agg_meta_cached = None
+            except Exception as exc:
+                logger.warning(
+                    "purge_aggregated_edges: could not update the in-graph "
+                    "_AggMeta epoch: %s", exc,
+                )
+            # Redis mirror second. ``lastMaterializedAt`` rides on every
+            # aggregated-edge response and is the client caches'
+            # invalidation signal — without this bump a purge was
+            # invisible to every consumer. Best-effort — marker failures
+            # must never fail a purge whose deletes already landed.
             try:
                 if self._redis is not None:
-                    from datetime import datetime, timezone
                     await self._redis.set(
-                        self._agg_last_materialized_key(),
-                        datetime.now(timezone.utc).isoformat(),
+                        self._agg_last_materialized_key(), now_iso,
                     )
                     if hasattr(self, "_agg_regime_key"):
-                        await self._redis.delete(self._agg_regime_key())
+                        await self._redis.set(self._agg_regime_key(), "fine")
             except Exception as exc:
                 logger.warning(
                     "purge_aggregated_edges: could not bump the "

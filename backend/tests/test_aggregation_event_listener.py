@@ -81,3 +81,35 @@ def test_job_completed_without_workspace_skips_invalidation(monkeypatch):
     assert synced["ds"] == "ds_1"
     cache.bump_generation.assert_not_awaited()
     cache.purge_lkg.assert_not_awaited()
+
+
+def test_purge_completed_syncs_and_invalidates(monkeypatch):
+    """A purge is the same cache-relevant event as a completed run with
+    the opposite sign: status resets AND the aggregated read caches are
+    invalidated, or canvases keep serving pre-purge answers."""
+    lst = _listener()
+    synced = {}
+
+    async def fake_sync(ds_id, **fields):
+        synced["ds"] = ds_id
+        synced.update(fields)
+
+    lst._sync_data_source = fake_sync
+    cache = AsyncMock()
+    cache.purge_lkg = AsyncMock(return_value=1)
+    monkeypatch.setattr(gc_module, "get_graph_cache", lambda: cache)
+
+    _run(lst._handle_event({
+        "type": "purge.completed",
+        "payload": {
+            "job_id": "agg_p1",
+            "data_source_id": "ds_1",
+            "workspace_id": "ws_1",
+            "deleted_edges": 1323,
+        },
+    }))
+
+    assert synced["ds"] == "ds_1"
+    assert synced["aggregation_status"] == "none"
+    cache.bump_generation.assert_awaited_once()
+    cache.purge_lkg.assert_awaited_once()

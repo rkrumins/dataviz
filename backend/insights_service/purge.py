@@ -280,6 +280,41 @@ async def _collect_in_session(
         from .enqueue import mark_stats_changed
         await mark_stats_changed(envelope.data_source_id, envelope.workspace_id)
 
+        # The purge rewrote the :AGGREGATED layer — invalidate the
+        # aggregated read caches THROUGH THE SHARED CHOKE POINT (bump the
+        # scoped generation + purge the last-known-good entries). Without
+        # this a purge was invisible to the canvas: the primary cache
+        # expired in ~60s but every degraded read kept serving pre-purge
+        # LKG answers for up to its TTL ("edges still there after a
+        # verified delete"). Best-effort direct call (same-Redis
+        # topologies) + a bus event so the viz-service listener covers
+        # split topologies. Both must never fail a purge whose deletes
+        # already landed.
+        try:
+            from backend.app.services.graph_cache import invalidate_aggregated_reads
+            await invalidate_aggregated_reads(
+                envelope.workspace_id or "", envelope.data_source_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "purge.cache_invalidation_failed ds=%s: %s",
+                envelope.data_source_id, exc,
+            )
+        try:
+            from backend.app.services.aggregation.events import AggregationEventPublisher
+            from backend.app.services.aggregation.redis_client import get_redis
+            await AggregationEventPublisher(get_redis()).purge_completed(
+                job_id=job.id,
+                data_source_id=job.data_source_id,
+                workspace_id=envelope.workspace_id,
+                deleted_edges=deleted,
+            )
+        except Exception as exc:
+            logger.warning(
+                "purge.event_publish_failed ds=%s: %s",
+                envelope.data_source_id, exc,
+            )
+
         # PURGE QUARANTINE for the opt-out case: skipping the post-purge
         # re-aggregation is meaningless if the read path's empty-result
         # backfill resurrects the cells on the next canvas load. Arm the

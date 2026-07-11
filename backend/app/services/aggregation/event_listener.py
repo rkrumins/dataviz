@@ -116,10 +116,24 @@ class AggregationEventListener:
                 await self._invalidate_aggregated_cache(
                     payload.get("workspace_id"), data_source_id,
                 )
+            case "purge.completed":
+                await self._sync_data_source(
+                    data_source_id,
+                    aggregation_status="none",
+                    aggregation_edge_count=0,
+                )
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
+                )
             case "job.failed":
                 await self._sync_data_source(
                     data_source_id,
                     aggregation_status="failed",
+                )
+                # A failed run may have PARTIALLY written before dying —
+                # cached pre-run answers no longer match the store.
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
                 )
             case "job.pending":
                 await self._sync_data_source(
@@ -136,6 +150,9 @@ class AggregationEventListener:
                     data_source_id,
                     aggregation_status="none",
                 )
+                await self._invalidate_aggregated_cache(
+                    payload.get("workspace_id"), data_source_id,
+                )
             case "state.updated":
                 await self._sync_data_source(
                     data_source_id,
@@ -149,35 +166,21 @@ class AggregationEventListener:
     async def _invalidate_aggregated_cache(
         self, workspace_id: Any, data_source_id: str,
     ) -> None:
-        """A completed aggregation run rewrote the :AGGREGATED layer —
-        bump the scoped graph-cache generation AND purge the
-        last-known-good entries (which survive generation bumps by
-        design), or degraded reads keep serving pre-run answers for up
-        to the LKG TTL. Events from workers that predate the
-        workspace_id field skip silently (the cache keys are
-        workspace-scoped, so the scope can't be built without it)."""
+        """Any event that rewrote the :AGGREGATED layer (run completed,
+        purge, failed/cancelled mid-write) invalidates the aggregated
+        read caches through the shared choke point. Events from workers
+        that predate the workspace_id field skip silently (the cache
+        keys are workspace-scoped, so the scope can't be built without
+        it)."""
         if not workspace_id:
             logger.debug(
-                "job.completed for %s carried no workspace_id — skipping "
-                "aggregated-cache invalidation", data_source_id,
+                "aggregation event for %s carried no workspace_id — "
+                "skipping aggregated-cache invalidation", data_source_id,
             )
             return
         try:
-            from backend.app.services.graph_cache import (
-                CacheScope, ENDPOINT_AGGREGATED, get_graph_cache,
-            )
-            cache = get_graph_cache()
-            scope = CacheScope(
-                workspace_id=str(workspace_id),
-                data_source_id=data_source_id,
-                branch_id="",
-            )
-            await cache.bump_generation(scope)
-            removed = await cache.purge_lkg(scope, ENDPOINT_AGGREGATED)
-            logger.info(
-                "Aggregated-edge cache invalidated for %s/%s (%d LKG "
-                "entries purged)", workspace_id, data_source_id, removed,
-            )
+            from backend.app.services.graph_cache import invalidate_aggregated_reads
+            await invalidate_aggregated_reads(str(workspace_id), data_source_id)
         except Exception as e:
             logger.warning(
                 "Aggregated-edge cache invalidation failed for %s: %s",

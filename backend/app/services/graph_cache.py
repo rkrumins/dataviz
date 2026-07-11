@@ -558,6 +558,42 @@ def _is_empty_result(result: BaseModel) -> bool:
     return False
 
 
+async def invalidate_aggregated_reads(
+    workspace_id: str, data_source_id: str,
+) -> None:
+    """THE invalidation choke point for the :AGGREGATED read caches.
+
+    Call after ANY event that changes what the aggregated endpoints
+    should answer — an aggregation run completing (or dying mid-write),
+    a purge, a skip. Bumps the scoped generation (unreaches every
+    primary entry) AND purges the last-known-good entries — LKG keys
+    survive generation bumps by design (they are the outage fallback),
+    which is exactly how a purge stayed invisible: the primary entries
+    expired in 60s but every degraded read kept serving the pre-purge
+    LKG answer for up to its TTL. Best-effort: never raises.
+    """
+    if not workspace_id or not data_source_id:
+        return
+    try:
+        cache = get_graph_cache()
+        scope = CacheScope(
+            workspace_id=str(workspace_id),
+            data_source_id=str(data_source_id),
+            branch_id="",
+        )
+        await cache.bump_generation(scope)
+        removed = await cache.purge_lkg(scope, ENDPOINT_AGGREGATED)
+        logger.info(
+            "aggregated-read caches invalidated for %s/%s (%d LKG purged)",
+            workspace_id, data_source_id, removed,
+        )
+    except Exception as exc:
+        logger.warning(
+            "aggregated-read cache invalidation failed for %s/%s: %s",
+            workspace_id, data_source_id, exc,
+        )
+
+
 # ─── Singleton accessor ────────────────────────────────────────────────
 
 _cache: Optional[GraphCache] = None

@@ -62,8 +62,18 @@ def test_purge_bumps_epoch_and_drops_regime():
         "purge must bump lastMaterializedAt — it is the client caches' "
         "invalidation epoch"
     )
-    assert p._agg_regime_key() in redis.deleted, (
-        "an empty store must not advertise the pre-purge regime"
+    # The regime marker is overwritten to 'fine' (cube contract), not
+    # deleted: with the marker (and _AggMeta) gone, readers RE-PROBE the
+    # empty store, resolve 'boundary', and the structural on-demand
+    # reader re-derives the purged cells from raw lineage on the next
+    # canvas read — purge-then-resurrect. 'fine' keeps derivation off
+    # while still not advertising the pre-purge shape.
+    regime_val = redis.store.get(p._agg_regime_key())
+    if isinstance(regime_val, tuple):
+        regime_val = regime_val[0]
+    assert regime_val == "fine", (
+        "an empty store must keep on-demand derivation OFF (cube "
+        "contract), or readers resurrect the purged cells from raw"
     )
 
 

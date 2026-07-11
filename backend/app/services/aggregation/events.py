@@ -152,6 +152,25 @@ class AggregationEventPublisher:
             "status": "cancelled",
         })
 
+    async def purge_completed(
+        self,
+        job_id: str,
+        data_source_id: str,
+        workspace_id: Optional[str],
+        deleted_edges: int,
+    ) -> None:
+        """A purge rewrote the :AGGREGATED layer — listeners must sync
+        status AND invalidate the aggregated read caches, exactly like a
+        completed aggregation run (a purge is the same event with the
+        opposite sign)."""
+        await self.publish("purge.completed", {
+            "job_id": job_id,
+            "data_source_id": data_source_id,
+            "workspace_id": workspace_id,
+            "status": "none",
+            "deleted_edges": deleted_edges,
+        })
+
     async def state_updated(
         self,
         data_source_id: str,
