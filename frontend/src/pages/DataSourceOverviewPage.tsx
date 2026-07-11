@@ -22,13 +22,18 @@ export function DataSourceOverviewPage() {
     return (
         <div className="absolute inset-0 overflow-y-auto">
             <div className="max-w-[1440px] mx-auto px-6 md:px-10 lg:px-12 py-8 animate-in fade-in duration-500">
-                <button
-                    onClick={() => navigate('/ingestion?tab=assets')}
-                    className="mb-6 inline-flex items-center gap-1.5 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
-                >
-                    <ArrowLeft className="w-3.5 h-3.5" /> Data Sources
-                </button>
-                <DataSourceProfile catalogId={catalogId} />
+                {/* Single-column profile constrained to a comfortable reading
+                    column (the profile fills its container, so the drawers show
+                    it full-width; the page centres it instead of stretching). */}
+                <div className="max-w-3xl mx-auto">
+                    <button
+                        onClick={() => navigate('/ingestion?tab=assets')}
+                        className="mb-6 inline-flex items-center gap-1.5 text-xs font-semibold text-ink-muted hover:text-ink transition-colors"
+                    >
+                        <ArrowLeft className="w-3.5 h-3.5" /> Data Sources
+                    </button>
+                    <DataSourceProfile catalogId={catalogId} />
+                </div>
             </div>
         </div>
     )

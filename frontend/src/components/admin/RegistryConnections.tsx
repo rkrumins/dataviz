@@ -89,13 +89,15 @@ function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedA
     const config = getProviderConfig(provider.providerType)
     const [expanded, setExpanded] = useState(false)
     const statusDot = { checking: 'bg-amber-400 animate-pulse', healthy: 'bg-emerald-400', unhealthy: 'bg-red-400', unknown: 'bg-gray-400' }[health.status]
-    const freshness = health.status === 'checking'
-        ? null
-        : justChecked
-            ? 'Checked just now'
-            : lastCheckedAt
-                ? `Checked ${timeAgoShort(lastCheckedAt)}`
-                : null
+    // Only surface a freshness stamp when the status is MEANINGFULLY stale —
+    // a fresh/just-checked card showing "Checked just now" on every row is
+    // noise (the status chip already conveys currency). Show "Checked Xm ago"
+    // only once it's been a while.
+    const freshness = (() => {
+        if (health.status === 'checking' || justChecked || !lastCheckedAt) return null
+        const secs = (Date.now() - new Date(lastCheckedAt).getTime()) / 1000
+        return secs >= 90 ? `Checked ${timeAgoShort(lastCheckedAt)}` : null
+    })()
 
     return (
         <div className={cn("group border border-glass-border rounded-xl bg-canvas-elevated hover:shadow-lg transition-colors duration-150 duration-200", health.status === 'healthy' && "hover:border-emerald-500/30", health.status === 'unhealthy' && "border-red-500/20")}>
