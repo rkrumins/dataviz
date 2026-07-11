@@ -43,6 +43,13 @@ from backend.common.interfaces.provider import ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
 
+# Per-server (host, port) facts we only need to discover / report ONCE, so onboarding
+# many graphs against the same FalkorDB doesn't re-probe and re-log the same thing on
+# every graph. Whether a FalkorDB build supports a label-less property index, and whether
+# we've already logged its index-health summary, are server-level — not per-graph.
+_UNLABELED_URN_UNSUPPORTED: set = set()
+_INDEX_HEALTH_LOGGED: set = set()
+
 
 class AggregationBatchAbort(Exception):
     """Raised when sustained provider failure makes continuing pointless.
@@ -2888,28 +2895,31 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             pass  # Index may already exist
 
-        # Unlabeled URN index for the aggregation MERGE hot path. Best-effort;
-        # supported on recent FalkorDB versions (>=2.10). On older releases
-        # the CREATE fails and the planner continues to scan — flagged for
-        # the operator via the slow-query metric exported in WS4.
-        try:
-            await self._proj_query("CREATE INDEX FOR (n) ON (n.urn)")
-        except Exception as exc:
-            logger.info(
-                "ensure_projections: unlabeled URN index not supported on this "
-                "FalkorDB version (%s); falling back to per-label indexes. "
-                "Aggregation MERGEs will scan unless every label has a URN "
-                "index in place.", exc,
-            )
+        # Label-less URN index. FalkorDB's openCypher requires a label on an index, so
+        # `CREATE INDEX FOR (n) ON (n.urn)` is unsupported on every build — AND it is no
+        # longer needed: every write/read hot path (bulk load, incremental MERGE, and the
+        # AGGREGATED upsert at projection.py) is label-qualified and served by the per-label
+        # URN indexes. Discover support ONCE PER SERVER so onboarding many graphs doesn't
+        # re-attempt and re-log the same fallback on each graph (the recurring "falling back
+        # to per-label indexes" noise).
+        server = (self._host, self._port)
+        if server not in _UNLABELED_URN_UNSUPPORTED:
+            try:
+                await self._proj_query("CREATE INDEX FOR (n) ON (n.urn)")
+            except Exception:
+                _UNLABELED_URN_UNSUPPORTED.add(server)
+                logger.info(
+                    "FalkorDB %s:%s uses the labeled-index strategy (no label-less property "
+                    "index on this build; every hot path is label-qualified and index-driven "
+                    "via the per-label URN indexes). Expected — not a degradation.",
+                    self._host, self._port,
+                )
 
-        # Smoke-probe: log which AGGREGATED-relevant indexes actually
-        # exist in the graph now. Best-effort — surfaces the silent-fail
-        # case where CREATE INDEX returned success on an older FalkorDB
-        # that ignores unsupported syntax (or where a deployment skipped
-        # _initialize_indices entirely). Two sessions of guessing at
-        # whether indexes are "really there" justifies running this
-        # explicitly at startup.
-        await self._log_aggregation_index_health()
+        # Index-health smoke probe: log the summary ONCE per server (not per onboarded
+        # graph). Surfaces a genuinely missing index without spamming every reconcile.
+        if server not in _INDEX_HEALTH_LOGGED:
+            _INDEX_HEALTH_LOGGED.add(server)
+            await self._log_aggregation_index_health()
 
     async def _log_aggregation_index_health(self) -> None:
         """Introspect the projection graph's index catalogue and log a
