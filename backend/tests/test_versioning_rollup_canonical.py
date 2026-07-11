@@ -1,11 +1,13 @@
 """The versioning projector's incremental :AGGREGATED maintenance must
-emit the same CANONICAL level-bridged pairs as the aggregation worker.
+emit the same pair sets as the aggregation worker's shared pair rules.
 
-Its original full ancestor cross-product wrote leaf-involving and
-mixed-level cells the canonical boundary deliberately excludes — on a
-canonically-aggregated graph every versioned lineage commit then created
-full-cube rows that the on-demand reader either shadowed (leaf pairs) or
-double-counted (mixed-level additive merge) until the next batch run.
+The stored regime (cube vs boundary) is only knowable from the graph at
+APPLY time, so the compute step returns the full ancestor-closure CUBE
+deltas (``dw``) with the canonical depth-bridged subset flagged
+(``dwc``); ``_apply_rollups`` picks the delta matching the graph. On a
+boundary graph only ``dwc`` is applied — writing the full cube there
+would shadow leaf pairs and double-count the reader's additive
+mixed-level merges until the next batch run.
 """
 import asyncio
 from types import SimpleNamespace
@@ -87,18 +89,27 @@ def test_projector_emits_canonical_pairs_with_level_stamps():
         p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
     )
 
-    # Canonical diagonal only — no leaf-involving, no mixed cells.
-    assert set(pairs) == {
+    # Full cube deltas (every ancestor combination minus the raw
+    # mirror), with the canonical diagonal flagged via dwc — the apply
+    # step selects by the graph's stored regime.
+    assert len(pairs) == 4 * 4 - 1
+    canonical = {k for k, v in pairs.items() if v.get("dwc")}
+    assert canonical == {
         ("urn:a2", "urn:b2"), ("urn:a1", "urn:b1"), ("urn:a0", "urn:b0"),
     }
     for (su, tu), v in pairs.items():
         assert v["dw"] == 1
         assert v["types"] == {"FLOWS"}
+        # Structural depth stamps ride every pair.
+        assert isinstance(v["sd"], int) and isinstance(v["td"], int)
+        assert v["dg"]
+    for k in canonical:
+        v = pairs[k]
         # Level stamps + digest keep the read path's storage-regime probe
         # clean (NULL stamps flip readers to stored-only answers).
         assert isinstance(v["sl"], int) and isinstance(v["tl"], int)
         assert v["sl"] == v["tl"]
-        assert v["dg"]
+        assert v["dwc"] == 1
 
 
 def test_projector_structural_canonical_without_level_map():
@@ -116,7 +127,8 @@ def test_projector_structural_canonical_without_level_map():
         p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
     )
 
-    assert set(pairs) == {
+    canonical = {k for k, v in pairs.items() if v.get("dwc")}
+    assert canonical == {
         ("urn:a2", "urn:b2"), ("urn:a1", "urn:b1"), ("urn:a0", "urn:b0"),
     }
     assert all("sl" not in v and "dg" not in v for v in pairs.values())
@@ -142,10 +154,12 @@ def test_projector_delete_emits_negative_canonical_deltas():
         p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
     )
 
-    assert set(pairs) == {
+    canonical = {k for k, v in pairs.items() if v.get("dwc")}
+    assert canonical == {
         ("urn:a2", "urn:b2"), ("urn:a1", "urn:b1"), ("urn:a0", "urn:b0"),
     }
     assert all(v["dw"] == -1 for v in pairs.values())
+    assert all(pairs[k]["dwc"] == -1 for k in canonical)
 
 
 def test_projector_self_nesting_type_emits_every_depth():
@@ -178,9 +192,14 @@ def test_projector_self_nesting_type_emits_every_depth():
         p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
     )
 
-    assert set(pairs) == {
+    canonical = {k for k, v in pairs.items() if v.get("dwc")}
+    assert canonical == {
         ("urn:a2", "urn:b2"),      # Node-container diagonal — was missing
         ("urn:a1", "urn:b1"),      # Roots diagonal
     }
     assert pairs[("urn:a2", "urn:b2")]["sl"] == 1
     assert pairs[("urn:a1", "urn:b1")]["sl"] == 0
+    # Structural depth stamps on every cube pair, self-nesting included.
+    assert pairs[("urn:a2", "urn:b2")]["sd"] == 1
+    assert pairs[("urn:a3", "urn:b1")]["sd"] == 2
+    assert pairs[("urn:a3", "urn:b1")]["td"] == 0

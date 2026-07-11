@@ -593,16 +593,25 @@ def test_write_path_hook_emits_only_canonical_pairs():
     async def noop():
         return None
 
-    async def ancestors(urn):
-        # urn:a3 -> [urn:a2, urn:a1, urn:a0]
-        chain, idx = urn[4], int(urn[5])
-        return [f"urn:{chain}{i}" for i in range(idx - 1, -1, -1)]
+    async def dag_pair(source_urn, target_urn):
+        # urn:a3 -> closure {a3: 3, a2: 2, a1: 1, a0: 0}
+        def closure(urn):
+            chain, idx = urn[4], int(urn[5])
+            out = {urn: idx}
+            for i in range(idx):
+                out[f"urn:{chain}{i}"] = i
+            return out
+
+        return closure(source_urn), closure(target_urn), False, False
 
     async def proj_query(cypher, params=None, timeout=None):
         merged.extend(params["batch"])
 
+    import time as _time
+    from backend.app.providers.falkordb_provider import AggRunMeta
     p._ensure_connected = noop
-    p._get_ancestor_chain = ancestors
+    p._get_ancestor_dag_pair = dag_pair
+    p._agg_meta_cached = (AggRunMeta("boundary", 2, None, None), _time.monotonic())
     p._redis = redis
     p._urn_label_key = lambda: "labels"
     p._level_digest = "digest-1"

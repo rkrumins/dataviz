@@ -734,21 +734,23 @@ class FalkorProjector:
         if not lineage_creates and not lineage_deletes and not moved:
             return None
 
-        anc_cache: Dict[Tuple[str, Optional[int]], Tuple[List[str], Dict[str, str]]] = {}
+        anc_cache: Dict[Tuple[str, Optional[int]], Tuple[List[str], Dict[str, List[str]]]] = {}
         lvl_cache: Dict[Tuple[str, Optional[int]], Optional[int]] = {}
 
-        async def chain(node_id: str, as_of: Optional[int]) -> Tuple[List[str], Dict[str, str]]:
-            """(ancestors-or-self ids, child→parent map) — the parent map
-            carries the STRUCTURE the canonical selection ranks on."""
+        async def chain(node_id: str, as_of: Optional[int]) -> Tuple[List[str], Dict[str, List[str]]]:
+            """(ancestors-or-self ids, child→ALL-parents multimap) — the
+            parent DAG the shared pair rules rank on. Multi-parent nodes
+            keep every ancestry (the old single-slot map silently dropped
+            all but the last-seen parent)."""
             key = (node_id, as_of)
             if key not in anc_cache:
                 seen, edges = await self._svc._containment_ancestors(
                     s, graph.id, main_id, {node_id}, cont_types, as_of)
-                child_parent: Dict[str, str] = {}
+                child_parent: Dict[str, List[str]] = {}
                 for payload in edges.values():
                     a, b = _edge_endpoints(payload)      # a = parent, b = child
-                    if a and b:
-                        child_parent[b] = a
+                    if a and b and a not in child_parent.setdefault(b, []):
+                        child_parent[b].append(a)
                 anc_cache[key] = (list(seen), child_parent)
             return anc_cache[key]
 
@@ -761,68 +763,53 @@ class FalkorProjector:
                     lvl_cache[(i, as_of)] = level_map.get(et_id) if et_id else None
             return {i: lvl_cache[(i, as_of)] for i in ids}
 
-        async def canonical_pairs(
-            cs: List[str], cp_s: Dict[str, str],
-            ct: List[str], cp_t: Dict[str, str],
-        ):
-            """Mirror of the worker's structural _merge_canonical_pairs /
-            the hooks' _canonical_rep_pairs: reps are the containment
-            PARENTS among each side's ancestors, ranked by depth from the
-            root; per rank R the pair of each side's deepest rep at
-            depth <= R. Chains here are ancestor SETS (not the pipeline's
-            longest-chain walk): a multi-parent tie may attribute a delta
-            to the other parent — deltas stay self-consistent and the
-            next batch run reconciles exact weights."""
-            def reps(ids: List[str], cp: Dict[str, str]):
-                parents_set = set(cp.values())
-
-                def depth(n: str) -> int:
-                    d, cur, guard = 0, cp.get(n), 0
-                    while cur is not None and guard < 64:
-                        d += 1
-                        cur = cp.get(cur)
-                        guard += 1
-                    return d
-
-                return sorted(
-                    ((depth(i), i) for i in ids if i in parents_set),
-                    key=lambda t: (-t[0], t[1]),
-                )
-
-            cs_r, ct_r = reps(cs, cp_s), reps(ct, cp_t)
-            out, seen = [], set()
-            for rank in {r for r, _ in cs_r} | {r for r, _ in ct_r}:
-                sp = next(((r, i) for r, i in cs_r if r <= rank), None)
-                tp = next(((r, i) for r, i in ct_r if r <= rank), None)
-                if sp is None or tp is None or sp[1] == tp[1]:
-                    continue
-                if (sp[1], tp[1]) in seen:
-                    continue
-                seen.add((sp[1], tp[1]))
-                out.append((sp, tp))
-            return out
-
         pairs: Dict[Tuple[str, str], Dict[str, object]] = {}
 
         async def contribute(p: dict, sign: int, as_of: Optional[int]) -> None:
+            """Accumulate this raw edge's delta into BOTH pair sets via
+            the shared ``pair_rules`` (the same rules the batch pipeline
+            and the write hooks run): ``dw`` = the full ancestor-closure
+            cross-product (what a CUBE-regime graph stores), ``dwc`` = the
+            canonical depth-bridged subset (what a BOUNDARY-regime graph
+            stores). The stored regime is only knowable from the graph
+            itself, so _apply_rollups picks the matching delta at apply
+            time. Closures have SET semantics — a diamond's shared
+            grandparent gets each edge's delta exactly once — and every
+            ancestry of a multi-parent node is linked."""
+            from backend.common.providers.pair_rules import (
+                ancestor_closure, boundary_pairs, cube_pairs,
+            )
             src, tgt = _edge_endpoints(p)
             if not src or not tgt:
                 return
             et = _etype(p)
             (cs, cp_s), (ct, cp_t) = await chain(src, as_of), await chain(tgt, as_of)
             if use_canonical:
-                selected = await canonical_pairs(cs, cp_s, ct, cp_t)
-                if selected:
-                    ids = {i for pair in selected for _r, i in pair}
-                    lv = await levels_of(ids, as_of)
-                else:
-                    lv = {}
-                for (_rs, sx), (_rt, tx) in selected:
-                    e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
+                s_cl = ancestor_closure(cp_s, src)
+                t_cl = ancestor_closure(cp_t, tgt)
+                s_parents = {pp for ps in cp_s.values() for pp in ps}
+                t_parents = {pp for ps in cp_t.values() for pp in ps}
+                canon = boundary_pairs(
+                    {a: d for a, d in s_cl.items() if a in s_parents},
+                    {a: d for a, d in t_cl.items() if a in t_parents},
+                )
+                cube = set(cube_pairs(
+                    s_cl, t_cl, include_leaf_mirror=False, s=src, t=tgt,
+                ))
+                ids = {i for pair in cube for i in pair}
+                lv = await levels_of(ids, as_of) if ids else {}
+                depths = {**t_cl, **s_cl}
+                for sx, tx in cube:
+                    e = pairs.setdefault(
+                        (sx, tx), {"dw": 0, "dwc": 0, "types": set()},
+                    )
                     e["dw"] += sign
+                    if (sx, tx) in canon:
+                        e["dwc"] += sign
                     sl, tl = lv.get(sx), lv.get(tx)
                     if sl is not None and tl is not None:
                         e["sl"], e["tl"] = sl, tl
+                    e["sd"], e["td"] = depths.get(sx), depths.get(tx)
                     if sign > 0 and et:
                         e["types"].add(et)
                 return
@@ -860,7 +847,10 @@ class FalkorProjector:
                 await contribute(p, -1, from_seq)
                 await contribute(p, +1, to_seq)
 
-        pairs = {k: v for k, v in pairs.items() if v["dw"] != 0}
+        pairs = {
+            k: v for k, v in pairs.items()
+            if v["dw"] != 0 or v.get("dwc", 0) != 0
+        }
         if not pairs:
             return None
         # FalkorDB keys nodes by urn; versioned entity ids usually ARE urns, but imported
@@ -881,14 +871,21 @@ class FalkorProjector:
         for (sx, tx), v in pairs.items():                # distinct ids can share a urn — SUM, don't overwrite
             e = out.setdefault((urn_of[sx], urn_of[tx]), {"dw": 0, "types": set()})
             e["dw"] += v["dw"]
+            if "dwc" in v:
+                e["dwc"] = e.get("dwc", 0) + v["dwc"]
             e["types"] |= v["types"]
             e.setdefault("slb", lbl_of[sx])
             e.setdefault("tlb", lbl_of[tx])
             if "sl" in v:
                 e["sl"], e["tl"] = v["sl"], v["tl"]
+            if "sd" in v:
+                e["sd"], e["td"] = v["sd"], v["td"]
             if digest is not None:
                 e["dg"] = digest
-        out = {k: v for k, v in out.items() if v["dw"] != 0}
+        out = {
+            k: v for k, v in out.items()
+            if v["dw"] != 0 or v.get("dwc", 0) != 0
+        }
         return out or None
 
     async def _apply_rollups(self, client, pairs: Dict, from_seq: int, to_seq: int) -> bool:
@@ -911,19 +908,41 @@ class FalkorProjector:
         if marker > from_seq:
             return False                                 # partial/foreign overlap — rebuild, don't guess
 
+        # Storage regime of THIS graph's :AGGREGATED set (stamped by the
+        # aggregation pipeline's _AggMeta node): a cube graph stores the
+        # full ancestor cross-product, a boundary graph only the
+        # canonical depth-bridged cells — the deltas computed upstream
+        # carry both (dw = cube, dwc = canonical) so the apply can match
+        # what is actually stored. Unknown/absent meta defaults to the
+        # canonical subset (never writes cells a boundary set excludes).
+        regime = "boundary"
+        try:
+            res = await _q(client,
+                           "MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.regime",
+                           timeout_ms=_READ_TIMEOUT_MS)
+            rows = getattr(res, "result_set", None) or []
+            if rows and rows[0] and rows[0][0] in ("cube", "boundary"):
+                regime = str(rows[0][0])
+        except Exception:
+            pass
+
         # Grouped by the endpoints' labels so every node match below is a
         # per-label URN index seek (an unlabeled ``(a {urn: …})`` scans all
         # nodes per UNWIND row).
         items_by_labels: Dict[Tuple[str, str], list] = {}
         for (s_, t_), v in pairs.items():
+            dw = int(v["dw"] if (regime == "cube" or "dwc" not in v) else v["dwc"])
+            if dw == 0:
+                continue
             key = (
                 _sanitize_label(str(v.get("slb") or "Entity")),
                 _sanitize_label(str(v.get("tlb") or "Entity")),
             )
             items_by_labels.setdefault(key, []).append(
-                {"s": s_, "t": t_, "dw": int(v["dw"]), "et": sorted(v["types"]),
+                {"s": s_, "t": t_, "dw": dw, "et": sorted(v["types"]),
                  "key": f"{s_}|{t_}", "seq": to_seq,
-                 "sl": v.get("sl"), "tl": v.get("tl"), "dg": v.get("dg")}
+                 "sl": v.get("sl"), "tl": v.get("tl"),
+                 "sd": v.get("sd"), "td": v.get("td"), "dg": v.get("dg")}
             )
         for (slb, tlb), items in items_by_labels.items():
             for chunk in _batches(items, self._batch):
@@ -952,6 +971,7 @@ class FalkorProjector:
                     upserts.append({"s": item["s"], "t": item["t"], "w": w1, "key": item["key"],
                                     "et": sorted(set(types0) | set(item["et"])), "seq": item["seq"],
                                     "sl": item.get("sl"), "tl": item.get("tl"),
+                                    "sd": item.get("sd"), "td": item.get("td"),
                                     "dg": item.get("dg")})
                 if upserts:
                     # Level stamps coalesce so the legacy (level-less) mode
@@ -968,6 +988,8 @@ class FalkorProjector:
                         f"SET r.weight = item.w, r.sourceEdgeTypes = item.et, r.aggKey = item.key, "
                         f"    r.sourceLevel = coalesce(item.sl, r.sourceLevel), "
                         f"    r.targetLevel = coalesce(item.tl, r.targetLevel), "
+                        f"    r.sourceDepth = coalesce(item.sd, r.sourceDepth), "
+                        f"    r.targetDepth = coalesce(item.td, r.targetDepth), "
                         f"    r.levelDigest = coalesce(item.dg, r.levelDigest), "
                         f"    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
                         params={"batch": upserts})

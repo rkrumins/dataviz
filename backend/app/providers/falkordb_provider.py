@@ -3758,39 +3758,93 @@ class FalkorDBProvider(GraphDataProvider):
             return None
         return urn_levels, urn_labels
 
-    @staticmethod
-    def _canonical_rep_pairs(
-        s_chain: List[str],
-        t_chain: List[str],
+    async def _get_ancestor_dag_pair(
+        self, source_urn: str, target_urn: str,
+    ) -> Optional[Tuple[Dict[str, int], Dict[str, int], bool, bool]]:
+        """Both endpoints' ancestor CLOSURES ({ancestor_or_self: depth})
+        plus whether each endpoint is itself a container — the DAG input
+        the shared pair rules run on. Multi-parent nodes keep every
+        ancestry (the flat-chain walk collapsed them to one). Two bounded
+        label-free queries: the endpoint profile (children count + depth,
+        the WS3 shape) and the distinct-ancestor depth query. Returns
+        None when containment types are unconfigured."""
+        try:
+            containment = list(self._get_containment_edge_types())
+        except Exception:
+            return None
+        if not containment:
+            return None
+        c_pattern = "|".join(
+            _sanitize_label(t) for t in self._alias_rel_types(containment)
+        )
+        hops = self._containment_hop_bound()
+        urns = [source_urn, target_urn]
+        prof = await self._ro_query(
+            f"MATCH (n) WHERE n.urn IN $urns "
+            f"OPTIONAL MATCH (n)-[:{c_pattern}]->(ch) "
+            f"WITH n, count(ch) AS kids "
+            f"OPTIONAL MATCH p = (a)-[:{c_pattern}*1..{hops}]->(n) "
+            f"RETURN n.urn, kids, coalesce(max(length(p)), 0)",
+            params={"urns": urns},
+        )
+        profile: Dict[str, Tuple[bool, int]] = {}
+        for row in (prof.result_set or []):
+            if row and row[0]:
+                profile[str(row[0])] = (int(row[1] or 0) > 0, int(row[2] or 0))
+        anc = await self._ro_query(
+            f"MATCH (a)-[:{c_pattern}*1..{hops}]->(child) "
+            f"WHERE child.urn IN $urns "
+            f"WITH DISTINCT child.urn AS cu, a "
+            f"OPTIONAL MATCH q = (r0)-[:{c_pattern}*1..{hops}]->(a) "
+            f"RETURN cu, a.urn, coalesce(max(length(q)), 0)",
+            params={"urns": urns},
+        )
+        closures: Dict[str, Dict[str, int]] = {u: {} for u in urns}
+        for row in (anc.result_set or []):
+            if row and row[0] and row[1]:
+                closures[str(row[0])][str(row[1])] = int(row[2] or 0)
+        s_prof = profile.get(source_urn, (False, 0))
+        t_prof = profile.get(target_urn, (False, 0))
+        s_cl = dict(closures.get(source_urn) or {})
+        t_cl = dict(closures.get(target_urn) or {})
+        s_cl[source_urn] = s_prof[1]
+        t_cl[target_urn] = t_prof[1]
+        return s_cl, t_cl, s_prof[0], t_prof[0]
+
+    def _hook_pairs(
+        self,
+        regime: str,
+        source_urn: str,
+        target_urn: str,
+        s_cl: Dict[str, int],
+        t_cl: Dict[str, int],
+        s_is_container: bool,
+        t_is_container: bool,
     ) -> List[Tuple[str, str]]:
-        """Canonical STRUCTURAL pair selection — the single mirror of the
-        batch pipeline's ``_merge_canonical_pairs``, shared by the write
-        and delete hooks. Reps are the containment ANCESTORS of each
-        endpoint (``chain[1:]``, root last), ranked by depth-from-root —
-        independent of ontology type levels, so self-nesting types
-        (Node ⊃ Node) roll up correctly. The endpoint itself is excluded
-        (whether it has children is unknowable from an upward chain; a
-        raw edge FROM a container is covered by the batch run). Per rank
-        R: the pair of each side's deepest ancestor at depth <= R."""
+        """Pair selection for the incremental hooks — the shared
+        ``pair_rules`` the batch pipeline stores, dispatched on the
+        stored regime so the hook writes exactly what the batch would:
+        boundary → canonical depth-bridged container pairs; cube → the
+        full ancestor cross-product (raw mirror excluded, matching the
+        batch default). Sorted for a deterministic Redis pipeline."""
+        from backend.common.providers.pair_rules import boundary_pairs, cube_pairs
 
-        def _reps(chain: List[str]) -> List[tuple]:
-            anc = chain[1:]                    # deepest first, root last
-            n = len(anc)
-            return [(n - 1 - i, u) for i, u in enumerate(anc)]
-
-        cs, ct = _reps(s_chain), _reps(t_chain)
-        pairs: List[Tuple[str, str]] = []
-        seen_pairs = set()
-        for rank in {r for r, _ in cs} | {r for r, _ in ct}:
-            sp = next((u for r, u in cs if r <= rank), None)
-            tp = next((u for r, u in ct if r <= rank), None)
-            if sp is None or tp is None or sp == tp:
-                continue
-            if (sp, tp) in seen_pairs:
-                continue
-            seen_pairs.add((sp, tp))
-            pairs.append((sp, tp))
-        return pairs
+        if regime == "cube":
+            pairs = set(cube_pairs(
+                s_cl, t_cl, include_leaf_mirror=False,
+                s=source_urn, t=target_urn,
+            ))
+        else:
+            s_reps = {
+                a: d for a, d in s_cl.items()
+                if a != source_urn or s_is_container
+            }
+            t_reps = {
+                a: d for a, d in t_cl.items()
+                if a != target_urn or t_is_container
+            }
+            pairs = boundary_pairs(s_reps, t_reps)
+        return sorted(pairs)
 
     async def on_lineage_edge_written(
         self,
@@ -3822,33 +3876,34 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
-        s_ancestors = await self._get_ancestor_chain(source_urn)
-        t_ancestors = await self._get_ancestor_chain(target_urn)
-
-        s_chain = [source_urn] + s_ancestors
-        t_chain = [target_urn] + t_ancestors
+        # DAG closures (every ancestry of a multi-parent node — the flat
+        # chain collapsed them to one and silently dropped the rest) +
+        # the stored regime, so the hook writes exactly the pair set the
+        # batch pipeline owns.
+        dag = await self._get_ancestor_dag_pair(source_urn, target_urn)
+        if dag is None:
+            logger.debug(
+                "on_lineage_edge_written: containment unresolved for "
+                "%s -> %s — deferring to the batch pipeline",
+                source_urn, target_urn,
+            )
+            return 0
+        s_cl, t_cl, s_cont, t_cont = dag
+        meta = await self._aggregation_run_meta()
 
         members_key_prefix = f"{self._graph_name}:agg_members"
 
-        # Resolve ontology levels for every chain member up front (one
-        # urn→label cache pipeline) — needed both to select CANONICAL
-        # pairs and to stamp sourceLevel/targetLevel on the merge.
+        # Resolve ontology levels for every closure member up front (one
+        # urn→label cache pipeline) — labels anchor the MERGE on per-label
+        # URN indexes; levels survive as display stamps.
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         resolved = await self._resolve_chain_levels(
-            s_chain, t_chain, entity_levels, caller="on_lineage_edge_written",
+            list(s_cl), list(t_cl), entity_levels, caller="on_lineage_edge_written",
         )
         if resolved is None:
             return 0
         urn_levels, urn_labels = resolved
 
-        # Pair selection MUST mirror the batch pipeline's
-        # _merge_canonical_pairs: only canonical level-bridged pairs
-        # (each side's deepest NON-leaf ancestor at level <= L, per
-        # level L). Writing the full ancestor cross-product here would
-        # pollute the canonical set with leaf-involving and mixed-level
-        # cells the boundary deliberately excludes — masking the
-        # on-demand reader's exact answers and double-counting its
-        # additive mixed-level sums until the next full run reconciles.
         if entity_levels and not urn_levels:
             # Level map exists but no chain member resolved (cold
             # urn→label cache). Level STAMPS would pollute the boundary;
@@ -3860,12 +3915,16 @@ class FalkorDBProvider(GraphDataProvider):
                 source_urn, target_urn,
             )
             return 0
-        # STRUCTURAL canonical selection — mirrors the batch pipeline on
-        # any graph shape (levels are stamps, never the selector).
-        pairs_to_check = self._canonical_rep_pairs(s_chain, t_chain)
+        # Shared pair rule, regime-dispatched — mirrors the batch
+        # pipeline on any graph shape (levels are stamps, never the
+        # selector; depth stamps come from the closures).
+        pairs_to_check = self._hook_pairs(
+            meta.regime, source_urn, target_urn, s_cl, t_cl, s_cont, t_cont,
+        )
 
         if not pairs_to_check:
             return 0
+        depth_of = {**t_cl, **s_cl}
 
         # Pipeline: SADD for all pairs.
         # Do NOT silently fallback on Redis failure — the previous
@@ -3911,6 +3970,9 @@ class FalkorDBProvider(GraphDataProvider):
                 "k": f"{s_urn}|{t_urn}",
                 "sl": urn_levels.get(s_urn, UNKNOWN_LEVEL),
                 "tl": urn_levels.get(t_urn, UNKNOWN_LEVEL),
+                # Structural depth stamps — the readers' filter dimension.
+                "sd": depth_of.get(s_urn),
+                "td": depth_of.get(t_urn),
             })
 
         # Stamp the current levelDigest so the cold-start probe doesn't
@@ -3932,6 +3994,8 @@ class FalkorDBProvider(GraphDataProvider):
             "SET r.weight = coalesce(r.weight, 0) + 1, "
             "r.sourceLevel = item.sl, "
             "r.targetLevel = item.tl, "
+            "r.sourceDepth = item.sd, "
+            "r.targetDepth = item.td, "
             "r.levelDigest = $digest, "
             "r.sourceEdgeTypes = CASE "
             "  WHEN r.sourceEdgeTypes IS NULL THEN [$edgeType] "
@@ -3999,17 +4063,17 @@ class FalkorDBProvider(GraphDataProvider):
         """
         await self._ensure_connected()
 
-        s_ancestors = await self._get_ancestor_chain(source_urn)
-        t_ancestors = await self._get_ancestor_chain(target_urn)
-
-        s_chain = [source_urn] + s_ancestors
-        t_chain = [target_urn] + t_ancestors
+        dag = await self._get_ancestor_dag_pair(source_urn, target_urn)
+        if dag is None:
+            return  # defer to the batch pipeline, like the write hook
+        s_cl, t_cl, s_cont, t_cont = dag
+        meta = await self._aggregation_run_meta()
 
         members_key_prefix = f"{self._graph_name}:agg_members"
 
         entity_levels: Dict[str, int] = getattr(self, "_entity_type_levels", None) or {}
         resolved = await self._resolve_chain_levels(
-            s_chain, t_chain, entity_levels, caller="on_lineage_edge_deleted",
+            list(s_cl), list(t_cl), entity_levels, caller="on_lineage_edge_deleted",
         )
         if resolved is None:
             return  # defer to the batch pipeline, like the write hook
@@ -4022,9 +4086,11 @@ class FalkorDBProvider(GraphDataProvider):
                 source_urn, target_urn,
             )
             return
-        # STRUCTURAL canonical candidates (write-hook parity) — the SREM
-        # gate below still limits writes to hook-tracked pairs.
-        pairs = self._canonical_rep_pairs(s_chain, t_chain)
+        # Shared pair rule, regime-dispatched (write-hook parity) — the
+        # SREM gate below still limits writes to hook-tracked pairs.
+        pairs = self._hook_pairs(
+            meta.regime, source_urn, target_urn, s_cl, t_cl, s_cont, t_cont,
+        )
         if not pairs:
             return
 
