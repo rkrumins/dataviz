@@ -52,6 +52,13 @@ AGGREGATED_SOURCE_URN_BATCH_SIZE: int = int(os.getenv("AGGREGATED_SOURCE_URN_BAT
 # Generous default because batch MERGE operations in the aggregation
 # worker can legitimately take 10-15s on large graphs.
 FALKORDB_WRITE_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_WRITE_TIMEOUT", "15"))
+# Slow-query log threshold (milliseconds). Any Cypher whose DB execution
+# OR semaphore-queue wait exceeds this is logged at WARNING with
+# graph/op/query_ms/queue_ms/rows and the first 80 chars of the query.
+# Queue time is reported separately because it is the saturation signal
+# (queries waiting on the per-provider semaphore / FalkorDB threads),
+# while query time attributes cost to the query shape itself.
+FALKORDB_SLOW_QUERY_MS: int = int(os.getenv("FALKORDB_SLOW_QUERY_MS", "500"))
 # Startup-time operations: seed check, index creation.
 # Short because these run during _ensure_connected() on the critical path.
 FALKORDB_INIT_TIMEOUT_SECS: float = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))

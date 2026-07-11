@@ -110,7 +110,7 @@ class _FakeGraph:
 
     legacy_rows = False  # True simulates NULL-aggKey / NULL-stamp rows
 
-    async def proj_ro_query(self, cypher, params=None, timeout=None):
+    async def proj_ro_query(self, cypher, params=None, timeout=None, **kw):
         """Projection-graph reads: _AggMeta, regime probe, depth-stamped
         :AGGREGATED anchors."""
         params = params or {}
@@ -137,7 +137,7 @@ class _FakeGraph:
             ])
         raise AssertionError(f"unhandled proj_ro_query: {cypher}")
 
-    async def ro_query(self, cypher, params=None, timeout=None):
+    async def ro_query(self, cypher, params=None, timeout=None, **kw):
         params = params or {}
         m = _CLASSIFY_RE.search(cypher)
         if m:
@@ -433,10 +433,10 @@ def test_trace_drilldown_falls_back_to_raw_when_aggregated_empty():
     _seed_deep_chains(fake, depth=3)
     p = _make_provider(fake, levels={"lvl0": 0, "lvl1": 1, "lvl2": 2})
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         return _Result([])   # no fine AGGREGATED cells materialized
 
-    async def ro_query(cypher, params=None, timeout=None):
+    async def ro_query(cypher, params=None, timeout=None, **kw):
         # the raw-edge branch of _edges_between_sets_once
         assert "type(r) IN $ltypes" in cypher
         rows = [
@@ -500,7 +500,7 @@ def test_progressive_topdown_drilldown_journey():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
@@ -604,7 +604,7 @@ def test_write_path_hook_emits_only_canonical_pairs():
 
         return closure(source_urn), closure(target_urn), False, False
 
-    async def proj_query(cypher, params=None, timeout=None):
+    async def proj_query(cypher, params=None, timeout=None, **kw):
         merged.extend(params["batch"])
 
     import time as _time
@@ -653,7 +653,7 @@ def test_full_cross_product_matrix_six_levels():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
@@ -699,7 +699,7 @@ def test_mixed_level_weight_sums_stored_and_derived_portions():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 ["urn:a1", "urn:b1", 5, ["FLOWS"]],
@@ -737,7 +737,7 @@ def test_get_aggregated_edges_between_merges_and_dedupes():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         assert "AGGREGATED" in cypher or "_AggMeta" in cypher
         if params and "sourceUrns" in params:
             # The main materialized read: the diagonal cell plus a stale
@@ -823,7 +823,7 @@ def test_full_cube_regime_skips_mixed_derivation():
     async def noop_connect():
         return None
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([
                 [s, t, w, list(ty)] for s, t, w, ty, sl, tl in fake.agg
@@ -942,10 +942,10 @@ def test_failed_subquery_marks_result_truncated():
     async def noop_connect():
         return None
 
-    async def failing_ro_query(cypher, params=None, timeout=None):
+    async def failing_ro_query(cypher, params=None, timeout=None, **kw):
         raise TimeoutError("classification timed out")
 
-    async def proj_ro_query(cypher, params=None, timeout=None):
+    async def proj_ro_query(cypher, params=None, timeout=None, **kw):
         if params and "sourceUrns" in params:
             return _Result([])
         return await fake.proj_ro_query(cypher, params=params, timeout=timeout)

@@ -1238,7 +1238,56 @@ class FalkorDBProvider(GraphDataProvider):
         finally:
             self._inflight -= 1
 
-    async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
+    async def _guarded_timed(
+        self,
+        runner: Callable[[], Awaitable[Any]],
+        *,
+        kind: str,
+        cypher: str,
+        op: Optional[str],
+        budget: float,
+    ):
+        """Semaphore + guard + slow-query telemetry for every Cypher.
+
+        Emits one WARNING line when DB execution OR semaphore-queue wait
+        exceeds ``FALKORDB_SLOW_QUERY_MS``. The two durations are reported
+        separately on purpose: ``queue_ms`` is the saturation signal (work
+        waiting for a slot), ``query_ms`` attributes cost to the query
+        shape. Zero overhead below the threshold beyond three monotonic
+        reads; never raises from the logging path.
+        """
+        from ..config.resilience import FALKORDB_SLOW_QUERY_MS
+
+        queued_at = time.monotonic()
+        async with self._query_semaphore:
+            started = time.monotonic()
+            rows: Optional[int] = None
+            err: Optional[str] = None
+            try:
+                result = await self._run_guarded(runner)
+                rs = getattr(result, "result_set", None)
+                rows = len(rs) if rs is not None else 0
+                return result
+            except Exception as exc:
+                err = type(exc).__name__
+                raise
+            finally:
+                try:
+                    query_ms = int((time.monotonic() - started) * 1000)
+                    queue_ms = int((started - queued_at) * 1000)
+                    if max(query_ms, queue_ms) >= FALKORDB_SLOW_QUERY_MS:
+                        logger.warning(
+                            "falkordb slow %s: graph=%s op=%s query_ms=%d queue_ms=%d "
+                            "budget_s=%.1f rows=%s err=%s cypher=%.80s",
+                            kind, self._graph_name, op or "-", query_ms, queue_ms,
+                            budget, "-" if rows is None else rows, err or "-",
+                            " ".join(cypher.split()),
+                        )
+                except Exception:  # pragma: no cover — telemetry must not mask results
+                    pass
+
+    async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None,
+                        op: Optional[str] = None):
         """Timeout-guarded read-only query on the source graph."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
 
@@ -1248,21 +1297,22 @@ class FalkorDBProvider(GraphDataProvider):
                 timeout=t,
             )
 
-        async with self._query_semaphore:
-            return await self._run_guarded(_call)
+        return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
 
-    async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None):
+    async def _ro_query_tolerant(self, cypher: str, params: dict = None, *, timeout: float = None,
+                                 op: Optional[str] = None):
         """Like :meth:`_ro_query`, but a missing/empty graph yields an empty
         result set instead of raising. For introspection reads where an empty
         graph is a valid 0-result state (the graph key may not exist yet)."""
         try:
-            return await self._ro_query(cypher, params=params, timeout=timeout)
+            return await self._ro_query(cypher, params=params, timeout=timeout, op=op)
         except Exception as exc:
             if _is_missing_graph_error(exc):
                 return _EmptyResult()
             raise
 
-    async def _query(self, cypher: str, params: dict = None, *, timeout: float = None):
+    async def _query(self, cypher: str, params: dict = None, *, timeout: float = None,
+                     op: Optional[str] = None):
         """Timeout-guarded write query on the source graph."""
         t = timeout if timeout is not None else self._WRITE_TIMEOUT
 
@@ -1272,10 +1322,10 @@ class FalkorDBProvider(GraphDataProvider):
                 timeout=t,
             )
 
-        async with self._query_semaphore:
-            return await self._run_guarded(_call)
+        return await self._guarded_timed(_call, kind="write", cypher=cypher, op=op, budget=t)
 
-    async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None):
+    async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None,
+                             op: Optional[str] = None):
         """Timeout-guarded read-only query on the projection graph."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
 
@@ -1285,8 +1335,7 @@ class FalkorDBProvider(GraphDataProvider):
                 timeout=t,
             )
 
-        async with self._query_semaphore:
-            return await self._run_guarded(_call)
+        return await self._guarded_timed(_call, kind="proj-ro", cypher=cypher, op=op, budget=t)
 
     def _quiesce_p95(self) -> float:
         """p95 of the rolling write-latency window (seconds). 0 if window empty."""
@@ -2001,6 +2050,7 @@ class FalkorDBProvider(GraphDataProvider):
             result = await self._ro_query(
                 f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
                 params={"urn": urn},
+                op="nodes.get",
             )
             if result.result_set and len(result.result_set) > 0:
                 return self._extract_node_from_result(result.result_set[0])
@@ -2009,6 +2059,7 @@ class FalkorDBProvider(GraphDataProvider):
         result = await self._ro_query(
             "MATCH (n) WHERE n.urn = $urn RETURN n",
             params={"urn": urn},
+            op="nodes.get_unlabeled",
         )
         if result.result_set and len(result.result_set) > 0:
             node = self._extract_node_from_result(result.result_set[0])
@@ -2297,6 +2348,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher,
             params=params,
             timeout=self._EDGES_BETWEEN_TIMEOUT if is_between else None,
+            op="edges.between" if is_between else "edges.query",
         )
         edges = []
         for row in (result.result_set or []):
@@ -2368,7 +2420,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
-        result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS)
+        result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
         # Align the entity-type post-filter to the graph's observed label spelling (Task E),
         # so a declared `Table` still matches a TABLE-graph node. Identity for governed graphs.
         entity_types = self._alias_entity_types(entity_types) if entity_types else entity_types
@@ -2460,7 +2512,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
-        result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS)
+        result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
 
         children: List[GraphNode] = []
         containment_edges: List[GraphEdge] = []
@@ -2506,7 +2558,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN a.urn, b.urn, type(lr), properties(lr)"
             )
 
-            lr_result = await self._ro_query(lineage_cypher, params=lineage_params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS)
+            lr_result = await self._ro_query(lineage_cypher, params=lineage_params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.lineage")
             for row in (lr_result.result_set or []):
                 lineage_edges_list.append(_edge_from_row(row[0], row[1], row[2], row[3] or {}))
 
@@ -2662,7 +2714,7 @@ class FalkorDBProvider(GraphDataProvider):
             )
 
         try:
-            page_result = await self._ro_query(page_cypher, params=params, timeout=t)
+            page_result = await self._ro_query(page_cypher, params=params, timeout=t, op="toplevel.page")
         except Exception as e:
             if not _is_missing_graph_error(e):
                 logger.warning(f"get_top_level_or_orphan_nodes page query failed: {e}")
@@ -2727,7 +2779,7 @@ class FalkorDBProvider(GraphDataProvider):
 
             total_count = 0
             try:
-                count_result = await self._ro_query(count_cypher, params=count_params, timeout=t)
+                count_result = await self._ro_query(count_cypher, params=count_params, timeout=t, op="toplevel.count")
                 if count_result and count_result.result_set:
                     first = count_result.result_set[0]
                     total_count = int(first[0] if isinstance(first, (list, tuple)) else first)
@@ -3277,7 +3329,7 @@ class FalkorDBProvider(GraphDataProvider):
             if not labels:
                 # No ontology label map — legacy single-scan chunk query.
                 result = await self._ro_query(
-                    _chain_cypher(""), params={"urns": chunk},
+                    _chain_cypher(""), params={"urns": chunk}, op="trace.chains",
                 )
                 for row in result.result_set or []:
                     out[row[0]] = [c for c in (row[1] or []) if c]
@@ -3289,14 +3341,14 @@ class FalkorDBProvider(GraphDataProvider):
                 safe = _sanitize_label(lbl)
                 members = (await self._ro_query(
                     f"MATCH (n:{safe}) WHERE n.urn IN $urns RETURN n.urn",
-                    params={"urns": list(remaining)},
+                    params={"urns": list(remaining)}, op="trace.chains_membership",
                 )).result_set or []
                 member_urns = [r[0] for r in members if r and r[0]]
                 if not member_urns:
                     continue
                 remaining.difference_update(member_urns)
                 result = await self._ro_query(
-                    _chain_cypher(f":{safe}"), params={"urns": member_urns},
+                    _chain_cypher(f":{safe}"), params={"urns": member_urns}, op="trace.chains",
                 )
                 for row in result.result_set or []:
                     # Drop None entries (node lacked .urn) so callers
@@ -4594,7 +4646,7 @@ class FalkorDBProvider(GraphDataProvider):
                 params["targetUrns"] = target_urns
             try:
                 result = await self._proj_ro_query(
-                    _cypher_for(label), params=params, timeout=timeout,
+                    _cypher_for(label), params=params, timeout=timeout, op="agg.cells",
                 )
                 return result.result_set or []
             except Exception as e:
@@ -4784,7 +4836,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         async def _run(cypher: str, params: Dict[str, Any]) -> list:
             try:
-                res = await self._ro_query(cypher, params=params, timeout=timeout)
+                res = await self._ro_query(cypher, params=params, timeout=timeout, op="agg.synth")
                 return res.result_set or []
             except Exception as e:
                 degraded["v"] = True
@@ -4793,7 +4845,7 @@ class FalkorDBProvider(GraphDataProvider):
 
         async def _run_proj(cypher: str, params: Dict[str, Any]) -> list:
             try:
-                res = await self._proj_ro_query(cypher, params=params, timeout=timeout)
+                res = await self._proj_ro_query(cypher, params=params, timeout=timeout, op="agg.synth_anchor")
                 return res.result_set or []
             except Exception as e:
                 degraded["v"] = True
@@ -6352,7 +6404,7 @@ class FalkorDBProvider(GraphDataProvider):
         async def _run(c: str, p: Dict[str, Any]):
             try:
                 return await self._proj_ro_query(
-                    c, params=p, timeout=per_query_timeout,
+                    c, params=p, timeout=per_query_timeout, op="trace.expand",
                 )
             except Exception as exc:
                 logger.warning(
@@ -6493,7 +6545,7 @@ class FalkorDBProvider(GraphDataProvider):
                 ),
             ):
                 try:
-                    res = await self._proj_ro_query(cypher, params={"urns": bucket})
+                    res = await self._proj_ro_query(cypher, params={"urns": bucket}, op="trace.frontier_depths")
                     for row in (res.result_set or []):
                         if row and row[0] is not None and row[1] is not None:
                             u, d = str(row[0]), int(row[1])
@@ -6533,6 +6585,7 @@ class FalkorDBProvider(GraphDataProvider):
             cypher,
             params={"source": source_urn, "target": target_urn,
                     "ctypes": ctypes, "limit": limit},
+            op="trace.children_pair",
             timeout=2.0,
         )
         s_urns: List[str] = []
