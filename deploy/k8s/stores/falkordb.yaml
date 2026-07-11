@@ -68,7 +68,11 @@ spec:
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              command: ["redis-cli", "ping"]
+              # LOADING = alive and replaying its AOF/RDB — killing it here
+              # restarts the replay from scratch and the pod NEVER recovers
+              # (observed live 2026-07-11 on a 3.9GB AOF: hours of flapping).
+              # Readiness stays strict (no traffic while loading).
+              command: ["sh", "-c", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
             periodSeconds: 10
             timeoutSeconds: 3
           volumeMounts:

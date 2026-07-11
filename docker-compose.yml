@@ -71,13 +71,15 @@ services:
       # `compose down`.
       - falkordb_data:/var/lib/falkordb/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # LOADING counts as healthy-enough: the process is alive and replaying
+      # its AOF/RDB; dependent services boot and the app surfaces a retryable
+      # "warming" state instead of the whole stack gating on a multi-minute
+      # replay (and anything auto-healing on `unhealthy` must not kill the
+      # replay — that restarts it from scratch, forever).
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
       interval: 5s
       timeout: 3s
       retries: 10
-      # Grace period while the AOF base RDB loads on (re)start — otherwise a
-      # normal multi-GB load reports LOADING past the 10×5s window and Docker
-      # flaps the container unhealthy mid-recovery.
       start_period: 120s
 
   # ── Redis (Message Broker) ─────────────────────────────────────────

@@ -38,10 +38,12 @@ services:
       # noeviction = writes fail loudly at the ceiling instead of silent eviction.
       REDIS_ARGS: --maxmemory ${FALKORDB_MAXMEMORY:-12gb} --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # LOADING = alive and replaying AOF/RDB — see docker-compose.yml.
+      test: ["CMD-SHELL", "redis-cli ping 2>&1 | grep -qE 'PONG|LOADING'"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 120s
 
   # ── Visualization Service (SQLite, no PostgreSQL needed) ────────────
   viz-service:

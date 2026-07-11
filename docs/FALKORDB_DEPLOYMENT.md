@@ -86,6 +86,32 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 
 ---
 
+## 5a. Memory Sizing Rule (read this before raising maxmemory)
+
+`maxmemory` must fit INSIDE the machine that runs the container, with
+headroom — it is a Redis-level ceiling, not a reservation, and setting
+it above the host/VM capacity converts graceful `OOM command not
+allowed` write errors into host-level OOM kills of the whole instance
+(observed live 2026-07-11: `maxmemory 12gb` on a 12GB Docker Desktop VM
+shared with 8 other containers — the instance died repeatedly under
+load and each restart paid a multi-minute AOF replay, presenting as
+"the stack blew up and is not recovering for hours").
+
+Rule of thumb:
+
+- `maxmemory ≤ host_memory − 4GB` (other services + OS + page cache);
+- expected dataset ≤ ~60% of `maxmemory` — BGSAVE/BGREWRITEAOF fork
+  copy-on-write can spike usage well above the resident dataset while
+  writes are in flight;
+- if the dataset legitimately needs more, grow the HOST first
+  (Docker Desktop → Settings → Resources → Memory), then `maxmemory`.
+
+Recovery time is part of sizing: an AOF *incremental* replays
+command-by-command (minutes per GB) while the *base* RDB bulk-loads
+fast — keep the incremental small (see the auto-rewrite thresholds in
+the compose files) or restarts of a large instance take tens of
+minutes, during which liveness MUST NOT kill the process (see below).
+
 ## 5b. Local Durability: AOF Is Mandatory
 
 Every shipped topology (compose files, k8s manifests) runs FalkorDB with
