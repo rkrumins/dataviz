@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService';
+import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
 
 export function AggregationProgressBanner({
@@ -29,7 +30,14 @@ export function AggregationProgressBanner({
         const res = await aggregationService.getReadiness(dataSourceId);
         consecutiveErrors = 0;
         if (mounted) {
-          setReadiness(res);
+          setReadiness((prev) => {
+            // An aggregation job finishing changes which rollups the server
+            // reports, but the canvas's visible set (its cache key) doesn't
+            // change — without this bump the 5-min aggregated-edge cache
+            // keeps serving the pre-run (often empty) answers.
+            if (prev && !prev.isReady && res.isReady) invalidateAggregatedEdges();
+            return res;
+          });
           onStatusChange(res.isReady);
           // Terminal states — polling can't change them: ready (drift
           // included; it's steady-state until the user re-aggregates)

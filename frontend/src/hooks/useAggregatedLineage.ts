@@ -143,6 +143,13 @@ export function invalidateAggregatedEdges(): void {
     useAggregatedCacheVersion.setState((s) => ({ version: s.version + 1 }))
 }
 
+/** Reactive cache version. Canvases include it in their fetch-dedupe keys so an
+ *  invalidation (draft save, publish/merge, aggregation job completion) defeats
+ *  the "visible set unchanged → skip refetch" guard and actually refetches. */
+export function useAggregatedEdgesCacheVersion(): number {
+    return useAggregatedCacheVersion((s) => s.version)
+}
+
 /**
  * Cap on parallel `/edges/aggregated` chunks. Aggregation is the
  * single most expensive endpoint — letting a 100k-URN canvas fire all
