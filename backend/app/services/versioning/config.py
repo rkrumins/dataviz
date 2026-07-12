@@ -225,6 +225,29 @@ IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
 STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
 
 
+# --------------------------------------------------------------------------- #
+# "Enable version control" bootstrap job (async, resumable, integrity-checked)  #
+# --------------------------------------------------------------------------- #
+# The source graph is scanned in ID-RANGE windows (never OFFSET: deep offsets are
+# O(n²) at 10M) and written in per-window transactions, so peak memory is O(window)
+# regardless of graph size. The cursor (next `lo`) is checkpointed on the job row,
+# making a crashed job resumable mid-phase.
+BOOTSTRAP_SCAN_WIDTH: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SCAN_WIDTH", "100000"))
+BOOTSTRAP_SCAN_MIN_WIDTH: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SCAN_MIN_WIDTH", "10000"))
+# Rows accumulated before a window is committed to Postgres.
+BOOTSTRAP_WINDOW: int = int(os.getenv("GRAPHVER_BOOTSTRAP_WINDOW", "50000"))
+# Entities re-read from the SOURCE and content-hash-compared during validation.
+BOOTSTRAP_SAMPLE_K: int = int(os.getenv("GRAPHVER_BOOTSTRAP_SAMPLE_K", "64"))
+# The import commit's Merkle tree is built inline up to this many entities; above it
+# the root is left NULL (the column is expressly "async-filled for bulk") and the
+# report says so, rather than OOM-ing on a 10M-entity in-memory tree.
+BOOTSTRAP_MERKLE_INLINE_MAX: int = int(os.getenv("GRAPHVER_BOOTSTRAP_MERKLE_MAX", "1000000"))
+# Worker pickup cadence + the heartbeat age after which a `running` job is presumed
+# dead and taken over by another worker (JobORM is the durable queue; no stream).
+INGEST_POLL_SECS: int = int(os.getenv("GRAPHVER_INGEST_POLL_SECS", "5"))
+INGEST_STALE_SECS: int = int(os.getenv("GRAPHVER_INGEST_STALE_SECS", "120"))
+
+
 def _selftest() -> None:
     assert PARTITIONS >= 1 and MERKLE_DEPTH >= 1
     h1 = hash_parts(b"ab", b"c")

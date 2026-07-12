@@ -50,6 +50,7 @@ from .models import (
     EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
+    JobORM,
     MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
@@ -300,6 +301,21 @@ class GraphVersioningService:
             return {"graph_id": again["graph_id"], "already_enabled": True,
                     "imported": 0, "rows": 0}
 
+    async def _assert_not_bootstrapping(self, s, graph_id: str) -> None:
+        """A graph whose "enable version control" job is still running has its head
+        parked at genesis and its import commit half-written — writing to it would
+        race the importer (and branch off an empty main). One indexed lookup
+        (``ix_jobs_graph_status``); the UI never gets here because the enable flow
+        shows progress instead of the editor."""
+        active = await s.scalar(select(func.count()).select_from(JobORM).where(
+            JobORM.job_type == "ingest", JobORM.graph_id == graph_id,
+            JobORM.status.in_(("pending", "running")),
+        ))
+        if active:
+            raise ConcurrencyError(
+                "version control is still being enabled for this data source — "
+                "try again once it finishes")
+
     async def open_draft(
         self,
         *,
@@ -318,6 +334,7 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
+            await self._assert_not_bootstrapping(s, graph_id)
             draft = BranchORM(
                 graph_id=graph_id,
                 kind="draft",
@@ -4246,6 +4263,7 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
     ) -> Optional[str]:
         async with self._session() as s:
+            await self._assert_not_bootstrapping(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")

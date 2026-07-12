@@ -30,6 +30,7 @@ from .cache_manager import CacheManager
 from .projection import FalkorProjector
 
 if TYPE_CHECKING:
+    from .bootstrap_worker import BootstrapRunner
     from .service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class ProjectionWorker:
         sweep_secs: Optional[int] = None,
         evict_budget: Optional[Callable[[str], Union[int, Awaitable[int]]]] = None,
         evict_secs: Optional[int] = None,
+        bootstrap: Optional["BootstrapRunner"] = None,
     ):
         self._proj = projector
         self._poll = poll_secs or config.PROJECTION_POLL_SECS
@@ -58,6 +60,7 @@ class ProjectionWorker:
         self._evict_budget = evict_budget        # provider_id -> max resident graphs; enables eviction
         self._evict_secs = evict_secs or config.EVICT_SECS
         self._cache = CacheManager(projector) if evict_budget is not None else None
+        self._bootstrap = bootstrap              # enables the "enable version control" ingest loop
 
     def stop(self) -> None:
         self._stop.set()
@@ -117,7 +120,27 @@ class ProjectionWorker:
             loops.append(self._sweep_loop())
         if self._cache is not None:
             loops.append(self._evict_loop())
+        if self._bootstrap is not None:
+            loops.append(self._ingest_loop())
         await asyncio.gather(*loops)
+
+    async def _ingest_loop(self) -> None:
+        """Run "enable version control" jobs. ``JobORM`` is the durable queue (claimed
+        with ``FOR UPDATE SKIP LOCKED``), so a job survives a worker restart and a job
+        whose worker died is taken over once its heartbeat goes stale — no second
+        Redis stream to keep alive. A multi-minute copy doesn't notice the poll gap."""
+        while not self._stop.is_set():
+            try:
+                job_id = await self._bootstrap.claim_one()
+                if job_id:
+                    await self._bootstrap.run_job(job_id)
+                    continue                      # drain the queue before sleeping
+            except Exception:
+                logger.exception("bootstrap ingest loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.INGEST_POLL_SECS)
+            except asyncio.TimeoutError:
+                pass
 
     async def _poll_loop(self) -> None:
         while not self._stop.is_set():

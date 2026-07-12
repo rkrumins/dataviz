@@ -927,6 +927,7 @@ async def lifespan(_app: FastAPI):
     try:
         from .services.versioning import config as _vcfg
         if _vcfg.PROJECTION_INPROCESS:
+            from .services.versioning.bootstrap_worker import BootstrapRunner
             from .services.versioning.projection import FalkorProjector
             from .providers.falkor_graph_registry import make_registry_graph_factory
             from .services.versioning.worker import ProjectionWorker
@@ -961,6 +962,9 @@ async def lifespan(_app: FastAPI):
                 # (env GRAPHVER_FALKOR_* as fallback); the loop no-ops until a
                 # provider's falkorMaxResident is set.
                 evict_budget=make_registry_budget_resolver(),
+                # "Enable version control" jobs (dev / single-node: the standalone
+                # versioning-worker hosts them when INPROCESS=0).
+                bootstrap=BootstrapRunner(make_registry_graph_factory()),
             )
             _app.state._versioning_worker = _vw
             _app.state._versioning_worker_task = asyncio.create_task(
@@ -1316,6 +1320,22 @@ async def _feature_disabled_handler(request, exc: _FeatureDisabledError):
                 "message": exc.message,
             }
         },
+    )
+
+
+# A canvas write reached a data source that isn't versioned yet. Enablement copies the
+# whole source graph, so it is an explicit guided job — never an implicit side-effect of
+# a write (which used to make the web tier's memory O(graph)).
+from backend.app.providers.versioned_write_provider import (  # noqa: E402
+    VersioningNotEnabled as _VersioningNotEnabled,
+)
+
+
+@app.exception_handler(_VersioningNotEnabled)
+async def _versioning_not_enabled_handler(request, exc: _VersioningNotEnabled):
+    return JSONResponse(
+        status_code=409,
+        content={"detail": {"type": "versioning_not_enabled", "message": str(exc)}},
     )
 
 

@@ -27,6 +27,12 @@ from backend.app.services.versioning.service import GraphVersioningService
 logger = logging.getLogger(__name__)
 
 
+class VersioningNotEnabled(RuntimeError):
+    """A write reached a data source that has no versioned graph yet. Enablement is an
+    explicit, guided job (it copies the whole source graph) — never an implicit
+    side-effect of a write. Mapped to 409 by the app's exception handler."""
+
+
 async def _require_versioning_flag() -> None:
     """Backstop for the admin ``versioningEnabled`` flag on the write-through path.
 
@@ -102,28 +108,25 @@ class VersionedWriteProvider:
 
     # ------------------------------------------------------------------ #
     async def _graph_id(self) -> str:
-        """Resolve (and lazily create) the data source's versioned graph."""
+        """Resolve the data source's versioned graph.
+
+        Deliberately does NOT enable versioning on the fly. Enablement copies the
+        WHOLE source graph, which at real scale is a multi-minute job — kicking that
+        off from a stray canvas write made the web tier's memory O(graph) and left the
+        user staring at a hung request. It is now an explicit, guided, resumable flow
+        (``POST /graph/bootstrap``); a write to an un-versioned source says so.
+        """
         if self._gid is None:
             async with self._lock:
                 if self._gid is None:
                     res = await self._svc.resolve_graph(
                         data_source_id=self._ds, actor=self._actor,
                         workspace_id=self._ws, open_draft_if_absent=False)
-                    if res is not None:
-                        self._gid = res["graph_id"]
-                    else:
-                        # Implicit enablement is a heavy full-graph import — never
-                        # do it while the admin has versioning turned off.
-                        await _require_versioning_flag()
-                        # Atomic, complete, idempotent enablement: create-graph + full
-                        # provider import in one transaction (no half-enabled graph that
-                        # would hijack reads while empty), so every editable entity gets a
-                        # Postgres version row and edits can't spawn phantoms.
-                        self._gid = (await self._svc.enable_versioning(
-                            data_source_id=self._ds, workspace_id=self._ws,
-                            actor=self._actor, provider=self._inner,
-                            falkor_graph_name=self._falkor_graph_name,
-                            ontology_rules=self._ontology_rules))["graph_id"]
+                    if res is None:
+                        raise VersioningNotEnabled(
+                            "Version control isn't enabled for this data source yet — "
+                            "turn it on to start editing.")
+                    self._gid = res["graph_id"]
         return self._gid
 
     async def _record(self, ops: List[dict], message: str) -> None:
