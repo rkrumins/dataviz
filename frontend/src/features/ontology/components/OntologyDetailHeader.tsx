@@ -29,6 +29,7 @@ import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionSe
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import { OntologyStatusBadge } from './OntologyStatusBadge'
 import { useOntologyVersions } from '../hooks/useOntologies'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 interface OntologyDetailHeaderProps {
   ontology: OntologyDefinitionResponse
@@ -103,7 +104,7 @@ export function OntologyDetailHeader({
   const hasMultipleVersions = versions && versions.length > 1
 
   return (
-    <div className="flex-shrink-0 max-w-[1440px] mx-auto w-full px-8 pt-6 pb-0">
+    <PageContainer gutter="shell" className="flex-shrink-0 w-full pt-6 pb-0">
       {/* Tier 1: Name + version + primary actions */}
       <div className="flex items-start justify-between mb-1">
         <div className="min-w-0 flex-1">
@@ -421,6 +422,6 @@ export function OntologyDetailHeader({
         </div>
       </div>
 
-    </div>
+    </PageContainer>
   )
 }

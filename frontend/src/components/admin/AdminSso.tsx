@@ -25,6 +25,7 @@ import { permissionsService, type RoleDefinitionResponse } from '@/services/perm
 import { roleVisualFor } from '@/lib/roleVisual'
 import { FORBIDDEN_AUTO_GRANT_ROLES, type RoleName } from '@/lib/roleNames'
 import { cn } from '@/lib/utils'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 type Tab = 'providers' | 'mappings' | 'settings' | 'lookup'
 
@@ -952,7 +953,7 @@ function LookupTab() {
 export function AdminSso() {
     const [tab, setTab] = useState<Tab>('providers')
     return (
-        <div className="max-w-[1440px] mx-auto p-8 space-y-6">
+        <PageContainer gutter="shell" className="py-8 space-y-6">
             <header>
                 <h1 className="text-2xl font-semibold flex items-center gap-2">
                     <Beaker className="w-6 h-6 text-accent-lineage" />
@@ -988,7 +989,7 @@ export function AdminSso() {
             {tab === 'mappings' && <MappingsTab />}
             {tab === 'settings' && <SettingsTab />}
             {tab === 'lookup' && <LookupTab />}
-        </div>
+        </PageContainer>
     )
 }
 

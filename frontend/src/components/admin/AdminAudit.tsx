@@ -16,6 +16,7 @@ import { auditService, type AuditEvent, type AuditFilters } from '@/services/aud
 import { useToast } from '@/components/ui/toast'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 
 // Category buckets for the KPI strip + colour coding. Each maps to
@@ -181,7 +182,7 @@ export function AdminAudit() {
     }
 
     return (
-        <div className="max-w-[1440px] mx-auto p-8 space-y-6 animate-in fade-in duration-500">
+        <PageContainer gutter="shell" className="py-8 space-y-6 animate-in fade-in duration-500">
                 {/* Hero */}
                 <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3 min-w-0">
@@ -399,7 +400,7 @@ export function AdminAudit() {
                         )}
                     </>
                 )}
-        </div>
+        </PageContainer>
     )
 }
 

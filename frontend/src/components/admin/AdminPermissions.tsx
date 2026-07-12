@@ -53,6 +53,7 @@ import { AccessSummary } from '@/components/access/AccessSummary'
 import { Link, useNavigate } from 'react-router-dom'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
 import { roleSatisfiesSpec, type NavPermissionSpec } from '@/lib/navPermissions'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 
 // ── Shared types ─────────────────────────────────────────────────────
@@ -201,7 +202,7 @@ export function AdminPermissions() {
 
 
     return (
-        <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+        <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
             {/* Hero */}
             <div className="flex items-center justify-between mb-8">
                 <div className="flex items-center gap-3">
@@ -363,7 +364,7 @@ export function AdminPermissions() {
                     }}
                 />
             )}
-        </div>
+        </PageContainer>
     )
 }
 

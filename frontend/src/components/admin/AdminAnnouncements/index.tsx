@@ -18,6 +18,7 @@ import {
 import { useAnnouncementStore } from '@/store/announcements'
 import { useAuthStore } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { PageContainer } from '@/components/layout/PageContainer'
 
 const ANN_LIST_QUERY_KEY = ['admin', 'announcements', 'list'] as const
 const ANN_CONFIG_QUERY_KEY = ['admin', 'announcements', 'config'] as const
@@ -240,7 +241,7 @@ export function AdminAnnouncements() {
     setForm((prev) => ({ ...prev, [key]: value }))
 
   return (
-    <div className="max-w-[1440px] mx-auto p-8 animate-in fade-in duration-500">
+    <PageContainer gutter="shell" className="py-8 animate-in fade-in duration-500">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6 mb-10">
         <div className="flex items-center gap-3">
@@ -797,7 +798,7 @@ export function AdminAnnouncements() {
           </motion.div>
         )}
       </AnimatePresence>
-    </div>
+    </PageContainer>
   )
 }
 

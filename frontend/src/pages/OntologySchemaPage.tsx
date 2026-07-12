@@ -64,6 +64,7 @@ import { VersionHistoryPanel } from '@/features/ontology/components/panels/Versi
 import { DeploymentDashboardPanel } from '@/features/ontology/components/panels/DeploymentDashboardPanel'
 import { OntologyAlertBanner, type OntologyAlert } from '@/features/ontology/components/OntologyAlertBanner'
 import type { OntologyImpactResponse, OntologyImportResponse } from '@/services/ontologyDefinitionService'
+import { PageContainer, pageGeometry } from '@/components/layout/PageContainer'
 
 // ---------------------------------------------------------------------------
 // Tab configuration
@@ -1231,7 +1232,7 @@ export function OntologySchemaPage() {
 
               {/* Tabs — underline style (AdminRegistry pattern) */}
               <div className="border-b border-glass-border shrink-0">
-                <div className="max-w-[1440px] mx-auto px-8 flex items-center gap-1">
+                <PageContainer gutter="shell" className="flex items-center gap-1">
                 {TAB_DEFS.map(t => {
                   const Icon = t.icon
                   const isActive = activeTab === t.id
@@ -1272,7 +1273,7 @@ export function OntologySchemaPage() {
                     </button>
                   )
                 })}
-                </div>
+                </PageContainer>
               </div>
 
               {/* Tab content + editor panel */}
@@ -1285,7 +1286,7 @@ export function OntologySchemaPage() {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -6 }}
                       transition={{ duration: 0.15, ease: 'easeOut' }}
-                      className="max-w-[1440px] mx-auto p-8"
+                      className={cn(pageGeometry({ gutter: 'shell' }), 'py-8')}
                     >
                       {activeTab === 'overview' && (
                         <OverviewPanel
