@@ -259,7 +259,9 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     fireEvent.click(screen.getByTitle('Node A'))
     fireEvent.click(screen.getByRole('button', { name: /Select its 2 children only/i }))
 
-    await waitFor(() => expect(screen.getByText('2 selected')).toBeInTheDocument())
+    // Generous: this awaits a paged load AND a virtualized re-render, which can
+    // outrun the 1s default when the suite runs files in parallel.
+    await waitFor(() => expect(screen.getByText('2 selected')).toBeInTheDocument(), { timeout: 5000 })
     // And it says so, so nobody places children without their parent by accident.
     expect(screen.getByText(/itself won’t be placed/)).toBeInTheDocument()
 
@@ -303,7 +305,9 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     // "…itself won’t be placed" line once its children are selected.
     fireEvent.click(screen.getByTitle('Node A'))
     fireEvent.click(screen.getByRole('button', { name: /Select its 2 children only/i }))
-    await waitFor(() => expect(screen.getByText('2 selected')).toBeInTheDocument())
+    // Generous: this awaits a paged load AND a virtualized re-render, which can
+    // outrun the 1s default when the suite runs files in parallel.
+    await waitFor(() => expect(screen.getByText('2 selected')).toBeInTheDocument(), { timeout: 5000 })
 
     fireEvent.click(screen.getByTitle('Node A'), { metaKey: true })   // add the parent
     await waitFor(() => expect(screen.getByText('3 selected')).toBeInTheDocument())
