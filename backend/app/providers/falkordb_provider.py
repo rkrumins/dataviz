@@ -814,8 +814,12 @@ class FalkorDBProvider(GraphDataProvider):
         NOAUTH and trigger the same false breaker storm we're trying to
         prevent for unreachable hosts. When TLS is enabled, the probe
         completes a real TLS handshake (else a TLS-only server is wrongly
-        marked unreachable). For sentinel/cluster the probe hits the first
-        configured node; connect() remains the authoritative topology check.
+        marked unreachable). For sentinel the probe hits the first configured
+        sentinel node (failover is the sentinel pool's job). For CLUSTER the
+        probe resolves and pings the node that OWNS this graph — probing only
+        an entry node would report healthy while the owning node is dead —
+        falling back to the first startup node when discovery fails;
+        connect() remains the authoritative topology check.
         """
         from backend.common.interfaces.preflight import redis_ping_preflight
         from backend.app.providers.falkordb_connection import load_connection_config
@@ -832,7 +836,26 @@ class FalkorDBProvider(GraphDataProvider):
         if cfg.mode == "sentinel" and cfg.sentinel_nodes:
             host, port = cfg.sentinel_nodes[0]
         elif cfg.mode == "cluster" and cfg.cluster_nodes:
+            # Probe the node that OWNS this graph, not just an entry node.
+            # A healthy startup node would otherwise mask a dead owner: the
+            # warmup loop keeps reporting the provider healthy (so the
+            # recovery eviction never fires) while every real query against
+            # the pinned pool fails. Discovery is deadline-bounded and falls
+            # back to the first startup node when it can't resolve —
+            # connect() remains the authoritative topology check.
             host, port = cfg.cluster_nodes[0]
+            from backend.app.providers.falkordb_connection import (
+                resolve_cluster_node_for_key,
+            )
+            started = time.monotonic()
+            try:
+                host, port = await asyncio.wait_for(
+                    resolve_cluster_node_for_key(cfg, self._graph_name, 1.0),
+                    timeout=max(0.5, deadline_s * 0.6),
+                )
+            except Exception:
+                pass
+            deadline_s = max(0.3, deadline_s - (time.monotonic() - started))
         return await redis_ping_preflight(
             host, port,
             deadline_s=deadline_s,
@@ -1201,7 +1224,11 @@ class FalkorDBProvider(GraphDataProvider):
           redis-py hands out a fresh pooled connection on the next call, so
           the retried op succeeds once FalkorDB recovers. Reads are
           idempotent; a retried write/flush re-applies at most one chunk's
-          weight via MERGE ON MATCH (bounded, self-healing).
+          weight via MERGE ON MATCH (bounded, self-healing). In CLUSTER
+          mode the second and later retries escalate to a full topology
+          re-resolve (see below): a silently-dead owning node (rotated pod,
+          new address) never answers MOVED, so redialing the pinned address
+          would otherwise fail forever.
         * **Cluster routing changes** (Moved/Ask/ClusterDown) — only in
           cluster mode: rebuild the single-node client (re-resolve the key
           owner) and retry.
@@ -1267,14 +1294,31 @@ class FalkorDBProvider(GraphDataProvider):
                     if (handle_lost or _is_transient_connection_error(exc)) and attempt < max_retries:
                         backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
                         attempt += 1
+                        # Cluster: the pinned single-node pool redials the SAME
+                        # address, so once a plain redial has also failed
+                        # (attempt 2+) assume the owning node is gone — a
+                        # rotated pod comes back at a NEW address and a dark
+                        # node never answers MOVED — and re-resolve the
+                        # topology (finds the promoted replica) instead of
+                        # redialing a corpse. The first retry stays the cheap
+                        # redial: it absorbs same-node blips (reset-by-peer)
+                        # without pool churn.
+                        reresolve = cluster and not handle_lost and attempt >= 2
                         logger.warning(
-                            "FalkorDB %s: %s (%s) — reconnect + retry %d/%d after %.2fs.",
+                            "FalkorDB %s: %s (%s) — %s + retry %d/%d after %.2fs.",
                             self._graph_name,
                             "lost graph handle" if handle_lost else "transient connection error",
-                            type(exc).__name__, attempt, max_retries, backoff,
+                            type(exc).__name__,
+                            "cluster topology re-resolve" if reresolve else "reconnect",
+                            attempt, max_retries, backoff,
                         )
                         try:
-                            await self._ensure_connected()
+                            if reresolve:
+                                await self._rebuild_graph_client_for_failover(
+                                    self._conn_generation
+                                )
+                            else:
+                                await self._ensure_connected()
                         except Exception as reconnect_exc:
                             # If FalkorDB is loading (RDB replay) during the
                             # reconnect, surface the retryable warming signal
