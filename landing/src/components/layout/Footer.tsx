@@ -1,4 +1,4 @@
-import { Github, MessageCircle } from 'lucide-react'
+import { GitBranch, MessageCircle } from 'lucide-react'
 import { useBrand } from '@/context/BrandContext'
 
 const PRODUCT_LINKS = [
@@ -23,7 +23,7 @@ const COMPANY_LINKS = [
 ]
 
 const SOCIAL_LINKS = [
-  { label: 'GitHub', href: 'https://github.com', icon: Github },
+  { label: 'GitHub', href: 'https://github.com', icon: GitBranch },
   { label: 'Discord', href: 'https://discord.gg', icon: MessageCircle },
 ]
 

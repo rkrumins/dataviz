@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Menu, Github } from 'lucide-react'
+import { Menu, GitBranch } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { ThemeToggle } from '@/components/ui/ThemeToggle'
 import { Button } from '@/components/ui/Button'
@@ -89,7 +89,7 @@ export function Navbar() {
               variant="ghost"
               href="https://github.com"
               className="hidden sm:inline-flex text-xs px-3 py-2"
-              icon={<Github size={16} />}
+              icon={<GitBranch size={16} />}
             >
               Star
             </Button>

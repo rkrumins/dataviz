@@ -15,15 +15,15 @@ import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 
 // Lazy-load zxcvbn for password strength
-let zxcvbnModule: typeof import('@zxcvbn-ts/core') | null = null
+let zxcvbnInstance: import('@zxcvbn-ts/core').ZxcvbnFactory | null = null
 async function loadZxcvbn() {
-    if (zxcvbnModule) return zxcvbnModule
+    if (zxcvbnInstance) return zxcvbnInstance
     const [core, langCommon, langEn] = await Promise.all([
         import('@zxcvbn-ts/core'),
         import('@zxcvbn-ts/language-common'),
         import('@zxcvbn-ts/language-en'),
     ])
-    core.zxcvbnOptions.setOptions({
+    zxcvbnInstance = new core.ZxcvbnFactory({
         translations: langEn.translations,
         graphs: langCommon.adjacencyGraphs,
         dictionary: {
@@ -31,8 +31,7 @@ async function loadZxcvbn() {
             ...langEn.dictionary,
         },
     })
-    zxcvbnModule = core
-    return core
+    return zxcvbnInstance
 }
 
 const STRENGTH_COLORS = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-400', 'bg-green-500']
@@ -67,7 +66,7 @@ export function ResetPasswordPage() {
         }
         const timer = setTimeout(async () => {
             const zxcvbn = await loadZxcvbn()
-            const result = zxcvbn.zxcvbn(password)
+            const result = zxcvbn.check(password)
             setPasswordScore(result.score)
             const fb = result.feedback
             const parts: string[] = []
