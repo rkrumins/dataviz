@@ -81,7 +81,6 @@ _DLQ_SAMPLE = 200
 
 _http_client: Optional[httpx.AsyncClient] = None
 _cache_redis_client = None
-_falkor_redis_client = None
 
 
 def _http() -> httpx.AsyncClient:
@@ -106,18 +105,9 @@ def _cache_redis():
     return _cache_redis_client
 
 
-def _falkor_redis():
-    global _falkor_redis_client
-    if _falkor_redis_client is None:
-        import redis.asyncio as aioredis
-
-        _falkor_redis_client = aioredis.Redis(
-            host=os.getenv("FALKORDB_HOST", "localhost"),
-            port=int(os.getenv("FALKORDB_PORT", "6379")),
-            decode_responses=True,
-            socket_connect_timeout=1, socket_timeout=1.5,
-        )
-    return _falkor_redis_client
+# NOTE: FalkorDB gets no cached singleton — probe_falkordb resolves the topology
+# per call and builds short-lived clients (cluster nodes come and go on a rotation,
+# so a cached client would pin a dead pod).
 
 
 # ── Envelope helpers ─────────────────────────────────────────────────
@@ -425,19 +415,100 @@ async def probe_cache_redis() -> dict:
     return result
 
 
-async def probe_falkordb() -> dict:
-    client = _falkor_redis()
-    result = await _redis_probe("falkordb", "FalkorDB", client, _BUDGET_FALKOR)
-    if result["status"] == "down":
+async def _falkor_node_probe(host: str, port: int, label: str) -> dict:
+    """One FalkorDB node: PING + INFO + its own GRAPH.LIST count. Builds a
+    short-lived client (nodes come and go on a rotation, so nothing is cached)."""
+    import redis.asyncio as aioredis
+
+    client = aioredis.Redis(
+        host=host, port=port, decode_responses=True,
+        socket_connect_timeout=1, socket_timeout=1.5,
+    )
+    try:
+        result = await _redis_probe("falkordbNode", label, client, _BUDGET_FALKOR)
+        if result["status"] != "down":
+            # Best-effort — GRAPH.LIST failing alone is not a fault. On a cluster
+            # this is the count of keys in THIS node's slots.
+            try:
+                async with asyncio.timeout(_BUDGET_FALKOR):
+                    graphs = await client.execute_command("GRAPH.LIST")
+                    result["detail"]["graphCount"] = (
+                        len(graphs) if graphs is not None else None
+                    )
+            except Exception:
+                result["detail"]["graphCount"] = None
+        result["detail"]["endpoint"] = f"{host}:{port}"
         return result
-    # Graph count is best-effort — GRAPH.LIST failing alone is not a fault.
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
+async def probe_falkordb() -> dict:
+    """Topology-aware FalkorDB health.
+
+    Standalone / Sentinel: probe the configured endpoint (Sentinel's master is
+    followed by the data path itself; the dashboard reports the endpoint it has).
+
+    CLUSTER: probe EVERY primary. A single-seed probe would report the whole graph
+    tier "healthy" while a rotating shard is down and a third of the graphs are
+    unreadable — and its graph count would only see the seed's own slots. Shard
+    verdicts roll up: all up → healthy, some up → degraded (naming the dead shards),
+    none up → down. Graph count is the sum across shards.
+    """
+    from backend.app.providers.falkordb_connection import cluster_primary_nodes, env_conn_config
+
+    cfg = env_conn_config()
+
+    if cfg.mode != "cluster":
+        return await _falkor_node_probe(cfg.host, cfg.port, "FalkorDB")
+
     try:
         async with asyncio.timeout(_BUDGET_FALKOR):
-            graphs = await client.execute_command("GRAPH.LIST")
-            result["detail"]["graphCount"] = len(graphs) if graphs is not None else None
-    except Exception:
-        result["detail"]["graphCount"] = None
-    return result
+            nodes = await cluster_primary_nodes(cfg, _BUDGET_FALKOR)
+    except Exception as exc:
+        # No topology → the cluster is unreachable from here, which IS the fault.
+        return _svc("falkordb", "FalkorDB · Cluster", "down", error=_err(exc),
+                    detail={"mode": "cluster"})
+
+    results = await asyncio.gather(
+        *(_falkor_node_probe(h, p, f"shard {h}:{p}") for h, p in nodes),
+        return_exceptions=True,
+    )
+    shards = [r for r in results if isinstance(r, dict)]
+    up = [s for s in shards if s["status"] != "down"]
+    down = [s for s in shards if s["status"] == "down"]
+
+    if not up:
+        status = "down"
+    elif down:
+        status = "degraded"
+    else:
+        status = "healthy"
+
+    counts = [s["detail"].get("graphCount") for s in up]
+    detail = {
+        "mode": "cluster",
+        "shardsTotal": len(shards),
+        "shardsUp": len(up),
+        "graphCount": sum(c for c in counts if c is not None) if counts else None,
+        "shards": [
+            {"endpoint": s["detail"].get("endpoint"), "status": s["status"],
+             "latencyMs": s.get("latencyMs"), "graphCount": s["detail"].get("graphCount")}
+            for s in shards
+        ],
+    }
+    if down:
+        detail["reasons"] = [
+            f"shard {s['detail'].get('endpoint')} unreachable" for s in down
+        ]
+    latencies = [s["latencyMs"] for s in up if s.get("latencyMs") is not None]
+    return _svc("falkordb", "FalkorDB · Cluster", status,
+                latency_ms=max(latencies) if latencies else None,
+                error="; ".join(detail.get("reasons", [])) or None,
+                detail=detail)
 
 
 async def probe_aggregation_controlplane() -> dict:

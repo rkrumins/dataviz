@@ -793,90 +793,16 @@ async def lifespan(_app: FastAPI):
     # them unreachable — never affects the request path.
     _app.state._warmup_shutdown = asyncio.Event()
     try:
-        from .providers.warmup import initial_fast_pass, supervised_warmup_loop
-        from .db.engine import get_provider_probe_session
-        from .db.repositories import provider_repo as _provider_repo
+        from .providers.warmup import start_provider_warmup
 
-        async def _list_providers_for_warmup():
-            async with get_provider_probe_session() as session:
-                rows = await _provider_repo.list_providers(session)
-                out = []
-                for row in rows:
-                    creds = await _provider_repo.get_credentials(session, row.id)
-                    out.append({
-                        "id": row.id,
-                        "provider_type": (
-                            row.provider_type.value
-                            if hasattr(row.provider_type, "value")
-                            else str(row.provider_type)
-                        ),
-                        "host": row.host,
-                        "port": row.port,
-                        "tls": row.tls_enabled,
-                        "creds": creds,
-                    })
-                return out
-
-        def _build_provider_for_warmup(cfg):
-            return provider_manager._create_provider_instance(
-                cfg["provider_type"],
-                cfg.get("host"),
-                cfg.get("port"),
-                None,
-                cfg.get("tls", False),
-                cfg.get("creds") or {},
-            )
-
-        # P1.3 — warmup→manager state-machine callbacks.
-        async def _on_recovery(provider_id: str, entry: dict) -> None:
-            await provider_manager.record_probe_success(
-                provider_id,
-                source="warmup",
-                elapsed_ms=int(entry.get("elapsed_ms", 0)),
-            )
-
-        async def _on_failure(provider_id: str, entry: dict) -> None:
-            await provider_manager.record_probe_failure(
-                provider_id,
-                reason=str(entry.get("reason", "unknown"))[:200],
-                source="warmup",
-                elapsed_ms=int(entry.get("elapsed_ms", 0)),
-            )
-
-        # P1.4 — heartbeat for /health/deps liveness signal.
-        import time as _time
-
-        async def _on_cycle_complete() -> None:
-            provider_manager.warmup_last_cycle_at = _time.monotonic()
-
-        # P1.5 — initial fast-pass: hard-deadline-bounded one-shot warmup
-        # that populates the cache for the cold-start window. Runs
-        # concurrently with first request handling; does NOT block
-        # lifespan completion. Schedule BEFORE the supervisor so it can
-        # observe transitions from the empty cache.
-        _app.state._warmup_initial_pass_task = asyncio.create_task(
-            initial_fast_pass(
-                cache=provider_manager.warmup_cache,
-                list_providers=_list_providers_for_warmup,
-                build_instance=_build_provider_for_warmup,
-                on_recovery=_on_recovery,
-                on_failure=_on_failure,
-            ),
-            name="provider-warmup-initial-pass",
+        # One shared starter (also used by the aggregation worker, which owns its
+        # OWN ProviderManager): probe → record_probe_success/failure, which
+        # force-closes breakers and evicts stale pools when a provider recovers.
+        _tasks = await start_provider_warmup(
+            provider_manager, shutdown_event=_app.state._warmup_shutdown,
         )
-
-        _app.state._warmup_task = asyncio.create_task(
-            supervised_warmup_loop(
-                cache=provider_manager.warmup_cache,
-                shutdown_event=_app.state._warmup_shutdown,
-                list_providers=_list_providers_for_warmup,
-                build_instance=_build_provider_for_warmup,
-                on_recovery=_on_recovery,
-                on_failure=_on_failure,
-                on_cycle_complete=_on_cycle_complete,
-            ),
-            name="provider-warmup-supervisor",
-        )
+        _app.state._warmup_initial_pass_task = _tasks[0]
+        _app.state._warmup_task = _tasks[-1]
         logger.info("Provider warmup supervisor + initial fast-pass scheduled")
     except Exception as exc:
         logger.warning(
