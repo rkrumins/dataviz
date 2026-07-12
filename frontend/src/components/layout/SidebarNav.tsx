@@ -101,7 +101,8 @@ function SidebarQuickAccess({
   onOpenView: (viewId: string, wsId?: string, dsId?: string) => void
 }) {
   const navigate = useNavigate()
-  const { pinnedViewIds, unpinView } = usePreferencesStore()
+  const pinnedViewIds = usePreferencesStore((s) => s.pinnedViewIds)
+  const unpinView = usePreferencesStore((s) => s.unpinView)
   const { recentViews, allViews, activeViewId } = useWorkspaceContext()
 
   // Resolve pinned view IDs to view data (filter out deleted views)
@@ -298,8 +299,11 @@ function NavButton({ item, collapsed, active, onClick, onHoverStart, onHoverEnd 
 // ─────────────────────────────────────────────────────────────────────
 export function SidebarNav() {
   const navigate = useNavigate()
-  const { activeTab } = useNavigationStore()
-  const { sidebarCollapsed, toggleSidebar } = usePreferencesStore()
+  // Selector subscriptions so this always-mounted shell doesn't re-render on
+  // unrelated navigation/preference writes.
+  const activeTab = useNavigationStore((s) => s.activeTab)
+  const sidebarCollapsed = usePreferencesStore((s) => s.sidebarCollapsed)
+  const toggleSidebar = usePreferencesStore((s) => s.toggleSidebar)
   const activeLensId = useCanvasStore((s) => s.activeLensId)
 
   const { viewCount, openView } = useWorkspaceContext()

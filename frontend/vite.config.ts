@@ -25,8 +25,11 @@ export default defineConfig({
             if (id.includes('react-dom') || id.includes('/react/')) {
               return 'vendor-react'
             }
-            if (id.includes('lucide-react') || id.includes('framer-motion')) {
-              return 'vendor-ui'
+            if (id.includes('framer-motion')) {
+              return 'vendor-motion'
+            }
+            if (id.includes('lucide-react')) {
+              return 'vendor-icons'
             }
             if (id.includes('zustand')) {
               return 'vendor-state'
@@ -34,7 +37,17 @@ export default defineConfig({
             if (id.includes('react-markdown') || id.includes('remark-') || id.includes('rehype-') || id.includes('unified') || id.includes('mdast') || id.includes('hast') || id.includes('micromark')) {
               return 'vendor-markdown'
             }
-            if (id.includes('mermaid') || id.includes('dagre') || id.includes('d3') || id.includes('elkjs')) {
+            // elkjs is the canvas layout engine (statically imported by the graph
+            // canvas). Keep it in its own chunk so opening a graph view no longer
+            // drags in the ~4MB docs-only mermaid bundle it used to be merged with.
+            if (id.includes('elkjs')) {
+              return 'vendor-elk'
+            }
+            // mermaid is docs-only and already dynamically imported. Keep it
+            // isolated; do NOT co-bundle d3/dagre here — d3 is a canvas (xyflow)
+            // dependency, and merging it with mermaid was what pulled the whole
+            // mermaid chunk onto every canvas route. Let Rollup auto-chunk d3.
+            if (id.includes('mermaid')) {
               return 'vendor-mermaid'
             }
           }

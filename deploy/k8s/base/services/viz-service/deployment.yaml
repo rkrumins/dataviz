@@ -35,14 +35,23 @@ spec:
               until nc -z postgres 5432; do sleep 2; done
               echo "Waiting for redis..."
               until nc -z redis 6379; do sleep 2; done
-              echo "Waiting for falkordb..."
-              until nc -z falkordb 6379; do sleep 2; done
+              # WS1.1 decoupling: do NOT gate startup on FalkorDB — viz connects
+              # lazily and fast-fails while the graph is down/loading, so a graph
+              # blip must not block new pods from starting (HPA / rollout /
+              # reschedule) exactly when capacity is needed.
               echo "Waiting for aggregation-controlplane..."
               until nc -z aggregation-controlplane 8091; do sleep 3; done
               echo "All dependencies ready."
       containers:
         - name: viz-service
           image: REGISTRY/synodic-viz:latest
+          # R-M2: drain endpoints before SIGTERM reaches uvicorn — avoids the
+          # kube-proxy/LB deregistration race that 502s in-flight requests on
+          # every rollout / HPA scale-down / pod reschedule.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 5"]
           ports:
             - containerPort: 8000
               name: http

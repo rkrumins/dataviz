@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { Database, FolderOpen, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Layers, Users } from 'lucide-react'
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge } from './WorkspaceHealthBadge'
@@ -25,7 +26,7 @@ interface WorkspaceListRowProps {
     onManageMembers?: () => void
 }
 
-export function WorkspaceListRow({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers }: WorkspaceListRowProps) {
+function WorkspaceListRowBase({ ws, index: _index, stats, healthStatus, dsProviders, onOpen, onDelete, onSetDefault, onManageMembers }: WorkspaceListRowProps) {
     const uniqueProviderTypes = Array.from(new Set(dsProviders.map(p => p.providerType).filter(t => t !== 'unknown')))
 
     return (
@@ -139,3 +140,7 @@ function WorkspaceRowActions({
         </div>
     )
 }
+
+// Memoized: renders per-row in the workspaces list. (Full benefit needs the
+// parent to pass stable onOpen/onDelete/onSetDefault/onManageMembers.)
+export const WorkspaceListRow = memo(WorkspaceListRowBase)

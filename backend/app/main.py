@@ -972,6 +972,16 @@ async def lifespan(_app: FastAPI):
                 _vw.run(), name="versioning-projection-worker",
             )
             logger.info("In-process versioning projection worker started")
+        else:
+            # R-M4: make the delegated-projection topology observable — with
+            # INPROCESS=0 the reconciling poll-loop backstop runs ONLY in the
+            # standalone versioning-worker. If that deployment is absent or
+            # crash-looping, deferred/lagging projections never catch up.
+            logger.info(
+                "In-process versioning projection is OFF "
+                "(GRAPHVER_PROJECTION_INPROCESS=0) — projection delegated to the "
+                "standalone versioning-worker; ensure that deployment is running."
+            )
     except Exception as exc:
         logger.warning("Versioning projection worker not started: %s", exc)
 

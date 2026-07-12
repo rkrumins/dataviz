@@ -117,12 +117,13 @@ services:
     image: postgres:16.14-alpine
     restart: unless-stopped
     # max_connections must cover the sum of every service's SQLAlchemy
-    # pool ceilings (db/engine.py ROLE_POOL_DEFAULTS: 65 potential
-    # connections PER PROCESS × GUNICORN_WORKERS=4 on viz alone, plus
-    # controlplane / aggregation-worker / stats-service / projector).
+    # pool ceilings (db/engine.py _POOL_DEFAULTS: ~85 potential connections
+    # PER PROCESS incl. GRAPH_READ × GUNICORN_WORKERS=4 on viz alone, plus
+    # controlplane / aggregation-worker / stats-service / versioning-worker).
     # The postgres default of 100 is exhausted under load spikes and
     # fails as "FATAL: sorry, too many clients already". Pools fill
-    # lazily, so 400 is headroom, not steady-state usage.
+    # lazily, so 400 is headroom, not steady-state usage. At GKE scale front
+    # Postgres with PgBouncer — one server can't cover an HPA'd fleet.
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-400}"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set in .env}
