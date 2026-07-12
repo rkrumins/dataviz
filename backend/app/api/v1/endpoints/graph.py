@@ -276,6 +276,14 @@ async def resync_versioned_graph_endpoint(
     dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
     strategy: str = Query("merge", description="merge | external_wins"),
     _gate: None = Depends(require_versioning_enabled),
+    # A WRITE gated on READ. The graph router's blanket dependency is
+    # `workspace:datasource:read`, and this route added nothing on top — so any member who
+    # could merely LOOK at a data source could commit a `sync` to its main branch, overwriting
+    # source-authoritative fields across the whole graph. Every other write on this router
+    # (bootstrap, and its retry/abandon siblings) requires manage; this one was simply missed.
+    # Tightening is deliberate and is a breaking change for any caller relying on read-only
+    # access — which is precisely the access that should never have worked.
+    _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
