@@ -1,4 +1,4 @@
-import { Database, Star, GitBranch, ChevronRight } from 'lucide-react'
+import { Database, Star, GitBranch, ChevronRight, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
@@ -150,12 +150,16 @@ export function DataSourceGridCard({
 
                 {/* Stats */}
                 <div className="grid grid-cols-3 gap-2 mb-3">
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">
-                        <div className="text-sm font-bold text-ink">{stats ? compactNum(stats.nodeCount) : '\u2014'}</div>
+                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={stats?.computing ? 'Stats are being computed \u2014 check back shortly.' : undefined}>
+                        <div className="text-sm font-bold text-ink">
+                            {stats?.computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(stats.nodeCount) : '\u2014'}
+                        </div>
                         <div className="text-[9px] text-ink-muted uppercase tracking-wider">Nodes</div>
                     </div>
-                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">
-                        <div className="text-sm font-bold text-ink">{stats ? compactNum(stats.edgeCount) : '\u2014'}</div>
+                    <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center" title={stats?.computing ? 'Stats are being computed \u2014 check back shortly.' : undefined}>
+                        <div className="text-sm font-bold text-ink">
+                            {stats?.computing ? <Loader2 className="w-3.5 h-3.5 animate-spin text-ink-muted mx-auto" /> : stats ? compactNum(stats.edgeCount) : '\u2014'}
+                        </div>
                         <div className="text-[9px] text-ink-muted uppercase tracking-wider">Edges</div>
                     </div>
                     <div className="p-2.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] text-center">

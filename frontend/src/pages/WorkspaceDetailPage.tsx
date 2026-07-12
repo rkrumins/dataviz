@@ -673,6 +673,7 @@ export function WorkspaceDetailPage() {
                 ontologyName={selectedDsId ? ontologyNameMap[selectedDs?.ontologyId || ''] : undefined}
                 ontologyId={selectedDs?.ontologyId}
                 views={selectedDsId ? (viewsByDs[selectedDsId] || []) : []}
+                readiness={selectedDsId ? readinessMap[selectedDsId] : undefined}
                 ontologies={ontologies}
                 onSaveEdit={handleEditDsSave}
                 onDelete={workspace.dataSources.length > 1 && selectedDs

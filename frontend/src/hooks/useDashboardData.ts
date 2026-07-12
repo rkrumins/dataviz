@@ -22,6 +22,9 @@ export interface DataSourceStats {
     nodeCount: number
     edgeCount: number
     entityTypes: string[]
+    /** True when the stats cache is cold and still being computed server-side,
+     *  so the UI can show a "computing" state instead of a misleading 0 / dash. */
+    computing?: boolean
 }
 
 export interface TemplateBrief {

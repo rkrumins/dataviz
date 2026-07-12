@@ -18,6 +18,7 @@ import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
+import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
 import { getProviderLogo } from '../ProviderLogos'
 import { usePermission } from '@/store/auth'
@@ -44,6 +45,10 @@ interface DataSourceDetailPanelProps {
     ontologyName?: string
     ontologyId?: string
     views: View[]
+    /** Live aggregation readiness — drives the header pill so it agrees with
+     *  the Overview's Aggregation card (the persisted ds.aggregationStatus can
+     *  lag behind the live state). */
+    readiness?: DataSourceReadinessResponse
     /** Ontologies selectable in the inline edit panel. */
     ontologies: OntologyDefinitionResponse[]
     /** Persist an inline metadata edit (label + ontology). Replaces the old
@@ -125,6 +130,7 @@ export function DataSourceDetailPanel({
     ontologyName,
     ontologyId,
     views,
+    readiness,
     ontologies,
     onSaveEdit,
     onDelete,
@@ -213,7 +219,11 @@ export function DataSourceDetailPanel({
         setPendingDedicatedName(originalDedicatedName)
     }
 
-    const aggMeta = AGG_STATUS_META[ds?.aggregationStatus || 'none'] || AGG_STATUS_META.none
+    // Prefer the LIVE readiness status over the persisted ds.aggregationStatus
+    // so the header pill agrees with the Overview's Aggregation card.
+    const liveAggStatus = readiness?.aggregationStatus ?? ds?.aggregationStatus
+    const liveLastAggregatedAt = readiness?.lastAggregatedAt ?? ds?.lastAggregatedAt
+    const aggMeta = AGG_STATUS_META[liveAggStatus || 'none'] || AGG_STATUS_META.none
 
     const content = (
         <>
@@ -276,9 +286,9 @@ export function DataSourceDetailPanel({
                                 <span
                                     title="Lineage aggregation — whether this source's rolled-up lineage has been built. Trigger or manage it in the Aggregation tab."
                                     className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border", aggMeta.text,
-                                    ds.aggregationStatus === 'ready' ? 'bg-emerald-500/10 border-emerald-500/20' :
-                                    ds.aggregationStatus === 'failed' ? 'bg-red-500/10 border-red-500/20' :
-                                    ds.aggregationStatus === 'running' || ds.aggregationStatus === 'pending' ? 'bg-amber-500/10 border-amber-500/20' :
+                                    liveAggStatus === 'ready' ? 'bg-emerald-500/10 border-emerald-500/20' :
+                                    liveAggStatus === 'failed' ? 'bg-red-500/10 border-red-500/20' :
+                                    liveAggStatus === 'running' || liveAggStatus === 'pending' ? 'bg-amber-500/10 border-amber-500/20' :
                                     'bg-black/5 dark:bg-white/5 border-glass-border'
                                 )}>
                                     <span className={cn("w-2 h-2 rounded-full", aggMeta.dot)} />
@@ -292,9 +302,9 @@ export function DataSourceDetailPanel({
                                         <GitBranch className="w-3 h-3" /> {ontologyName}
                                     </Link>
                                 )}
-                                {ds.lastAggregatedAt && (
+                                {liveLastAggregatedAt && (
                                     <span className="flex items-center gap-1 text-[10px] text-ink-muted">
-                                        <Clock className="w-3 h-3" /> Aggregated {new Date(ds.lastAggregatedAt).toLocaleDateString()}
+                                        <Clock className="w-3 h-3" /> Aggregated {new Date(liveLastAggregatedAt).toLocaleDateString()}
                                     </span>
                                 )}
                             </div>

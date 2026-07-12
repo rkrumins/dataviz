@@ -109,8 +109,13 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
           `/api/v1/admin/workspaces/datasources/cached-stats?workspace_id=${encodeURIComponent(ws.id)}`,
         ).then(bulk => {
           for (const [key, entry] of Object.entries(bulk ?? {})) {
-            if (entry.status === 'computing') continue
             const dsId = key.slice(key.indexOf('/') + 1)
+            if (entry.status === 'computing') {
+              // Record the cold-cache placeholder (instead of skipping) so the
+              // card can show a "computing" state rather than a blank dash.
+              stats[dsId] = { nodeCount: 0, edgeCount: 0, entityTypes: [], computing: true }
+              continue
+            }
             stats[dsId] = {
               nodeCount: entry.nodeCount ?? 0,
               edgeCount: entry.edgeCount ?? 0,
