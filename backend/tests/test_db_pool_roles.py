@@ -172,3 +172,26 @@ def test_pool_status_returns_expected_counter_shape():
     # Counters are present (values may be None for NullPool-style pools
     # but the keys must exist so scrapers don't KeyError).
     assert set(web.keys()) >= {"checked_out", "checked_in", "overflow", "size"}
+
+
+def test_pooler_mode_toggles_asyncpg_statement_cache(monkeypatch):
+    """DB_POOLER_MODE=transaction|statement disables asyncpg's server-side
+    prepared statements (``statement_cache_size=0``) so a transaction-mode
+    pooler (Cloud SQL MCP / PgBouncer) can multiplex backends; unset / session
+    / direct keep prepared statements on (the query-plan-cache win)."""
+    # Default: prepared statements stay on.
+    monkeypatch.delenv("DB_POOLER_MODE", raising=False)
+    assert "statement_cache_size" not in _asyncpg_connect_args(PoolRole.WEB)
+
+    # Transaction / statement mode (case-insensitive): cache disabled.
+    for mode in ("transaction", "statement", "TRANSACTION"):
+        monkeypatch.setenv("DB_POOLER_MODE", mode)
+        assert _asyncpg_connect_args(PoolRole.WEB)["statement_cache_size"] == 0
+        # The read-only guard is applied ALONGSIDE the cache knob, not instead.
+        ro = _asyncpg_connect_args(PoolRole.READONLY)
+        assert ro["statement_cache_size"] == 0
+        assert ro["server_settings"]["default_transaction_read_only"] == "on"
+
+    # Session mode does NOT need it (dedicated backend per client).
+    monkeypatch.setenv("DB_POOLER_MODE", "session")
+    assert "statement_cache_size" not in _asyncpg_connect_args(PoolRole.WEB)
