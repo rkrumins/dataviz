@@ -97,6 +97,8 @@ export interface ExplorerListRowProps {
   onShare: () => void
   onPreview?: () => void
   onEdit?: () => void
+  /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
+  onEditLayout?: () => void
   editDisabled?: boolean
   onDelete?: () => void
   onRestore?: () => void
@@ -333,7 +335,7 @@ export function ExplorerListRow({
                     type="button"
                     onClick={e => { e.stopPropagation(); onEdit() }}
                     className="rounded-lg p-1.5 text-ink-muted hover:text-accent-lineage hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150"
-                    title="Edit view"
+                    title="Edit details (name, description, tags, visibility)"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </button>
