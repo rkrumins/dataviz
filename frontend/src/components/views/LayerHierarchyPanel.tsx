@@ -36,9 +36,11 @@ import {
 import { cn } from '@/lib/utils'
 import type { ViewLayerConfig, LogicalNodeConfig, EntityAssignmentConfig, LayerAssignmentEntry } from '@/types/schema'
 import type { UseLogicalNodesReturn } from '@/hooks/useLogicalNodes'
-import { useCanvasStore } from '@/store/canvas'
-import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { useContainmentEdgeTypes, useEntityTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { useEntityTypes } from '@/store/schema'
+import {
+    fallbackNameFromUrn,
+    type WizardEntityIndex,
+} from '@/components/views/ViewWizard/useWizardEntityIndex'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -66,6 +68,9 @@ interface LayerHierarchyPanelProps {
     assignments: Record<string, LayerAssignmentEntry>
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
+    /** Resolves assigned-entity identity + children. The wizard has no canvas
+     *  store, so names/children MUST come from the entity browser's data. */
+    entityIndex: WizardEntityIndex
     /** Called when user clicks OR drags onto a layer/node — becomes the active target */
     onSetActiveTarget: (target: ActiveTarget) => void
     /** Called when entities are dropped onto a layer or logical node */
@@ -73,6 +78,10 @@ interface LayerHierarchyPanelProps {
     /** Called when user clicks the X button on an assigned entity */
     onUnassign: (entityId: string) => void
     onReorderLayers: (layerIds: string[]) => void
+    /** Layer CRUD — routed through the Studio so undo/redo stays one history. */
+    onAddLayer: (name: string) => void
+    onRenameLayer: (layerId: string, name: string) => void
+    onDeleteLayer: (layerId: string) => void
     className?: string
 }
 
@@ -135,40 +144,54 @@ function InlineInput({
 function AssignedEntityItem({
     entityId,
     depth,
+    entityIndex,
     onUnassign,
+    inherited = false,
 }: {
     entityId: string
     depth: number
+    entityIndex: WizardEntityIndex
     onUnassign: (entityId: string) => void
+    /** Descendant shown under its assigned ancestor — it inherits the layer, so
+     *  it is read-only here (no unassign, no drag: moving it would violate the
+     *  containment rule the Studio already enforces). */
+    inherited?: boolean
 }) {
     const [isExpanded, setIsExpanded] = useState(false)
-    const node = useCanvasStore(s => s.nodes.find(n => n.id === entityId))
-    const edges = useCanvasStore(s => s.edges)
-    const containmentEdgeTypes = useContainmentEdgeTypes()
-    const { loadChildren, loadingNodes } = useGraphHydration()
 
-    const isNodeLoading = loadingNodes.has(entityId)
+    // Identity + children come from the entity browser's data (via the wizard
+    // entity index) — NOT the canvas store, which is empty inside the wizard
+    // and used to make every assigned row render as a raw URN fragment.
+    const identity = entityIndex.resolve(entityId)
+    const isNodeLoading = entityIndex.isLoading(entityId)
+    const childrenIds = entityIndex.childrenOf(entityId)
 
-    // Find children
-    const childrenIds = useMemo(() => {
-        const validEdges = edges.filter(e => {
-            if (e.source !== entityId) return false
-            return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
-        })
-        return [...new Set(validEdges.map(e => e.target))]
-    }, [edges, entityId, containmentEdgeTypes])
-
-    const name = node?.data?.label ?? node?.data?.businessLabel ?? entityId.split(',').pop()?.replace(')', '') ?? entityId
-    const type = (node?.data?.type as string) ?? 'unknown'
-    const childCount = (node?.data as any)?.childCount ?? childrenIds.length
+    const isResolving = identity === undefined
+    const name = identity?.name ?? fallbackNameFromUrn(entityId)
+    const type = identity?.type ?? 'unknown'
+    const childCount = identity?.childCount ?? childrenIds.length
     const hasChildren = childCount > 0
+    const isMissing = !!identity?.missing
 
     const handleToggle = (e: React.MouseEvent) => {
         e.stopPropagation()
-        if (!isExpanded) {
-            loadChildren(entityId)
-        }
+        if (!isExpanded) void entityIndex.loadChildren(entityId)
         setIsExpanded(v => !v)
+    }
+
+    /** Drag an already-assigned entity straight onto another layer/group —
+     *  same payload the browser tree emits, so the existing drop targets and
+     *  the Studio's move path (assignEntities) handle it unchanged. */
+    const handleDragStart = (e: React.DragEvent) => {
+        e.stopPropagation()
+        e.dataTransfer.setData('application/x-entity-assignment', JSON.stringify({
+            entityId,
+            entityName: name,
+            entityIds: [entityId],
+            entityCount: 1,
+            primaryEntity: { id: entityId, name, type },
+        }))
+        e.dataTransfer.effectAllowed = 'move'
     }
 
     const schemaEntityTypes = useEntityTypes()
@@ -186,14 +209,19 @@ function AssignedEntityItem({
     return (
         <div>
             <div
+                draggable={!inherited}
+                onDragStart={!inherited ? handleDragStart : undefined}
                 className={cn(
-                    'group/entity flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors cursor-default',
+                    'group/entity flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors',
+                    inherited ? 'cursor-default opacity-80' : 'cursor-grab active:cursor-grabbing',
                     'hover:bg-slate-100 dark:hover:bg-slate-800/50'
                 )}
                 style={{ paddingLeft: `${depth * 16 + 8}px` }}
             >
                 <div
                     onClick={hasChildren ? handleToggle : undefined}
+                    role={hasChildren ? 'button' : undefined}
+                    aria-label={hasChildren ? `${isExpanded ? 'Collapse' : 'Expand'} ${name}` : undefined}
                     className={cn(
                         'w-4 h-4 flex items-center justify-center shrink-0',
                         hasChildren ? 'cursor-pointer text-slate-400 hover:text-slate-600 dark:hover:text-slate-200' : ''
@@ -211,22 +239,41 @@ function AssignedEntityItem({
                 >
                     {icon}
                 </div>
-                <div className="flex-1 min-w-0 flex flex-col justify-center">
-                    <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300 truncate" title={String(name)}>
-                        {name}
-                    </span>
+                <div className="flex-1 min-w-0 flex items-center gap-1">
+                    {isResolving ? (
+                        <span className="h-2.5 w-24 rounded bg-slate-200 dark:bg-slate-700 animate-pulse" />
+                    ) : (
+                        <span
+                            className={cn(
+                                'text-[11px] font-medium truncate',
+                                isMissing
+                                    ? 'text-slate-400 italic'
+                                    : 'text-slate-600 dark:text-slate-300',
+                            )}
+                            title={isMissing ? `${name} — not found in the graph` : `${name}${entityId ? `\n${entityId}` : ''}`}
+                        >
+                            {name}
+                        </span>
+                    )}
+                    {hasChildren && !isExpanded && (
+                        <span className="text-[9px] text-slate-400 shrink-0" title={`${childCount} children inherit this layer`}>
+                            {childCount}
+                        </span>
+                    )}
                 </div>
-                {/* Unassign button */}
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation()
-                        onUnassign(entityId)
-                    }}
-                    className="opacity-0 group-hover/entity:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
-                    title="Remove assignment"
-                >
-                    <X className="w-3 h-3" />
-                </button>
+                {/* Unassign — only the explicit placement can be removed. */}
+                {!inherited && (
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation()
+                            onUnassign(entityId)
+                        }}
+                        className="opacity-0 group-hover/entity:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500 shrink-0 transition-all"
+                        title="Remove assignment"
+                    >
+                        <X className="w-3 h-3" />
+                    </button>
+                )}
             </div>
 
             <AnimatePresence>
@@ -242,7 +289,9 @@ function AssignedEntityItem({
                                 key={childId}
                                 entityId={childId}
                                 depth={depth + 1}
+                                entityIndex={entityIndex}
                                 onUnassign={onUnassign}
+                                inherited
                             />
                         ))}
                     </motion.div>
@@ -263,6 +312,7 @@ interface LogicalNodeItemProps {
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
     entityAssignments: LayerEntityRef[]
+    entityIndex: WizardEntityIndex
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
@@ -277,6 +327,7 @@ function LogicalNodeItem({
     activeTarget,
     logicalNodes,
     entityAssignments,
+    entityIndex,
     onSetActiveTarget,
     onDrop,
     onUnassign,
@@ -479,6 +530,7 @@ function LogicalNodeItem({
                                         activeTarget={activeTarget}
                                         logicalNodes={logicalNodes}
                                         entityAssignments={entityAssignments}
+                                        entityIndex={entityIndex}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -493,6 +545,7 @@ function LogicalNodeItem({
                                         key={entityId}
                                         entityId={entityId}
                                         depth={depth + 1}
+                                        entityIndex={entityIndex}
                                         onUnassign={onUnassign}
                                     />
                                 ))}
@@ -509,18 +562,37 @@ function LogicalNodeItem({
 
 interface LayerRowProps {
     layer: ViewLayerConfig
+    /** 0-based position — surfaces the 1–9 quick-assign shortcut. */
+    layerIndex: number
     assignments: Record<string, LayerAssignmentEntry>
     activeTarget: ActiveTarget | null
     logicalNodes: UseLogicalNodesReturn
+    entityIndex: WizardEntityIndex
     onSetActiveTarget: (target: ActiveTarget) => void
     onDrop: (layerId: string, nodeId: string | undefined, payload: DropPayload) => void
     onUnassign: (entityId: string) => void
+    onRenameLayer: (layerId: string, name: string) => void
+    onDeleteLayer: (layerId: string) => void
 }
 
-function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveTarget, onDrop, onUnassign }: LayerRowProps) {
+function LayerRow({
+    layer,
+    layerIndex,
+    assignments,
+    activeTarget,
+    logicalNodes,
+    entityIndex,
+    onSetActiveTarget,
+    onDrop,
+    onUnassign,
+    onRenameLayer,
+    onDeleteLayer,
+}: LayerRowProps) {
     const [isExpanded, setIsExpanded] = useState(true)
     const [showAddRoot, setShowAddRoot] = useState(false)
     const [isDragOver, setIsDragOver] = useState(false)
+    const [isRenaming, setIsRenaming] = useState(false)
+    const [confirmDelete, setConfirmDelete] = useState(false)
     const dragControls = useDragControls()
 
     const isLayerActive = activeTarget?.layerId === layer.id && !activeTarget?.nodeId
@@ -609,10 +681,29 @@ function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveT
                         style={{ backgroundColor: color }}
                     />
 
-                    {/* Layer name */}
-                    <span className="flex-1 text-sm font-semibold text-slate-800 dark:text-white truncate">
-                        {layer.name}
-                    </span>
+                    {/* Layer name (double-click to rename) */}
+                    {isRenaming ? (
+                        <InlineInput
+                            defaultValue={layer.name}
+                            placeholder="Layer name…"
+                            onConfirm={name => {
+                                onRenameLayer(layer.id, name)
+                                setIsRenaming(false)
+                            }}
+                            onCancel={() => setIsRenaming(false)}
+                        />
+                    ) : (
+                        <span
+                            className="flex-1 text-sm font-semibold text-slate-800 dark:text-white truncate"
+                            title="Double-click to rename"
+                            onDoubleClick={e => {
+                                e.stopPropagation()
+                                setIsRenaming(true)
+                            }}
+                        >
+                            {layer.name}
+                        </span>
+                    )}
 
                     {/* Drop indicator */}
                     {isDragOver && (
@@ -622,10 +713,42 @@ function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveT
                         </span>
                     )}
 
+                    {/* Quick-assign shortcut hint (matches the tree's 1–9 keys) */}
+                    {!isDragOver && layerIndex < 9 && (
+                        <kbd
+                            className="hidden group-hover:inline-block px-1 py-0.5 rounded border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-[9px] font-medium text-slate-400 shrink-0"
+                            title={`Press ${layerIndex + 1} to assign the selection to this layer`}
+                        >
+                            {layerIndex + 1}
+                        </kbd>
+                    )}
+
                     {/* Assignment count */}
                     {totalAssigned > 0 && !isDragOver && (
                         <span className="text-xs text-slate-400 shrink-0">{totalAssigned}</span>
                     )}
+
+                    {/* Layer actions */}
+                    <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 shrink-0 transition-opacity">
+                        <button
+                            onClick={e => { e.stopPropagation(); setIsRenaming(true) }}
+                            className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
+                            title="Rename layer"
+                        >
+                            <Pencil className="w-3 h-3" />
+                        </button>
+                        <button
+                            onClick={e => {
+                                e.stopPropagation()
+                                if (totalAssigned > 0) setConfirmDelete(true)
+                                else onDeleteLayer(layer.id)
+                            }}
+                            className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 text-slate-400 hover:text-red-500"
+                            title={`Delete ${layer.name}`}
+                        >
+                            <Trash2 className="w-3 h-3" />
+                        </button>
+                    </div>
 
                     {/* Expand toggle */}
                     <button
@@ -637,6 +760,34 @@ function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveT
                             : <ChevronRight className="w-4 h-4" />}
                     </button>
                 </motion.div>
+
+                {/* Delete confirmation — deleting a layer also drops its
+                    placements, so say so before it happens. */}
+                {confirmDelete && (
+                    <div className="mt-1 mx-1 px-3 py-2 rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30">
+                        <p className="text-[11px] text-red-700 dark:text-red-300">
+                            Delete <span className="font-semibold">{layer.name}</span>? {totalAssigned} placement{totalAssigned !== 1 ? 's' : ''} will be unassigned.
+                        </p>
+                        <div className="mt-1.5 flex items-center gap-2">
+                            <button
+                                onClick={e => {
+                                    e.stopPropagation()
+                                    onDeleteLayer(layer.id)
+                                    setConfirmDelete(false)
+                                }}
+                                className="px-2 py-1 rounded-lg bg-red-500 text-white text-[11px] font-medium hover:bg-red-600 transition-colors"
+                            >
+                                Delete layer
+                            </button>
+                            <button
+                                onClick={e => { e.stopPropagation(); setConfirmDelete(false) }}
+                                className="px-2 py-1 rounded-lg text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {/* Nodes + Add Group */}
                 <AnimatePresence>
@@ -659,6 +810,7 @@ function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveT
                                         activeTarget={activeTarget}
                                         logicalNodes={logicalNodes}
                                         entityAssignments={layerEntityAssignments}
+                                        entityIndex={entityIndex}
                                         onSetActiveTarget={onSetActiveTarget}
                                         onDrop={onDrop}
                                         onUnassign={onUnassign}
@@ -677,6 +829,7 @@ function LayerRow({ layer, assignments, activeTarget, logicalNodes, onSetActiveT
                                                 key={entityId}
                                                 entityId={entityId}
                                                 depth={0}
+                                                entityIndex={entityIndex}
                                                 onUnassign={onUnassign}
                                             />
                                         ))}
@@ -734,13 +887,18 @@ export function LayerHierarchyPanel({
     assignments,
     activeTarget,
     logicalNodes,
+    entityIndex,
     onSetActiveTarget,
     onDrop,
     onUnassign,
     onReorderLayers,
+    onAddLayer,
+    onRenameLayer,
+    onDeleteLayer,
     className,
 }: LayerHierarchyPanelProps) {
     const layerIds = layers.map(l => l.id)
+    const [showAddLayer, setShowAddLayer] = useState(false)
 
     return (
         <div
@@ -781,8 +939,9 @@ export function LayerHierarchyPanel({
             {/* Layer list (scrollable) */}
             <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
                 {layers.length === 0 ? (
-                    <div className="text-center py-8 text-slate-400 text-sm">
-                        No layers configured
+                    <div className="text-center py-8">
+                        <p className="text-sm text-slate-400">No layers yet</p>
+                        <p className="text-xs text-slate-400 mt-1">Add one below to start placing entities</p>
                     </div>
                 ) : (
                     <Reorder.Group
@@ -791,19 +950,49 @@ export function LayerHierarchyPanel({
                         onReorder={onReorderLayers}
                         className="space-y-1"
                     >
-                        {layers.map(layer => (
+                        {layers.map((layer, i) => (
                             <LayerRow
                                 key={layer.id}
                                 layer={layer}
+                                layerIndex={i}
                                 assignments={assignments}
                                 activeTarget={activeTarget}
                                 logicalNodes={logicalNodes}
+                                entityIndex={entityIndex}
                                 onSetActiveTarget={onSetActiveTarget}
                                 onDrop={onDrop}
                                 onUnassign={onUnassign}
+                                onRenameLayer={onRenameLayer}
+                                onDeleteLayer={onDeleteLayer}
                             />
                         ))}
                     </Reorder.Group>
+                )}
+
+                {/* Add layer — no more going back a step because you forgot one. */}
+                {showAddLayer ? (
+                    <div className="flex items-center gap-2 mt-1 px-2 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/20">
+                        <Layers className="w-4 h-4 text-blue-400 shrink-0" />
+                        <InlineInput
+                            placeholder="Layer name…"
+                            onConfirm={name => {
+                                onAddLayer(name)
+                                setShowAddLayer(false)
+                            }}
+                            onCancel={() => setShowAddLayer(false)}
+                        />
+                    </div>
+                ) : (
+                    <button
+                        onClick={() => setShowAddLayer(true)}
+                        className={cn(
+                            'flex items-center gap-1.5 w-full px-2 py-1.5 mt-1 rounded-lg text-xs font-medium',
+                            'text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors'
+                        )}
+                    >
+                        <Plus className="w-3.5 h-3.5" />
+                        Add layer
+                    </button>
                 )}
             </div>
         </div>

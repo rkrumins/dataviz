@@ -5,8 +5,8 @@
  * props (Task 4: canonical view-config store). It must never write to the
  * referenceModelStore directly — that store is a render cache now, not a writer.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // jsdom has no layout, so @tanstack/react-virtual would render 0 rows without a
 // viewport + ResizeObserver (same pattern as ConflictResolver.test.tsx).
@@ -23,20 +23,32 @@ vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => ({}),
 }))
 
+type FakeEntry = {
+  node: { urn: string; entityType: string; displayName: string; properties: Record<string, unknown> }
+  childIds: string[]
+  totalChildren: number
+  hasMore: boolean
+  nextCursor: string | null
+  loaded: boolean
+}
+
+function nodeA(overrides: Partial<FakeEntry> = {}): FakeEntry {
+  return {
+    node: { urn: 'urn:a', entityType: 'domain', displayName: 'Node A', properties: {} },
+    childIds: [],
+    totalChildren: 0,
+    hasMore: false,
+    nextCursor: null,
+    loaded: true,
+    ...overrides,
+  }
+}
+
 const fakeBrowser = {
   typeFilter: null as string | null,
   typesOnPathTo: () => null,
   topLevelIds: ['urn:a'],
-  nodes: new Map([
-    ['urn:a', {
-      node: { urn: 'urn:a', entityType: 'domain', displayName: 'Node A', properties: {} },
-      childIds: [],
-      totalChildren: 0,
-      hasMore: false,
-      nextCursor: null,
-      loaded: true,
-    }],
-  ]),
+  nodes: new Map<string, FakeEntry>([['urn:a', nodeA()]]),
   parentMap: new Map<string, string>(),
   isLoading: false,
   loadTopLevel: vi.fn(),
@@ -45,6 +57,9 @@ const fakeBrowser = {
   expandNode: vi.fn(),
   loadMoreChildren: vi.fn(),
   loadMoreTopLevel: vi.fn(),
+  loadAllChildren: vi.fn().mockResolvedValue(undefined),
+  loadAllTopLevel: vi.fn().mockResolvedValue(undefined),
+  peekNode: (urn: string) => fakeBrowser.nodes.get(urn),
   topLevelHasMore: false,
   topLevelTotalCount: 1,
   topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
@@ -128,6 +143,74 @@ describe('WizardAssignmentTree', () => {
       />
     )
 
-    expect(screen.getByText('Layer 2', { selector: 'span' })).toBeInTheDocument()
+    expect(screen.getByTestId('assigned-layer-badge')).toHaveTextContent('Layer 2')
+  })
+})
+
+describe('WizardAssignmentTree — coverage, filtering and bulk selection', () => {
+  afterEach(() => {
+    fakeBrowser.nodes = new Map<string, FakeEntry>([['urn:a', nodeA()]])
+    fakeBrowser.loadAllChildren.mockClear()
+  })
+
+  function renderTree(props: Partial<React.ComponentProps<typeof WizardAssignmentTree>> = {}) {
+    return render(
+      <WizardAssignmentTree
+        layers={layers}
+        assignments={{}}
+        onAssignmentChange={vi.fn()}
+        onBulkAssign={vi.fn()}
+        {...props}
+      />
+    )
+  }
+
+  it('reports how many top-level entities are placed', () => {
+    renderTree({ assignments: { 'urn:a': { layerId: 'l2', inheritsChildren: true } } })
+
+    // 1 of 1 top-level entities placed — the honest "am I done?" signal.
+    expect(screen.getByText(/\/ 1 placed/)).toBeInTheDocument()
+  })
+
+  it('"Unassigned only" hides entities that already have a layer', () => {
+    renderTree({ assignments: { 'urn:a': { layerId: 'l2', inheritsChildren: true } } })
+
+    expect(screen.getByText('Node A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Unassigned only/i }))
+    expect(screen.queryByText('Node A')).not.toBeInTheDocument()
+  })
+
+  it('assigns the selection to the Nth layer when 1–9 is pressed', () => {
+    const onBulkAssign = vi.fn()
+    renderTree({ onBulkAssign })
+
+    fireEvent.click(screen.getByText('Node A'))       // select the row
+    fireEvent.keyDown(window, { key: '2' })           // → second layer
+
+    expect(onBulkAssign).toHaveBeenCalledWith('l2', ['urn:a'])
+  })
+
+  it('never hijacks digits typed into the search box', () => {
+    const onBulkAssign = vi.fn()
+    renderTree({ onBulkAssign })
+
+    fireEvent.click(screen.getByText('Node A'))
+    fireEvent.keyDown(screen.getByPlaceholderText(/Search entities/i), { key: '1' })
+
+    expect(onBulkAssign).not.toHaveBeenCalled()
+  })
+
+  it('"Select all N children" pages in every remaining child before selecting', async () => {
+    // 888 children, only the first page loaded — the exact case that used to
+    // mean clicking "Load more" seventeen times.
+    fakeBrowser.nodes = new Map<string, FakeEntry>([
+      ['urn:a', nodeA({ totalChildren: 888, hasMore: true, nextCursor: 'cursor-1', loaded: true })],
+    ])
+    renderTree()
+
+    fireEvent.click(screen.getByText('Node A'))
+    fireEvent.click(screen.getByRole('button', { name: /Select all 888 children/i }))
+
+    await waitFor(() => expect(fakeBrowser.loadAllChildren).toHaveBeenCalledWith('urn:a'))
   })
 })

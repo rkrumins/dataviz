@@ -21,8 +21,13 @@ beforeAll(() => {
   }
 })
 
+// LayerStudio → LayoutStep (LAYER_COLORS) → … → `@/store/workspaces` →
+// workspaceSwitchCleanup → `@/main`, which calls createRoot() at import time.
+// Same stub the other store-touching suites use.
+vi.mock('@/main', () => ({ getQueryClient: () => ({ removeQueries: vi.fn(), invalidateQueries: vi.fn() }) }))
+
 vi.mock('@/providers/GraphProviderContext', () => ({
-  useGraphProvider: () => ({}),
+  useGraphProvider: () => ({ getNode: vi.fn().mockResolvedValue(null) }),
 }))
 
 const fakeBrowser = {
@@ -47,6 +52,9 @@ const fakeBrowser = {
   expandNode: vi.fn(),
   loadMoreChildren: vi.fn(),
   loadMoreTopLevel: vi.fn(),
+  loadAllChildren: vi.fn().mockResolvedValue(undefined),
+  loadAllTopLevel: vi.fn().mockResolvedValue(undefined),
+  peekNode: (urn: string) => fakeBrowser.nodes.get(urn),
   topLevelHasMore: false,
   topLevelTotalCount: 1,
   topLevelMetadata: { rootTypeCount: 1, orphanCount: 0 },
@@ -57,10 +65,19 @@ vi.mock('@/hooks/useEntityBrowser', () => ({
   useEntityBrowser: () => fakeBrowser,
 }))
 
-// Not under test here — trivial stub so LayerStudio can mount without the real
-// drag/drop hierarchy UI.
+// The real drag/drop hierarchy UI is covered by LayerHierarchyPanel.test.tsx.
+// Here it is a stub that exposes just the CRUD callbacks so we can assert what
+// the Studio commits (and that one undo restores it).
 vi.mock('../LayerHierarchyPanel', () => ({
-  LayerHierarchyPanel: () => <div data-testid="layer-hierarchy-panel-stub" />,
+  LayerHierarchyPanel: ({ onAddLayer, onDeleteLayer }: {
+    onAddLayer: (name: string) => void
+    onDeleteLayer: (layerId: string) => void
+  }) => (
+    <div data-testid="layer-hierarchy-panel-stub">
+      <button onClick={() => onAddLayer('Curated')}>stub-add-layer</button>
+      <button onClick={() => onDeleteLayer('l1')}>stub-delete-l1</button>
+    </div>
+  ),
 }))
 
 import { LayerStudio } from '../LayerStudio'
@@ -111,5 +128,65 @@ describe('LayerStudio — assignment writes go to formData.assignments', () => {
     expect(updateFormData).toHaveBeenCalledTimes(1)
     const call = updateFormData.mock.calls[0][0]
     expect(call.assignments).toEqual({})
+  })
+})
+
+describe('LayerStudio — in-step layer CRUD commits through the shared undo history', () => {
+  it('adds a layer with a palette colour and the next order', () => {
+    const updateFormData = vi.fn()
+    render(<LayerStudio formData={makeFormData()} updateFormData={updateFormData} />)
+
+    fireEvent.click(screen.getByText('stub-add-layer'))
+
+    const call = updateFormData.mock.calls[0][0]
+    expect(call.layers).toHaveLength(3)
+    expect(call.layers[2]).toMatchObject({ name: 'Curated', order: 2 })
+    expect(call.layers[2].color).toMatch(/^#/)
+  })
+
+  it('deleting a layer drops its placements in the SAME commit (one undo restores both)', () => {
+    const updateFormData = vi.fn()
+    const formData = makeFormData({
+      assignments: {
+        'urn:a': { layerId: 'l1', inheritsChildren: true },
+        'urn:b': { layerId: 'l2', inheritsChildren: true },
+      },
+    })
+    render(<LayerStudio formData={formData} updateFormData={updateFormData} />)
+
+    fireEvent.click(screen.getByText('stub-delete-l1'))
+
+    expect(updateFormData).toHaveBeenCalledTimes(1)
+    const call = updateFormData.mock.calls[0][0]
+    // Layer gone, its assignment gone, the other layer's assignment kept.
+    expect(call.layers.map((l: ViewLayerConfig) => l.id)).toEqual(['l2'])
+    expect(call.assignments).toEqual({ 'urn:b': { layerId: 'l2', inheritsChildren: true } })
+  })
+})
+
+describe('LayerStudio — Magic Map', () => {
+  it('proposes a name match and applies it as ONE inheriting entry marked assignedBy=rule', async () => {
+    const updateFormData = vi.fn()
+    // The browser's only top-level entity is named exactly like layer "Node A".
+    const formData = makeFormData({
+      layers: [{ id: 'l-node-a', name: 'Node A', entityTypes: [], order: 0 }],
+    })
+    render(<LayerStudio formData={formData} updateFormData={updateFormData} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Magic Map/i }))
+
+    // Review sheet lists the suggestion before anything is applied.
+    expect(await screen.findByText(/Accept all 1/i)).toBeInTheDocument()
+    expect(updateFormData).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /Accept all 1/i }))
+
+    expect(updateFormData).toHaveBeenCalledTimes(1)
+    const call = updateFormData.mock.calls[0][0]
+    expect(call.assignments['urn:a']).toMatchObject({
+      layerId: 'l-node-a',
+      inheritsChildren: true,
+      assignedBy: 'rule',
+    })
   })
 })

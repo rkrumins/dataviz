@@ -35,16 +35,21 @@ import {
     Undo2,
     Redo2,
     Sparkles,
+    Wand2,
     Eye,
     EyeOff,
     AlertCircle,
     Check,
     X,
     ChevronRight,
+    Loader2,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, generateId } from '@/lib/utils'
 import { LayerHierarchyPanel, type ActiveTarget, type DropPayload } from './LayerHierarchyPanel'
-import { WizardAssignmentTree } from '../views/ViewWizard/WizardAssignmentTree'
+import { WizardAssignmentTree, type BrowserSnapshot } from '../views/ViewWizard/WizardAssignmentTree'
+import { useWizardEntityIndex, fallbackNameFromUrn } from '../views/ViewWizard/useWizardEntityIndex'
+import { suggestLayerMappings, type MagicMapSuggestion } from '../views/ViewWizard/magicMap'
+import { LAYER_COLORS } from '../views/ViewWizard/steps/LayoutStep'
 import { useLogicalNodes } from '@/hooks/useLogicalNodes'
 import { useAutoOrganize, type GroupingSuggestion } from '@/hooks/useAutoOrganize'
 import { assignEntities, unassignEntities } from '@/components/canvas/context-view/assignmentMutations'
@@ -53,7 +58,9 @@ import type { ViewLayerConfig, LayerAssignmentEntry } from '@/types/schema'
 import type { WizardFormData } from '../views/ViewWizard/ViewWizard'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
+import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
+import { useToast } from '@/components/ui/toast'
 import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/ChildReassignConfirmDialog'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -177,6 +184,155 @@ function AutoOrganizeSheet({
     )
 }
 
+// ─── Magic Map Review Sheet ────────────────────────────────────────────────────
+
+function MagicMapSheet({
+    suggestions,
+    scanned,
+    total,
+    hasMore,
+    busy,
+    onLoadAll,
+    onAcceptAll,
+    onAcceptOne,
+    onDismissOne,
+    onClose,
+}: {
+    suggestions: MagicMapSuggestion[]
+    scanned: number
+    total: number
+    hasMore: boolean
+    busy: boolean
+    onLoadAll: () => void
+    onAcceptAll: () => void
+    onAcceptOne: (s: MagicMapSuggestion) => void
+    onDismissOne: (urn: string) => void
+    onClose: () => void
+}) {
+    const grouped = useMemo(() => {
+        const map = new Map<string, MagicMapSuggestion[]>()
+        for (const s of suggestions) {
+            map.set(s.layerName, [...(map.get(s.layerName) ?? []), s])
+        }
+        return Array.from(map.entries())
+    }, [suggestions])
+
+    const confidenceColor = (c: MagicMapSuggestion['confidence']) => ({
+        high: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30',
+        medium: 'text-amber-600 bg-amber-50 dark:bg-amber-900/30',
+        low: 'text-slate-500 bg-slate-100 dark:bg-slate-700',
+    }[c])
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.97 }}
+            className={cn(
+                'absolute inset-x-0 bottom-0 z-50 mx-4 mb-4',
+                'bg-white dark:bg-slate-900 rounded-2xl shadow-2xl',
+                'border border-slate-200 dark:border-slate-700',
+                'max-h-[60%] flex flex-col overflow-hidden'
+            )}
+        >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-800">
+                <div className="min-w-0">
+                    <h3 className="font-semibold text-slate-800 dark:text-white flex items-center gap-2">
+                        <Wand2 className="w-4 h-4 text-violet-500" />
+                        Magic Map
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                        {suggestions.length > 0
+                            ? `${suggestions.length} top-level ${suggestions.length === 1 ? 'entity matches a layer' : 'entities match your layers'} by name — their children inherit automatically`
+                            : 'No name matches found between your top-level entities and layer names'}
+                        {hasMore && (
+                            <>
+                                {' · '}
+                                <span className="text-amber-600 dark:text-amber-400">
+                                    scanned {scanned} of {total}
+                                </span>
+                            </>
+                        )}
+                    </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                    {hasMore && (
+                        <button
+                            onClick={onLoadAll}
+                            disabled={busy}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-60"
+                        >
+                            {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            Scan all {total}
+                        </button>
+                    )}
+                    {suggestions.length > 0 && (
+                        <button
+                            onClick={onAcceptAll}
+                            className="px-3 py-1.5 bg-violet-500 text-white text-sm font-medium rounded-lg hover:bg-violet-600 transition-colors"
+                        >
+                            Accept all {suggestions.length}
+                        </button>
+                    )}
+                    <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">
+                        <X className="w-4 h-4 text-slate-500" />
+                    </button>
+                </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+                {grouped.length === 0 ? (
+                    <p className="text-center text-sm text-slate-400 py-6">
+                        Rename a layer to match a root entity (or vice versa) and run this again.
+                    </p>
+                ) : grouped.map(([layerName, items]) => (
+                    <div key={layerName}>
+                        <div className="flex items-center gap-1.5 mb-2">
+                            <ChevronRight className="w-3 h-3 text-slate-400" />
+                            <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
+                                {layerName}
+                            </span>
+                            <span className="text-[10px] text-slate-400">{items.length}</span>
+                        </div>
+                        <div className="space-y-1.5 ml-4">
+                            {items.map(s => (
+                                <div
+                                    key={s.urn}
+                                    className="flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-800 rounded-lg"
+                                >
+                                    <span className={cn('text-xs px-1.5 py-0.5 rounded font-medium shrink-0', confidenceColor(s.confidence))}>
+                                        {s.confidence}
+                                    </span>
+                                    <span className="flex-1 min-w-0 text-sm text-slate-700 dark:text-slate-300 truncate" title={s.reason}>
+                                        {s.name}
+                                        <span className="ml-1 text-xs text-slate-400">({s.type})</span>
+                                    </span>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                            onClick={() => onAcceptOne(s)}
+                                            className="p-1 rounded hover:bg-emerald-100 dark:hover:bg-emerald-900/40 text-emerald-500"
+                                            title="Accept"
+                                        >
+                                            <Check className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                            onClick={() => onDismissOne(s.urn)}
+                                            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400"
+                                            title="Dismiss"
+                                        >
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </motion.div>
+    )
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export function LayerStudio({
@@ -281,16 +437,23 @@ export function LayerStudio({
         return result
     }, [childMap, layerAssignmentMap])
 
-    // ── Node name lookup for confirmation dialog ────────────────────────────────
-    const canvasNodes = useCanvasStore(s => s.nodes)
-    const nodeNameMap = useMemo(() => {
-        const map = new Map<string, string>()
-        canvasNodes.forEach(n => {
-            map.set(n.id, (n.data as { label?: string; businessLabel?: string }).label
-                ?? (n.data as { businessLabel?: string }).businessLabel ?? n.id)
-        })
-        return map
-    }, [canvasNodes])
+    // ── Entity identity (names + children) ──────────────────────────────────────
+    // The wizard has NO canvas, so identity comes from the entity browser's own
+    // data (published as a snapshot) plus on-demand getNode() lookups for
+    // assignments the browser hasn't paged in yet (edit mode).
+    const provider = useGraphProvider()
+    const [snapshot, setSnapshot] = useState<BrowserSnapshot | null>(null)
+    const entityIndex = useWizardEntityIndex({
+        provider,
+        containmentEdgeTypes,
+        assignments: formData.assignments ?? {},
+        snapshot,
+    })
+    const nameOf = useCallback(
+        (urn: string) => entityIndex.resolve(urn)?.name ?? fallbackNameFromUrn(urn),
+        [entityIndex],
+    )
+    const { showToast } = useToast()
 
     // ── Confirmation dialog for child reassignment ────────────────────────────
     const [pendingReassign, setPendingReassign] = useState<{
@@ -409,8 +572,20 @@ export function LayerStudio({
                 { logicalNodeId, clearDescendants: descendantsToMove },
             )
             commitLayout(next)
+
+            // Make the inheritance rule visible: placing one root silently covers
+            // its whole subtree, which is exactly what people don't expect.
+            const inherited = entityIds.reduce(
+                (sum, id) => sum + (entityIndex.resolve(id)?.childCount ?? 0),
+                0,
+            )
+            if (inherited > 0) {
+                const layerName = layers.find(l => l.id === layerId)?.name ?? 'layer'
+                const what = entityIds.length === 1 ? nameOf(entityIds[0]) : `${entityIds.length} entities`
+                showToast('success', `${what} → ${layerName} · ${inherited} ${inherited === 1 ? 'child inherits' : 'children inherit'} automatically`)
+            }
         },
-        [layers, assignments, commitLayout]
+        [layers, assignments, commitLayout, entityIndex, nameOf, showToast]
     )
 
     /** Show confirmation dialog if descendants need moving, otherwise commit immediately */
@@ -424,12 +599,12 @@ export function LayerStudio({
             const info: ChildReassignInfo = {
                 entityId: entityIds[0],
                 entityName: entityIds.length === 1
-                    ? (nodeNameMap.get(entityIds[0]) ?? entityIds[0])
+                    ? nameOf(entityIds[0])
                     : `${entityIds.length} entities`,
                 targetLayerId: layerId,
                 descendantsToMove: descendantsToMove.map(dId => ({
                     id: dId,
-                    name: nodeNameMap.get(dId) ?? dId,
+                    name: nameOf(dId),
                     currentLayerId: layerAssignmentMap.get(dId) ?? '',
                 })),
             }
@@ -441,7 +616,7 @@ export function LayerStudio({
                 },
             })
         },
-        [commitAssignment, nodeNameMap, layerAssignmentMap]
+        [commitAssignment, nameOf, layerAssignmentMap]
     )
 
     // ── Assignment from entity tree ─────────────────────────────────────────────
@@ -533,9 +708,98 @@ export function LayerStudio({
         [layers, logicalNodes, isContainmentLocked, getDescendantsInDifferentLayer, showAssignmentWarning, confirmOrCommit]
     )
 
+    // ── Layer CRUD (in-step) ────────────────────────────────────────────────────
+    // Routed through commitLayout so add/rename/delete share ONE undo history
+    // with assignments — you never have to walk back to the Layout step because
+    // you forgot a layer.
+    const handleAddLayer = useCallback((name: string) => {
+        const nextLayer: ViewLayerConfig = {
+            id: generateId('layer'),
+            name,
+            description: '',
+            color: LAYER_COLORS[layers.length % LAYER_COLORS.length],
+            entityTypes: [],
+            order: layers.length,
+            sequence: layers.length,
+        }
+        handleUpdateLayers([...layers, nextLayer])
+    }, [layers, handleUpdateLayers])
+
+    const handleRenameLayer = useCallback((layerId: string, name: string) => {
+        handleUpdateLayers(layers.map(l => (l.id === layerId ? { ...l, name } : l)))
+    }, [layers, handleUpdateLayers])
+
+    /** Deleting a layer also drops every placement into it — one atomic commit,
+     *  so a single undo restores both the layer AND its assignments. */
+    const handleDeleteLayer = useCallback((layerId: string) => {
+        const nextLayers = layers
+            .filter(l => l.id !== layerId)
+            .map((l, i) => ({ ...l, order: i, sequence: i }))
+        const nextAssignments = Object.fromEntries(
+            Object.entries(assignments).filter(([, entry]) => entry.layerId !== layerId)
+        )
+        commitLayout({ layers: nextLayers, assignments: nextAssignments })
+        setActiveTarget(prev => (prev?.layerId === layerId
+            ? (nextLayers.length > 0 ? { layerId: nextLayers[0].id, label: nextLayers[0].name } : null)
+            : prev))
+    }, [layers, assignments, commitLayout])
+
     // ── Auto-organize ───────────────────────────────────────────────────────────
     const autoOrganize = useAutoOrganize()
     const [showSuggestions, setShowSuggestions] = useState(false)
+
+    // ── Magic Map ───────────────────────────────────────────────────────────────
+    // Matches top-level entity names against layer names ("Staging" → Staging)
+    // and proposes the whole mapping at once. Each accepted suggestion is ONE
+    // assignment entry with inheritsChildren — an 888-child root is placed
+    // without enumerating a single child.
+    const [magicSuggestions, setMagicSuggestions] = useState<MagicMapSuggestion[] | null>(null)
+    const [magicBusy, setMagicBusy] = useState(false)
+
+    const runMagicMap = useCallback(() => {
+        if (!snapshot) return
+        const unassignedRoots = snapshot.topLevelIds
+            .filter(urn => !assignments[urn])
+            .map(urn => {
+                const identity = snapshot.directory.get(urn)
+                return identity
+                    ? { urn, name: identity.name, type: identity.type }
+                    : null
+            })
+            .filter((c): c is { urn: string; name: string; type: string } => c !== null)
+        setMagicSuggestions(suggestLayerMappings(unassignedRoots, layers))
+    }, [snapshot, assignments, layers])
+
+    /** Scan every top-level entity, not just the loaded page. */
+    const loadAllThenMagicMap = useCallback(async () => {
+        if (!snapshot) return
+        setMagicBusy(true)
+        try {
+            await snapshot.loadAllTopLevel()
+        } finally {
+            setMagicBusy(false)
+        }
+    }, [snapshot])
+
+    // Re-run whenever the scanned population changes (e.g. after "Load all").
+    useEffect(() => {
+        if (magicSuggestions !== null && !magicBusy) runMagicMap()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [snapshot?.topLevelIds.length, magicBusy])
+
+    /** Apply N suggestions in ONE commit → one undo step. */
+    const applyMagicSuggestions = useCallback((accepted: MagicMapSuggestion[]) => {
+        if (accepted.length === 0) return
+        let working: NormalizedReferenceLayout = { layers, assignments }
+        const byLayer = new Map<string, string[]>()
+        accepted.forEach(s => byLayer.set(s.layerId, [...(byLayer.get(s.layerId) ?? []), s.urn]))
+        byLayer.forEach((urns, layerId) => {
+            working = assignEntities(working, urns, layerId, { assignedBy: 'rule' })
+        })
+        commitLayout(working)
+        setMagicSuggestions(prev => (prev ?? []).filter(s => !accepted.some(a => a.urn === s.urn)))
+        showToast('success', `Placed ${accepted.length} ${accepted.length === 1 ? 'entity' : 'entities'} — their children inherit automatically`)
+    }, [layers, assignments, commitLayout, showToast])
 
     // ── Preview pane toggle ─────────────────────────────────────────────────────
     const [showPreview, setShowPreview] = useState(false)
@@ -593,6 +857,22 @@ export function LayerStudio({
                             </span>
                         )}
                     </button>
+
+                    {/* Magic Map — name-match top-level entities to layers in one pass */}
+                    <button
+                        onClick={() => {
+                            if (magicSuggestions !== null) { setMagicSuggestions(null); return }
+                            runMagicMap()
+                        }}
+                        disabled={layers.length === 0 || !snapshot}
+                        title={layers.length === 0
+                            ? 'Add a layer first'
+                            : 'Match top-level entities to layers by name'}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                        <Wand2 className="w-4 h-4" />
+                        Magic Map
+                    </button>
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -630,10 +910,14 @@ export function LayerStudio({
                         assignments={assignments}
                         activeTarget={activeTarget}
                         logicalNodes={logicalNodes}
+                        entityIndex={entityIndex}
                         onSetActiveTarget={setActiveTarget}
                         onDrop={handleHierarchyDrop}
                         onUnassign={(entityId) => handleAssignmentChange(entityId, null)}
                         onReorderLayers={handleReorderLayers}
+                        onAddLayer={handleAddLayer}
+                        onRenameLayer={handleRenameLayer}
+                        onDeleteLayer={handleDeleteLayer}
                         className="min-h-0"
                     />
 
@@ -655,6 +939,7 @@ export function LayerStudio({
                             activeTarget={activeTarget}
                             onAssignmentChange={handleAssignmentChange}
                             onBulkAssign={handleBulkAssignment}
+                            onBrowserSnapshot={setSnapshot}
                             className="flex-1 min-h-0"
                         />
                     </div>
@@ -697,6 +982,27 @@ export function LayerStudio({
                             onAcceptOne={s => autoOrganize.acceptOne(s, layers, handleUpdateLayers)}
                             onDismissOne={autoOrganize.dismissOne}
                             onClose={() => setShowSuggestions(false)}
+                        />
+                    )}
+                </AnimatePresence>
+
+                {/* Magic Map review sheet */}
+                <AnimatePresence>
+                    {magicSuggestions !== null && snapshot && (
+                        <MagicMapSheet
+                            suggestions={magicSuggestions}
+                            scanned={snapshot.topLevelIds.length}
+                            total={Math.max(snapshot.topLevelTotalCount, snapshot.topLevelIds.length)}
+                            hasMore={snapshot.topLevelHasMore}
+                            busy={magicBusy}
+                            onLoadAll={loadAllThenMagicMap}
+                            onAcceptAll={() => {
+                                applyMagicSuggestions(magicSuggestions)
+                                setMagicSuggestions(null)
+                            }}
+                            onAcceptOne={s => applyMagicSuggestions([s])}
+                            onDismissOne={urn => setMagicSuggestions(prev => (prev ?? []).filter(s => s.urn !== urn))}
+                            onClose={() => setMagicSuggestions(null)}
                         />
                     )}
                 </AnimatePresence>

@@ -24,6 +24,7 @@ import {
     CheckSquare,
     Square,
     GitBranch,
+    Filter,
     Loader2
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -59,6 +60,26 @@ export interface EntityTreeNode {
     conflictMessage?: string
 }
 
+/** One entry of the published browser directory — enough identity for any
+ *  consumer (left panel, Magic Map) to render a node it hasn't fetched itself. */
+export interface BrowserSnapshotEntry {
+    name: string
+    type: string
+    childCount: number
+}
+
+/** Live snapshot of everything the entity browser has loaded. Published via
+ *  `onBrowserSnapshot` so sibling panels resolve names/children from the SAME
+ *  data the tree shows — never from the (empty-in-wizard) canvas store. */
+export interface BrowserSnapshot {
+    directory: Map<string, BrowserSnapshotEntry>
+    topLevelIds: string[]
+    topLevelTotalCount: number
+    topLevelHasMore: boolean
+    /** Fully paginate the top level (stable identity — safe to hold). */
+    loadAllTopLevel: () => Promise<void>
+}
+
 interface WizardAssignmentTreeProps {
     /** Layers to assign to */
     layers: ViewLayerConfig[]
@@ -72,6 +93,8 @@ interface WizardAssignmentTreeProps {
     onBulkAssign?: (layerId: string, entityIds: string[]) => void
     /** Callback when the containment parentMap changes (for AssignmentStep inheritance) */
     onParentMapChange?: (map: Map<string, string>) => void
+    /** Publishes the browser's loaded directory + top-level state (see BrowserSnapshot). */
+    onBrowserSnapshot?: (snapshot: BrowserSnapshot) => void
     /** Additional class name */
     className?: string
 }
@@ -283,6 +306,7 @@ function TreeRow({
             {assignedLayer && (
                 <div className="flex items-center gap-1 flex-shrink-0">
                     <span
+                        data-testid="assigned-layer-badge"
                         className={cn(
                             'text-xs px-2 py-0.5 rounded-full font-medium',
                             node.isInherited && 'opacity-70'
@@ -341,6 +365,7 @@ export function WizardAssignmentTree({
     onAssignmentChange,
     onBulkAssign,
     onParentMapChange,
+    onBrowserSnapshot,
     className
 }: WizardAssignmentTreeProps) {
     // ── API-driven Entity Browser (replaces canvas store + useGraphHydration) ──
@@ -375,6 +400,35 @@ export function WizardAssignmentTree({
         onParentMapChange?.(browser.parentMap)
     }, [browser.parentMap, onParentMapChange])
 
+    // Publish the loaded directory + top-level state so sibling panels
+    // (Layers & Groups, Magic Map) resolve identity from the browser's data.
+    const { loadAllTopLevel } = browser
+    useEffect(() => {
+        if (!onBrowserSnapshot) return
+        const directory = new Map<string, BrowserSnapshotEntry>()
+        browser.nodes.forEach((entry, urn) => {
+            directory.set(urn, {
+                name: entry.node.displayName,
+                type: entry.node.entityType,
+                childCount: entry.totalChildren,
+            })
+        })
+        onBrowserSnapshot({
+            directory,
+            topLevelIds: browser.topLevelIds,
+            topLevelTotalCount: browser.topLevelTotalCount,
+            topLevelHasMore: browser.topLevelHasMore,
+            loadAllTopLevel,
+        })
+    }, [
+        onBrowserSnapshot,
+        browser.nodes,
+        browser.topLevelIds,
+        browser.topLevelTotalCount,
+        browser.topLevelHasMore,
+        loadAllTopLevel,
+    ])
+
     // Store hooks (assignment-related — read-only; the tree never writes to the
     // store, it communicates assignment changes ONLY via onAssignmentChange/onBulkAssign).
     const effectiveAssignments = useEffectiveAssignments()
@@ -395,6 +449,10 @@ export function WizardAssignmentTree({
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [draggingNode, setDraggingNode] = useState<EntityTreeNode | null>(null)
+    /** "Unassigned only" — hides every node whose effective layer resolves
+     *  (explicit OR inherited: an inherited child is, correctly, assigned). */
+    const [hideAssigned, setHideAssigned] = useState(false)
+    const [selectAllBusy, setSelectAllBusy] = useState(false)
 
     const parentRef = useRef<HTMLDivElement>(null)
     const searchInputRef = useRef<HTMLInputElement>(null)
@@ -404,6 +462,13 @@ export function WizardAssignmentTree({
     const pathTypes = useMemo(
         () => browser.typeFilter ? browser.typesOnPathTo(browser.typeFilter) : null,
         [browser.typeFilter, browser.typesOnPathTo]
+    )
+
+    // Roots actually displayable at the top level (drops entries whose parent
+    // was discovered on a later expand). Shared by the tree and the coverage meter.
+    const visibleRootIds = useMemo(
+        () => browser.topLevelIds.filter(urn => !browser.parentMap.has(urn)),
+        [browser.topLevelIds, browser.parentMap]
     )
 
     const entityTree = useMemo<EntityTreeNode[]>(() => {
@@ -443,6 +508,10 @@ export function WizardAssignmentTree({
                 isInherited = true
             }
 
+            // "Unassigned only": an assigned node drops out together with its
+            // subtree (children inherit its layer, so they're assigned too).
+            if (hideAssigned && effectiveLayerId) return null
+
             // Recurse into loaded children only (lazy — children are loaded on expand)
             const children = entry.loaded
                 ? entry.childIds
@@ -473,12 +542,11 @@ export function WizardAssignmentTree({
         // on expand). These appear in topLevelIds because the initial top-level
         // query pre-dated the expand — once a parent link is discovered they
         // belong as children in the hierarchy, not as roots.
-        return browser.topLevelIds
-            .filter(urn => !browser.parentMap.has(urn))
+        return visibleRootIds
             .map(urn => buildNode(urn, 0))
             .filter((n): n is EntityTreeNode => n !== null)
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [browser.nodes, browser.topLevelIds, browser.parentMap, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap])
+    }, [browser.nodes, browser.topLevelIds, visibleRootIds, browser.typeFilter, pathTypes, conflicts, effectiveAssignments, manualAssignmentMap, hideAssigned])
 
     // Build child allocation map: for each entity with children, which layers are descendants assigned to?
     const childAllocationMap = useMemo(() => {
@@ -591,6 +659,64 @@ export function WizardAssignmentTree({
         overscan: 10
     })
 
+    // ── Auto-load-more ────────────────────────────────────────────────────────
+    // A "Load more" sentinel that scrolls into the rendered window fetches its
+    // next page by itself — no clicking through 17 pages of an 888-child node.
+    // Guarded per (target, cursor) so each page fires exactly once, and it
+    // self-limits: once the new rows push the sentinel out of the window, it
+    // stops. The explicit button + "Load all" stay for deliberate control.
+    const browserRef = useRef(browser)
+    browserRef.current = browser
+    const autoLoadedRef = useRef<Set<string>>(new Set())
+    const virtualItems = rowVirtualizer.getVirtualItems()
+
+    useEffect(() => {
+        const b = browserRef.current
+        for (const item of virtualItems) {
+            const row = flattenedNodes[item.index]
+            if (!row || !('isLoadMore' in row) || !row.isLoadMore) continue
+
+            const parentId = 'parentId' in row ? row.parentId : undefined
+            const key = parentId ?? '__top-level'
+            if (b.loadingNodes.has(key)) continue
+
+            // Cursor identity — advances with every loaded page.
+            const cursor = parentId
+                ? b.peekNode(parentId)?.nextCursor ?? ''
+                : String(b.topLevelIds.length)
+            const guard = `${key}:${cursor}`
+            if (autoLoadedRef.current.has(guard)) continue
+            autoLoadedRef.current.add(guard)
+
+            if (parentId) void b.loadMoreChildren(parentId)
+            else void b.loadMoreTopLevel()
+        }
+    }, [virtualItems, flattenedNodes])
+
+    // ── Coverage ──────────────────────────────────────────────────────────────
+    // Top-level coverage is the honest denominator: a top-level node has no
+    // parent, so it can only be placed EXPLICITLY (children inherit). Y comes
+    // from the server's total, so it doesn't lie while pages are still loading.
+    const coverage = useMemo(() => {
+        const explicit = assignments ?? {}
+        const assignedRoots = visibleRootIds.filter(urn => !!explicit[urn]).length
+        const perLayer = new Map<string, number>()
+        Object.values(explicit).forEach(a => {
+            perLayer.set(a.layerId, (perLayer.get(a.layerId) ?? 0) + 1)
+        })
+        const loadedRoots = visibleRootIds.length
+        const totalRoots = Math.max(browser.topLevelTotalCount, loadedRoots)
+        return {
+            assignedRoots,
+            loadedRoots,
+            totalRoots,
+            partial: loadedRoots < totalRoots,
+            perLayer,
+            totalPlacements: Object.keys(explicit).length,
+            pct: totalRoots > 0 ? Math.round((assignedRoots / totalRoots) * 100) : 0,
+        }
+    }, [assignments, visibleRootIds, browser.topLevelTotalCount])
+
     // Handlers
     // CRITICAL: expandNode() ONLY loads direct children of the clicked node.
     // It NEVER recursively loads grandchildren. Even with a type filter active,
@@ -660,26 +786,44 @@ export function WizardAssignmentTree({
         setSelectedIds(new Set())
     }, [selectedIds, onBulkAssign, onAssignmentChange])
 
-    const handleSelectAllChildren = useCallback(() => {
-        if (selectedIds.size !== 1) return
-        const selectedId = Array.from(selectedIds)[0]
-        const node = flattenedNodes.find(n => n.id === selectedId)
-        if (!node) return
+    // TRUE select-all-children: pages in EVERY remaining child of the selected
+    // node (plus any already-expanded descendant that still has unloaded pages)
+    // BEFORE selecting the union — so "select all 888 children" is one click,
+    // not seventeen "Load more"s. Deliberately does NOT explode *unexpanded*
+    // subtrees: assignment inherits down containment (`inheritsChildren`), so
+    // selecting the parent already covers them, and exploding them would be the
+    // million-node footgun.
+    const handleSelectAllChildren = useCallback(async () => {
+        if (selectedIds.size !== 1 || selectAllBusy) return
+        const rootId = Array.from(selectedIds)[0]
 
-        const collectChildren = (n: EntityTreeNode): string[] => {
-            return [n.id, ...n.children.flatMap(collectChildren)]
+        setSelectAllBusy(true)
+        try {
+            await browser.loadAllChildren(rootId)
+
+            // Walk the freshly-loaded entries via peekNode — React state is
+            // stale inside this callback.
+            const selected = new Set<string>([rootId])
+            const queue = [...(browser.peekNode(rootId)?.childIds ?? [])]
+            while (queue.length > 0) {
+                const id = queue.shift()!
+                if (selected.has(id)) continue
+                selected.add(id)
+                const entry = browser.peekNode(id)
+                if (!entry) continue
+                if (expandedIds.has(id) && entry.hasMore) {
+                    await browser.loadAllChildren(id)
+                }
+                const fresh = browser.peekNode(id)
+                if (fresh?.loaded) queue.push(...fresh.childIds)
+            }
+
+            setExpandedIds(prev => new Set(prev).add(rootId))
+            setSelectedIds(selected)
+        } finally {
+            setSelectAllBusy(false)
         }
-
-        const originalNode = entityTree.find(function findNode(t): t is EntityTreeNode {
-            if (t.id === selectedId) return true
-            return t.children.some(findNode)
-        })
-
-        if (originalNode) {
-            const allIds = collectChildren(originalNode)
-            setSelectedIds(new Set(allIds))
-        }
-    }, [selectedIds, flattenedNodes, entityTree])
+    }, [selectedIds, selectAllBusy, expandedIds, browser])
 
     // Drag & Drop
     const handleDragStart = useCallback((e: React.DragEvent, node: EntityTreeNode) => {
@@ -710,19 +854,32 @@ export function WizardAssignmentTree({
     // Keyboard shortcuts
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
+            const target = e.target as HTMLElement | null
+            // Never hijack typing — search box, rename inputs, quick-assign selects.
+            const isTyping = !!target?.closest?.('input, textarea, select, [contenteditable="true"]')
+
             if (e.key === '/' && document.activeElement !== searchInputRef.current) {
                 e.preventDefault()
                 searchInputRef.current?.focus()
+                return
             }
             if (e.key === 'Escape') {
                 setSelectedIds(new Set())
                 searchInputRef.current?.blur()
+                return
+            }
+            // Quick-assign: 1–9 drops the current selection into the Nth layer.
+            if (!isTyping && !e.metaKey && !e.ctrlKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+                const layer = layers[Number(e.key) - 1]
+                if (!layer || selectedIds.size === 0) return
+                e.preventDefault()
+                handleBulkAssign(layer.id)
             }
         }
 
         window.addEventListener('keydown', handleKeyDown)
         return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [])
+    }, [layers, selectedIds, handleBulkAssign])
 
     return (
         <div className={cn(
@@ -775,6 +932,67 @@ export function WizardAssignmentTree({
                     )}
                 </div>
 
+                {/* Coverage — "am I done?" at a glance. Counts TOP-LEVEL nodes,
+                    the only ones that must be placed by hand (children inherit). */}
+                {coverage.totalRoots > 0 && (
+                    <div className="rounded-xl border border-slate-200/70 dark:border-slate-700/60 bg-white/70 dark:bg-slate-900/50 px-3 py-2">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                                {coverage.assignedRoots}
+                                <span className="text-slate-400 font-normal"> / {coverage.totalRoots} placed</span>
+                            </span>
+                            <span
+                                className="text-[10px] text-slate-400"
+                                title={coverage.partial
+                                    ? `${coverage.loadedRoots} of ${coverage.totalRoots} top-level entities loaded — load all to verify coverage`
+                                    : 'All top-level entities loaded'}
+                            >
+                                {coverage.partial ? `${coverage.loadedRoots} loaded` : 'all loaded'}
+                            </span>
+                            <span className="flex-1" />
+                            <span className="text-xs font-semibold tabular-nums text-slate-500 dark:text-slate-400">
+                                {coverage.pct}%
+                            </span>
+                        </div>
+                        <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden flex">
+                            {layers.map(layer => {
+                                const count = coverage.perLayer.get(layer.id) ?? 0
+                                if (count === 0) return null
+                                const width = (count / coverage.totalRoots) * 100
+                                return (
+                                    <div
+                                        key={layer.id}
+                                        className="h-full first:rounded-l-full transition-[width] duration-200"
+                                        style={{ width: `${width}%`, backgroundColor: layer.color || '#3b82f6' }}
+                                        title={`${layer.name}: ${count}`}
+                                    />
+                                )
+                            })}
+                        </div>
+                        {coverage.totalPlacements > 0 && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                {layers.map(layer => {
+                                    const count = coverage.perLayer.get(layer.id) ?? 0
+                                    if (count === 0) return null
+                                    return (
+                                        <span
+                                            key={layer.id}
+                                            className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-500 dark:text-slate-400"
+                                        >
+                                            <span
+                                                className="w-2 h-2 rounded-full"
+                                                style={{ backgroundColor: layer.color || '#3b82f6' }}
+                                            />
+                                            {layer.name}
+                                            <span className="tabular-nums text-slate-400">{count}</span>
+                                        </span>
+                                    )
+                                })}
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {/* Search */}
                 <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -817,6 +1035,22 @@ export function WizardAssignmentTree({
                     >
                         All Types
                     </button>
+
+                    {/* Unassigned-only — hides anything already placed (explicitly
+                        OR by inheritance), so the list becomes a to-do list. */}
+                    <button
+                        onClick={() => setHideAssigned(v => !v)}
+                        title="Show only entities with no layer yet"
+                        className={cn(
+                            'px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-colors duration-150 flex items-center gap-1.5',
+                            hideAssigned
+                                ? 'bg-emerald-500 text-white shadow-md'
+                                : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'
+                        )}
+                    >
+                        <Filter className="w-3 h-3" />
+                        Unassigned only
+                    </button>
                     {entityTypes.map(type => (
                         <button
                             key={type}
@@ -856,14 +1090,21 @@ export function WizardAssignmentTree({
 
                             <div className="flex-1" />
 
-                            {selectedIds.size === 1 && (
-                                <button
-                                    onClick={handleSelectAllChildren}
-                                    className="text-xs px-3 py-1.5 bg-white dark:bg-slate-800 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
-                                >
-                                    Select all children
-                                </button>
-                            )}
+                            {selectedIds.size === 1 && (() => {
+                                const only = Array.from(selectedIds)[0]
+                                const total = browser.nodes.get(only)?.totalChildren ?? 0
+                                if (total === 0) return null
+                                return (
+                                    <button
+                                        onClick={handleSelectAllChildren}
+                                        disabled={selectAllBusy}
+                                        className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-white dark:bg-slate-800 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors disabled:opacity-60"
+                                    >
+                                        {selectAllBusy && <Loader2 className="w-3 h-3 animate-spin" />}
+                                        {selectAllBusy ? 'Loading children…' : `Select all ${total} children`}
+                                    </button>
+                                )
+                            })()}
 
                             <select
                                 className="text-sm bg-white dark:bg-slate-800 border border-blue-200 dark:border-blue-700 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -936,10 +1177,15 @@ export function WizardAssignmentTree({
                         {rowVirtualizer.getVirtualItems().map(virtualRow => {
                             const node = flattenedNodes[virtualRow.index]
 
-                            // "Load more" sentinel row
+                            // "Load more" sentinel row — auto-fires when scrolled
+                            // into view; "Load all N" pages in the whole remainder.
                             if ('isLoadMore' in node && node.isLoadMore) {
                                 const parentId = 'parentId' in node ? node.parentId : undefined
                                 const isLoadingMore = browser.loadingNodes.has(parentId ?? '__top-level')
+                                const entry = parentId ? browser.nodes.get(parentId) : undefined
+                                const remaining = parentId
+                                    ? Math.max(0, (entry?.totalChildren ?? 0) - (entry?.childIds.length ?? 0))
+                                    : Math.max(0, browser.topLevelTotalCount - browser.topLevelIds.length)
                                 return (
                                     <div
                                         key={node.id}
@@ -952,18 +1198,32 @@ export function WizardAssignmentTree({
                                             transform: `translateY(${virtualRow.start}px)`
                                         }}
                                     >
-                                        <button
-                                            className="flex items-center gap-2 w-full px-3 py-2 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-colors disabled:opacity-50"
+                                        <div
+                                            className="flex items-center gap-1"
                                             style={{ paddingLeft: `${(node.depth ?? 0) * 20 + 32}px` }}
-                                            onClick={() => parentId ? browser.loadMoreChildren(parentId) : browser.loadMoreTopLevel()}
-                                            disabled={isLoadingMore}
                                         >
-                                            {isLoadingMore
-                                                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                                : <ChevronRight className="w-3.5 h-3.5" />
-                                            }
-                                            {isLoadingMore ? 'Loading...' : 'Load more'}
-                                        </button>
+                                            <button
+                                                className="flex items-center gap-2 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-colors disabled:opacity-50"
+                                                onClick={() => parentId ? browser.loadMoreChildren(parentId) : browser.loadMoreTopLevel()}
+                                                disabled={isLoadingMore}
+                                            >
+                                                {isLoadingMore
+                                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                    : <ChevronRight className="w-3.5 h-3.5" />
+                                                }
+                                                {isLoadingMore ? 'Loading…' : 'Load more'}
+                                            </button>
+                                            {remaining > 0 && (
+                                                <button
+                                                    className="px-2.5 py-2 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-colors disabled:opacity-50"
+                                                    onClick={() => parentId ? browser.loadAllChildren(parentId) : browser.loadAllTopLevel()}
+                                                    disabled={isLoadingMore}
+                                                    title={`Load all ${remaining} remaining`}
+                                                >
+                                                    Load all {remaining}
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 )
                             }
@@ -1004,7 +1264,11 @@ export function WizardAssignmentTree({
             {/* Footer */}
             <div className="px-4 py-2 border-t border-slate-200/60 dark:border-slate-700/60 bg-white/30 dark:bg-slate-900/30">
                 <p className="text-xs text-slate-500">
-                    Tip: Shift+click for range select • Cmd+click for multi-select • Drag to layers
+                    Tip: Shift+click for range select • Cmd+click for multi-select • Drag to layers •{' '}
+                    <kbd className="px-1 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[10px] font-medium">1</kbd>
+                    –
+                    <kbd className="px-1 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[10px] font-medium">9</kbd>
+                    {' '}assigns the selection to that layer
                 </p>
             </div>
 
