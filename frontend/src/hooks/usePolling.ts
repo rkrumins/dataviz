@@ -64,9 +64,6 @@ export function usePolling(
   const cbRef = useRef(callback)
   cbRef.current = callback
 
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const cancelledRef = useRef(false)
-
   // Stable refresh — uses the latest callback via the ref so callers
   // can wire it to a button without dep-array churn.
   const refresh = useCallback(() => {
@@ -74,19 +71,42 @@ export function usePolling(
   }, [])
 
   useEffect(() => {
-    if (!enabled || baseIntervalMs <= 0) return
+    // `> 0` rather than `<= 0`: a NaN interval must be REJECTED. Call sites
+    // compute this (`pollIntervalSeconds * 1000`), and `undefined * 1000` is
+    // NaN. `NaN <= 0` is FALSE, so the old guard waved NaN through; then
+    // `withJitter(NaN)` returns NaN and `setTimeout(fn, NaN)` coerces the
+    // delay to 0 — turning this poller into a tight loop that re-fires as
+    // fast as the network can answer. Measured: 1002 calls per second.
+    if (!enabled || !(baseIntervalMs > 0)) return
 
-    cancelledRef.current = false
+    // Closure-local, deliberately NOT refs. Each effect run owns its own
+    // `cancelled` flag and timer handle, so a tick parked in `await` belongs
+    // to exactly one generation and dies with it.
+    //
+    // These used to be shared refs, and that leaked immortal poll chains: the
+    // cleanup set `cancelledRef.current = true`, but the NEXT effect run
+    // immediately reset it to false. A tick still parked in `await` from the
+    // previous run would then wake, read `cancelled === false`, and re-arm
+    // itself — a second chain. The single shared `timerRef` only ever held one
+    // handle, so cleanup could never cancel the other. Since the surfaces that
+    // poll (announcement banner, provider health) are always mounted, those
+    // chains accumulated for the lifetime of the tab: the request rate climbed
+    // without bound (measured: a 60s poll arriving 5.9x/sec — ~350 live
+    // chains) and every chain retained its closure, so the heap climbed with
+    // it. BackendHealthBanner already used this closure-local idiom, which is
+    // precisely why its /health poll was the one that never stormed.
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
 
     const tick = async () => {
-      if (cancelledRef.current) return
+      if (cancelled) return
       // Skip the network call while hidden. The visibilitychange
       // listener below will fire an immediate tick on resume so the
       // user doesn't sit with stale data after un-hiding.
       if (typeof document !== 'undefined' && document.hidden) {
         // Re-arm at the base cadence; the resume handler will kick
         // sooner if the user comes back.
-        timerRef.current = setTimeout(tick, withJitter(baseIntervalMs, jitterFrac))
+        timer = setTimeout(tick, withJitter(baseIntervalMs, jitterFrac))
         return
       }
       try {
@@ -97,15 +117,15 @@ export function usePolling(
         // historical behaviour and the desired one for banners /
         // status indicators.
       }
-      if (cancelledRef.current) return
-      timerRef.current = setTimeout(tick, withJitter(baseIntervalMs, jitterFrac))
+      if (cancelled) return
+      timer = setTimeout(tick, withJitter(baseIntervalMs, jitterFrac))
     }
 
     // Initial fire: immediate (cache-warming) unless caller asked otherwise.
     if (fireOnMount) {
       void tick()
     } else {
-      timerRef.current = setTimeout(tick, withJitter(baseIntervalMs, jitterFrac))
+      timer = setTimeout(tick, withJitter(baseIntervalMs, jitterFrac))
     }
 
     // Wake-on-visible: when the user returns to the tab, fire one
@@ -114,8 +134,8 @@ export function usePolling(
     const onVisibilityChange = () => {
       if (typeof document === 'undefined') return
       if (document.hidden) return
-      if (cancelledRef.current) return
-      if (timerRef.current) clearTimeout(timerRef.current)
+      if (cancelled) return
+      if (timer) clearTimeout(timer)
       void tick()
     }
     if (typeof document !== 'undefined') {
@@ -123,9 +143,9 @@ export function usePolling(
     }
 
     return () => {
-      cancelledRef.current = true
-      if (timerRef.current) clearTimeout(timerRef.current)
-      timerRef.current = null
+      cancelled = true
+      if (timer) clearTimeout(timer)
+      timer = null
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibilityChange)
       }
