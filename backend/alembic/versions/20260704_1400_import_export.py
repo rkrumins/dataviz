@@ -51,6 +51,48 @@ def _schema() -> str:
     return gv_config.graphver_schema()
 
 
+# Job types this revision requires ``ck_jobs_type`` to allow.
+_REQUIRED_JOB_TYPES = ("ingest", "projection", "rebuild", "export")
+# What the pre-import/export revision required (used by ``downgrade``).
+_PRE_EXPORT_JOB_TYPES = ("ingest", "projection", "rebuild")
+
+
+def _sync_job_type_check(bind, jobs: str, required: tuple[str, ...]) -> None:
+    """Rebuild ``ck_jobs_type`` as ``required`` UNION the types already in the table.
+
+    WIDEN-ONLY — and never fail on data this revision didn't author.
+
+    ``jobs`` is a SHARED sink with several producers (import/export here, the
+    versioning projector, and the bootstrap worker on the versioning branch), and
+    its schema has two sources of truth: this migration chain AND the ORM's
+    ``create_all`` (see the module docstring). A blind ``DROP CONSTRAINT`` +
+    re-``ADD`` of a hard-coded allow-list is therefore destructive twice over:
+
+      * it CLOBBERS a wider constraint that a later revision — or a branch whose
+        ORM created the table — already installed, silently narrowing the domain;
+      * it then FAILS outright against rows whose ``job_type`` it never knew
+        about. That is exactly what happened: a live database carrying
+        ``'bootstrap'`` jobs could not be migrated at all.
+
+    Unioning the required set with what is actually present makes the migration
+    forward-compatible. On a FRESH database the table is empty, so the constraint
+    is exactly the strict ``required`` set. On an EXISTING one it can only widen,
+    so the migration cannot fail on live rows. Job types that are neither required
+    nor already present are still rejected from here on.
+    """
+    present = {
+        row[0]
+        for row in bind.execute(sa.text(f"SELECT DISTINCT job_type FROM {jobs}"))
+        if row[0]
+    }
+    allowed = sorted(set(required) | present)
+    values = ", ".join("'" + t.replace("'", "''") + "'" for t in allowed)
+    bind.execute(sa.text(f"ALTER TABLE {jobs} DROP CONSTRAINT IF EXISTS ck_jobs_type"))
+    bind.execute(sa.text(
+        f"ALTER TABLE {jobs} ADD CONSTRAINT ck_jobs_type CHECK (job_type IN ({values}))"
+    ))
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     schema = _schema()
@@ -60,12 +102,10 @@ def upgrade() -> None:
     for col, typ in _JOB_COLS.items():
         bind.execute(sa.text(f"ALTER TABLE {jobs} ADD COLUMN IF NOT EXISTS {col} {typ}"))
 
-    # Widen the job_type check to include 'export'.
-    bind.execute(sa.text(f"ALTER TABLE {jobs} DROP CONSTRAINT IF EXISTS ck_jobs_type"))
-    bind.execute(sa.text(
-        f"ALTER TABLE {jobs} ADD CONSTRAINT ck_jobs_type "
-        f"CHECK (job_type IN ('ingest','projection','rebuild','export'))"
-    ))
+    # Widen the job_type check to include 'export'. Widen-only + data-safe —
+    # see _sync_job_type_check for why a blind DROP/ADD of a fixed list is unsafe
+    # on this shared, multi-producer table.
+    _sync_job_type_check(bind, jobs, _REQUIRED_JOB_TYPES)
     bind.execute(sa.text(
         f'CREATE INDEX IF NOT EXISTS ix_jobs_ds ON {jobs} (data_source_id, status)'
     ))
@@ -103,11 +143,11 @@ def downgrade() -> None:
     rows = f'"{schema}"."import_rows"'
 
     bind.execute(sa.text(f"DROP TABLE IF EXISTS {rows}"))
-    bind.execute(sa.text(f"ALTER TABLE {jobs} DROP CONSTRAINT IF EXISTS ck_jobs_type"))
-    bind.execute(sa.text(
-        f"ALTER TABLE {jobs} ADD CONSTRAINT ck_jobs_type "
-        f"CHECK (job_type IN ('ingest','projection','rebuild'))"
-    ))
+    # Revert to the pre-import/export required set — but still widen-only: we must
+    # not narrow below job types that live rows actually use, or the downgrade
+    # itself would fail. A downgrade that cannot run is worse than one that leaves
+    # the domain slightly wider than the revision nominally intended.
+    _sync_job_type_check(bind, jobs, _PRE_EXPORT_JOB_TYPES)
     bind.execute(sa.text(f'DROP INDEX IF EXISTS "{schema}".ix_jobs_ds'))
     for col in _JOB_COLS:
         bind.execute(sa.text(f"ALTER TABLE {jobs} DROP COLUMN IF EXISTS {col}"))

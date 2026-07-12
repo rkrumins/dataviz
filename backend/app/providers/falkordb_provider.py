@@ -4,6 +4,7 @@ Implements GraphDataProvider interface using FalkorDB async client and Cypher qu
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -69,6 +70,47 @@ async def _completed(value):
 def _sanitize_label(s: str) -> str:
     """Sanitize string for use as FalkorDB label/relationship type (alphanumeric + underscore)."""
     return "".join(c if c.isalnum() or c == "_" else "_" for c in str(s))
+
+
+# ── Keyset pagination cursor ────────────────────────────────────────────────
+#
+# displayName is NOT unique. A real graph holds hundreds of children all called
+# "Accounts (Analytics)". A keyset of `displayName > $cursor` therefore SKIPS
+# every row that shares the boundary row's name: when a page ends in the middle
+# of a run of duplicates, the next page starts *after* the whole run and those
+# rows are lost — silently, forever. That is how a node with 200 children paged
+# out as 197.
+#
+# A keyset is only correct on a UNIQUE sort key, so the cursor carries the urn
+# (which is unique) as a tiebreaker and the queries order by (displayName, urn).
+_CURSOR_PREFIX = "k1:"
+
+
+def _encode_keyset_cursor(display_name: Optional[str], urn: str) -> str:
+    payload = json.dumps({"n": display_name or "", "u": urn}, separators=(",", ":"))
+    encoded = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return _CURSOR_PREFIX + encoded
+
+
+def _decode_keyset_cursor(cursor: str) -> Tuple[str, Optional[str]]:
+    """(displayName, urn). A legacy displayName-only cursor yields urn=None, so a
+    client that is mid-pagination across a deploy keeps working (with the old,
+    lossy semantics) instead of erroring."""
+    if not cursor.startswith(_CURSOR_PREFIX):
+        return cursor, None
+    raw = cursor[len(_CURSOR_PREFIX):]
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        data = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        return str(data.get("n", "")), data.get("u") or None
+    except Exception:  # pragma: no cover - corrupt cursor, fall back to prefix scan
+        return cursor, None
+
+
+def _keyset_sort_key(node: Any) -> Tuple[bool, str, str]:
+    """Sort rows the same way the keyset does: (displayName, urn), nulls last."""
+    name = getattr(node, "display_name", None)
+    return (name is None, name or "", getattr(node, "urn", "") or "")
 
 
 # Exception class names that indicate a Redis Cluster routing change (the
@@ -149,8 +191,18 @@ def _is_transient_connection_error(exc: BaseException) -> bool:
     (e.g. 'Connection reset by peer' under FalkorDB memory pressure) worth a
     short backoff + retry. Matched by isinstance against the redis exception
     classes so ``asyncio.TimeoutError`` (the per-op deadline, same class name)
-    is excluded and never inflates a genuine slow-query timeout."""
+    is excluded and never inflates a genuine slow-query timeout.
+
+    AUTH failures are excluded even though redis-py's ``AuthenticationError``
+    SUBCLASSES redis ``ConnectionError``: bad credentials are not a blip, so
+    retrying them (and, in cluster mode, re-resolving the topology for them) just
+    burns the budget and then trips the breaker — reporting a misconfiguration as an
+    outage. They are surfaced as ProviderConfigurationError instead."""
     if not _TRANSIENT_REDIS_EXC:
+        return False
+    from backend.app.providers.falkordb_connection import is_auth_error
+
+    if is_auth_error(exc):
         return False
     seen = exc
     for _ in range(4):  # walk a short __cause__/__context__ chain
@@ -1075,10 +1127,66 @@ class FalkorDBProvider(GraphDataProvider):
             # read-write GRAPH.QUERY — that would lazily create an empty
             # graph key for every asset name discovery probes.
             _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
-            await asyncio.wait_for(
-                Redis(connection_pool=self._pool).ping(),
-                timeout=_init_timeout,
-            )
+            try:
+                await asyncio.wait_for(
+                    Redis(connection_pool=self._pool).ping(),
+                    timeout=_init_timeout,
+                )
+            except Exception as _auth_exc:
+                from backend.app.providers.falkordb_connection import (
+                    is_auth_not_configured_error,
+                    mark_instance_unauthenticated,
+                    raise_auth_config_error,
+                    strip_credentials,
+                )
+
+                if is_auth_not_configured_error(_auth_exc) and (
+                    self._username or self._password
+                ):
+                    # The instance has NO authentication configured but this provider
+                    # carries credentials (a stale password on the row, or auth turned
+                    # off on the server). Reconnect WITHOUT them rather than reporting
+                    # a healthy graph as down; the lesson is remembered for every other
+                    # connection to this instance.
+                    logger.warning(
+                        "FalkorDB at %s has NO authentication configured but this "
+                        "provider carries credentials — reconnecting without them.",
+                        self._conn_cfg.describe(),
+                    )
+                    mark_instance_unauthenticated(self._conn_cfg)
+                    self._conn_cfg = strip_credentials(self._conn_cfg)
+                    self._username = None
+                    self._password = None
+                    _graph_pool_kwargs = self._build_pool_kwargs(socket_timeout)
+                    self._db, self._pool = await build_graph_client(
+                        self._conn_cfg,
+                        graph_name=self._graph_name,
+                        pool_kwargs=_graph_pool_kwargs,
+                    )
+                    self._graph = self._db.select_graph(self._graph_name)
+                    if self._projection_mode == "dedicated":
+                        proj_name = f"{self._graph_name}_proj"
+                        if self._conn_cfg.mode == "cluster":
+                            self._proj_db, self._proj_pool = await build_graph_client(
+                                self._conn_cfg,
+                                graph_name=proj_name,
+                                pool_kwargs=_graph_pool_kwargs,
+                            )
+                            self._proj_graph = self._proj_db.select_graph(proj_name)
+                        else:
+                            self._proj_db = self._db
+                            self._proj_graph = self._db.select_graph(proj_name)
+                    await asyncio.wait_for(
+                        Redis(connection_pool=self._pool).ping(),
+                        timeout=_init_timeout,
+                    )
+                else:
+                    # NOAUTH (instance wants credentials we lack) or WRONGPASS
+                    # (credentials rejected) → a CONFIGURATION error, not an outage:
+                    # raising ProviderConfigurationError keeps the breaker closed and
+                    # tells the operator what to fix. Anything else propagates as-is.
+                    raise_auth_config_error(self._conn_cfg, _auth_exc)
+                    raise
 
             # Schema reconciliation runs OFF the request path. Fire-and-
             # forget background task; failures are logged but do not affect
@@ -2727,21 +2835,30 @@ class FalkorDBProvider(GraphDataProvider):
             search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
             params["searchQuery"] = search_query
 
-        # Cursor-based pagination: use WHERE c.displayName > $cursor instead of SKIP
-        # This is O(log N) with FalkorDB indices vs O(N) for SKIP-based pagination.
+        # Keyset pagination (O(log N) with FalkorDB indices vs O(N) for SKIP).
+        # COMPOSITE on (displayName, urn) — displayName is not unique, and a
+        # non-unique keyset drops rows at page boundaries (_encode_keyset_cursor).
         cursor_where = ""
         if cursor:
-            cursor_where = "AND c.displayName > $cursor "
-            params["cursor"] = cursor
+            cursor_name, cursor_urn = _decode_keyset_cursor(cursor)
+            params["cursorName"] = cursor_name
+            if cursor_urn:
+                cursor_where = (
+                    "AND (c.displayName > $cursorName "
+                    "OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) "
+                )
+                params["cursorUrn"] = cursor_urn
+            else:
+                cursor_where = "AND c.displayName > $cursorName "  # legacy cursor
         else:
             # Fallback to offset when no cursor (first page or legacy callers)
             params["skip"] = offset
 
-        # Build ORDER BY suffix for the WITH clause
+        # ORDER BY must match the keyset exactly, or paging skips/repeats rows.
         order_suffix = ""
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
-            order_suffix = f" ORDER BY c.{safe_prop}"
+            order_suffix = f" ORDER BY c.{safe_prop}, c.urn"
 
         # Use SKIP only when no cursor is provided (first page)
         skip_clause = "" if cursor else " SKIP $skip"
@@ -2821,19 +2938,31 @@ class FalkorDBProvider(GraphDataProvider):
             search_where = "AND (toLower(c.displayName) CONTAINS toLower($searchQuery) OR toLower(c.urn) CONTAINS toLower($searchQuery)) "
             params["searchQuery"] = search_query
 
-        # Cursor-based pagination: WHERE c.displayName > $cursor is O(log N) vs SKIP's O(N)
+        # Keyset pagination, O(log N) vs SKIP's O(N). The keyset is COMPOSITE
+        # (displayName, urn): displayName alone is not unique, and a non-unique
+        # keyset silently drops every row sharing the boundary row's name — see
+        # _encode_keyset_cursor.
         cursor_where = ""
         if cursor:
-            cursor_where = "AND c.displayName > $cursor "
-            params["cursor"] = cursor
+            cursor_name, cursor_urn = _decode_keyset_cursor(cursor)
+            params["cursorName"] = cursor_name
+            if cursor_urn:
+                cursor_where = (
+                    "AND (c.displayName > $cursorName "
+                    "OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) "
+                )
+                params["cursorUrn"] = cursor_urn
+            else:
+                # Legacy cursor minted before the tiebreaker existed.
+                cursor_where = "AND c.displayName > $cursorName "
         else:
             params["skip"] = offset
 
-        # Build ORDER BY suffix for the WITH clause
+        # ORDER BY must match the keyset exactly, or paging skips/repeats rows.
         order_suffix = ""
         if sort_property:
             safe_prop = _sanitize_label(sort_property)
-            order_suffix = f" ORDER BY c.{safe_prop}"
+            order_suffix = f" ORDER BY c.{safe_prop}, c.urn"
 
         skip_clause = "" if cursor else " SKIP $skip"
 
@@ -2937,16 +3066,16 @@ class FalkorDBProvider(GraphDataProvider):
         # discard ORDER BY around an aggregating RETURN (count(gc) here), and
         # the cursor MUST be the page's max sort key or keyset pagination
         # skips rows. LIMIT selection is unaffected (known engine behaviour).
+        # Sorts on (displayName, urn) — the same composite key the cursor uses.
         if sort_property == "displayName" and children:
-            order = sorted(
-                range(len(children)),
-                key=lambda i: (children[i].display_name is None,
-                               children[i].display_name or ""),
-            )
+            order = sorted(range(len(children)), key=lambda i: _keyset_sort_key(children[i]))
             children = [children[i] for i in order]
             containment_edges = [containment_edges[i] for i in order]
             child_urns = [children[i].urn for i in range(len(children))]
-        next_cursor = children[-1].display_name if children and has_more else None
+        next_cursor = (
+            _encode_keyset_cursor(children[-1].display_name, children[-1].urn)
+            if children and has_more else None
+        )
 
         return ChildrenWithEdgesResult(
             children=children,
@@ -3065,11 +3194,22 @@ class FalkorDBProvider(GraphDataProvider):
             if not safe_types:
                 use_label_union = False
 
-        # Page-query cursor: keyset over displayName for stability under writes.
+        # Page-query cursor: keyset over (displayName, urn) for stability under
+        # writes. The urn tiebreaker is what makes the key UNIQUE — without it a
+        # run of same-named nodes straddling a page boundary is silently dropped
+        # (_encode_keyset_cursor).
         page_filters = list(filter_fragments)
         if cursor is not None:
-            params["cursor"] = str(cursor)
-            page_filters.append("n.displayName > $cursor")
+            cursor_name, cursor_urn = _decode_keyset_cursor(str(cursor))
+            params["cursorName"] = cursor_name
+            if cursor_urn:
+                params["cursorUrn"] = cursor_urn
+                page_filters.append(
+                    "(n.displayName > $cursorName "
+                    "OR (n.displayName = $cursorName AND n.urn > $cursorUrn))"
+                )
+            else:
+                page_filters.append("n.displayName > $cursorName")  # legacy cursor
 
         def _build_match(filters: List[str]) -> str:
             where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
@@ -3085,7 +3225,7 @@ class FalkorDBProvider(GraphDataProvider):
         if include_child_count and containment_rel_types:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY n.displayName ASC LIMIT $limit"
+                + " WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit"
                 + f" OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child)"
                 # Re-project through a non-aggregating WITH before ORDER BY:
                 # FalkorDB discards an ORDER BY that sits directly on an
@@ -3093,13 +3233,13 @@ class FalkorDBProvider(GraphDataProvider):
                 # so the pre-aggregation window order is lost. Materializing the
                 # count into a WITH first, then ordering that WITH, restores the
                 # displayName-ASC output the keyset cursor depends on.
-                + " WITH n, count(child) as childCount ORDER BY n.displayName ASC"
+                + " WITH n, count(child) as childCount ORDER BY n.displayName ASC, n.urn ASC"
                 + " RETURN n, childCount"
             )
         else:
             page_cypher = (
                 _build_match(page_filters)
-                + " WITH n ORDER BY n.displayName ASC LIMIT $limit"
+                + " WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit"
                 + " RETURN n, 0 as childCount"
             )
 
@@ -3139,10 +3279,13 @@ class FalkorDBProvider(GraphDataProvider):
         # page maximum and keyset pagination never overlaps/skips. Uses the same
         # key the cursor compares on. Classification/childCount are already
         # attached above and are order-independent.
-        nodes.sort(key=lambda node: node.display_name or "")
+        nodes.sort(key=_keyset_sort_key)
 
         has_more = len(nodes) >= int(limit)
-        next_cursor = nodes[-1].display_name if (has_more and nodes) else None
+        next_cursor = (
+            _encode_keyset_cursor(nodes[-1].display_name, nodes[-1].urn)
+            if (has_more and nodes) else None
+        )
 
         if known_total_count is not None:
             # Caller already knows the total (e.g. serving from a materialized

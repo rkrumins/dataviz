@@ -109,9 +109,19 @@ def fake_redis_and_falkor(monkeypatch):
         async def list_graphs(self):
             return [b"g1", "g2"]
 
+    class FakeRedis:
+        """Backs the build-time verify PING (auth negotiation happens there)."""
+
+        def __init__(self, connection_pool=None, **kwargs):
+            self.pool = connection_pool
+
+        async def ping(self):
+            return True
+
     redis_pkg = types.ModuleType("redis")
     redis_asyncio = types.ModuleType("redis.asyncio")
     redis_asyncio.ConnectionPool = FakePool
+    redis_asyncio.Redis = FakeRedis
     falkor_pkg = types.ModuleType("falkordb")
     falkor_asyncio = types.ModuleType("falkordb.asyncio")
     falkor_asyncio.FalkorDB = FakeFalkorDB

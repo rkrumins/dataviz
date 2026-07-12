@@ -201,9 +201,19 @@ def fleet(monkeypatch):
         async def aclose(self):
             return None
 
+    class FakeRedis:
+        """Backs the build-time verify PING (auth negotiation happens there)."""
+
+        def __init__(self, connection_pool=None, **kwargs):
+            self.pool = connection_pool
+
+        async def ping(self):
+            return True
+
     redis_pkg = types.ModuleType("redis")
     redis_asyncio = types.ModuleType("redis.asyncio")
     redis_asyncio.ConnectionPool = FakePool
+    redis_asyncio.Redis = FakeRedis
     sentinel_mod = types.ModuleType("redis.asyncio.sentinel")
     sentinel_mod.Sentinel = FakeSentinel
     cluster_mod = types.ModuleType("redis.asyncio.cluster")
