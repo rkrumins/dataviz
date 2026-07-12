@@ -291,6 +291,7 @@ def projection_socket_timeout() -> float:
 def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
     """Connection kwargs shared by the high-level Sentinel/Cluster clients —
     auth + timeouts + TLS (``ssl=True`` + cert paths when enabled)."""
+    cfg = apply_learned_auth(cfg)       # skip AUTH on an instance known to have none
     kw: dict = {
         "socket_connect_timeout": _resilience.FALKORDB_SOCKET_CONNECT_TIMEOUT_SECS,
         "socket_timeout": socket_timeout,
@@ -302,6 +303,146 @@ def _conn_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
         kw["password"] = cfg.password
     kw.update(tls_client_kwargs(cfg.tls_settings()))
     return kw
+
+
+# ── Authentication: every combination of (instance auth on/off) × (creds present/absent)
+#
+# Three distinct outcomes, and they must NOT be confused with an outage:
+#
+#   auth_not_configured — we sent credentials, the instance has no password. Whether
+#       this even errors depends on the server's ACL and the RESP version redis-py
+#       negotiates (a `nopass` default user accepts any password over HELLO AUTH; a
+#       plain RESP2 AUTH against the same server errors). SELF-HEAL: drop the
+#       credentials for that instance and reconnect — a stale password on a provider
+#       row must never take a healthy graph offline.
+#   auth_required   — NOAUTH: the instance wants credentials we don't have.
+#   auth_rejected   — WRONGPASS / invalid: the credentials are wrong.
+#
+# The last two are CONFIGURATION errors, not network failures. That distinction is
+# load-bearing: redis-py's AuthenticationError subclasses redis ConnectionError, so
+# without this mapping the provider retried bad credentials as a "transient blip"
+# (and, in cluster mode, re-resolved the topology for them) and the circuit breaker
+# tripped — surfacing a misconfiguration as "provider unavailable" and hammering it
+# with half-open probes forever. Mapped to ProviderConfigurationError they are
+# LOGICAL errors: the breaker stays closed and the operator sees what's actually wrong.
+
+_AUTH_NOT_CONFIGURED_MARKERS = (
+    "without any password configured",      # Redis 6+/ACL wording
+    "client sent auth, but no password is set",
+)
+_AUTH_REQUIRED_MARKERS = (
+    "noauth",
+    "authentication required",
+    # redis-py's RESP3 handshake against an auth-enabled server WITHOUT credentials:
+    # "HELLO must be called with the client already authenticated, otherwise the
+    # HELLO <proto> AUTH <user> <pass> option can be used…". No 'NOAUTH' anywhere in
+    # it — found by driving a real requirepass instance, not by reading the docs.
+    "must be called with the client already authenticated",
+)
+_AUTH_REJECTED_MARKERS = (
+    "wrongpass", "invalid username-password", "invalid password",
+    "invalid username or password",
+)
+
+# Instances observed to reject AUTH because they have none configured. Keyed by the
+# same identity the client cache uses, so the lesson is applied to every later build.
+_UNAUTHENTICATED_INSTANCES: set = set()
+
+
+def _auth_error_text(exc: BaseException) -> str:
+    parts, seen, cur = [], 0, exc
+    while cur is not None and seen < 4:
+        parts.append(str(cur))
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return " | ".join(parts).lower()
+
+
+def is_auth_not_configured_error(exc: BaseException) -> bool:
+    """We sent credentials; the instance has no authentication configured."""
+    text = _auth_error_text(exc)
+    return any(m in text for m in _AUTH_NOT_CONFIGURED_MARKERS)
+
+
+def is_auth_required_error(exc: BaseException) -> bool:
+    """The instance requires credentials (NOAUTH)."""
+    text = _auth_error_text(exc)
+    return any(m in text for m in _AUTH_REQUIRED_MARKERS)
+
+
+def is_auth_rejected_error(exc: BaseException) -> bool:
+    """Credentials were supplied and rejected."""
+    text = _auth_error_text(exc)
+    return any(m in text for m in _AUTH_REJECTED_MARKERS)
+
+
+def is_auth_error(exc: BaseException) -> bool:
+    return (
+        is_auth_not_configured_error(exc)
+        or is_auth_required_error(exc)
+        or is_auth_rejected_error(exc)
+    )
+
+
+def strip_credentials(cfg: FalkorDBConnConfig) -> FalkorDBConnConfig:
+    from dataclasses import replace
+
+    return replace(cfg, username=None, password=None)
+
+
+def mark_instance_unauthenticated(cfg: FalkorDBConnConfig) -> None:
+    _UNAUTHENTICATED_INSTANCES.add(TopologyGraphClients.identity(strip_credentials(cfg)))
+
+
+def apply_learned_auth(cfg: FalkorDBConnConfig) -> FalkorDBConnConfig:
+    """Drop credentials for an instance we've already learned has no auth, so every
+    later connection (any mode, any entry point) skips AUTH instead of re-failing."""
+    if not (cfg.username or cfg.password):
+        return cfg
+    if TopologyGraphClients.identity(strip_credentials(cfg)) in _UNAUTHENTICATED_INSTANCES:
+        return strip_credentials(cfg)
+    return cfg
+
+
+def raise_auth_config_error(cfg: FalkorDBConnConfig, exc: BaseException) -> None:
+    """Translate an auth failure into an actionable configuration error (LOGICAL —
+    never trips the circuit breaker, never retried as a transient blip)."""
+    if is_auth_required_error(exc):
+        raise ProviderConfigurationError(
+            f"FalkorDB at {cfg.describe()} requires authentication but no credentials "
+            f"are configured for this provider — add them to the provider, or disable "
+            f"auth on the instance."
+        ) from exc
+    if is_auth_rejected_error(exc):
+        raise ProviderConfigurationError(
+            f"FalkorDB at {cfg.describe()} rejected the provider's credentials "
+            f"(wrong username/password)."
+        ) from exc
+
+
+async def with_auth_negotiation(cfg: FalkorDBConnConfig, attempt: Callable[..., Any]) -> Any:
+    """Run ``attempt(cfg)``, resolving the auth mismatch cases exactly once.
+
+    * instance has no auth but we hold credentials → strip them, remember it for
+      every later connection, and retry (a stale password never takes a graph down);
+    * instance wants credentials we lack, or rejects the ones we have → raise a clear
+      ProviderConfigurationError instead of a retried, breaker-tripping "outage".
+    """
+    effective = apply_learned_auth(cfg)
+    try:
+        return await attempt(effective)
+    except Exception as exc:
+        if is_auth_not_configured_error(exc) and (effective.username or effective.password):
+            mark_instance_unauthenticated(effective)
+            logger.warning(
+                "FalkorDB at %s has NO authentication configured but this provider "
+                "carries credentials — reconnecting without them. Clear the credentials "
+                "on the provider (or set falkordbConnection.authEnabled=false) to silence "
+                "this.", effective.describe(),
+            )
+            return await attempt(strip_credentials(effective))
+        raise_auth_config_error(effective, exc)
+        raise
 
 
 def _sentinel_auth_kwargs(cfg: FalkorDBConnConfig, socket_timeout: float) -> dict:
@@ -344,12 +485,27 @@ async def resolve_cluster_node_for_key(
     from redis.asyncio.cluster import RedisCluster
     from redis.cluster import ClusterNode
 
-    nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
-    if not nodes:
+    if not cfg.cluster_nodes:
         raise ProviderConfigurationError(
             "FalkorDB cluster mode requires cluster.startupNodes (or "
             "FALKORDB_CLUSTER_NODES)."
         )
+
+    # Slot discovery authenticates too — an unauthenticated cluster must not become
+    # unreachable just because a provider row carries a stale password.
+    async def _discover(c: FalkorDBConnConfig) -> Tuple[str, int]:
+        return await _resolve_cluster_node_once(c, graph_name, socket_timeout)
+
+    return await with_auth_negotiation(cfg, _discover)
+
+
+async def _resolve_cluster_node_once(
+    cfg: FalkorDBConnConfig, graph_name: str, socket_timeout: float,
+) -> Tuple[str, int]:
+    from redis.asyncio.cluster import RedisCluster
+    from redis.cluster import ClusterNode
+
+    nodes = [ClusterNode(h, p) for h, p in cfg.cluster_nodes]
     cluster = RedisCluster(startup_nodes=nodes, **_conn_auth_kwargs(cfg, socket_timeout))
     try:
         # redis.asyncio.cluster initializes lazily; force it so the slot
@@ -531,6 +687,7 @@ def build_graph_pool_kwargs(
     Deliberately NOT ``decode_responses`` — the registry/projection callers
     have always run bytes-mode and decode at their own boundaries.
     """
+    cfg = apply_learned_auth(cfg)       # skip AUTH on an instance known to have none
     kw: dict = {
         "max_connections": (
             max_connections
@@ -666,6 +823,24 @@ class ResilientGraph:
         try:
             return await getattr(self._graph, method)(*args, **kwargs)
         except Exception as exc:
+            if is_auth_not_configured_error(exc) and (
+                self._cfg.username or self._cfg.password
+            ):
+                # Auth was turned OFF on the instance (or the row's password is
+                # stale) — drop the credentials, rebuild, retry once. A graph that
+                # is up must not read as down because of a leftover secret.
+                logger.warning(
+                    "falkordb graph %r: instance has no authentication configured — "
+                    "reconnecting without credentials.", self._name,
+                )
+                mark_instance_unauthenticated(self._cfg)
+                await self._clients.invalidate(self._cfg, self._name)
+                self._cfg = strip_credentials(self._cfg)
+                self._graph = await self._clients.resolve_graph(self._cfg, self._name)
+                return await getattr(self._graph, method)(*args, **kwargs)
+            if is_auth_error(exc):
+                # NOAUTH / WRONGPASS → configuration error, not a retryable outage.
+                raise_auth_config_error(self._cfg, exc)
             if not _is_retryable_client_error(exc):
                 raise
             logger.warning(
@@ -768,16 +943,31 @@ class TopologyGraphClients:
         async with lock:
             entry = self._clients.get(key)          # another task may have built it
             if entry is None:
-                if node is not None:
-                    # Already resolved the owning node — build straight to it
-                    # instead of re-running discovery inside build_graph_client.
-                    db, pool = build_node_client(
-                        cfg, node[0], node[1], self._pool_kwargs(cfg),
+                async def _build(c: FalkorDBConnConfig):
+                    if node is not None:
+                        # Already resolved the owning node — build straight to it
+                        # instead of re-running discovery inside build_graph_client.
+                        db, pool = build_node_client(
+                            c, node[0], node[1], self._pool_kwargs(c),
+                        )
+                    else:
+                        db, pool = await build_graph_client(
+                            c, graph_name=graph_name, pool_kwargs=self._pool_kwargs(c),
+                        )
+                    # Verify the connection ONCE here (bounded) so an auth mismatch is
+                    # resolved at build time rather than surfacing deep inside a
+                    # projector write. with_auth_negotiation turns "instance has no
+                    # auth" into a silent reconnect without credentials, and
+                    # NOAUTH/WRONGPASS into a clear configuration error.
+                    from redis.asyncio import Redis
+
+                    await asyncio.wait_for(
+                        Redis(connection_pool=pool).ping(),
+                        timeout=_resilience.FALKORDB_INIT_TIMEOUT_SECS,
                     )
-                else:
-                    db, pool = await build_graph_client(
-                        cfg, graph_name=graph_name, pool_kwargs=self._pool_kwargs(cfg),
-                    )
+                    return db, pool
+
+                db, pool = await with_auth_negotiation(cfg, _build)
                 self._clients[key] = entry = (db, pool)
                 logger.info(
                     "falkordb: built graph client for %s%s",
@@ -884,12 +1074,17 @@ async def resolve_sentinel_master(
             "FalkorDB sentinel mode requires sentinel.masterName and "
             "sentinel.nodes (or FALKORDB_SENTINEL_MASTER / FALKORDB_SENTINEL_NODES)."
         )
-    sentinel_auth = _sentinel_auth_kwargs(cfg, socket_timeout)
-    sentinel = Sentinel(
-        cfg.sentinel_nodes, sentinel_kwargs=sentinel_auth, **sentinel_auth,
-    )
-    host, port = await sentinel.discover_master(cfg.sentinel_master)
-    return host, int(port)
+    async def _discover(c: FalkorDBConnConfig):
+        sentinel_auth = _sentinel_auth_kwargs(c, socket_timeout)
+        sentinel = Sentinel(
+            c.sentinel_nodes, sentinel_kwargs=sentinel_auth, **sentinel_auth,
+        )
+        host, port = await sentinel.discover_master(c.sentinel_master)
+        return host, int(port)
+
+    # Sentinel daemons have their own auth (see _sentinel_auth_kwargs); negotiate the
+    # same way so a credentialed config against unauthenticated sentinels self-heals.
+    return await with_auth_negotiation(cfg, _discover)
 
 
 async def cluster_primary_nodes(
