@@ -87,7 +87,7 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def _widen_alembic_version_column(connection) -> None:
+def _ensure_wide_alembic_version_column(connection) -> None:
     """Ensure ``alembic_version.version_num`` can hold long revision ids.
 
     Alembic creates this column as ``VARCHAR(32)`` by default. A revision
@@ -98,16 +98,37 @@ def _widen_alembic_version_column(connection) -> None:
 
     The primary defence is the ≤32-char contract enforced by
     ``tests/test_alembic_revision_lengths.py`` (over-length ids are
-    renamed to fit). This widen stays as a safety net for legacy
-    databases: widen to 128 unconditionally. The check + alter is
-    microsecond-fast on a one-row table, and it's a no-op when the
-    column is already wide enough.
+    renamed to fit). This function is the safety net, and it must cover
+    the FRESH-INSTALL case too:
+
+    An earlier version of this bailed out when the table was absent —
+    "fresh DB, alembic will create it, we re-run on next boot". That
+    reasoning is wrong, and it is why a brand-new environment could not
+    be built at all. On a fresh database alembic creates the table
+    ITSELF, mid-run, at the default VARCHAR(32); there is no "next boot"
+    because the very first ``upgrade head`` is what fails. So a fresh
+    install got no protection from the widen, and a long id at the head
+    of the chain rolled the entire upgrade back — every table with it.
+
+    Creating the table up-front at VARCHAR(128) closes that hole:
+    alembic's own ``_ensure_version_table`` issues a ``checkfirst``
+    CREATE, so it adopts ours instead of making a narrow one. An empty
+    ``alembic_version`` reads as "no revision applied" — identical to no
+    table at all — so the chain still runs from base. Column shape and PK
+    name (``alembic_version_pkc``) are exactly alembic's, so nothing
+    downstream can tell the difference.
     """
     from sqlalchemy import inspect as sa_inspect, text
 
     inspector = sa_inspect(connection)
     if not inspector.has_table("alembic_version"):
-        return  # Fresh DB — alembic will create the table; we re-run on next boot.
+        connection.execute(text(
+            "CREATE TABLE alembic_version ("
+            "version_num VARCHAR(128) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+        ))
+        connection.commit()
+        return
     cols = {c["name"]: c for c in inspector.get_columns("alembic_version")}
     col = cols.get("version_num")
     if col is None:
@@ -164,6 +185,11 @@ def _reset_stale_alembic_version(connection) -> None:
     _RENAMED_REVISIONS = {
         # 34 chars — over the default VARCHAR(32); shortened 2026-07-10.
         "20260707_1400_view_layout_overlays": "20260707_1400_view_layout_ovl",
+        # 40 chars — over the default VARCHAR(32); shortened 2026-07-12.
+        # Databases whose version_num had already been widened to 128 (see
+        # _ensure_wide_alembic_version_column) DID record the long id, so they
+        # must be translated rather than reset to baseline.
+        "20260712_1730_view_activity_data_changed": "20260712_1730_val_data_changed",
     }
     renamed_to = _RENAMED_REVISIONS.get(current_version)
     if renamed_to:
@@ -215,11 +241,12 @@ def run_migrations_online() -> None:
         connect_args={"connect_timeout": connect_timeout},
     )
     with connectable.connect() as connection:
-        # Widen version_num BEFORE the migration body runs — otherwise
+        # Size version_num BEFORE the migration body runs — otherwise
         # alembic's own UPDATE alembic_version at the end of a long-id
         # revision crashes with StringDataRightTruncation and silently
-        # rolls back the migration.
-        _widen_alembic_version_column(connection)
+        # rolls back the migration. Creates the table on a fresh DB so
+        # the safety net covers new installs, not just migrated ones.
+        _ensure_wide_alembic_version_column(connection)
         # Fix stale revision pointers BEFORE Alembic reads the chain.
         _reset_stale_alembic_version(connection)
 

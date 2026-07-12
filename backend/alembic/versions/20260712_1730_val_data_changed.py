@@ -10,7 +10,7 @@ from typing import Union
 
 from alembic import op
 
-revision: str = "20260712_1730_view_activity_data_changed"
+revision: str = "20260712_1730_val_data_changed"
 down_revision: Union[str, None] = "20260712_1600_view_activity_log"
 branch_labels = None
 depends_on = None
