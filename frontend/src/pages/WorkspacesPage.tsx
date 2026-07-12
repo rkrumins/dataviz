@@ -22,6 +22,8 @@ import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHea
 import { AdminWizard, type WizardStep } from '@/components/admin/AdminWizard'
 import { withTimeout } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
+import { useQueryClient } from '@tanstack/react-query'
+import { prefetchWorkspaceDetail } from '@/components/admin/workspace/useWorkspaceDetailData'
 
 function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -38,6 +40,7 @@ function providerLabel(type: string): string {
 
 export function WorkspacesPage() {
     const navigate = useNavigate()
+    const queryClient = useQueryClient()
     const [searchParams, setSearchParams] = useSearchParams()
     // Per-card permission check — read the resolver fn from the auth
     // store so we can call it inline for each row without violating
@@ -633,6 +636,7 @@ export function WorkspacesPage() {
                                 dsProviders={wsProviderInfoMap[ws.id] || []}
                                 schemaSummary={wsSchemaSummaryMap[ws.id] || { uniqueEntityTypes: 0, uniqueRelationshipTypes: 0, ontologyNames: [], providerGroups: [], viewCount: 0 }}
                                 onOpen={() => navigate(`/workspaces/${ws.id}`)}
+                                onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
                                 onDelete={() => handleDelete(ws.id)}
                                 onSetDefault={() => handleSetDefault(ws.id)}
                                 onManageMembers={
@@ -658,6 +662,7 @@ export function WorkspacesPage() {
                             healthStatus={deriveWorkspaceHealth(ws.dataSources || [])}
                             dsProviders={wsProviderInfoMap[ws.id] || []}
                             onOpen={() => navigate(`/workspaces/${ws.id}`)}
+                            onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
                             onDelete={() => handleDelete(ws.id)}
                             onSetDefault={() => handleSetDefault(ws.id)}
                             onManageMembers={

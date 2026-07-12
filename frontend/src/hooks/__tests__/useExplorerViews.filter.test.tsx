@@ -8,7 +8,7 @@ vi.mock('@/services/viewApiService', () => ({
   unfavouriteView: vi.fn().mockResolvedValue({}),
 }))
 
-import { listViews } from '@/services/viewApiService'
+import { listViews, type View, type ViewListParams } from '@/services/viewApiService'
 import { useExplorerViews, type ExplorerFilters } from '../useExplorerViews'
 
 const mockListViews = vi.mocked(listViews)
@@ -60,11 +60,11 @@ describe('useExplorerViews — filter/sort refetch', () => {
   })
 
   it('surfaces the server response ORDER in views (az → za reorders)', async () => {
-    const A = { id: 'a', name: 'Apple', favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as import('@/services/viewApiService').View
-    const B = { id: 'b', name: 'Banana', favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as import('@/services/viewApiService').View
-    mockListViews.mockImplementation((params: { sort?: string }) => {
+    const A = { id: 'a', name: 'Apple', favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as View
+    const B = { id: 'b', name: 'Banana', favouriteCount: 0, updatedAt: '2026-01-01', viewType: 'graph' } as unknown as View
+    mockListViews.mockImplementation((params?: ViewListParams) => {
       const items = params?.sort === 'za' ? [B, A] : [A, B]
-      return Promise.resolve({ items, total: 2, hasMore: false, nextOffset: null, popular: [] } as never)
+      return Promise.resolve({ items, total: 2, hasMore: false, nextOffset: null, popular: [] })
     })
 
     const { result, rerender } = renderHook(({ filters }) => useExplorerViews(filters), {
