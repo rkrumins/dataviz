@@ -10,11 +10,6 @@
 import { Link } from 'react-router-dom'
 import {
   Heart,
-  Network,
-  GitBranch,
-  Layout,
-  Table2,
-  Layers,
   Globe,
   Users,
   Lock,
@@ -31,71 +26,16 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
+import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { ViewCardOverflowMenu } from '@/components/explorer/ViewCardOverflowMenu'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 
-// ─── View type themes ───────────────────────────────────────────
-// ``gradient`` is a subtle whole-card tint keyed to the view type so
-// scanning a grid of mixed types stays effortless. It's very light —
-// 3-4% opacity — so the card still reads as neutral up close but the
-// viewport as a whole becomes colour-coded at a glance.
-const VIEW_TYPE_META: Record<
-  string,
-  {
-    icon: React.ElementType
-    label: string
-    iconBg: string
-    hoverBorder: string
-    gradient: string
-  }
-> = {
-  graph: {
-    icon: Network,
-    label: 'Graph',
-    iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
-    hoverBorder: 'group-hover:border-indigo-500/30',
-    gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
-  },
-  hierarchy: {
-    icon: GitBranch,
-    label: 'Hierarchy',
-    iconBg: 'bg-violet-500/10 border-violet-500/20 text-violet-500',
-    hoverBorder: 'group-hover:border-violet-500/30',
-    gradient: 'bg-gradient-to-br from-violet-500/[0.04] via-transparent to-transparent',
-  },
-  table: {
-    icon: Table2,
-    label: 'Table',
-    iconBg: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500',
-    hoverBorder: 'group-hover:border-emerald-500/30',
-    gradient: 'bg-gradient-to-br from-emerald-500/[0.04] via-transparent to-transparent',
-  },
-  'layered-lineage': {
-    icon: Layers,
-    label: 'Lineage',
-    iconBg: 'bg-amber-500/10 border-amber-500/20 text-amber-500',
-    hoverBorder: 'group-hover:border-amber-500/30',
-    gradient: 'bg-gradient-to-br from-amber-500/[0.04] via-transparent to-transparent',
-  },
-  reference: {
-    icon: Layout,
-    label: 'Context View',
-    iconBg: 'bg-rose-500/10 border-rose-500/20 text-rose-500',
-    hoverBorder: 'group-hover:border-rose-500/30',
-    gradient: 'bg-gradient-to-br from-rose-500/[0.04] via-transparent to-transparent',
-  },
-}
-
-const DEFAULT_META = {
-  icon: Layout,
-  label: 'View',
-  iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
-  hoverBorder: 'group-hover:border-indigo-500/30',
-  gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
-}
+// View type theme (label + colours) comes from the SHARED resolver in
+// lib/viewUtils — see viewTypeMeta(). Do not reintroduce a local map: a
+// per-component copy is exactly how the recents strip drifted into rendering a
+// different icon and colour for the same view the grid showed.
 
 // Deterministic tag colors from a curated palette
 const TAG_COLORS = [
@@ -255,7 +195,7 @@ export function ExplorerViewCard({
   const showDescription = !compact
   const showTags = !compact
   const isDeleted = !!view.deletedAt
-  const meta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_META
+  const meta = viewTypeMeta(view.viewType)
   // Glyph = the user's chosen icon (config.icon) when set; tile color stays
   // type identity so mixed grids remain colour-coded by view type.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })

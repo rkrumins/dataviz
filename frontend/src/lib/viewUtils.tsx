@@ -69,6 +69,73 @@ export function viewTypeColor(viewType: string): string {
   return VIEW_TYPE_COLORS[viewType] ?? 'text-ink-muted'
 }
 
+// ── View Type Theme — SINGLE SOURCE OF TRUTH ──────────────────────────
+//
+// Every Explorer surface (grid card, list row, recents strip, hero, preview
+// drawer) MUST resolve a view's icon and colour identically. Each component
+// previously kept its OWN type→icon/colour map, which is exactly how the
+// "Continue where you left off" strip ended up rendering a purple Network icon
+// for the same view the grid showed as a rose "Context View": the strip's map
+// had no ``reference`` entry and fell through to its default, and it never
+// called ``resolveViewIcon`` so a user's chosen ``config.icon`` was ignored too.
+//
+// Consume this together with ``resolveViewIcon`` + ``DynamicIcon``:
+//   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
+//   const meta     = viewTypeMeta(view.viewType)
+
+export interface ViewTypeMeta {
+  label: string
+  /** Icon-chip classes: background + border + icon colour, together. */
+  iconBg: string
+  hoverBorder: string
+  gradient: string
+}
+
+const VIEW_TYPE_META: Record<string, ViewTypeMeta> = {
+  graph: {
+    label: 'Graph',
+    iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
+    hoverBorder: 'group-hover:border-indigo-500/30',
+    gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
+  },
+  hierarchy: {
+    label: 'Hierarchy',
+    iconBg: 'bg-violet-500/10 border-violet-500/20 text-violet-500',
+    hoverBorder: 'group-hover:border-violet-500/30',
+    gradient: 'bg-gradient-to-br from-violet-500/[0.04] via-transparent to-transparent',
+  },
+  table: {
+    label: 'Table',
+    iconBg: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-500',
+    hoverBorder: 'group-hover:border-emerald-500/30',
+    gradient: 'bg-gradient-to-br from-emerald-500/[0.04] via-transparent to-transparent',
+  },
+  'layered-lineage': {
+    label: 'Lineage',
+    iconBg: 'bg-amber-500/10 border-amber-500/20 text-amber-500',
+    hoverBorder: 'group-hover:border-amber-500/30',
+    gradient: 'bg-gradient-to-br from-amber-500/[0.04] via-transparent to-transparent',
+  },
+  reference: {
+    label: 'Context View',
+    iconBg: 'bg-rose-500/10 border-rose-500/20 text-rose-500',
+    hoverBorder: 'group-hover:border-rose-500/30',
+    gradient: 'bg-gradient-to-br from-rose-500/[0.04] via-transparent to-transparent',
+  },
+}
+
+const DEFAULT_VIEW_TYPE_META: ViewTypeMeta = {
+  label: 'View',
+  iconBg: 'bg-indigo-500/10 border-indigo-500/20 text-indigo-500',
+  hoverBorder: 'group-hover:border-indigo-500/30',
+  gradient: 'bg-gradient-to-br from-indigo-500/[0.04] via-transparent to-transparent',
+}
+
+/** Canonical label + colour theme for a view type. Never define a local copy. */
+export function viewTypeMeta(viewType?: string | null): ViewTypeMeta {
+  return VIEW_TYPE_META[viewType ?? ''] ?? DEFAULT_VIEW_TYPE_META
+}
+
 // ── Dynamic Icon Component ────────────────────────────────────────────
 
 /** Renders a Lucide icon by string name. Falls back to Layout icon. */

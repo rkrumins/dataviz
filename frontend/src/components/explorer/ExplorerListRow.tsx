@@ -3,11 +3,6 @@ import { Link } from 'react-router-dom'
 import {
   Heart,
   Link2,
-  Network,
-  GitBranch,
-  Layout,
-  Table2,
-  Layers,
   Globe,
   Users,
   Lock,
@@ -24,7 +19,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
+import { DynamicIcon, resolveViewIcon, viewTypeMeta } from '@/lib/viewUtils'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -33,54 +28,9 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 /*  View type icon + themed color mapping                              */
 /* ------------------------------------------------------------------ */
 
-const VIEW_TYPE_META: Record<
-  string,
-  { icon: React.ElementType; label: string; bg: string; border: string; text: string }
-> = {
-  graph: {
-    icon: Network,
-    label: 'Graph',
-    bg: 'bg-indigo-500/10',
-    border: 'border-indigo-500/20',
-    text: 'text-indigo-500',
-  },
-  hierarchy: {
-    icon: GitBranch,
-    label: 'Hierarchy',
-    bg: 'bg-violet-500/10',
-    border: 'border-violet-500/20',
-    text: 'text-violet-500',
-  },
-  table: {
-    icon: Table2,
-    label: 'Table',
-    bg: 'bg-emerald-500/10',
-    border: 'border-emerald-500/20',
-    text: 'text-emerald-500',
-  },
-  'layered-lineage': {
-    icon: Layers,
-    label: 'Lineage',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500/20',
-    text: 'text-amber-500',
-  },
-  reference: {
-    icon: Layout,
-    label: 'Context View',
-    bg: 'bg-rose-500/10',
-    border: 'border-rose-500/20',
-    text: 'text-rose-500',
-  },
-}
-
-const DEFAULT_TYPE_META = {
-  icon: Layout,
-  label: 'View',
-  bg: 'bg-indigo-500/10',
-  border: 'border-indigo-500/20',
-  text: 'text-indigo-500',
-}
+// View type theme comes from the SHARED resolver — see viewTypeMeta() in
+// lib/viewUtils. Do not reintroduce a local map (that drift is what made the
+// recents strip show a different icon/colour for the same view).
 
 const VISIBILITY_ICON: Record<string, React.ElementType> = {
   enterprise: Globe,
@@ -135,7 +85,7 @@ export function ExplorerListRow({
   providerInfo,
   hideWorkspaceInScope,
 }: ExplorerListRowProps) {
-  const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
+  const typeMeta = viewTypeMeta(view.viewType)
   // Glyph = user-chosen icon when set; tile colors stay type identity.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
@@ -198,9 +148,7 @@ export function ExplorerListRow({
           <div
             className={cn(
               'w-7 h-7 rounded-lg border flex items-center justify-center shrink-0',
-              typeMeta.bg,
-              typeMeta.border,
-              typeMeta.text,
+              typeMeta.iconBg,
             )}
           >
             <DynamicIcon name={iconName} className="h-3.5 w-3.5" />
