@@ -86,25 +86,28 @@ class PoolRole(str, Enum):
 
 # Default pool sizing per role. Tuned for the web tier (~4 uvicorn
 # workers per replica); worker / control-plane tiers should override
-# via env vars in their deployment manifests. Totals (with PROVIDER_PROBE):
-# 20+10 + 8+4 + 10+5 + 4+2 + 2+0 = 65 peak connections PER PROCESS.
-# That is per gunicorn worker: viz alone can reach 65 × GUNICORN_WORKERS
-# (=4 → 260), plus controlplane / aggregation-worker / stats-service /
-# standalone projector pools — far beyond Postgres' default
-# max_connections=100. The compose file therefore raises the server to
-# ``POSTGRES_MAX_CONNECTIONS`` (default 400); keep that knob in sync
-# with any pool or worker-count change here.
+# via env vars in their deployment manifests. Per-process PEAK (all roles):
+# WEB 20+10 + JOBS 8+4 + READONLY 10+5 + PROVIDER_PROBE 4+2 +
+# GRAPH_READ 10+10 + ADMIN 2+0 = 85 peak connections PER PROCESS.
+# That is per gunicorn worker: viz alone can reach 85 × GUNICORN_WORKERS
+# (=4 → 340), plus controlplane / aggregation-worker / stats-service /
+# versioning-worker pools. Keep ``POSTGRES_MAX_CONNECTIONS`` in sync with
+# any pool/worker-count change (compose default 400; the k8s Postgres
+# StatefulSet must match — it was 200).
+#   AT GKE SCALE (many HPA'd replicas) a single Postgres max_connections
+#   cannot cover 85 × workers × replicas — front Postgres with a transaction
+#   pooler (PgBouncer) and/or lower GUNICORN_WORKERS + the DB_*_POOL_SIZE
+#   envs so the per-pod ceiling fits the server limit.
 _POOL_DEFAULTS: dict[PoolRole, dict[str, int]] = {
     PoolRole.WEB:            {"pool_size": 20, "max_overflow": 10},
     PoolRole.JOBS:           {"pool_size": 8,  "max_overflow": 4},
     PoolRole.READONLY:       {"pool_size": 10, "max_overflow": 5},
     PoolRole.PROVIDER_PROBE: {"pool_size": 4,  "max_overflow": 2},
-    # GRAPH_READ absorbs the per-source fan-out (a workspace can open many
-    # data sources at once); sized generously since it must NOT queue graph
-    # reads behind each other, but bounded so it can't exhaust Postgres.
-    # Env override: DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_MAX_OVERFLOW.
-    # Keep POSTGRES_MAX_CONNECTIONS in sync (see the note above).
-    PoolRole.GRAPH_READ:     {"pool_size": 15, "max_overflow": 15},
+    # GRAPH_READ absorbs the per-source fan-out (bounded to 4-wide on the FE
+    # now). Kept modest so it can't dominate the Postgres budget; graph reads
+    # fast-fail (~1.5s) on a down provider so holds are short. Env override:
+    # DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_MAX_OVERFLOW.
+    PoolRole.GRAPH_READ:     {"pool_size": 10, "max_overflow": 10},
     PoolRole.ADMIN:          {"pool_size": 2,  "max_overflow": 0},
 }
 

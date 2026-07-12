@@ -34,8 +34,13 @@ spec:
               value: /var/lib/postgresql/data/pgdata
           args:
             - postgres
+            # R-C3: must cover the sum of every service's SQLAlchemy pool
+            # ceilings (see engine.py _POOL_DEFAULTS: ~85/process × workers ×
+            # replicas). 200 was exceeded by a single fully-warmed viz pod.
+            # This raises headroom to match compose; at real HPA scale front
+            # Postgres with PgBouncer (a single server cannot cover the fleet).
             - -c
-            - max_connections=200
+            - max_connections=400
             - -c
             - shared_buffers=256MB
             - -c
