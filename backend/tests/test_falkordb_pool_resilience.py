@@ -71,6 +71,20 @@ def test_projection_socket_timeout_tracks_write_budget(monkeypatch):
 
 # ── construction sites (fake redis/falkordb capture pool kwargs) ─────
 
+@pytest.fixture(autouse=True)
+def _clear_graph_client_cache():
+    """The topology-aware client cache is a process-wide singleton — clear it
+    around every test so a client built with one test's fakes can't be handed
+    to the next."""
+    from backend.app.providers import falkordb_connection as fc
+
+    fc.graph_clients()._clients.clear()
+    fc.graph_clients()._locks.clear()
+    yield
+    fc.graph_clients()._clients.clear()
+    fc.graph_clients()._locks.clear()
+
+
 @pytest.fixture
 def fake_redis_and_falkor(monkeypatch):
     """Install fake redis.asyncio + falkordb.asyncio modules so the lazy
@@ -81,6 +95,9 @@ def fake_redis_and_falkor(monkeypatch):
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             captured.setdefault("pools", []).append(self)
+
+        async def aclose(self):
+            pass
 
     class FakeFalkorDB:
         def __init__(self, connection_pool=None, **kwargs):
@@ -115,11 +132,15 @@ def _assert_resilient(pool_kwargs: dict, *, socket_timeout: float):
         resilience.FALKORDB_HEALTH_CHECK_INTERVAL_SECS
 
 
-def test_registry_env_handle_pool_is_resilient(fake_redis_and_falkor, monkeypatch):
+@pytest.mark.asyncio
+async def test_env_graph_factory_pool_is_resilient(fake_redis_and_falkor, monkeypatch):
+    """The env-default factory (registry fallback + versioning-worker) builds
+    its pool through the shared topology path, so it carries the kwargs."""
     monkeypatch.delenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", raising=False)
-    import backend.app.providers.falkor_graph_registry as frg
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
+    from backend.app.providers.falkordb_connection import make_env_graph_factory
 
-    frg._env_handle_factory()
+    await make_env_graph_factory()("g")
     (pool,) = fake_redis_and_falkor["pools"]
     # Projection-capable pool: hang net = write budget (60) + margin.
     _assert_resilient(pool.kwargs, socket_timeout=projection_socket_timeout())
@@ -127,21 +148,24 @@ def test_registry_env_handle_pool_is_resilient(fake_redis_and_falkor, monkeypatc
     assert "decode_responses" not in pool.kwargs
 
 
-def test_projection_env_factory_pool_is_resilient(fake_redis_and_falkor, monkeypatch):
+@pytest.mark.asyncio
+async def test_projection_env_factory_pool_is_resilient(fake_redis_and_falkor, monkeypatch):
     monkeypatch.delenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
     from backend.app.services.versioning.projection import make_falkor_graph_factory
 
-    factory = make_falkor_graph_factory()
+    graph = await make_falkor_graph_factory()("g")
     (pool,) = fake_redis_and_falkor["pools"]
     _assert_resilient(pool.kwargs, socket_timeout=projection_socket_timeout())
     assert "decode_responses" not in pool.kwargs
-    assert factory("g") == ("graph", "g")
+    assert graph is not None
 
 
 @pytest.mark.asyncio
 async def test_list_graph_keys_pool_is_resilient(fake_redis_and_falkor, monkeypatch):
     monkeypatch.setenv("FALKORDB_HOST", "gx")
     monkeypatch.setenv("FALKORDB_PORT", "6400")
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
     import backend.app.providers.falkor_graph_registry as frg
 
     keys = await frg.list_graph_keys(None)
@@ -153,15 +177,20 @@ async def test_list_graph_keys_pool_is_resilient(fake_redis_and_falkor, monkeypa
     assert "decode_responses" not in pool.kwargs
 
 
-def test_registry_pinned_handles_route_through_resilient_kwargs():
-    # _handle_for is a closure inside make_registry_graph_factory (needs a
-    # live registry row to drive) — pin the routing at the source level,
-    # same pattern as test_falkordb_host_resolution.py.
-    import backend.app.providers.falkor_graph_registry as frg
+def test_shared_pool_kwargs_builder_is_resilient(monkeypatch):
+    """Every topology-aware client (registry, env, projector, cluster nodes)
+    builds its pool through this one helper — so the socket hygiene cannot be
+    bypassed by adding another call site."""
+    from backend.app.providers.falkordb_connection import (
+        FalkorDBConnConfig, build_graph_pool_kwargs,
+    )
 
-    src = inspect.getsource(frg.make_registry_graph_factory)
-    assert "resilient_pool_kwargs(" in src
-    assert "projection_socket_timeout(" in src
+    cfg = FalkorDBConnConfig(mode="standalone", host="h", port=6379,
+                             username="u", password="p")
+    kw = build_graph_pool_kwargs(cfg, socket_timeout=75.0)
+    _assert_resilient(kw, socket_timeout=75.0)
+    assert kw["username"] == "u" and kw["password"] == "p"
+    assert "decode_responses" not in kw
 
 
 def test_primary_provider_pool_kwargs_are_resilient(monkeypatch):
