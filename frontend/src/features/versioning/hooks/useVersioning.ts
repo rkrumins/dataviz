@@ -58,6 +58,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'squashed', ws, gid, cid] as const,
   projectionWatermark: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'watermark', ws, gid] as const,
+  restorePreview: (ws?: string, gid?: string | null, cid?: string | null) =>
+    [...VERSIONING_KEYS.all, 'restorePreview', ws, gid, cid] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────────
@@ -422,6 +424,59 @@ export function usePublishBranch(wsId: string, graphId: string) {
       invalidateAggregatedEdges()
       setTimeout(invalidateAggregatedEdges, 4000)
     },
+  })
+}
+
+/** Main advanced by a rollback commit — the same cache fan-out as a publish. */
+function invalidateAfterMainAdvance(
+  qc: ReturnType<typeof useQueryClient>,
+  wsId: string,
+  graphId: string,
+  bumpMainEpoch: () => void,
+) {
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
+  qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'restorePreview'] })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+  qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) })
+  bumpMainEpoch()
+  invalidateAggregatedEdges()
+  setTimeout(invalidateAggregatedEdges, 4000)
+}
+
+/** Undo ONE published commit (new `revert` revision; keeps later work).
+ *  Surfaces `MergeConflictError` when later commits touched the same entities. */
+export function useRevertCommit(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (v: { commitId: string; message?: string }) =>
+      api.revertCommit(wsId, graphId, v.commitId, v.message),
+    onSuccess: () => invalidateAfterMainAdvance(qc, wsId, graphId, bumpMainEpoch),
+  })
+}
+
+/** Reset main to its state at a commit (new `restore` revision; rolls back everything after). */
+export function useRestoreCommit(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (v: { commitId: string; message?: string }) =>
+      api.restoreCommit(wsId, graphId, v.commitId, v.message),
+    onSuccess: () => invalidateAfterMainAdvance(qc, wsId, graphId, bumpMainEpoch),
+  })
+}
+
+/** Exact impact of restoring to a commit — fetched while the confirm dialog is open. */
+export function useRestorePreview(
+  wsId?: string, graphId?: string | null, commitId?: string | null, enabled = true,
+) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.restorePreview(wsId, graphId, commitId),
+    queryFn: () => api.getRestorePreview(wsId!, graphId!, commitId!),
+    enabled: enabled && !!wsId && !!graphId && !!commitId,
+    staleTime: 15_000,
   })
 }
 

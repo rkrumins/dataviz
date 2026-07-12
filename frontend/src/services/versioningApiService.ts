@@ -833,6 +833,55 @@ export function publishBranch(
   return vfetch<CommitResponse>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data))
 }
 
+// ============================================
+// Rollback: revert one commit / restore to a point in time
+// ============================================
+
+/** Undo ONE published commit as a new `revert` commit (keeps later work).
+ *  409 `MergeConflictError` when later commits touched the same entities. */
+export function revertCommit(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+  message?: string,
+): Promise<CommitResponse> {
+  return vfetch<CommitResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/revert`,
+    jsonBody(message ? { message } : {}),
+  )
+}
+
+/** Reset main to its state at `commitId` as ONE new `restore` commit —
+ *  rolls back everything after it. Never conflicts; history is kept. */
+export function restoreCommit(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+  message?: string,
+): Promise<CommitResponse> {
+  return vfetch<CommitResponse>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/restore`,
+    jsonBody(message ? { message } : {}),
+  )
+}
+
+/** Exact impact a restore would have — powers the confirm dialog. */
+export interface RestorePreview {
+  commitsUndone: number
+  nodes: { create: number; update: number; delete: number }
+  edges: { create: number; update: number; delete: number }
+}
+
+export function getRestorePreview(
+  wsId: string,
+  graphId: string,
+  commitId: string,
+): Promise<RestorePreview> {
+  return vfetch<RestorePreview>(
+    `${base(wsId)}/graphs/${graphId}/commits/${commitId}/restore-preview`,
+  )
+}
+
 export function openMergeRequest(
   wsId: string,
   graphId: string,
