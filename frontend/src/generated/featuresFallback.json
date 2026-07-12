@@ -173,6 +173,21 @@
       "implemented": false
     },
     {
+      "key": "versioningEnabled",
+      "name": "Version control",
+      "description": "Drafts, reviews, publishing, history and rollback for data sources. When off, all version-control tools are hidden and canvases are view-only. Existing history is kept and stays safe.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": true,
+      "userOverridable": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Turning this off hides version control for every user and makes editing unavailable. Background sync of already-versioned data keeps running, and nothing is deleted.",
+      "sortOrder": 4,
+      "deprecated": false,
+      "implemented": true
+    },
+    {
       "key": "announcementsEnabled",
       "name": "Announcements",
       "description": "Show global announcement banners to all users. When disabled, banners are hidden even if active announcements exist.",
@@ -336,6 +351,7 @@
     "semanticLayerVersionHistory": true,
     "semanticLayerEditMode": true,
     "semanticLayerImportEnabled": true,
+    "versioningEnabled": true,
     "announcementsEnabled": true
   },
   "experimentalNotice": {
