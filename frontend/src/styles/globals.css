@@ -87,7 +87,7 @@
   * {
     transition-property: background-color, border-color, color;
     transition-timing-function: ease-out;
-    transition-duration: 150ms;
+    transition-duration: 100ms;
   }
 
   /* Disable transitions on theme change to prevent flash */
@@ -116,7 +116,7 @@
 
   /* === Node Styles === */
   .nx-node {
-    @apply relative rounded-xl transition-all duration-200;
+    @apply relative rounded-xl transition-[box-shadow,transform] duration-200;
     background: var(--nx-bg-elevated);
     border: 1px solid var(--nx-border-subtle);
     box-shadow: var(--nx-shadow-md);
@@ -226,7 +226,7 @@
 
   /* === Buttons === */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all duration-150;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-[color,background-color,border-color,box-shadow,filter,transform] duration-150;
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2;
     @apply disabled:pointer-events-none disabled:opacity-50;
   }
@@ -265,7 +265,7 @@
     @apply border-glass-border;
     @apply placeholder:text-ink-muted;
     @apply focus:outline-none focus:ring-2 focus:border-accent-lineage;
-    @apply transition-all duration-150;
+    @apply transition-[color,background-color,border-color,box-shadow] duration-150;
     --tw-ring-color: rgba(99, 102, 241, 0.5);
   }
 

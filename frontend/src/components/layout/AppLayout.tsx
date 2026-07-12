@@ -135,7 +135,7 @@ export function AppLayout() {
           <SidebarNav />
 
           <main
-            className="flex-1 relative overflow-hidden transition-all duration-300"
+            className="flex-1 relative overflow-hidden"
           >
             <ErrorBoundary
               resetKeys={[activeWorkspaceId]}
