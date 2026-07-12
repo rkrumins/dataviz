@@ -207,23 +207,18 @@ async def test_build_graph_client_cluster_routes_to_owning_node(fake_redis_and_f
 
 
 @pytest.mark.asyncio
-async def test_cache_fallback_cluster_builds_cluster_client(fake_redis_and_falkor):
-    # Cluster cache is now served by a dedicated RedisCluster client (no longer
-    # degraded to None) — safe because the cache ops are single-key/single-hash.
+async def test_cache_no_dedicated_url_cluster_returns_none(fake_redis_and_falkor):
+    # WS2.1 decoupling: with no dedicated cache_url the cache is NEVER built on
+    # the FalkorDB instance — even in cluster mode it is disabled (None), so a
+    # FalkorDB outage can't also take out caching.
     cfg = FalkorDBConnConfig(mode="cluster", cluster_nodes=[("n1", 7000), ("n2", 7001)])
-    client = build_cache_redis_fallback(cfg, pool_kwargs={"socket_timeout": 3.0})
-    assert client is not None
-    assert len(fake_redis_and_falkor["cluster_startup_nodes"]) == 2
-
-
-@pytest.mark.asyncio
-async def test_cache_fallback_cluster_no_nodes_returns_none(fake_redis_and_falkor):
-    cfg = FalkorDBConnConfig(mode="cluster", cluster_nodes=[])
     assert build_cache_redis_fallback(cfg, pool_kwargs={"socket_timeout": 3.0}) is None
 
 
 @pytest.mark.asyncio
-async def test_cache_fallback_standalone_builds_client(fake_redis_and_falkor):
+async def test_cache_no_dedicated_url_standalone_returns_none(fake_redis_and_falkor):
+    # No dedicated cache_url → cache disabled, not co-located on FalkorDB.
     cfg = FalkorDBConnConfig(mode="standalone", host="h", port=6379)
-    client = build_cache_redis_fallback(cfg, pool_kwargs={"socket_timeout": 3.0, "decode_responses": True})
-    assert client is not None
+    assert build_cache_redis_fallback(
+        cfg, pool_kwargs={"socket_timeout": 3.0, "decode_responses": True}
+    ) is None
