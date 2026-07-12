@@ -7,6 +7,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { DashboardHero } from './DashboardHero'
+import { DashboardSkeleton } from './DashboardSkeleton'
 import { InsightCards } from './InsightCards'
 import { WorkspaceGrid } from './WorkspaceGrid'
 import { ViewGrid } from './ViewGrid'
@@ -104,22 +105,10 @@ export function Dashboard() {
         setSearchQuery('')
     }, [navigate, searchResult.query, recordRecentSearch])
 
-    // ── Loading state: show spinner only while workspaces load ─────────────────
+    // ── Loading state: a content-shaped skeleton (not a centered spinner) so the
+    // shell paints instantly and the layout doesn't jump when data lands. ───────
     if (isLoadingWorkspaces) {
-        return (
-            <div className="w-full h-full bg-canvas flex items-center justify-center">
-                <div className="flex flex-col items-center gap-4">
-                    <div className="relative w-12 h-12">
-                        <div className="absolute inset-0 rounded-full border-2 border-accent-business/20" />
-                        <div className="absolute inset-0 rounded-full border-2 border-accent-business border-t-transparent animate-spin" />
-                    </div>
-                    <div className="text-center">
-                        <div className="text-sm font-semibold text-ink animate-pulse">Loading your workspace</div>
-                        <div className="text-xs text-ink-muted mt-1">Fetching environments & views</div>
-                    </div>
-                </div>
-            </div>
-        )
+        return <DashboardSkeleton />
     }
 
     // ── Onboarding: first-run experience for new users ────────────────────────
