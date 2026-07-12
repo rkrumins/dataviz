@@ -50,6 +50,17 @@ services:
 
   falkordb:
     container_name: synodic-falkordb-dev
+    # Dev self-heal: FalkorDB's AOF *incremental* is an engine-version-locked
+    # binary GRAPH.EFFECT opcode stream; replaying an incr written by an OLDER
+    # engine after an image bump NULL-derefs -> SIGSEGV during startup AOF load,
+    # and `restart: unless-stopped` loops forever (the RDB base is portable, the
+    # incr is not). The entrypoint arms a crash marker before starting redis and
+    # clears it at ready; after two pre-ready deaths it quarantines the incr +
+    # resets the manifest to the base RDB so the next boot loads clean. NO-OP on
+    # healthy boots. Mirrors the redis service's self-heal entrypoint.
+    entrypoint: ["/bin/sh", "/docker-entrypoint.d/falkordb-dev-entrypoint.sh"]
+    volumes:
+      - ./scripts/falkordb-dev-entrypoint.sh:/docker-entrypoint.d/falkordb-dev-entrypoint.sh:ro
 
   viz-service:
     volumes:

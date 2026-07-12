@@ -128,6 +128,53 @@ lost the input. AOF `everysec` bounds the loss window to ~1 second;
 refusing to start. Keep RDB snapshots enabled alongside AOF — they
 remain the fast-restart and DR-export mechanism.
 
+## 5c. Engine Version Upgrades: Reload From RDB, Not AOF
+
+**The AOF *incremental* is NOT portable across FalkorDB engine versions; the
+RDB *base* is.** FalkorDB persists graph mutations to the AOF incremental as a
+binary `GRAPH.EFFECT` opcode stream that is specific to the engine build. After
+bumping the `falkordb/falkordb:vX` image tag, replaying an incremental written
+by the PREVIOUS engine can NULL-deref (`AttributeSet_Update` → SIGSEGV) *during
+the startup AOF load*, before the server accepts a single query. With
+`restart: unless-stopped` this becomes a permanent crash loop, and because the
+healthcheck treats the `-LOADING` reply as healthy, `docker ps` can even show
+"(healthy)" while it loops. `--aof-load-truncated` does NOT help — it only
+forgives a torn tail, not a well-formed-but-incompatible effect. (Observed live
+2026-07-12 upgrading v4.16.0 → v4.18.11.)
+
+The RDB base decodes cleanly across versions, so migrate persistence through
+RDB whenever the engine tag changes on a topology that persists a volume:
+
+1. **Before** bumping the image tag, on the OLD running engine, compact and
+   confirm the write is durable:
+   ```
+   redis-cli BGREWRITEAOF
+   redis-cli INFO persistence | grep aof_last_bgrewrite_status   # want :ok
+   ```
+2. Boot the NEW image once with **AOF off** so it loads the portable RDB
+   (the AOF base RDB, or a standalone `dump.rdb`), then re-enable AOF to mint a
+   fresh, engine-native AOF (empty incremental + a base written by the new
+   engine):
+   ```
+   # temporary container / args: drop `--appendonly yes`, add `--appendonly no`
+   redis-cli CONFIG SET appendonly yes
+   redis-cli INFO persistence | grep -E 'aof_enabled|aof_rewrite_in_progress|aof_last_bgrewrite_status'
+   # wait for aof_enabled:1, aof_rewrite_in_progress:0, aof_last_bgrewrite_status:ok, then clean-stop
+   ```
+   > Gotcha: with `--appendonly yes` and NO `appendonlydir` present, Redis starts
+   > **EMPTY** — it does not fall back to `dump.rdb`. Load the RDB with
+   > `--appendonly no`, or keep a valid base RDB + a base-only manifest.
+3. Validate the RDB before trusting it: `redis-check-rdb <file>` (envelope/CRC
+   pre-filter; the definitive check is a boot that loads the graph module).
+
+In **dev**, the `scripts/falkordb-dev-entrypoint.sh` guard performs this
+recovery automatically: it detects a startup crash loop and quarantines the
+incompatible incremental (moving it to `appendonlydir.poison-*`, never deleting)
+so the next boot loads clean from the base RDB. In **prod**, this is a manual
+runbook by design — quarantining data should be a human decision made against a
+known-good backup, and a crash loop should surface as CrashLoopBackOff and page
+an operator, not silently discard writes.
+
 ## 6. Disaster Recovery (Cross-Region)
 
 In the event of a total GCP Region loss (e.g., `us-central1` goes completely offline), standard HA mechanisms fail. The following DR strategy must be implemented proactively:
