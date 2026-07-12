@@ -114,18 +114,43 @@ export const useProviderHealthStore = create<ProviderHealthState>((set, get) => 
 const POLL_INTERVAL_MS = 60_000
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
+// Set SYNCHRONOUSLY by startPolling, before any await. The old guard tested
+// `pollTimer`, which is only assigned AFTER `await refresh()` resolves — so
+// for the entire duration of the in-flight request it was still null and the
+// guard let re-entrant callers through, each spawning another chain.
+let running = false
+// Invalidates in-flight chains. A poll parked in `await refresh()` holds no
+// timer handle yet, so stopPolling() has nothing to clear; without an epoch it
+// wakes up afterwards and re-arms itself, resurrecting a chain that was meant
+// to be dead. Every leaked chain then reschedules itself forever and can never
+// be cancelled, so the request rate climbs monotonically for the lifetime of
+// the tab (measured: this 60s poll arriving 5.9x/second — ~350 live chains —
+// with the heap climbing alongside as each chain retains its closure).
+//
+// This bites hardest exactly when a provider is DOWN: the re-entrancy window
+// IS the in-flight request latency, and /health/providers probes the dead
+// provider with a 30s timeout. A healthy provider answers in milliseconds and
+// the window is too small to notice.
+let epoch = 0
 
 function startPolling() {
-  if (pollTimer || !authReady) return
+  if (running || !authReady) return
+  running = true
+  const myEpoch = epoch
+
   const poll = async () => {
+    if (myEpoch !== epoch) return
     await useProviderHealthStore.getState().refresh()
+    if (myEpoch !== epoch) return
     const jitter = Math.random() * 5_000
     pollTimer = setTimeout(poll, POLL_INTERVAL_MS + jitter)
   }
-  poll()
+  void poll()
 }
 
 function stopPolling() {
+  epoch += 1
+  running = false
   if (pollTimer) {
     clearTimeout(pollTimer)
     pollTimer = null

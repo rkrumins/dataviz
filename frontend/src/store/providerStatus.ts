@@ -180,8 +180,20 @@ export function useProviderSnooze(): {
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
+// `running` is set SYNCHRONOUSLY before the first await; `epoch` invalidates a
+// chain that is parked in `await refresh()` and therefore has no timer handle
+// for stopPolling() to clear. See store/providerHealth.ts for the full write-up
+// — this file had the identical defect: the re-entrancy guard tested
+// `pollTimer`, which is only assigned AFTER the await, so every re-entrant call
+// during an in-flight request leaked another immortal, self-rescheduling chain.
+// restartPolling() made it worse: stopPolling() could not cancel an in-flight
+// poll, so that poll survived and re-armed itself on top of the fresh chain.
+let running = false
+let epoch = 0
 
 function stopPolling() {
+  epoch += 1
+  running = false
   if (pollTimer) {
     clearTimeout(pollTimer)
     pollTimer = null
@@ -189,9 +201,12 @@ function stopPolling() {
 }
 
 function startPolling() {
-  if (pollTimer || !authReady || typeof document === 'undefined' || document.hidden) return
+  if (running || !authReady || typeof document === 'undefined' || document.hidden) return
+  running = true
+  const myEpoch = epoch
 
   const poll = async () => {
+    if (myEpoch !== epoch) return
     // Snoozed: skip the refresh entirely and wake exactly at expiry, then
     // resume the normal cadence. This is the request saving the user asked
     // for — no polls fire while the banner is snoozed.
@@ -201,6 +216,7 @@ function startPolling() {
       return
     }
     await useProviderStatusStore.getState().refresh()
+    if (myEpoch !== epoch) return
     // Jitter every reschedule so 1000 clients that mounted near the
     // same instant don't fire in lockstep forever. Same flat-load
     // motivation as the announcements + aggregation-history pollers.

@@ -1,59 +1,62 @@
 /**
- * useRecentViews — tracks the last N views the user has visited, persisted
- * in localStorage via a Zustand store.
+ * useRecentViews — the user's recently-visited views ("Continue where you left off").
  *
- * Uses Zustand so that ALL consumers (sidebar, popovers, command palette)
- * react in real-time when a view is visited — no page refresh needed.
+ * SERVER-BACKED (was a localStorage-persisted Zustand store). The browser-local
+ * version had three enterprise problems:
+ *   1. It didn't follow the user — switch machine or browser and your recents
+ *      were gone.
+ *   2. The storage key was NOT user-scoped, so a second user signing in on the
+ *      same browser inherited the previous user's recent views.
+ *   3. It cached a stale snapshot of each view's name/scope, so a renamed view
+ *      showed its old name and a deleted one stayed in the strip and 404'd.
+ *
+ * The server keeps one upserted row per (user, view) and joins the read against
+ * the LIVE views, which fixes all three: per-identity, cross-device, always
+ * fresh, and deleted views drop out on their own (FK cascade).
+ *
+ * The public API ({ recent, recordVisit }) is unchanged, so the sidebar, command
+ * palette, dashboard and Explorer strip all keep working as-is.
  */
-import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { useCallback } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  getRecentViews,
+  recordViewVisit,
+  type RecentViewEntry,
+} from '@/services/viewApiService'
 
-export interface RecentViewEntry {
-  viewId: string
-  viewName: string
-  /** View layout type — used to select the appropriate icon. */
-  viewType: string
-  /** User-chosen view icon (config.icon) — wins over the type icon when set.
-   *  Optional: entries persisted before this field existed degrade to the
-   *  type-derived icon. */
-  icon?: string
-  workspaceId?: string
-  workspaceName?: string
-  /** Datasource the view belongs to — used to switch context on click. */
-  dataSourceId?: string
-  dataSourceName?: string
-  visitedAt: string  // ISO 8601 timestamp
-}
+export type { RecentViewEntry }
 
-const MAX_RECENT = 5
+export const RECENT_VIEWS_QUERY_KEY = 'recent-views' as const
 
-interface RecentViewsState {
-  recent: RecentViewEntry[]
-  recordVisit: (entry: Omit<RecentViewEntry, 'visitedAt'>) => void
-}
+const EMPTY: RecentViewEntry[] = []
 
-const useRecentViewsStore = create<RecentViewsState>()(
-  persist(
-    (set, get) => ({
-      recent: [],
-      recordVisit: (entry) => {
-        const existing = get().recent.filter(e => e.viewId !== entry.viewId)
-        const updated: RecentViewEntry[] = [
-          { ...entry, visitedAt: new Date().toISOString() },
-          ...existing,
-        ].slice(0, MAX_RECENT)
-        set({ recent: updated })
-      },
-    }),
-    {
-      name: 'synodic-recent-views',
-    }
-  )
-)
-
-/** Hook wrapper — returns the same shape as the old useState-based hook. */
 export function useRecentViews() {
-  const recent = useRecentViewsStore((s) => s.recent)
-  const recordVisit = useRecentViewsStore((s) => s.recordVisit)
-  return { recent, recordVisit }
+  const queryClient = useQueryClient()
+
+  const { data } = useQuery<RecentViewEntry[], Error>({
+    queryKey: [RECENT_VIEWS_QUERY_KEY],
+    queryFn: () => getRecentViews(5),
+    staleTime: 30_000,
+    retry: 1,
+  })
+
+  /**
+   * Record a visit. The caller still passes the full entry (unchanged
+   * signature) but only the id is sent — the server derives the rest from the
+   * live view, which is precisely why the names can't go stale.
+   *
+   * Fire-and-forget: recents are a convenience, so a failure here must never
+   * break navigation to the view the user actually asked for.
+   */
+  const recordVisit = useCallback(
+    (entry: Omit<RecentViewEntry, 'visitedAt'>) => {
+      recordViewVisit(entry.viewId)
+        .then(() => queryClient.invalidateQueries({ queryKey: [RECENT_VIEWS_QUERY_KEY] }))
+        .catch(() => { /* non-fatal */ })
+    },
+    [queryClient],
+  )
+
+  return { recent: data ?? EMPTY, recordVisit }
 }

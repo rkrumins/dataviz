@@ -12,6 +12,7 @@ import {
   Users,
   Lock,
   Box,
+  Database,
   ExternalLink,
   Pencil,
   Check,
@@ -24,7 +25,6 @@ import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWor
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
-import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -168,8 +168,8 @@ export function ExplorerListRow({
         className={cn(
           'grid items-center gap-3',
           onToggleSelect
-            ? 'grid-cols-[28px_minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]'
-            : 'grid-cols-[minmax(0,2fr)_200px_90px_36px_110px_70px_80px_140px]',
+            ? 'grid-cols-[28px_minmax(0,1.5fr)_minmax(0,1.1fr)_90px_36px_110px_70px_80px_140px]'
+            : 'grid-cols-[minmax(0,1.5fr)_minmax(0,1.1fr)_90px_36px_110px_70px_80px_140px]',
           'rounded-xl px-3',
           densityPaddingClass,
           'hover:bg-black/5 dark:hover:bg-white/5',
@@ -218,17 +218,42 @@ export function ExplorerListRow({
           </div>
         </div>
 
-        {/* ── Workspace + Data source pills ── */}
-        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
-          <ViewScopeBadge
-            workspaceId={view.workspaceId}
-            workspaceName={view.workspaceName}
-            dataSourceId={view.dataSourceId}
-            dataSourceName={view.dataSourceName}
-            providerName={providerInfo?.providerName}
-            providerType={providerInfo?.providerType}
-            hideWorkspace={hideWorkspaceInScope}
-          />
+        {/* ── Scope ──
+             A table column cannot fit three chips legibly — they truncated to
+             "Major R…" / "Dat…" / "Falk…". Surface the DATA SOURCE as readable
+             text (the scope users actually scan for), with workspace · provider
+             as a muted second line. Full values stay available on hover. The
+             chip trio is still the right call on cards, which have the width. */}
+        <div className="min-w-0 overflow-hidden">
+          {view.dataSourceName || view.dataSourceId ? (
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Database className="h-3 w-3 text-emerald-500 shrink-0" />
+              <span
+                className="truncate text-xs font-medium text-ink"
+                title={view.dataSourceName ?? view.dataSourceId ?? ''}
+              >
+                {view.dataSourceName ?? view.dataSourceId}
+              </span>
+            </div>
+          ) : (
+            <span className="text-xs text-ink-muted">—</span>
+          )}
+          <div className="flex items-center gap-1 min-w-0 text-[10px] text-ink-muted leading-tight">
+            {!hideWorkspaceInScope && view.workspaceName && (
+              <span className="truncate" title={view.workspaceName}>{view.workspaceName}</span>
+            )}
+            {!hideWorkspaceInScope && view.workspaceName && providerInfo?.providerName && (
+              <span className="shrink-0">·</span>
+            )}
+            {providerInfo?.providerName && (
+              <span
+                className="truncate"
+                title={`Provider: ${providerInfo.providerName}${providerInfo.providerType ? ` · ${providerInfo.providerType}` : ''}`}
+              >
+                {providerInfo.providerName}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* ── Type label ── */}

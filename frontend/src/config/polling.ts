@@ -118,7 +118,11 @@ export const PROVIDER_RETRY_MAX_ATTEMPTS = (() => {
  * Pure function: easy to unit-test, no DOM / timer dependencies.
  */
 export function withJitter(baseMs: number, frac = 0.3): number {
-  if (baseMs <= 0) return 0
-  const spread = Math.max(0, Math.min(1, frac))
+  // `> 0` rather than `<= 0`, because `NaN <= 0` is FALSE. A NaN base (an
+  // undefined interval multiplied out at a call site) would otherwise flow
+  // through `Math.floor(NaN)` and out as NaN — and `setTimeout(fn, NaN)`
+  // coerces its delay to 0, which turns a caller's poll into a tight loop.
+  if (!(baseMs > 0)) return 0
+  const spread = Number.isFinite(frac) ? Math.max(0, Math.min(1, frac)) : 0
   return Math.floor(baseMs + Math.random() * baseMs * spread)
 }

@@ -43,6 +43,17 @@ const POLL_INTERVAL_MS = POLLING_INTERVALS.permissions
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let authReady = false
+/** Set SYNCHRONOUSLY before the first await, so a re-entrant caller cannot
+ *  start a second chain while the first is still in flight. `epoch` invalidates
+ *  a chain that is parked in ``await pollOnce()``: such a chain holds no timer
+ *  handle, so ``stopPolling()``'s ``clearTimeout`` has nothing to cancel, and
+ *  without the epoch it wakes up afterwards and calls ``scheduleNext()``,
+ *  resurrecting itself. Same defect as ``store/providerHealth.ts`` — every
+ *  re-entrant enable / tab-focus during an in-flight request permanently leaked
+ *  another immortal, self-rescheduling chain, and the request rate climbed for
+ *  the lifetime of the tab. */
+let running = false
+let epoch = 0
 /** JSON-stringified previous claims, used for cheap change detection.
  *  We compare against the LAST POLL'S response — not the store — so
  *  external updates (e.g. from the silent refresh path) don't trip a
@@ -81,19 +92,38 @@ async function pollOnce(): Promise<void> {
     }
 }
 
-function scheduleNext(): void {
+function scheduleNext(myEpoch: number): void {
+    if (myEpoch !== epoch) return
     if (!authReady || typeof document === 'undefined' || document.hidden) return
     pollTimer = setTimeout(async () => {
+        if (myEpoch !== epoch) return
         await pollOnce()
-        scheduleNext()
+        scheduleNext(myEpoch)
     }, withJitter(POLL_INTERVAL_MS))
 }
 
 function stopPolling(): void {
+    epoch += 1
+    running = false
     if (pollTimer) {
         clearTimeout(pollTimer)
         pollTimer = null
     }
+}
+
+/** Start exactly one poll chain: fire now, then resume the jittered cadence.
+ *  Idempotent — a chain that is already running, INCLUDING one parked in an
+ *  in-flight request, is left alone rather than duplicated. */
+function startChain(): void {
+    if (running || !authReady) return
+    if (typeof document !== 'undefined' && document.hidden) return
+    running = true
+    const myEpoch = epoch
+    void (async () => {
+        if (myEpoch !== epoch) return
+        await pollOnce()
+        scheduleNext(myEpoch)
+    })()
 }
 
 /** Call once after auth resolves. Seeds ``lastSnapshot`` from the
@@ -104,12 +134,11 @@ function stopPolling(): void {
 export function enablePermissionPolling(): void {
     authReady = true
     if (typeof document !== 'undefined' && document.hidden) return
-    stopPolling()
+    // Idempotent: the app shell calls this from an effect that can re-run (and
+    // re-runs on every remount), so a second chain must never be spawned.
+    if (running) return
     lastSnapshot = claimsSnapshot(useAuthStore.getState().permissions)
-    void (async () => {
-        await pollOnce()
-        scheduleNext()
-    })()
+    startChain()
 }
 
 /** Call on session loss / logout to stop polling and clear the
@@ -129,12 +158,11 @@ if (typeof document !== 'undefined') {
         if (!authReady) return
         // Tab returned to focus — poll immediately so the user sees
         // any mutation that happened while they were away, then
-        // resume the regular cadence.
+        // resume the regular cadence. stopPolling() bumps the epoch, which
+        // retires any chain still parked in an in-flight request, so
+        // startChain() below leaves exactly one chain running — not one more.
         stopPolling()
-        void (async () => {
-            await pollOnce()
-            scheduleNext()
-        })()
+        startChain()
     })
 }
 
