@@ -138,6 +138,37 @@ export const workspaceService = {
         return request<WorkspaceResponse[]>(ADMIN_API)
     },
 
+    /**
+     * One page of workspaces, filtered + RBAC-scoped + counted server-side.
+     *
+     * The unpaged {@link list} still exists (the workspaces store needs the
+     * whole set), but any UI that just shows a list of rows should page instead
+     * of pulling every workspace and its data sources to render ten of them.
+     */
+    async listPage(params: { limit: number; offset?: number; search?: string }): Promise<{
+        items: WorkspaceResponse[]
+        totalCount: number
+    }> {
+        const query = new URLSearchParams({
+            limit: String(params.limit),
+            offset: String(params.offset ?? 0),
+        })
+        if (params.search?.trim()) query.set('search', params.search.trim())
+
+        const res = await fetchWithTimeout(`${ADMIN_API}?${query}`, {
+            headers: { 'Content-Type': 'application/json' },
+        })
+        if (!res.ok) {
+            const text = await res.text()
+            throw new Error(`Workspace API ${res.status}: ${text || res.statusText}`)
+        }
+        const items: WorkspaceResponse[] = await res.json()
+        // Older servers don't send the header — fall back to the page length so
+        // the pager degrades to "what we can see" instead of breaking.
+        const header = res.headers.get('X-Total-Count')
+        return { items, totalCount: header ? Number(header) : items.length }
+    },
+
     get(id: string): Promise<WorkspaceResponse> {
         return request<WorkspaceResponse>(`${ADMIN_API}/${id}`)
     },

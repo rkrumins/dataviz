@@ -43,6 +43,7 @@ import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
+import { useWorkspacePage } from '@/hooks/useWorkspacePage'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
@@ -984,6 +985,8 @@ const NO_FILTERS = { primary: false, ontology: false, ready: false }
 
 /** 3×3 at lg inside the 1180px wizard modal — full rows in 3/2/1-col layouts. */
 const DS_PAGE_SIZE = 9
+/** Rail rows per page — one screenful, no endless scroll. */
+const WS_PAGE_SIZE = 10
 
 export function ScopeStep({
     availableWorkspaces,
@@ -1009,6 +1012,7 @@ export function ScopeStep({
     const [dsSort, setDsSort] = useState<DsSort>('recommended')
     const [dsFilters, setDsFilters] = useState(NO_FILTERS)
     const [dsPage, setDsPage] = useState(0)
+    const [wsPage, setWsPage] = useState(0)
 
     // Resolves the provider (e.g. falkordb/neo4j) each data source is built on.
     const { resolve: resolveProvider } = useDataSourceProviderMap()
@@ -1056,12 +1060,40 @@ export function ScopeStep({
         [dataSources, selectedDataSourceId],
     )
 
-    // Filter workspaces by search
-    const filteredWorkspaces = useMemo(() => {
-        if (!wsSearch.trim()) return availableWorkspaces
-        const q = wsSearch.toLowerCase()
-        return availableWorkspaces.filter(ws => ws.name.toLowerCase().includes(q))
-    }, [availableWorkspaces, wsSearch])
+    // ── Workspace rail: server-paginated ─────────────────────────────────────
+    // The rail only DISPLAYS workspaces; selection still resolves against the
+    // store-provided `availableWorkspaces` (the wizard's scope, auto-select and
+    // deep-link paths all read from it), so paging can never strand a selection
+    // that lives on another page.
+    const [wsSearchDebounced, setWsSearchDebounced] = useState('')
+    useEffect(() => {
+        const t = setTimeout(() => setWsSearchDebounced(wsSearch), 250)
+        return () => clearTimeout(t)
+    }, [wsSearch])
+
+    // A new query means a new result set — start at its first page.
+    useEffect(() => { setWsPage(0) }, [wsSearchDebounced])
+
+    const {
+        workspaces: pagedWorkspaces,
+        totalCount: wsTotalCount,
+        isLoading: wsPageLoading,
+        isError: wsPageError,
+        refetch: refetchWorkspacePage,
+    } = useWorkspacePage({
+        page: wsPage,
+        pageSize: WS_PAGE_SIZE,
+        search: wsSearchDebounced,
+        enabled: !singleWorkspace,
+    })
+
+    // Prefer the store's copy of each row (it's the one the rest of the wizard
+    // resolves against) but fall back to the server's — a workspace can legally
+    // appear on a page before the store's full list has refreshed.
+    const railWorkspaces = useMemo(
+        () => pagedWorkspaces.map(ws => availableWorkspaces.find(w => w.id === ws.id) ?? ws),
+        [pagedWorkspaces, availableWorkspaces],
+    )
 
     // Filter + sort the data sources for display.
     const visibleDataSources = useMemo(() => {
@@ -1178,16 +1210,17 @@ export function ScopeStep({
                     'min-h-[360px]',
                 )}
             >
-                {/* Left: Workspace List (hidden for single workspace) */}
+                {/* Left: Workspace rail — server-paginated, so it stays a short
+                    list whether the estate has 5 workspaces or 5,000. */}
                 {!singleWorkspace && (
                     <div className="w-[240px] shrink-0 border-r border-slate-200 dark:border-slate-700 flex flex-col">
-                        {/* Search */}
+                        {/* Search (server-side, debounced) */}
                         <div className="p-2.5 border-b border-slate-100 dark:border-slate-700/50">
                             <div className="relative">
                                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                                 <input
                                     type="text"
-                                    placeholder="Filter workspaces..."
+                                    placeholder="Search workspaces..."
                                     value={wsSearch}
                                     onChange={e => setWsSearch(e.target.value)}
                                     className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 placeholder:text-slate-400 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/30 transition-colors"
@@ -1197,21 +1230,60 @@ export function ScopeStep({
 
                         {/* Workspace list */}
                         <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
-                            {filteredWorkspaces.map(ws => (
-                                <WorkspaceItem
-                                    key={ws.id}
-                                    ws={ws}
-                                    isSelected={ws.id === selectedWorkspaceId}
-                                    isActive={ws.id === activeWorkspaceId}
-                                    dsCount={ws.dataSources?.length ?? 0}
-                                    onClick={() => handleSelectWorkspace(ws.id)}
-                                />
-                            ))}
-                            {filteredWorkspaces.length === 0 && (
-                                <div className="py-6 text-center text-xs text-slate-400">
-                                    No workspaces match "{wsSearch}"
+                            {wsPageLoading ? (
+                                Array.from({ length: 5 }).map((_, i) => (
+                                    <div key={i} className="px-3.5 py-3 rounded-xl animate-pulse">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-7 h-7 rounded-lg bg-slate-200 dark:bg-slate-700 shrink-0" />
+                                            <div className="flex-1 space-y-1.5">
+                                                <div className="h-2.5 w-2/3 bg-slate-200 dark:bg-slate-700 rounded" />
+                                                <div className="h-2 w-1/3 bg-slate-100 dark:bg-slate-800 rounded" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            ) : wsPageError ? (
+                                <div className="py-6 text-center">
+                                    <p className="text-xs text-slate-400">Couldn’t load workspaces</p>
+                                    <button
+                                        type="button"
+                                        onClick={refetchWorkspacePage}
+                                        className="mt-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                                    >
+                                        Try again
+                                    </button>
                                 </div>
+                            ) : (
+                                <>
+                                    {railWorkspaces.map(ws => (
+                                        <WorkspaceItem
+                                            key={ws.id}
+                                            ws={ws}
+                                            isSelected={ws.id === selectedWorkspaceId}
+                                            isActive={ws.id === activeWorkspaceId}
+                                            dsCount={ws.dataSources?.length ?? 0}
+                                            onClick={() => handleSelectWorkspace(ws.id)}
+                                        />
+                                    ))}
+                                    {railWorkspaces.length === 0 && (
+                                        <div className="py-6 text-center text-xs text-slate-400">
+                                            {wsSearch
+                                                ? `No workspaces match "${wsSearch}"`
+                                                : 'No workspaces available'}
+                                        </div>
+                                    )}
+                                </>
                             )}
+                        </div>
+
+                        {/* Pager (self-hides when everything fits on one page) */}
+                        <div className="border-t border-slate-100 dark:border-slate-700/50 px-2 py-1.5 flex justify-center">
+                            <TablePagination
+                                page={wsPage}
+                                pageSize={WS_PAGE_SIZE}
+                                total={wsTotalCount}
+                                onPageChange={setWsPage}
+                            />
                         </div>
                     </div>
                 )}
