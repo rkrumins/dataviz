@@ -1428,6 +1428,11 @@ export function RegistryAssets() {
                                                 </span>
                                             )}
                                         </p>
+                                        {assets.length > 0 && (
+                                            <p className="text-[11px] text-ink-muted mt-1.5 break-words">
+                                                The sources below are the last cached copy — counts may be out of date and will refresh automatically once the provider is reachable.
+                                            </p>
+                                        )}
                                     </div>
                                     <Link
                                         to={`/ingestion?tab=connections&edit=${selectedProviderId}`}

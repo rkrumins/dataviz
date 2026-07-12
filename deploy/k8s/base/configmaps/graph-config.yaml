@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: graph-config
-  namespace: synodic
-data:
-  FALKORDB_HOST: "falkordb"
-  FALKORDB_PORT: "6379"

@@ -913,6 +913,7 @@ async def lifespan(_app: FastAPI):
     from .observability.event_loop_monitor import (
         EventLoopLagStats,
         run_event_loop_monitor,
+        start_wedge_watchdog,
     )
     _app.state.event_loop_lag_stats = EventLoopLagStats()
     _app.state._event_loop_shutdown = asyncio.Event()
@@ -922,6 +923,12 @@ async def lifespan(_app: FastAPI):
             shutdown=_app.state._event_loop_shutdown,
         ),
         name="event-loop-monitor",
+    )
+    # WS1.4: a separate OS thread that dumps ALL thread stacks (faulthandler)
+    # when the loop stops ticking — capturing the exact frame wedging the loop,
+    # which the in-loop monitor cannot. Daemon; exits when shutdown is set.
+    _app.state._wedge_watchdog = start_wedge_watchdog(
+        _app.state._event_loop_shutdown.is_set,
     )
 
     # Versioning projection worker (in-process; dev / single-node). In
@@ -1579,12 +1586,17 @@ app.add_middleware(
     expose_headers=["X-Provider-Health", "X-Cache-Status"],
 )
 
-# GZip compression for responses > 1 KB. compresslevel=6 (zlib default)
-# instead of Starlette's default 9: level 9 costs roughly double the CPU
-# for a ~1-3% size win, and this compression runs ON the event loop — on
-# multi-MB graph payloads that stall blocks every other request on the
-# worker, including /health.
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+# GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was
+# Starlette's default 9). This compression runs ON the event loop, so on
+# multi-MB graph payloads its CPU cost stalls every other request on the
+# worker (including /health). For highly-compressible JSON, level 1 keeps
+# nearly all the size win of 6 at a fraction of the CPU — the right trade for
+# an on-loop codec. Env-tunable via GZIP_COMPRESSLEVEL.
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=1024,
+    compresslevel=int(os.getenv("GZIP_COMPRESSLEVEL", "1")),
+)
 
 # Structured JSON access log + X-Process-Time header
 app.add_middleware(StructuredLoggingMiddleware)

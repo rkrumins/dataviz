@@ -47,6 +47,11 @@ export interface OntologyBrief {
 /** @deprecated Use OntologyBrief */
 export type BlueprintBrief = OntologyBrief
 
+// Stable empty refs so non-admins (query disabled → data undefined) don't get a
+// fresh array identity each render.
+const EMPTY_TEMPLATES: TemplateBrief[] = []
+const EMPTY_ONTOLOGIES: OntologyBrief[] = []
+
 export function useDashboardData() {
     const { workspaces, isLoading: isLoadingWorkspaces } = useWorkspaces()
     const views = useSchemaStore(s => s.schema?.views ?? EMPTY_VIEWS)
@@ -66,12 +71,9 @@ export function useDashboardData() {
     // Per-datasource node/edge counts: key = "${wsId}/${dsId}"
     const [dataSourceStats, setDataSourceStats] = useState<Record<string, DataSourceStats>>({})
 
-    const [templates, setTemplates] = useState<TemplateBrief[]>([])
-    const [ontologies, setOntologies] = useState<OntologyBrief[]>([])
-
-    const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
-    const [isLoadingOntologies, setIsLoadingOntologies] = useState(false)
-    const [error, setError] = useState<Error | null>(null)
+    // templates / ontologies + their loading + error are React Query-derived
+    // below (was raw useState + a refetch-from-scratch-on-mount effect, which
+    // re-spun the dashboard every visit; now stale-while-revalidate cached).
 
     // Calculate high level stats whenever workspaces change
     useEffect(() => {
@@ -183,55 +185,33 @@ export function useDashboardData() {
     const hasOntologyRead = useAnyWorkspacePermission('workspace:ontology:read')
     const canReadOntologies = isPlatformAdmin || hasOntologyRead
 
-    useEffect(() => {
-        if (!isPlatformAdmin) {
-            setTemplates([])
-            setIsLoadingTemplates(false)
-            return
-        }
-        const fetchTemplates = async () => {
-            setIsLoadingTemplates(true)
-            try {
-                const res = await fetchWithTimeout('/api/v1/admin/context-model-templates', {
-                    silent403: true,
-                })
-                if (res.ok) {
-                    const data = await res.json()
-                    setTemplates(data || [])
-                }
-            } catch (err) {
-                setError(err instanceof Error ? err : new Error('Failed to load templates'))
-            } finally {
-                setIsLoadingTemplates(false)
-            }
-        }
-        fetchTemplates()
-    }, [isPlatformAdmin])
+    const templatesQuery = useQuery({
+        queryKey: ['dashboard', 'templates'],
+        enabled: isPlatformAdmin,
+        staleTime: 5 * 60 * 1000,
+        queryFn: async () => {
+            const res = await fetchWithTimeout('/api/v1/admin/context-model-templates', { silent403: true })
+            return res.ok ? (((await res.json()) as TemplateBrief[]) ?? EMPTY_TEMPLATES) : EMPTY_TEMPLATES
+        },
+    })
 
-    useEffect(() => {
-        if (!canReadOntologies) {
-            setOntologies([])
-            setIsLoadingOntologies(false)
-            return
-        }
-        const fetchOntologies = async () => {
-            setIsLoadingOntologies(true)
-            try {
-                const res = await fetchWithTimeout('/api/v1/admin/ontologies', {
-                    silent403: true,
-                })
-                if (res.ok) {
-                    const data = await res.json()
-                    setOntologies(data || [])
-                }
-            } catch (err) {
-                setError(err instanceof Error ? err : new Error('Failed to load ontologies'))
-            } finally {
-                setIsLoadingOntologies(false)
-            }
-        }
-        fetchOntologies()
-    }, [canReadOntologies])
+    const ontologiesQuery = useQuery({
+        queryKey: ['dashboard', 'ontologies'],
+        enabled: canReadOntologies,
+        staleTime: 5 * 60 * 1000,
+        queryFn: async () => {
+            const res = await fetchWithTimeout('/api/v1/admin/ontologies', { silent403: true })
+            return res.ok ? (((await res.json()) as OntologyBrief[]) ?? EMPTY_ONTOLOGIES) : EMPTY_ONTOLOGIES
+        },
+    })
+
+    const templates = templatesQuery.data ?? EMPTY_TEMPLATES
+    const ontologies = ontologiesQuery.data ?? EMPTY_ONTOLOGIES
+    const isLoadingTemplates = templatesQuery.isLoading
+    const isLoadingOntologies = ontologiesQuery.isLoading
+    // Matches the old single `error` state, which only tracked templates/
+    // ontologies fetch failures (dsStats errors were never surfaced here).
+    const error = (templatesQuery.error ?? ontologiesQuery.error ?? null) as Error | null
 
     // Derive recent and popular views — memoized so downstream effects get stable refs
     const recentViews = useMemo(
