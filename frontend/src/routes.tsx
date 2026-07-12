@@ -1,16 +1,22 @@
 import { lazy, Suspense } from 'react'
-import { createBrowserRouter, Navigate } from 'react-router-dom'
+import { createBrowserRouter, Navigate, useParams } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 import { RequireNav } from '@/components/auth/RequireNav'
+
+// The standalone workspace-views page was retired; view management now lives
+// in the workspace-detail "Views" tab. Redirect any old link there.
+function WorkspaceViewsRedirect() {
+  const { workspaceId } = useParams<{ workspaceId: string }>()
+  return <Navigate to={`/workspaces/${workspaceId}?tab=views`} replace />
+}
 
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
 const Dashboard = lazy(() => import('@/components/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
 const ViewPage = lazy(() => import('@/pages/ViewPage').then(m => ({ default: m.ViewPage })))
 const ViewsGallery = lazy(() => import('@/pages/ViewsGallery').then(m => ({ default: m.ViewsGallery })))
-const WorkspaceViewsManager = lazy(() => import('@/pages/WorkspaceViewsManager').then(m => ({ default: m.WorkspaceViewsManager })))
 const ExplorerPage = lazy(() => import('@/pages/ExplorerPage').then(m => ({ default: m.ExplorerPage })))
 const AdminPage = lazy(() => import('@/pages/AdminPage').then(m => ({ default: m.AdminPage })))
 const AdminOverview = lazy(() => import('@/components/admin/AdminOverview').then(m => ({ default: m.AdminOverview })))
@@ -152,7 +158,7 @@ export const router = createBrowserRouter([
           { path: 'explorer', element: <Lazy><ExplorerPage /></Lazy> },
           { path: 'views', element: <Lazy><ViewsGallery /></Lazy> },
           { path: 'views/:viewId', element: <Lazy><ViewPage /></Lazy> },
-          { path: 'workspaces/:workspaceId/views', element: <Lazy><WorkspaceViewsManager /></Lazy> },
+          { path: 'workspaces/:workspaceId/views', element: <WorkspaceViewsRedirect /> },
         ],
       },
       {

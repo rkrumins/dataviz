@@ -593,10 +593,10 @@ export function DataSourceDetailPanel({
 
                         {/* ── Footer action ──────────────────────────────── */}
                         <div className="px-6 py-4 border-t border-glass-border/50 shrink-0">
-                            {/* Views are the payoff of a data source; the header
-                                already has Schema Editor + Explorer, so the primary
-                                footer CTA points at the views that consume it. */}
-                            <Link to={`/workspaces/${wsId}/views`} onClick={onClose}
+                            {/* Views are the payoff of a data source; the primary
+                                footer CTA opens the Explorer pre-filtered to this
+                                source so the user browses exactly its views. */}
+                            <Link to={`/explorer?workspace=${wsId}&dataSource=${ds.id}`} onClick={onClose}
                                 className={cn(
                                     'w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3',
                                     'bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold',
