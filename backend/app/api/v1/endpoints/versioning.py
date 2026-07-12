@@ -258,10 +258,19 @@ async def _touch_views_data_updated(graph_id: str, actor: str) -> None:
         ds = str(meta.get("data_source_id") or "") if meta else ""
         if not ds:
             return
-        from sqlalchemy import update as sa_update
+        from sqlalchemy import select as sa_select, update as sa_update
         from backend.app.db.engine import get_async_session
         from backend.app.db.models import ViewORM, _now
+        from backend.app.db.repositories import view_activity_repo
         async with get_async_session() as session:
+            # Snapshot the affected views BEFORE the bulk update so we can fan
+            # out a per-view "data_changed" activity event (the timeline's Data
+            # channel — a graph publish/merge changed what this view shows).
+            affected = (await session.execute(
+                sa_select(ViewORM.id, ViewORM.workspace_id).where(
+                    ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None),
+                )
+            )).all()
             await session.execute(
                 sa_update(ViewORM)
                 .where(ViewORM.data_source_id == ds, ViewORM.deleted_at.is_(None))
@@ -272,6 +281,13 @@ async def _touch_views_data_updated(graph_id: str, actor: str) -> None:
                         updated_at=ViewORM.updated_at)
                 .execution_options(synchronize_session=False)
             )
+            for view_id, workspace_id in affected:
+                await view_activity_repo.record_view_activity(
+                    session, view_id=view_id, workspace_id=workspace_id,
+                    action="data_changed", actor=actor,
+                    summary="Underlying data updated",
+                    changes={"graphId": graph_id},
+                )
             await session.commit()
     except Exception as exc:
         logger.warning("view data-freshness stamp for %s skipped: %s", graph_id, exc)

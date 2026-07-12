@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # ``visualization.view.<action>`` verbs.
 ACTIONS = frozenset({
     "created", "updated", "visibility_changed", "shared", "unshared",
-    "favourited", "unfavourited", "deleted", "restored",
+    "favourited", "unfavourited", "deleted", "restored", "data_changed",
 })
 
 
