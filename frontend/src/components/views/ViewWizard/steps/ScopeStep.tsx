@@ -284,6 +284,23 @@ function WorkspaceItem({
 
 // ─── Data Source Card ───────────────────────────────────────────────
 
+/** One metric, stacked value-over-label so three of them always fit a card
+ *  column at the same height — inline they wrapped for some cards and not
+ *  others, which is what made the grid ragged. */
+function StatCell({ icon, value, label }: { icon: ReactNode; value: string; label: string }) {
+    return (
+        <div className="min-w-0">
+            <div className="flex items-center gap-1">
+                {icon}
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 tabular-nums truncate">
+                    {value}
+                </span>
+            </div>
+            <p className="mt-0.5 text-[10px] text-slate-400 truncate">{label}</p>
+        </div>
+    )
+}
+
 function DataSourceCard({
     ds,
     stats,
@@ -314,7 +331,9 @@ function DataSourceCard({
         <button
             onClick={onClick}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
+                // h-full + flex-col: the card fills its grid cell, so every card in a
+                // row is the same height and their footers line up (mt-auto below).
+                'relative flex h-full w-full flex-col text-left rounded-xl border-2 p-4 transition-colors duration-150',
                 'hover:shadow-md',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
@@ -329,7 +348,7 @@ function DataSourceCard({
             )}
 
             {/* Header */}
-            <div className="flex items-start gap-3 mb-3">
+            <div className="flex items-start gap-3">
                 {/* Branded provider tile — identifies WHICH connection this source
                     lives on at a glance (three FalkorDB instances stop looking
                     identical). Falls back to the neutral Database tile when the
@@ -345,97 +364,110 @@ function DataSourceCard({
                     {Logo ? <Logo className="w-4 h-4" /> : <Database className="w-4 h-4" />}
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
-                    <div className="flex items-center gap-1.5">
-                        <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 line-clamp-2 break-words">
+                    {/* Two lines are reserved whether the name needs them or not, so a
+                        wrapping name never pushes this card's provider line, badges and
+                        metrics out of step with its neighbours'. */}
+                    <div className="flex items-start gap-1.5 min-h-[2.5rem]">
+                        <h4 className="min-w-0 text-sm font-bold leading-tight text-slate-800 dark:text-slate-200 line-clamp-2 break-words">
                             {ds.label || ds.catalogItemId || 'Unnamed'}
                         </h4>
                         <span
-                            className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
+                            className={cn('w-2 h-2 mt-1 rounded-full shrink-0', healthMeta.dot)}
                             title={health.error ?? healthMeta.label}
                         />
                     </div>
-                    {providerInfo && (
-                        <div
-                            className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 truncate"
-                            title={`${providerInfo.providerName} · ${providerInfo.providerType}`}
-                        >
-                            {providerInfo.providerName}
-                            <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
-                        </div>
-                    )}
-                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                        {ds.isPrimary && (
-                            <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
-                                <Star className="w-2.5 h-2.5" />
-                                Primary
-                            </span>
-                        )}
-                        {sourceMode === 'managed' ? (
-                            <span
-                                title="Fully managed — created and versioned in this app"
-                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20"
-                            >
-                                <Sparkles className="w-2.5 h-2.5" />
-                                Fully managed
-                            </span>
-                        ) : (
-                            <span
-                                title={`Federated — external source of record${ds.writeBackEnabled ? ' · write-back enabled' : ''}`}
-                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20"
-                            >
-                                <Server className="w-2.5 h-2.5" />
-                                Federated
-                            </span>
-                        )}
-                        {recommended && (
-                            <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                                Recommended
-                            </span>
+                    <div
+                        className="text-[11px] text-slate-500 dark:text-slate-400 truncate min-h-[1rem]"
+                        title={providerInfo ? `${providerInfo.providerName} · ${providerInfo.providerType}` : undefined}
+                    >
+                        {providerInfo && (
+                            <>
+                                {providerInfo.providerName}
+                                <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
+                            </>
                         )}
                     </div>
                 </div>
             </div>
 
-            {/* Stats row */}
-            <div className="flex items-center gap-3 mb-3 flex-wrap">
-                {statsLoading && !stats ? (
-                    <div className="flex items-center gap-2 text-xs text-slate-400">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Loading stats...
-                    </div>
-                ) : stats ? (
-                    <>
-                        <div className="flex items-center gap-1 text-xs">
-                            <CircleDot className="w-3 h-3 text-indigo-500" />
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{compactNum(stats.nodeCount)}</span>
-                            <span className="text-slate-400">nodes</span>
-                        </div>
-                        <div className="flex items-center gap-1 text-xs">
-                            <ArrowRightLeft className="w-3 h-3 text-violet-500" />
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{compactNum(stats.edgeCount)}</span>
-                            <span className="text-slate-400">edges</span>
-                        </div>
-                        <div className="flex items-center gap-1 text-xs">
-                            <Layers className="w-3 h-3 text-emerald-500" />
-                            <span className="font-semibold text-slate-700 dark:text-slate-300">{stats.entityTypes.length}</span>
-                            <span className="text-slate-400">types</span>
-                        </div>
-                    </>
+            {/* Badges — their own row (not squeezed beside the logo), so they wrap
+                predictably instead of shoving the header around. */}
+            <div className="flex items-center gap-1.5 mt-2 flex-wrap min-h-[18px]">
+                {ds.isPrimary && (
+                    <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
+                        <Star className="w-2.5 h-2.5" />
+                        Primary
+                    </span>
+                )}
+                {sourceMode === 'managed' ? (
+                    <span
+                        title="Fully managed — created and versioned in this app"
+                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20"
+                    >
+                        <Sparkles className="w-2.5 h-2.5" />
+                        Fully managed
+                    </span>
                 ) : (
-                    <span className="text-[11px] text-slate-400">No statistics available</span>
+                    <span
+                        title={`Federated — external source of record${ds.writeBackEnabled ? ' · write-back enabled' : ''}`}
+                        className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20"
+                    >
+                        <Server className="w-2.5 h-2.5" />
+                        Federated
+                    </span>
+                )}
+                {recommended && (
+                    <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                        Recommended
+                    </span>
                 )}
             </div>
 
-            {/* Status row */}
-            <div className="flex items-center gap-3 pt-3 border-t border-slate-100 dark:border-slate-700/50">
+            {/* Stats — a fixed three-column block. Inline, they wrapped to two lines
+                for busy sources and one for quiet ones, which is most of why the grid
+                looked ragged. */}
+            <div className="mt-3 min-h-[38px]">
+                {statsLoading && !stats ? (
+                    <div className="flex items-center gap-2 h-[38px] text-xs text-slate-400">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Loading stats…
+                    </div>
+                ) : stats ? (
+                    <div className="grid grid-cols-3 gap-2">
+                        <StatCell
+                            icon={<CircleDot className="w-3 h-3 text-indigo-500 shrink-0" />}
+                            value={compactNum(stats.nodeCount)}
+                            label="nodes"
+                        />
+                        <StatCell
+                            icon={<ArrowRightLeft className="w-3 h-3 text-violet-500 shrink-0" />}
+                            value={compactNum(stats.edgeCount)}
+                            label="edges"
+                        />
+                        <StatCell
+                            icon={<Layers className="w-3 h-3 text-emerald-500 shrink-0" />}
+                            value={String(stats.entityTypes.length)}
+                            label={stats.entityTypes.length === 1 ? 'type' : 'types'}
+                        />
+                    </div>
+                ) : (
+                    <p className="flex items-center h-[38px] text-[11px] text-slate-400">
+                        No statistics available
+                    </p>
+                )}
+            </div>
+
+            {/* Status row — mt-auto pins it to the bottom of the card, so every footer
+                in a row sits on the same line no matter what's above it. */}
+            <div className="flex items-center gap-3 mt-auto pt-3 border-t border-slate-100 dark:border-slate-700/50">
                 {/* Aggregation status */}
-                <div className="flex items-center gap-1.5 text-[11px]">
+                <div className="flex items-center gap-1.5 text-[11px] shrink-0">
                     <span className={cn('w-2 h-2 rounded-full shrink-0', aggMeta.dot)} />
                     <span className="text-slate-500 dark:text-slate-400">{aggMeta.label}</span>
                 </div>
 
                 {/* Ontology status */}
-                <div className="flex items-center gap-1 text-[11px]">
+                <div className="flex items-center gap-1 text-[11px] shrink-0">
                     {ds.ontologyId ? (
                         <>
                             <ShieldCheck className="w-3 h-3 text-emerald-500" />
@@ -673,7 +705,9 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
             onClick={selectable ? onSelect : undefined}
             aria-disabled={!selectable}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
+                // h-full: a card carrying an "offline" note must not be taller than its
+                // neighbours — the grid cell decides the height, not the content.
+                'relative flex h-full w-full text-left rounded-xl border-2 p-4 transition-colors duration-150',
                 selectable ? 'hover:shadow-md' : 'cursor-default',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
@@ -689,13 +723,13 @@ function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeO
                     <Check className="w-3 h-3 text-white" />
                 </div>
             )}
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 w-full">
                 <div className={cn('w-10 h-10 rounded-xl border flex items-center justify-center shrink-0', meta.color)}>
                     <Logo className="w-5 h-5" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
                     <div className="flex items-center gap-1.5">
-                        <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{provider.name}</h4>
+                        <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{provider.name}</h4>
                         <span
                             className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
                             title={health.error ?? healthMeta.label}
@@ -740,7 +774,9 @@ function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDe
             type="button"
             onClick={onSelect}
             className={cn(
-                'relative w-full text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
+                // h-full: a description of two lines must not make this card taller
+                // than the one beside it that has none.
+                'relative flex h-full w-full text-left rounded-xl border-2 p-4 transition-colors duration-150 hover:shadow-md',
                 isSelected
                     ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/20 shadow-sm shadow-blue-500/10'
                     : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-slate-300 dark:hover:border-slate-600',
@@ -751,13 +787,13 @@ function OntologyCard({ ontology, isSelected, onSelect }: { ontology: OntologyDe
                     <Check className="w-3 h-3 text-white" />
                 </div>
             )}
-            <div className="flex items-start gap-3">
+            <div className="flex items-start gap-3 w-full">
                 <div className="w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 text-violet-500 bg-violet-500/10 border-violet-500/20">
                     <Sparkles className="w-5 h-5" />
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
                     <div className="flex items-center gap-1.5 flex-wrap">
-                        <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
+                        <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{ontology.name}</h4>
                         {ontology.isPublished && (
                             <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                                 <Check className="w-2.5 h-2.5" /> Published
@@ -930,7 +966,7 @@ function BlankScopePickers({
                                 cta="Manage connections"
                             />
                         ) : (
-                            <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="grid gap-3 sm:grid-cols-2 items-stretch">
                                 {visibleProviders.map(o => (
                                     <ProviderCard
                                         key={o.provider.id}
@@ -963,7 +999,7 @@ function BlankScopePickers({
                         cta="Manage semantic layers"
                     />
                 ) : (
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-3 sm:grid-cols-2 items-stretch">
                         {ontologies.map(o => (
                             <OntologyCard
                                 key={o.id}
@@ -1383,20 +1419,18 @@ export function ScopeStep({
                                 <NoDataSourcesState workspaceName={selectedWorkspace.name} />
                             ) : visibleDataSources.length > 0 ? (
                                 <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                                    <div className={cn(
-                                        'grid gap-3',
-                                        pagedDataSources.length === 1
-                                            ? 'grid-cols-1 max-w-md'
-                                            : pagedDataSources.length === 2
-                                                ? 'grid-cols-1 sm:grid-cols-2'
-                                                : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
-                                    )}>
+                                    {/* A FIXED column count. It used to widen the cards when a
+                                        page happened to hold one or two sources — which meant the
+                                        last page of a paginated list rendered at a completely
+                                        different size from the first. */}
+                                    <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 items-stretch">
                                         {pagedDataSources.map((ds, i) => (
                                             <motion.div
                                                 key={ds.id}
                                                 initial={{ opacity: 0, y: 8 }}
                                                 animate={{ opacity: 1, y: 0 }}
                                                 transition={{ duration: 0.12, delay: Math.min(i * 0.01, 0.05) }}
+                                                className="h-full"
                                             >
                                                 <DataSourceCard
                                                     ds={ds}
