@@ -121,6 +121,7 @@ async def bootstrap_versioned_graph_endpoint(
     _gate: None = Depends(require_versioning_enabled),
     _perm=Depends(require_ws_manage),
     user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Start "enable version control" for a data source: copy its whole graph into the
     versioned store as an auditable ``import`` commit.
@@ -133,7 +134,7 @@ async def bootstrap_versioned_graph_endpoint(
     integrity-checked against the source."""
     from backend.app.services.versioning.bootstrap_worker import create_bootstrap_job
     actor = user.id if user else "system"
-    provider_id, graph_name = await _pin_projection_target(dataSourceId)
+    provider_id, graph_name = await _pin_projection_target(session, dataSourceId, ws_id)
     try:
         res = await create_bootstrap_job(
             data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
@@ -151,12 +152,14 @@ async def bootstrap_status_endpoint(
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose enablement job to read."),
     _user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Live progress of the enablement job — phase, counts, percent, and (on a terminal
     job) the integrity report. Deliberately NOT flag-gated: a job started before an
     admin turned versioning off must still be observable. Scoped to ``ws_id`` so a job
     is never visible (nor its existence leaked) across tenants."""
     from backend.app.services.versioning.bootstrap_worker import bootstrap_status
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
     status = await bootstrap_status(data_source_id=dataSourceId, workspace_id=ws_id)
     if status is None:
         raise HTTPException(status_code=404, detail="no enablement job for this data source")
@@ -171,14 +174,17 @@ async def bootstrap_retry_endpoint(
     _gate: None = Depends(require_versioning_enabled),
     _perm=Depends(require_ws_manage),
     _user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Resume a failed copy from its last committed window, or start it over (for a
     source that changed while it was being read)."""
     from backend.app.services.versioning.bootstrap_worker import retry_bootstrap
     if mode not in ("resume", "restart"):
         raise HTTPException(status_code=422, detail="mode must be resume or restart")
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
-        return await retry_bootstrap(data_source_id=dataSourceId, mode=mode)
+        return await retry_bootstrap(data_source_id=dataSourceId, mode=mode,
+                                     workspace_id=ws_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -190,30 +196,44 @@ async def bootstrap_abandon_endpoint(
     _gate: None = Depends(require_versioning_enabled),
     _perm=Depends(require_ws_manage),
     _user=Depends(get_optional_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Give up on enablement: everything the job imported is removed and the data source
     reads exactly as it did before. Refused once version control is actually live."""
     from backend.app.services.versioning.bootstrap_worker import abandon_bootstrap
     from backend.app.services.versioning.service import ConcurrencyError
+    await _data_source_in_workspace(session, dataSourceId, ws_id)
     try:
-        return await abandon_bootstrap(data_source_id=dataSourceId)
+        return await abandon_bootstrap(data_source_id=dataSourceId, workspace_id=ws_id)
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
-async def _pin_projection_target(data_source_id: str):
+async def _data_source_in_workspace(session: AsyncSession, data_source_id: str, ws_id: str):
+    """TENANT ISOLATION for the bootstrap routes.
+
+    ``require_ws_manage`` proves the caller may manage *the workspace in the URL* — it says
+    nothing about the data source in the query string. Without this check a manager of
+    workspace A could pass workspace B's ``dataSourceId`` and enable, restart or (worst)
+    ABANDON — i.e. delete — B's versioned graph. The versioning router gets the same
+    guarantee from its ``graph_in_workspace`` dependency; these routes live on the graph
+    router and must do it themselves. 404, not 403: existence isn't leaked across tenants.
+    """
+    from backend.app.db.repositories import data_source_repo
+    ds = await data_source_repo.get_data_source_orm(session, data_source_id)
+    if ds is None or getattr(ds, "workspace_id", None) != ws_id:
+        raise HTTPException(status_code=404, detail="unknown data source")
+    return ds
+
+
+async def _pin_projection_target(session: AsyncSession, data_source_id: str, ws_id: str):
     """The data source's REAL FalkorDB graph + provider — the graph the canvas already
     reads. The versioned graph is pinned to it (the same target
     ``projection_target.repair_projection_target`` self-heals to) so the import's
     projection is a fast-forward, not a drop-and-reseed of data we just copied."""
-    from backend.app.db.engine import get_async_session
-    from backend.app.db.repositories import data_source_repo
-    async with get_async_session() as s:
-        ds = await data_source_repo.get_data_source_orm(s, data_source_id)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="unknown data source")
+    ds = await _data_source_in_workspace(session, data_source_id, ws_id)
     return getattr(ds, "provider_id", None), getattr(ds, "graph_name", None)
 
 

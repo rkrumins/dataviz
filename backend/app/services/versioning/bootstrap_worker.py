@@ -954,14 +954,22 @@ async def bootstrap_status(
         }
 
 
-async def retry_bootstrap(*, data_source_id: str, mode: str = "resume") -> Dict[str, object]:
+async def retry_bootstrap(
+    *, data_source_id: str, mode: str = "resume", workspace_id: Optional[str] = None,
+) -> Dict[str, object]:
     """``resume`` picks up from the last committed window; ``restart`` throws away what
     was imported and re-reads the source from scratch (for a source that changed
-    mid-copy). Neither can touch a graph whose head already flipped."""
+    mid-copy). Neither can touch a graph whose head already flipped.
+
+    ``workspace_id`` scopes the job for tenant isolation (the API also checks the data
+    source belongs to the workspace; this is the belt to that's braces)."""
     async with db.graphver_session() as s:
-        job = (await s.execute(select(JobORM).where(
-            JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
-        ).order_by(JobORM.created_at.desc()))).scalars().first()
+        conds = [JobORM.job_type == BOOTSTRAP_JOB_TYPE,
+                 JobORM.data_source_id == data_source_id]
+        if workspace_id is not None:
+            conds.append(JobORM.workspace_id == workspace_id)
+        job = (await s.execute(select(JobORM).where(*conds).order_by(
+            JobORM.created_at.desc()))).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
         if job.status == "completed":
@@ -989,7 +997,9 @@ async def retry_bootstrap(*, data_source_id: str, mode: str = "resume") -> Dict[
         return {"jobId": job.id, "status": "pending", "mode": mode}
 
 
-async def abandon_bootstrap(*, data_source_id: str) -> Dict[str, object]:
+async def abandon_bootstrap(
+    *, data_source_id: str, workspace_id: Optional[str] = None,
+) -> Dict[str, object]:
     """Give up on enablement and leave the data source exactly as it was: the graph shell
     and everything the job imported are removed, so it reads as un-versioned again.
     Refuses once the head has flipped (that graph is live — use the versioning UI).
@@ -998,11 +1008,17 @@ async def abandon_bootstrap(*, data_source_id: str) -> Dict[str, object]:
     ONE transaction, and every worker write re-reads the job in its own transaction and
     aborts if the job is cancelled (``BootstrapRunner._own``) — so the worker either
     committed its window before us (and we delete those rows too) or rolls back after us.
-    It cannot commit rows into a graph we have deleted."""
+    It cannot commit rows into a graph we have deleted.
+
+    ``workspace_id`` scopes the job for tenant isolation — this call DELETES a graph, so it
+    must never act on another tenant's data source id."""
     async with db.graphver_session() as s:
-        job = (await s.execute(select(JobORM).where(
-            JobORM.job_type == BOOTSTRAP_JOB_TYPE, JobORM.data_source_id == data_source_id,
-        ).order_by(JobORM.created_at.desc()).with_for_update())).scalars().first()
+        conds = [JobORM.job_type == BOOTSTRAP_JOB_TYPE,
+                 JobORM.data_source_id == data_source_id]
+        if workspace_id is not None:
+            conds.append(JobORM.workspace_id == workspace_id)
+        job = (await s.execute(select(JobORM).where(*conds).order_by(
+            JobORM.created_at.desc()).with_for_update())).scalars().first()
         if job is None:
             raise ValueError("no enablement job for this data source")
         if job.status == "cancelled":
