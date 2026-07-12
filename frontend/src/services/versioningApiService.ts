@@ -374,6 +374,12 @@ async function vfetch<T>(url: string, init?: RequestInit & { timeoutMs?: number 
     if (res.status === 409 && detail?.type === 'not_up_to_date') {
       throw new NotUpToDateError(detail)
     }
+    if (res.status === 422 && detail?.type === 'graph_name_unavailable') {
+      throw new GraphNameUnavailableError(
+        detail.message ?? 'That graph name is already taken on this connection.',
+        detail.suggestion ?? null,
+      )
+    }
     if (res.status === 401) throw new Error('Session expired')
     const msg =
       typeof detail === 'string'
@@ -426,6 +432,25 @@ export interface GraphNameCheck {
   available: boolean
   normalized: string
   reason?: string | null
+  /** A free name when this one is taken ("data_lineage" → "data_lineage_2"). */
+  suggestion?: string | null
+}
+
+/**
+ * The physical graph name was taken by the time we tried to provision.
+ *
+ * Worth its own type: the graph name IS the FalkorDB key the model writes into,
+ * so the server refuses rather than reusing it (a projection seed would wipe
+ * whatever lives there). Retrying the same name can therefore only fail again —
+ * the caller needs `suggestion` to offer a way forward.
+ */
+export class GraphNameUnavailableError extends Error {
+  readonly suggestion: string | null
+  constructor(message: string, suggestion: string | null) {
+    super(message)
+    this.name = 'GraphNameUnavailableError'
+    this.suggestion = suggestion
+  }
 }
 
 /** Live availability check for a blank model's physical graph name — the same

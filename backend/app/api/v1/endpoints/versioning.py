@@ -619,6 +619,9 @@ class GraphNameCheckResponse(_ApiModel):
     available: bool
     normalized: str
     reason: Optional[str] = None
+    #: A free name when this one is taken (e.g. "data_lineage" -> "data_lineage_2").
+    #: Advisory: provisioning re-checks under the advisory lock and is the authority.
+    suggestion: Optional[str] = None
 
 
 class BlankGraphResponse(_ApiModel):
@@ -1027,10 +1030,87 @@ _GRAPH_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 _RESERVED_GRAPH_PREFIXES = ("gv_", "gvt_", "gvtest_", "blank_", "__fork_")
 
 
+#: "data_lineage_2" -> ("data_lineage", 2). Lets a suggestion keep counting from an
+#: already-numbered name instead of producing "data_lineage_2_2".
+_NUMBERED_SUFFIX_RE = re.compile(r"^(?P<base>.+?)_(?P<n>\d+)$")
+_MAX_GRAPH_NAME_LEN = 64
+
+
+async def _taken_graph_names(
+    session: AsyncSession, provider_id: str, base: str,
+) -> set:
+    """Every name on this connection that could collide with ``base`` or ``base_N``.
+
+    Fetched in ONE pass so suggesting a free name doesn't re-run the whole
+    availability check (and its live GRAPH.LIST) once per candidate.
+    """
+    from sqlalchemy import or_, select
+    from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
+
+    like = f"{base}%"
+    taken: set = set()
+
+    rows = (await session.execute(
+        select(WorkspaceDataSourceORM.graph_name, WorkspaceDataSourceORM.dedicated_graph_name)
+        .where(
+            WorkspaceDataSourceORM.provider_id == provider_id,
+            or_(WorkspaceDataSourceORM.graph_name.ilike(like),
+                WorkspaceDataSourceORM.dedicated_graph_name.ilike(like)),
+        ))).all()
+    for graph_name, dedicated in rows:
+        for value in (graph_name, dedicated):
+            if value:
+                taken.add(str(value).strip().lower())
+
+    cats = (await session.execute(
+        select(CatalogItemORM.source_identifier).where(
+            CatalogItemORM.provider_id == provider_id,
+            CatalogItemORM.source_identifier.ilike(like),
+        ))).scalars().all()
+    taken.update(str(c).strip().lower() for c in cats if c)
+
+    from backend.app.providers.falkor_graph_registry import list_graph_keys
+    keys = await list_graph_keys(provider_id)
+    if keys:
+        taken.update(
+            k.strip().lower() for k in keys
+            if k and k.strip().lower().startswith(base)
+        )
+    return taken
+
+
+def _next_free_graph_name(base: str, taken: set) -> Optional[str]:
+    """First free ``base_N`` (N >= 2). None when the family is exhausted."""
+    trimmed = base[: _MAX_GRAPH_NAME_LEN - 5] or base  # leave room for "_999"
+    for n in range(2, 1000):
+        candidate = f"{trimmed}_{n}"
+        if len(candidate) > _MAX_GRAPH_NAME_LEN:
+            return None
+        if candidate not in taken:
+            return candidate
+    return None
+
+
+async def _suggest_graph_name(
+    session: AsyncSession, provider_id: str, normalized: str,
+) -> Optional[str]:
+    match = _NUMBERED_SUFFIX_RE.match(normalized)
+    base = match.group("base") if match else normalized
+    taken = await _taken_graph_names(session, provider_id, base)
+    return _next_free_graph_name(base, taken)
+
+
 async def _graph_name_availability(
-    session: AsyncSession, provider_id: str, raw: str,
+    session: AsyncSession, provider_id: str, raw: str, *, suggest: bool = False,
 ) -> Dict[str, object]:
-    """``{available, normalized, reason?}`` for a user-proposed physical graph name."""
+    """``{available, normalized, reason?, suggestion?}`` for a proposed graph name.
+
+    The graph name IS the FalkorDB key the model projects into, and a projection
+    seed WIPES that key — so a collision is destructive and this must never say
+    "available" for a name anything else already owns. When ``suggest`` is set, a
+    taken name also comes back with the first free ``<base>_<n>`` so the caller can
+    offer it instead of making the user invent one.
+    """
     from sqlalchemy import or_, select
     from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
 
@@ -1043,6 +1123,13 @@ async def _graph_name_availability(
         return {"available": False, "normalized": normalized,
                 "reason": "Names starting with gv_, gvt_, blank_, __fork_ or ending in "
                           "_proj are reserved for the system."}
+
+    async def _taken(reason: str) -> Dict[str, object]:
+        out: Dict[str, object] = {"available": False, "normalized": normalized, "reason": reason}
+        if suggest:
+            out["suggestion"] = await _suggest_graph_name(session, provider_id, normalized)
+        return out
+
     ds_taken = (await session.execute(
         select(WorkspaceDataSourceORM.id).where(
             WorkspaceDataSourceORM.provider_id == provider_id,
@@ -1050,23 +1137,20 @@ async def _graph_name_availability(
                 WorkspaceDataSourceORM.dedicated_graph_name == normalized),
         ).limit(1))).scalar_one_or_none()
     if ds_taken:
-        return {"available": False, "normalized": normalized,
-                "reason": "Another data source on this connection already uses this name."}
+        return await _taken("Another data source on this connection already uses this name.")
     cat_taken = (await session.execute(
         select(CatalogItemORM.id).where(
             CatalogItemORM.provider_id == provider_id,
             CatalogItemORM.source_identifier == normalized,
         ).limit(1))).scalar_one_or_none()
     if cat_taken:
-        return {"available": False, "normalized": normalized,
-                "reason": "A catalogued graph on this connection already uses this name."}
+        return await _taken("A catalogued graph on this connection already uses this name.")
     # Live key check — best-effort (None = unreachable → registry checks stand alone;
     # they cover every app-managed key, so only out-of-band keys slip past).
     from backend.app.providers.falkor_graph_registry import list_graph_keys
     keys = await list_graph_keys(provider_id)
     if keys is not None and normalized in keys:
-        return {"available": False, "normalized": normalized,
-                "reason": "A graph with this name already exists on this connection."}
+        return await _taken("A graph with this name already exists on this connection.")
     return {"available": True, "normalized": normalized}
 
 
@@ -1079,8 +1163,10 @@ async def check_blank_graph_name(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Live availability check for the wizard's graph-name field (same rules the
-    provisioning endpoint enforces authoritatively)."""
-    return await _graph_name_availability(session, provider_id, graph_name)
+    provisioning endpoint enforces authoritatively). A taken name comes back with a
+    free alternative so the wizard can auto-uniquify instead of asking the user to
+    invent one."""
+    return await _graph_name_availability(session, provider_id, graph_name, suggest=True)
 
 
 @router.post("/blank-graphs", response_model=BlankGraphResponse,
@@ -1192,10 +1278,18 @@ async def create_blank_graph(
         await session.execute(_sql_text(
             "SELECT pg_advisory_xact_lock(hashtext(:k))"
         ), {"k": f"graph-name:{body.provider_id}:{body.graph_name.strip().lower()}"})
-        verdict = await _graph_name_availability(session, body.provider_id, body.graph_name)
+        verdict = await _graph_name_availability(
+            session, body.provider_id, body.graph_name, suggest=True)
         if not verdict["available"]:
+            # Someone took the name while this wizard was open. Hand back a free one
+            # so the client can offer a single-click fix instead of a retry that can
+            # only ever fail again. NEVER fall through to the existing graph: a
+            # projection seed would wipe whatever lives under that key.
             raise HTTPException(status_code=422, detail={
-                "type": "graph_name_unavailable", "message": verdict["reason"]})
+                "type": "graph_name_unavailable",
+                "message": verdict["reason"],
+                "suggestion": verdict.get("suggestion"),
+            })
         user_graph_name = str(verdict["normalized"])
     ds = await data_source_repo.create_data_source(session, ws_id, DataSourceCreateRequest(
         provider_id=body.provider_id, ontology_id=body.ontology_id,

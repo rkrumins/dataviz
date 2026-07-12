@@ -372,8 +372,14 @@ describe('ViewWizard — submit (create path) retry', () => {
 
     await screen.findByRole('button', { name: /open view now/i })
     // The auto-open is advertised, not silent (the firing itself is pinned by the
-    // useAutoOpenCountdown tests at the bottom of this file).
-    expect(screen.getByText(/opening automatically in \d+s/i)).toBeInTheDocument()
+    // useAutoOpenCountdown tests at the bottom of this file). The seconds sit in
+    // their own element, so match on the whole line rather than a single text node.
+    expect(
+      screen.getByText(
+        (_content, el) =>
+          el?.tagName === 'P' && /opening automatically in \d+s/i.test(el.textContent ?? ''),
+      ),
+    ).toBeInTheDocument()
   })
 
   it('stays put (no redirect) when the user chooses to stay here', async () => {
@@ -476,14 +482,17 @@ describe('useAutoOpenCountdown', () => {
     expect(onFire).toHaveBeenCalledTimes(1)
   })
 
-  it('never fires while the user is reading (paused)', () => {
+  it('runs on its own — there is no hover-pause to stall it', () => {
+    // The pause used to make this hook useless in practice: after clicking
+    // "Create" the pointer is already over the modal, so the countdown started
+    // paused and the auto-open never happened. Cancelling is now an explicit act.
     const onFire = vi.fn()
     const { result } = renderHook(() => useAutoOpenCountdown({ enabled: true, seconds: 3, onFire }))
 
-    act(() => { result.current.setPaused(true) })
-    tick(10)
+    expect(result.current).not.toHaveProperty('setPaused')
+    tick(3)
 
-    expect(onFire).not.toHaveBeenCalled()
+    expect(onFire).toHaveBeenCalledTimes(1)
   })
 
   it('never fires after the user takes over (cancel)', () => {
