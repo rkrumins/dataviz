@@ -47,26 +47,6 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-frontend-to-graph
-  namespace: synodic
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: graph-service
-  policyTypes:
-    - Ingress
-  ingress:
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: frontend
-      ports:
-        - protocol: TCP
-          port: 8001
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
   name: allow-viz-to-controlplane
   namespace: synodic
 spec:
@@ -155,9 +135,6 @@ spec:
                   - api
                   - controlplane
                   - worker
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: graph-service
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: seed
