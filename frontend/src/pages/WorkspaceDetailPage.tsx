@@ -563,7 +563,7 @@ export function WorkspaceDetailPage() {
                             <span className="text-ink-muted"> Filter by data source or search to find specific views. Click any view to open it.</span>
                         </p>
                     </div>
-                    <WorkspaceViewsSection wsId={wsId!} dataSources={workspace.dataSources} views={allWorkspaceViews} />
+                    <WorkspaceViewsSection wsId={wsId!} dataSources={workspace.dataSources} />
                 </>
             )}
 

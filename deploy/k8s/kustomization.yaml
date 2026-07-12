@@ -20,7 +20,6 @@ resources:
   - db-init-job.yaml
   - aggregation-controlplane.yaml
   - viz-service.yaml
-  - graph-service.yaml
   - aggregation-worker.yaml
   - stats-service.yaml
   - frontend.yaml

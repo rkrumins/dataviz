@@ -12,7 +12,6 @@ resources:
   - configmaps/viz-config.yaml
   - configmaps/controlplane-config.yaml
   - configmaps/worker-config.yaml
-  - configmaps/graph-config.yaml
 
   # Secrets (templates — envsubst'd at deploy time)
   - secrets/db-credentials.yaml
@@ -40,11 +39,6 @@ resources:
   - services/aggregation-worker/hpa.yaml
   - services/aggregation-worker/pdb.yaml
   - services/versioning-worker/deployment.yaml
-  - services/graph-service/deployment.yaml
-  - services/graph-service/service.yaml
-  - services/graph-service/hpa.yaml
-  - services/graph-service/pdb.yaml
-  - services/graph-service/backendconfig.yaml
   - services/frontend/deployment.yaml
   - services/frontend/service.yaml
   - services/frontend/hpa.yaml

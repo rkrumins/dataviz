@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchEnveloped } from '@/services/cacheEnvelope'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
@@ -10,6 +11,15 @@ import type { DataSourceStats } from '@/hooks/useDashboardData'
 import { deriveWorkspaceHealth } from './WorkspaceHealthBadge'
 import { withTimeout, mapWithConcurrency } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
+
+// Stable empty refs so a missing/loading query doesn't hand the derived
+// useMemos a fresh array/object identity on every render.
+const EMPTY_CATALOG: CatalogItemResponse[] = []
+const EMPTY_ONTOLOGY_DEFS: OntologyDefinitionResponse[] = []
+const EMPTY_PROVIDERS: ProviderResponse[] = []
+const EMPTY_VIEWS: View[] = []
+const EMPTY_STATS: Record<string, DataSourceStats> = {}
+const EMPTY_READINESS: Record<string, DataSourceReadinessResponse> = {}
 
 /** Resolved provider info for a data source (derived from catalogItem → provider). */
 export interface DataSourceProviderInfo {
@@ -41,65 +51,65 @@ export interface UseWorkspaceDetailDataReturn {
 }
 
 export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDetailDataReturn {
-  const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
-  const [catalogItems, setCatalogItems] = useState<CatalogItemResponse[]>([])
-  const [ontologies, setOntologies] = useState<OntologyDefinitionResponse[]>([])
-  const [providers, setProviders] = useState<ProviderResponse[]>([])
-  const [dsStatsMap, setDsStatsMap] = useState<Record<string, DataSourceStats>>({})
-  const [allWorkspaceViews, setAllWorkspaceViews] = useState<View[]>([])
-  const [readinessMap, setReadinessMap] = useState<Record<string, DataSourceReadinessResponse>>({})
-  const [isRefreshing, setIsRefreshing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
 
-  // Derived: the page is "loading" (full-screen spinner) only when no workspace
-  // has been loaded yet for this wsId. Subsequent reloads keep the rendered
-  // page mounted and flip `isRefreshing` instead — callers should render a
-  // subtle indicator rather than unmounting the tree.
-  const isLoading = !workspace || workspace.id !== wsId
+  // Shared, workspace-INDEPENDENT lists. Same RQ keys other hooks already use
+  // (e.g. useBlankScopeOptions), so a catalog/provider/ontology list is fetched
+  // once across the app and every workspace visit reuses it — replacing the old
+  // per-visit re-fetch of all three inside a single loadWorkspace() call.
+  const catalogQuery = useQuery({
+    queryKey: ['catalog', 'list'],
+    staleTime: 5 * 60 * 1000,
+    queryFn: () => withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
+  })
+  const ontologyDefsQuery = useQuery({
+    queryKey: ['ontology-defs', 'list'],
+    staleTime: 5 * 60 * 1000,
+    queryFn: () => withTimeout(ontologyDefinitionService.list(), TIMEOUTS.ADMIN_LIST_MS, 'ontology.list'),
+  })
+  const providersQuery = useQuery({
+    queryKey: ['providers', 'list'],
+    staleTime: 5 * 60 * 1000,
+    queryFn: () => withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
+  })
 
-  const loadWorkspace = useCallback(async (signal?: { cancelled: boolean }) => {
-    if (!wsId) return
-    setIsRefreshing(true)
-    setError(null)
-    try {
-      // Phase 1 — parallel initial fetch. Each call gets a hard timeout
-      // so a single slow backend (e.g. provider listing held up by an
-      // unhealthy provider) doesn't pin the whole page on a spinner.
-      // Workspace itself is the only mandatory result; the rest fall
-      // back to empty lists and the page renders in a degraded state.
-      const settled = await Promise.allSettled([
-        withTimeout(workspaceService.get(wsId), TIMEOUTS.ADMIN_LIST_MS, 'workspace.get'),
-        withTimeout(catalogService.list(), TIMEOUTS.ADMIN_LIST_MS, 'catalog.list'),
-        withTimeout(ontologyDefinitionService.list(), TIMEOUTS.ADMIN_LIST_MS, 'ontology.list'),
-        withTimeout(providerService.list(), TIMEOUTS.ADMIN_LIST_MS, 'providers.list'),
-      ])
-      if (signal?.cancelled) return
+  // The workspace itself — keyed by wsId so switching workspaces (and coming
+  // back) is cache-served. Deliberately NOT keep-previous: a new wsId should
+  // show the loading state until it resolves (matches the old
+  // `workspace.id !== wsId` skeleton behavior).
+  const workspaceQuery = useQuery({
+    queryKey: ['workspace', wsId],
+    enabled: !!wsId,
+    queryFn: () => withTimeout(workspaceService.get(wsId!), TIMEOUTS.ADMIN_LIST_MS, 'workspace.get'),
+  })
 
-      const wsRes = settled[0]
-      if (wsRes.status !== 'fulfilled') {
-        throw wsRes.reason instanceof Error ? wsRes.reason : new Error(String(wsRes.reason))
-      }
-      const ws = wsRes.value
-      const catalogList = settled[1].status === 'fulfilled' ? settled[1].value : ([] as CatalogItemResponse[])
-      const ontologyList = settled[2].status === 'fulfilled' ? settled[2].value : ([] as OntologyDefinitionResponse[])
-      const providerList = settled[3].status === 'fulfilled' ? settled[3].value : ([] as ProviderResponse[])
+  const workspace = workspaceQuery.data ?? null
+  const catalogItems = catalogQuery.data ?? EMPTY_CATALOG
+  const ontologies = ontologyDefsQuery.data ?? EMPTY_ONTOLOGY_DEFS
+  const providers = providersQuery.data ?? EMPTY_PROVIDERS
 
-      setWorkspace(ws)
-      setCatalogItems(catalogList)
-      setOntologies(ontologyList)
-      setProviders(providerList)
-
-      // Phase 2 — per-DS stats + readiness, plus workspace views
+  // Phase 2 — per-DS stats + readiness + this workspace's views. Depends on the
+  // workspace (its data-source set) and is keyed on the sorted DS ids, so it
+  // only re-runs when that set changes. One cached unit: the bulk-stats read,
+  // the concurrency-capped readiness fan-out (bulkhead), and the views list.
+  const dsIdSetKey = useMemo(
+    () => (workspace?.dataSources || []).map(d => d.id).sort().join(','),
+    [workspace],
+  )
+  const phase2Query = useQuery({
+    queryKey: ['workspace-detail-phase2', wsId, dsIdSetKey],
+    enabled: !!workspace,
+    queryFn: async () => {
+      const ws = workspace!
       const stats: Record<string, DataSourceStats> = {}
       const readiness: Record<string, DataSourceReadinessResponse> = {}
       let views: View[] = []
 
       await Promise.all([
         // One bulk request (scoped to this workspace) replaces the former
-        // per-datasource cached-stats fan-out. Entries are keyed
-        // "<wsId>/<dsId>"; status==='computing' rows are cold-cache
-        // placeholders (refresh already enqueued server-side) — skip them,
-        // matching the old null-on-computing behavior.
+        // per-datasource cached-stats fan-out. Entries keyed "<wsId>/<dsId>";
+        // status==='computing' rows are cold-cache placeholders (refresh
+        // already enqueued server-side).
         fetchEnveloped<Record<string, {
           status?: string
           nodeCount?: number
@@ -112,7 +122,7 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
             const dsId = key.slice(key.indexOf('/') + 1)
             if (entry.status === 'computing') {
               // Record the cold-cache placeholder (instead of skipping) so the
-              // card can show a "computing" state rather than a blank dash.
+              // card shows a "computing" state rather than a blank dash.
               stats[dsId] = { nodeCount: 0, edgeCount: 0, entityTypes: [], computing: true }
               continue
             }
@@ -125,36 +135,40 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
         }).catch(() => {}),
         // WS0.4 bulkhead: cap the per-source readiness fan-out. A workspace
         // with many sources must not fire one unbounded request per source —
-        // when a provider is down each hangs to the fetch timeout and the
-        // batch saturates the browser's ~6 HTTP/1.1 connections, stalling
-        // every other request (the app-wide "storm").
+        // when a provider is down each hangs to the fetch timeout and the batch
+        // saturates the browser's ~6 HTTP/1.1 connections (the app-wide "storm").
         mapWithConcurrency(ws.dataSources || [], 4, async (ds) => {
           const ready = await aggregationService.getReadiness(ds.id).catch(() => null)
           if (ready) readiness[ds.id] = ready
         }),
-        listViews({ workspaceId: wsId }).then(v => { views = v.items }).catch(() => {}),
+        listViews({ workspaceId: ws.id }).then(v => { views = v.items }).catch(() => {}),
       ])
-      if (signal?.cancelled) return
 
-      setDsStatsMap(stats)
-      setReadinessMap(readiness)
-      setAllWorkspaceViews(views)
-    } catch (err) {
-      if (signal?.cancelled) return
-      console.error('Failed to load workspace', err)
-      setError(err instanceof Error ? err.message : 'Failed to load workspace')
-    } finally {
-      if (!signal?.cancelled) setIsRefreshing(false)
-    }
-  }, [wsId])
+      return { stats, readiness, views }
+    },
+  })
 
-  useEffect(() => {
-    const signal = { cancelled: false }
-    loadWorkspace(signal)
-    return () => { signal.cancelled = true }
-  }, [loadWorkspace])
+  const dsStatsMap = phase2Query.data?.stats ?? EMPTY_STATS
+  const readinessMap = phase2Query.data?.readiness ?? EMPTY_READINESS
+  const allWorkspaceViews = phase2Query.data?.views ?? EMPTY_VIEWS
 
-  const reload = useCallback(() => { loadWorkspace() }, [loadWorkspace])
+  // Loading = no workspace loaded for THIS wsId yet (the query is keyed by wsId,
+  // so its data is always for the current wsId; the second clause preserves the
+  // old exact condition). isRefreshing = a background refetch is in flight after
+  // the page already rendered — callers show a subtle indicator, not a spinner.
+  const isLoading = !workspace || workspace.id !== wsId
+  const isRefreshing = workspaceQuery.isFetching || phase2Query.isFetching
+  // Matches the old behavior: only a workspace.get failure surfaced an error;
+  // the list + phase-2 failures were swallowed (empty fallbacks).
+  const error = workspaceQuery.error instanceof Error ? workspaceQuery.error.message : null
+
+  const reload = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['workspace', wsId] })
+    queryClient.invalidateQueries({ queryKey: ['workspace-detail-phase2', wsId] })
+    queryClient.invalidateQueries({ queryKey: ['catalog', 'list'] })
+    queryClient.invalidateQueries({ queryKey: ['ontology-defs', 'list'] })
+    queryClient.invalidateQueries({ queryKey: ['providers', 'list'] })
+  }, [queryClient, wsId])
 
   // Derived: ontologyMap
   const ontologyMap = useMemo(() => {
