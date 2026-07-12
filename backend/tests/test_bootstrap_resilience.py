@@ -190,10 +190,11 @@ async def test_the_scan_shrinks_for_an_oversized_query(monkeypatch):
     assert width == 25_000 and seen == [100_000, 50_000, 25_000]
 
 
-async def test_the_scan_does_not_shrink_for_an_outage(monkeypatch):
+async def test_the_scan_does_not_shrink_for_a_broken_pipe(monkeypatch):
     """The regression. A dropped connection used to walk the ladder down to its floor and
     then fail the job — four wasted queries and a dead copy, for a fault that shrinking
-    cannot touch. It must be re-raised for `_run_phase` to wait out instead."""
+    cannot touch. No window is small enough to travel down a dead socket, so it must be
+    re-raised at once for `_run_phase` to wait out."""
     import backend.app.services.versioning.bootstrap_worker as bw
     r = _runner()
     seen = []
@@ -205,7 +206,49 @@ async def test_the_scan_does_not_shrink_for_an_outage(monkeypatch):
     monkeypatch.setattr(bw, "_q", q)
     with pytest.raises(ConnectionResetError):
         await r._scan(object(), "nodes", 0, 100_000)
-    assert seen == [100_000], "an outage must be raised at full width, not laddered down"
+    assert seen == [100_000], "a broken pipe must be raised at full width, not laddered down"
+
+
+async def test_the_scan_DOES_shrink_for_a_socket_timeout(monkeypatch):
+    """A timeout is ambiguous, and the ambiguity matters.
+
+    Observed live: a window sized for a healthy FalkorDB stopped coming back at all once that
+    FalkorDB was near its memory ceiling — surfacing as a socket read timeout, not a
+    server-side "query too expensive". Classified purely as "transient", the job waits out a
+    condition that only shrinking fixes, and waits forever. So a timeout shrinks first; if it
+    still times out at the floor, THEN it is raised and waited out. Both, cheapest first.
+    """
+    import backend.app.services.versioning.bootstrap_worker as bw
+    r = _runner()
+    seen = []
+
+    async def q(client, cypher, params=None, *, timeout_ms=0):
+        seen.append(params["hi"] - params["lo"])
+        if seen[-1] > 25_000:
+            raise TimeoutError("Timeout reading from falkordb:6379")   # a SOCKET timeout
+        return type("R", (), {"result_set": []})()
+
+    monkeypatch.setattr(bw, "_q", q)
+    _rows, width = await r._scan(object(), "nodes", 0, 100_000)
+    assert seen == [100_000, 50_000, 25_000] and width == 25_000, (
+        "a timeout must try a smaller window before concluding the server is down")
+
+
+async def test_a_timeout_at_the_floor_is_finally_waited_out(monkeypatch):
+    """Shrunk as far as it can go and STILL timing out — now it really is the server."""
+    import backend.app.services.versioning.bootstrap_worker as bw
+    r = _runner()
+    seen = []
+
+    async def q(client, cypher, params=None, *, timeout_ms=0):
+        seen.append(params["hi"] - params["lo"])
+        raise TimeoutError("Timeout reading from falkordb:6379")
+
+    monkeypatch.setattr(bw, "_q", q)
+    with pytest.raises(TimeoutError):
+        await r._scan(object(), "nodes", 0, 40_000)
+    assert seen[-1] == config.BOOTSTRAP_SCAN_MIN_WIDTH, "it must reach the floor before giving up"
+    assert _is_transient(TimeoutError("Timeout reading")), "and then be waited out, not fatal"
 
 
 # ── liveness: a working worker must never look dead to its colleagues ────────

@@ -890,19 +890,30 @@ class BootstrapRunner:
         Returns the width that actually WORKED so the caller can remember it: rediscovering
         it from scratch every window means paying a failed query per window forever.
 
-        Only shrinks for faults shrinking can FIX. An outage is re-raised untouched for the
-        phase-level retry to wait out — halving a window is no answer to a broken connection,
-        and it would burn the ladder down to its floor and then fail a perfectly good job."""
+        Shrinks only for faults shrinking can FIX, and knows which those are:
+
+        * A BROKEN PIPE is re-raised untouched — no window is small enough to travel down a
+          dead socket, and laddering down to the floor would burn four doomed queries and then
+          fail a perfectly good job. The phase-level retry waits it out instead.
+        * A TIMEOUT shrinks. It is ambiguous — the server may be in trouble, or the question
+          may be too big for it right now — and shrinking is harmless in the first case and
+          the only cure in the second. A window sized for a healthy FalkorDB genuinely stops
+          answering once that FalkorDB is near its memory ceiling. Once we are at the floor
+          and it STILL times out, we re-raise and the phase retry waits: we have then done
+          both things, in the order that costs least.
+        """
         while True:
             try:
                 res = await _q(client, _SCAN_NODES if kind == "nodes" else _SCAN_EDGES,
                                {"lo": lo, "hi": lo + width}, timeout_ms=_WRITE_TIMEOUT_MS)
                 return list(getattr(res, "result_set", None) or []), width
             except Exception as exc:
-                if _is_transient(exc) or width <= config.BOOTSTRAP_SCAN_MIN_WIDTH:
+                shrinkable = not _is_transient(exc) or _is_timeout(exc)
+                if not shrinkable or width <= config.BOOTSTRAP_SCAN_MIN_WIDTH:
                     raise
                 width = max(config.BOOTSTRAP_SCAN_MIN_WIDTH, width // 2)
-                logger.warning("bootstrap scan window shrank to %d (lo=%d)", width, lo)
+                logger.warning("bootstrap scan window shrank to %d (lo=%d): %s",
+                               width, lo, type(exc).__name__)
 
     async def _known_nodes(self, graph_id: str, commit_id: str, urns) -> set:
         """Which endpoint urns already exist as imported nodes (node phase precedes the
@@ -1384,6 +1395,23 @@ def _is_transient(exc: BaseException) -> bool:
         return (isinstance(exc, (DisconnectionError, InterfaceError, OperationalError))
                 or bool(getattr(exc, "connection_invalidated", False)))
     return any(t in blurb for t in _TRANSIENT_TEXT)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """A TIMEOUT, as opposed to a broken pipe — the difference decides whether SHRINKING the
+    window is a sane response, and the two are easy to conflate.
+
+    "The server did not answer in time" has two causes that look identical from here: the
+    server is in trouble (wait), or the question we asked was too big for it right now
+    (shrink). The second is real and not rare — a scan window sized for a healthy server can
+    stop coming back at all once that server is under memory pressure, which is exactly what
+    a busy FalkorDB does. Shrinking is harmless if the cause was an outage, and it is the
+    ONLY thing that helps if the cause was us. So a timeout shrinks first and waits second.
+
+    A broken pipe is not ambiguous: no window is small enough to travel down a dead socket.
+    """
+    blurb = f"{type(exc).__name__}: {exc}".lower()
+    return "timeout" in blurb or "timed out" in blurb
 
 
 def _friendly_infra_error(exc: Exception) -> str:
