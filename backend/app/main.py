@@ -1298,6 +1298,27 @@ async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
     )
 
 
+# A write reached a feature an admin turned off (e.g. the versioned write-through
+# path when ``versioningEnabled`` is disabled) — same typed 403 shape as the
+# API-layer gate in ``versioning_gate.py`` so the frontend handles one contract.
+from backend.app.services.feature_flags import FeatureDisabledError as _FeatureDisabledError  # noqa: E402
+
+
+@app.exception_handler(_FeatureDisabledError)
+async def _feature_disabled_handler(request, exc: _FeatureDisabledError):
+    logger.info("Feature-disabled write blocked on %s: %s", request.url.path, exc.feature)
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": {
+                "type": "feature_disabled",
+                "feature": exc.feature,
+                "message": exc.message,
+            }
+        },
+    )
+
+
 # Fallback handlers for raw connectivity errors that bypass the breaker
 # (e.g. errors raised during provider instantiation, before the proxy is in
 # place). In steady state these should be rare because every cached provider

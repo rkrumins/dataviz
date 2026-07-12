@@ -18,9 +18,26 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import GraphEdge, GraphNode
+from backend.app.services.feature_flags import (
+    FeatureDisabledError,
+    feature_flags,
+)
 from backend.app.services.versioning.service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
+
+
+async def _require_versioning_flag() -> None:
+    """Backstop for the admin ``versioningEnabled`` flag on the write-through path.
+
+    The API layer already 403s versioning routes, but canvas CRUD arrives through
+    the graph endpoints and lands here — one check blocks every such write (and the
+    implicit heavy enablement in ``_graph_id``) without touching each CRUD route.
+    Cache-first (30s TTL), so steady-state writes don't pay a DB round-trip. Maps
+    to 403 ``feature_disabled`` via the global handler in ``main.py``.
+    """
+    if not await feature_flags.is_enabled_self_session("versioningEnabled", default=True):
+        raise FeatureDisabledError("versioningEnabled")
 
 
 def _node_payload(node: GraphNode) -> dict:
@@ -95,6 +112,9 @@ class VersionedWriteProvider:
                     if res is not None:
                         self._gid = res["graph_id"]
                     else:
+                        # Implicit enablement is a heavy full-graph import — never
+                        # do it while the admin has versioning turned off.
+                        await _require_versioning_flag()
                         # Atomic, complete, idempotent enablement: create-graph + full
                         # provider import in one transaction (no half-enabled graph that
                         # would hijack reads while empty), so every editable entity gets a
@@ -110,6 +130,7 @@ class VersionedWriteProvider:
         ops = [o for o in ops if o is not None]
         if not ops:
             return
+        await _require_versioning_flag()
         await self._svc.apply_ops(graph_id=await self._graph_id(), ops=ops,
                                   actor=self._actor, message=message,
                                   containment_edge_types=self._containment_types,

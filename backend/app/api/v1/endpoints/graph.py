@@ -23,6 +23,7 @@ from backend.app.models.graph import (
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import SearchQuery
+from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.fair_share import get_fair_share
 from backend.app.services.graph_cache import (
@@ -114,6 +115,9 @@ async def get_context_engine(
 async def bootstrap_versioned_graph_endpoint(
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to seed."),
+    # Flag gate FIRST: dependencies resolve in declaration order, and a disabled
+    # feature must 403 before any provider/engine work happens.
+    _gate: None = Depends(require_versioning_enabled),
     user=Depends(get_optional_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -143,6 +147,7 @@ async def resync_versioned_graph_endpoint(
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
     strategy: str = Query("merge", description="merge | external_wins"),
+    _gate: None = Depends(require_versioning_enabled),
     user=Depends(get_optional_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
