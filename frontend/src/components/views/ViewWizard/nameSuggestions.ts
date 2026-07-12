@@ -1,10 +1,20 @@
 /**
- * nameSuggestions — context-catered view-name suggestions for BasicsStep.
+ * nameSuggestions — view-name suggestions for BasicsStep.
  *
- * Pure module (no React) so the ranking logic is unit-testable. Suggestions
- * are built from the wizard's resolved scope (workspace / data source /
- * ontology) plus the schema's root entity types, so they describe what the
- * user is actually building instead of generic boilerplate.
+ * These are a *starting point a person will actually keep*, so the bar is
+ * "reads like a product name", not "is derived from the most data".
+ *
+ * An earlier version templated the workspace name, the ontology name and the
+ * root entity types into the list. Those are identifiers, not prose, and the
+ * results were embarrassing in real estates:
+ *
+ *     "Overlay WS Overview"  ·  "Solidatus multi-containment Model"
+ *     "Zones Landscape"      ·  "Zone to Asset Flow"
+ *
+ * So the curated list is the backbone, and exactly ONE contextual suggestion is
+ * allowed — the data source's own label — and only when that label passes
+ * {@link isHumanLabel}. Omitting a suggestion costs nothing; suggesting garbage
+ * costs trust, so the gate is deliberately conservative.
  */
 
 /** Minimal structural slice of ScopeContext the builder needs. */
@@ -15,7 +25,12 @@ export interface SuggestionScope {
     isBlank?: boolean
 }
 
-/** Minimal structural slice of EntityTypeSchema the builder needs. */
+/**
+ * Minimal structural slice of EntityTypeSchema.
+ *
+ * Retained so BasicsStep's call site keeps compiling; the schema is no longer
+ * templated into names (see the header).
+ */
 export interface SuggestionEntityType {
     id: string
     name: string
@@ -23,85 +38,76 @@ export interface SuggestionEntityType {
     hierarchy?: { level?: number; canContain?: string[] }
 }
 
-/** Fallback labels produced by buildScopeContext when resolution failed —
- *  never worth templating into a suggestion. */
-const GENERIC_LABELS = new Set(['unknown', 'data source', 'blank model'])
+/** The evergreen list. Ordered most-reached-for first. */
+export const CURATED_SUGGESTIONS: readonly string[] = [
+    'Data Lineage',
+    'Impact Analysis',
+    'Data Pipeline',
+    'Domain Overview',
+    'Source to Target',
+    'Medallion Architecture',
+]
 
-function usable(label: string | undefined): label is string {
-    return !!label?.trim() && !GENERIC_LABELS.has(label.trim().toLowerCase())
-}
+const MAX_SUGGESTIONS = 6
+
+/** Placeholders `buildScopeContext` emits when resolution failed. */
+const GENERIC_LABELS = new Set(['unknown', 'data source', 'blank model', 'untitled'])
 
 /**
- * Root types = entity types that sit at the top of the containment
- * hierarchy: prefer explicit `hierarchy.level === 0`; otherwise types never
- * listed in any other type's `canContain`; otherwise the first two types.
+ * Did a person name this, or did a machine mint it?
+ *
+ * Accepts:  "Core DWH", "Finance", "Customer 360", "Sales & Ops"
+ * Rejects:  "ds_930583737602", "roots-node", "urn:synodic:…", "3e105c56b3b4"
+ *
+ * The last rule is the load-bearing one: a display name carries a capital or a
+ * space; a slug like `roots-node` carries neither.
  */
-export function deriveRootTypes(entityTypes: SuggestionEntityType[]): SuggestionEntityType[] {
-    if (entityTypes.length === 0) return []
-
-    const explicitRoots = entityTypes.filter(et => et.hierarchy?.level === 0)
-    if (explicitRoots.length > 0) return explicitRoots
-
-    const contained = new Set(
-        entityTypes.flatMap(et => et.hierarchy?.canContain ?? []),
-    )
-    const structuralRoots = entityTypes.filter(et => !contained.has(et.id))
-    if (structuralRoots.length > 0) return structuralRoots
-
-    return entityTypes.slice(0, 2)
+export function isHumanLabel(label: string | undefined | null): label is string {
+    const v = label?.trim()
+    if (!v) return false
+    if (v.length < 2 || v.length > 28) return false
+    if (GENERIC_LABELS.has(v.toLowerCase())) return false
+    // Identifier punctuation: urns, paths, snake_case keys.
+    if (/[_:/\\]/.test(v)) return false
+    if (!/^[A-Za-z]/.test(v)) return false
+    // Prose alphabet only.
+    if (!/^[A-Za-z0-9 &'.-]+$/.test(v)) return false
+    // Digit blobs: ds_930583737602, table_1197.
+    if (/\d{4,}/.test(v)) return false
+    // Slug test: no capital AND no space ⇒ not a display name.
+    if (!/[A-Z]/.test(v) && !v.includes(' ')) return false
+    return true
 }
 
-const EVERGREEN = ['Impact Analysis', 'Source to Target']
-
 /**
- * Build up to 6 deduped suggestions, most-specific first:
- *   1. "{dataSourceLabel} Lineage"          (existing-data journeys)
- *   2. "{workspaceName} Overview"
- *   3. "{ontologyName} Model"               (blank journeys)
- *   4. "{RootTypePlural} Landscape"
- *   5. "{RootType} to {SecondRootType} Flow"
- *   6. evergreen tails
+ * Up to 6 deduped suggestions: an optional "{Data source} Lineage" first, then
+ * the curated list.
+ *
+ * `_entityTypes` is accepted for call-site compatibility and intentionally
+ * unused — see the header.
  */
 export function buildNameSuggestions(
     scope: SuggestionScope | undefined,
-    entityTypes: SuggestionEntityType[],
+    _entityTypes?: SuggestionEntityType[],
 ): string[] {
     const out: string[] = []
     const seen = new Set<string>()
-    const push = (s: string | undefined) => {
-        const v = s?.trim()
-        if (!v) return
-        const key = v.toLowerCase()
+    const push = (s: string) => {
+        const key = s.toLowerCase()
         if (seen.has(key)) return
         seen.add(key)
-        out.push(v)
+        out.push(s)
     }
 
-    // Blank models have no meaningful data-source label distinct from the
-    // ontology, so lead with the ontology there instead.
-    if (!scope?.isBlank && usable(scope?.dataSourceLabel)) {
-        push(`${scope.dataSourceLabel} Lineage`)
-    }
-    if (usable(scope?.workspaceName)) {
-        push(`${scope.workspaceName} Overview`)
-    }
-    if (scope?.isBlank && usable(scope?.ontologyName)) {
-        push(`${scope.ontologyName} Model`)
+    // Blank models are excluded on purpose: their "data source label" IS the
+    // ontology's name (see buildBlankScopeContext), which reads like a schema,
+    // not like a view — that's where "Solidatus multi-containment Model" came from.
+    const dsLabel = scope?.dataSourceLabel
+    if (!scope?.isBlank && isHumanLabel(dsLabel)) {
+        push(`${dsLabel.trim()} Lineage`)
     }
 
-    const roots = deriveRootTypes(entityTypes)
-    const first = roots[0]
-    // Single-root schemas (the common case) still deserve a "X to Y Flow"
-    // suggestion — fall back to the root's first containable child type.
-    const firstChildId = first?.hierarchy?.canContain?.[0]
-    const second = roots[1]
-        ?? (firstChildId ? entityTypes.find(et => et.id === firstChildId) : undefined)
-    if (first) push(`${(first.pluralName || first.name).trim()} Landscape`)
-    if (first && second && second.id !== first.id) {
-        push(`${first.name.trim()} to ${second.name.trim()} Flow`)
-    }
+    CURATED_SUGGESTIONS.forEach(push)
 
-    EVERGREEN.forEach(push)
-
-    return out.slice(0, 6)
+    return out.slice(0, MAX_SUGGESTIONS)
 }

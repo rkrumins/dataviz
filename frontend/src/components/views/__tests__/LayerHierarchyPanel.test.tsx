@@ -69,6 +69,7 @@ function renderPanel(
     onAddLayer: (name: string) => void
     onRenameLayer: (id: string, name: string) => void
     onDeleteLayer: (id: string) => void
+    onClearLayer: (id: string) => void
   }> = {},
 ) {
   return render(
@@ -85,6 +86,7 @@ function renderPanel(
       onAddLayer={handlers.onAddLayer ?? vi.fn()}
       onRenameLayer={handlers.onRenameLayer ?? vi.fn()}
       onDeleteLayer={handlers.onDeleteLayer ?? vi.fn()}
+      onClearLayer={handlers.onClearLayer ?? vi.fn()}
     />
   )
 }
@@ -206,5 +208,31 @@ describe('LayerHierarchyPanel — in-step layer CRUD', () => {
 
     fireEvent.click(screen.getByTitle('Delete Layer 2'))
     expect(onDeleteLayer).toHaveBeenCalledWith('l2')
+  })
+
+  it('empties a layer in bulk without deleting it', () => {
+    const onClearLayer = vi.fn()
+    const index = makeIndex({
+      'urn:a': { name: 'Node A', type: 'domain', childCount: 0 },
+      'urn:b': { name: 'Node B', type: 'domain', childCount: 0 },
+    })
+    renderPanel(
+      {
+        'urn:a': { layerId: 'l1', inheritsChildren: true },
+        'urn:b': { layerId: 'l1', inheritsChildren: true },
+      },
+      index,
+      { onClearLayer },
+    )
+
+    fireEvent.click(screen.getByTitle('Remove all 2 placements from Layer 1'))
+    expect(onClearLayer).not.toHaveBeenCalled()           // confirm first
+    fireEvent.click(screen.getByRole('button', { name: 'Clear layer' }))
+    expect(onClearLayer).toHaveBeenCalledWith('l1')
+  })
+
+  it('offers no bulk-clear on a layer that holds nothing', () => {
+    renderPanel({}, makeIndex({}))
+    expect(screen.queryByTitle(/Remove all/)).not.toBeInTheDocument()
   })
 })

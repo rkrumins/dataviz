@@ -30,6 +30,7 @@ import {
     Layers,
     FolderPlus,
     Box,
+    Eraser,
     Loader2,
     X,
 } from 'lucide-react'
@@ -82,6 +83,11 @@ interface LayerHierarchyPanelProps {
     onAddLayer: (name: string) => void
     onRenameLayer: (layerId: string, name: string) => void
     onDeleteLayer: (layerId: string) => void
+    /** Empty a layer without deleting it. */
+    onClearLayer: (layerId: string) => void
+    /** Drag-to-resize the rail (long names + deep nesting need room). */
+    onStartResize?: (e: React.PointerEvent) => void
+    isResizing?: boolean
     className?: string
 }
 
@@ -99,6 +105,9 @@ function parseTransfer(e: React.DragEvent): DropPayload | null {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+/** Past this depth we stop indenting: the guide rail still shows nesting, but a
+ *  deeply-nested name keeps its width instead of being crushed to "acc…". */
+const MAX_INDENT_DEPTH = 6
 
 // ─── Inline Text Input ────────────────────────────────────────────────────────
 
@@ -212,12 +221,21 @@ function AssignedEntityItem({
                 draggable={!inherited}
                 onDragStart={!inherited ? handleDragStart : undefined}
                 className={cn(
-                    'group/entity flex items-center gap-1.5 px-2 py-1 rounded-lg transition-colors',
+                    'group/entity flex items-center gap-1.5 pr-2 py-1 rounded-lg transition-colors min-w-0',
                     inherited ? 'cursor-default opacity-80' : 'cursor-grab active:cursor-grabbing',
                     'hover:bg-slate-100 dark:hover:bg-slate-800/50'
                 )}
-                style={{ paddingLeft: `${depth * 16 + 8}px` }}
+                // Indent is a real element (see the guide rails below), not padding,
+                // so a deep name still gets the full remaining width instead of
+                // being squeezed into nothing.
+                style={{ paddingLeft: `${Math.min(depth, MAX_INDENT_DEPTH) * 12 + 8}px` }}
             >
+                {depth > 0 && (
+                    <span
+                        aria-hidden
+                        className="self-stretch w-px shrink-0 bg-slate-200 dark:bg-slate-700/70 mr-0.5"
+                    />
+                )}
                 <div
                     onClick={hasChildren ? handleToggle : undefined}
                     role={hasChildren ? 'button' : undefined}
@@ -573,6 +591,7 @@ interface LayerRowProps {
     onUnassign: (entityId: string) => void
     onRenameLayer: (layerId: string, name: string) => void
     onDeleteLayer: (layerId: string) => void
+    onClearLayer: (layerId: string) => void
 }
 
 function LayerRow({
@@ -587,12 +606,14 @@ function LayerRow({
     onUnassign,
     onRenameLayer,
     onDeleteLayer,
+    onClearLayer,
 }: LayerRowProps) {
     const [isExpanded, setIsExpanded] = useState(true)
     const [showAddRoot, setShowAddRoot] = useState(false)
     const [isDragOver, setIsDragOver] = useState(false)
     const [isRenaming, setIsRenaming] = useState(false)
     const [confirmDelete, setConfirmDelete] = useState(false)
+    const [confirmClear, setConfirmClear] = useState(false)
     const dragControls = useDragControls()
 
     const isLayerActive = activeTarget?.layerId === layer.id && !activeTarget?.nodeId
@@ -694,8 +715,8 @@ function LayerRow({
                         />
                     ) : (
                         <span
-                            className="flex-1 text-sm font-semibold text-slate-800 dark:text-white truncate"
-                            title="Double-click to rename"
+                            className="flex-1 min-w-0 text-sm font-semibold text-slate-800 dark:text-white truncate"
+                            title={`${layer.name} — double-click to rename`}
                             onDoubleClick={e => {
                                 e.stopPropagation()
                                 setIsRenaming(true)
@@ -730,6 +751,15 @@ function LayerRow({
 
                     {/* Layer actions */}
                     <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 shrink-0 transition-opacity">
+                        {totalAssigned > 0 && (
+                            <button
+                                onClick={e => { e.stopPropagation(); setConfirmClear(true) }}
+                                className="p-0.5 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40 text-slate-400 hover:text-amber-600"
+                                title={`Remove all ${totalAssigned} placements from ${layer.name}`}
+                            >
+                                <Eraser className="w-3 h-3" />
+                            </button>
+                        )}
                         <button
                             onClick={e => { e.stopPropagation(); setIsRenaming(true) }}
                             className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400"
@@ -760,6 +790,34 @@ function LayerRow({
                             : <ChevronRight className="w-4 h-4" />}
                     </button>
                 </motion.div>
+
+                {/* Clear confirmation — empties the layer, keeps the layer. */}
+                {confirmClear && (
+                    <div className="mt-1 mx-1 px-3 py-2 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30">
+                        <p className="text-[11px] text-amber-800 dark:text-amber-300">
+                            Remove all {totalAssigned} {totalAssigned === 1 ? 'placement' : 'placements'} from{' '}
+                            <span className="font-semibold">{layer.name}</span>? The layer stays.
+                        </p>
+                        <div className="mt-1.5 flex items-center gap-2">
+                            <button
+                                onClick={e => {
+                                    e.stopPropagation()
+                                    onClearLayer(layer.id)
+                                    setConfirmClear(false)
+                                }}
+                                className="px-2 py-1 rounded-lg bg-amber-500 text-white text-[11px] font-medium hover:bg-amber-600 transition-colors"
+                            >
+                                Clear layer
+                            </button>
+                            <button
+                                onClick={e => { e.stopPropagation(); setConfirmClear(false) }}
+                                className="px-2 py-1 rounded-lg text-[11px] text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {/* Delete confirmation — deleting a layer also drops its
                     placements, so say so before it happens. */}
@@ -895,6 +953,9 @@ export function LayerHierarchyPanel({
     onAddLayer,
     onRenameLayer,
     onDeleteLayer,
+    onClearLayer,
+    onStartResize,
+    isResizing,
     className,
 }: LayerHierarchyPanelProps) {
     const layerIds = layers.map(l => l.id)
@@ -903,17 +964,39 @@ export function LayerHierarchyPanel({
     return (
         <div
             className={cn(
-                'flex flex-col h-full rounded-2xl overflow-hidden',
+                'relative flex flex-col h-full rounded-2xl overflow-hidden',
                 'bg-white/60 dark:bg-slate-900/60 backdrop-blur-xl',
                 'border border-slate-200/70 dark:border-slate-700/60 shadow-lg',
                 className
             )}
         >
+            {/* Drag-to-resize divider — nested names need room. */}
+            {onStartResize && (
+                <div
+                    onPointerDown={onStartResize}
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize layers panel"
+                    title="Drag to resize"
+                    className={cn(
+                        'absolute right-0 top-0 bottom-0 w-1.5 z-20 cursor-col-resize group/resize',
+                        'flex items-center justify-center',
+                    )}
+                >
+                    <span className={cn(
+                        'h-10 w-1 rounded-full transition-colors',
+                        isResizing
+                            ? 'bg-blue-500'
+                            : 'bg-transparent group-hover/resize:bg-slate-300 dark:group-hover/resize:bg-slate-600',
+                    )} />
+                </div>
+            )}
+
             {/* Header */}
             <div className="px-4 pt-4 pb-2 border-b border-slate-200/60 dark:border-slate-700/60">
-                <h3 className="text-sm font-semibold text-slate-800 dark:text-white">Layers & Groups</h3>
+                <h3 className="text-sm font-semibold text-slate-800 dark:text-white">Layers &amp; Groups</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                    Drag entities here or click to set active target
+                    Drop entities on a layer — their children follow
                 </p>
             </div>
 
@@ -964,6 +1047,7 @@ export function LayerHierarchyPanel({
                                 onUnassign={onUnassign}
                                 onRenameLayer={onRenameLayer}
                                 onDeleteLayer={onDeleteLayer}
+                                onClearLayer={onClearLayer}
                             />
                         ))}
                     </Reorder.Group>

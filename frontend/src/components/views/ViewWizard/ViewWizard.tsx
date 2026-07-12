@@ -44,11 +44,16 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-    CreationProgress,
-    CreationSuccess,
+    CreationProgressBody,
+    CreationSuccessBody,
+    CreationBusyFooter,
+    CreationErrorFooter,
+    CreationSuccessFooter,
+    useAutoOpenCountdown,
     type CreationStage,
     type CreationStageId,
     type CreationStageState,
+    type CreationSummaryStat,
 } from './CreationPhase'
 import { useWizardDraft, draftKey } from './useWizardDraft'
 import { useSchemaStore } from '@/store/schema'
@@ -208,6 +213,17 @@ interface WizardShellProps {
     isLastStep: boolean
     isSubmitting: boolean
     onSubmit: () => void
+    /** Create mode only: the wizard is past the form and is creating / has created
+     *  the view. The chrome adapts — every step pill reads complete, a terminal pill
+     *  is appended, and the footer is replaced by `footer`. Creating a view is the
+     *  LAST STEP of the wizard, not a detached dialog. */
+    terminalPhase?: 'creating' | 'success'
+    terminalLabel?: string
+    terminalSubtitle?: string
+    /** Replaces the entire default footer (Back / Cancel / Next). */
+    footer?: React.ReactNode
+    /** Hide the header close button (nothing should abandon a create in flight). */
+    hideClose?: boolean
     children: React.ReactNode
 }
 
@@ -224,9 +240,15 @@ function WizardShell({
     isLastStep,
     isSubmitting,
     onSubmit,
+    terminalPhase,
+    terminalLabel = 'Create',
+    terminalSubtitle,
+    footer,
+    hideClose,
     children,
 }: WizardShellProps) {
-    const isWide = currentStep === 'scope' || currentStep === 'assignment'
+    const isTerminal = !!terminalPhase
+    const isWide = !isTerminal && (currentStep === 'scope' || currentStep === 'assignment')
 
     return (
         <>
@@ -245,37 +267,54 @@ function WizardShell({
                 {/* Header */}
                 <div className="flex items-center justify-between px-8 py-5 border-b border-slate-200 dark:border-slate-700 bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-900">
                     <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-md">
-                            {activeSteps[currentStepIndex]?.icon}
+                        <div className={cn(
+                            'w-12 h-12 rounded-xl flex items-center justify-center text-white shadow-md',
+                            terminalPhase === 'success'
+                                ? 'bg-gradient-to-br from-emerald-500 to-teal-600'
+                                : 'bg-gradient-to-br from-blue-500 to-indigo-600',
+                        )}>
+                            {terminalPhase === 'success'
+                                ? <Check className="w-6 h-6" />
+                                : terminalPhase === 'creating'
+                                    ? <Loader2 className="w-6 h-6 animate-spin" />
+                                    : activeSteps[currentStepIndex]?.icon}
                         </div>
                         <div>
                             <h2 className="text-xl font-bold text-slate-900 dark:text-white">
                                 {mode === 'create' ? 'Create New View' : 'Edit View'}
                             </h2>
                             <p className="text-sm text-slate-500">
-                                Step {currentStepIndex + 1} of {activeSteps.length}: {activeSteps[currentStepIndex]?.label}
+                                {isTerminal
+                                    ? terminalSubtitle
+                                    : `Step ${currentStepIndex + 1} of ${activeSteps.length}: ${activeSteps[currentStepIndex]?.label}`}
                             </p>
                         </div>
                     </div>
-                    <button
-                        onClick={onClose}
-                        className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                    >
-                        <X className="w-5 h-5 text-slate-500" />
-                    </button>
+                    {!hideClose && (
+                        <button
+                            onClick={onClose}
+                            aria-label="Close"
+                            className="p-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                        >
+                            <X className="w-5 h-5 text-slate-500" />
+                        </button>
+                    )}
                 </div>
 
                 {/* Progress Steps — overflow-proof: connectors flex instead of fixed
                     widths, pills can shrink with truncating labels, and non-active
-                    labels drop out below lg so all six steps always fit the modal. */}
+                    labels drop out below lg so all six steps always fit the modal.
+                    In the terminal phase every step reads complete and a final pill
+                    shows the create itself. */}
                 <div className="px-8 py-4 bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
                     <div className="flex items-center min-w-0">
                         {activeSteps.map((step, index) => {
-                            const isActive = step.id === currentStep
-                            const isCompleted = currentStepIndex > index
-                            const isClickable = isCompleted || isActive
+                            const isActive = !isTerminal && step.id === currentStep
+                            const isCompleted = isTerminal || currentStepIndex > index
+                            const isClickable = !isTerminal && (isCompleted || isActive)
+                            const showConnector = index < activeSteps.length - 1 || isTerminal
                             return (
-                                <div key={step.id} className={cn('flex items-center min-w-0', index < activeSteps.length - 1 && 'flex-1')}>
+                                <div key={step.id} className={cn('flex items-center min-w-0', showConnector && 'flex-1')}>
                                     <button
                                         onClick={() => isClickable && onStepClick(step.id)}
                                         disabled={!isClickable}
@@ -303,12 +342,33 @@ function WizardShell({
                                             {step.label}
                                         </span>
                                     </button>
-                                    {index < activeSteps.length - 1 && (
-                                        <div className="flex-1 min-w-2 h-px bg-slate-200 dark:bg-slate-700 mx-2" />
+                                    {showConnector && (
+                                        <div className={cn(
+                                            'flex-1 min-w-2 h-px mx-2',
+                                            isCompleted ? 'bg-emerald-300 dark:bg-emerald-700' : 'bg-slate-200 dark:bg-slate-700',
+                                        )} />
                                     )}
                                 </div>
                             )
                         })}
+
+                        {isTerminal && (
+                            <button
+                                type="button"
+                                disabled
+                                className={cn(
+                                    'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium min-w-0 shrink',
+                                    terminalPhase === 'success'
+                                        ? 'bg-emerald-500 text-white shadow-md'
+                                        : 'bg-blue-600 text-white shadow-md ring-2 ring-blue-100 dark:ring-blue-900',
+                                )}
+                            >
+                                {terminalPhase === 'success'
+                                    ? <Check className="w-4 h-4" />
+                                    : <Loader2 className="w-4 h-4 animate-spin" />}
+                                <span className="truncate">{terminalLabel}</span>
+                            </button>
+                        )}
                     </div>
                 </div>
 
@@ -316,7 +376,7 @@ function WizardShell({
                 <div className="flex-1 overflow-y-auto min-h-[520px]">
                     <AnimatePresence mode="wait">
                         <motion.div
-                            key={currentStep}
+                            key={terminalPhase ?? currentStep}
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: -20 }}
@@ -330,61 +390,65 @@ function WizardShell({
 
                 {/* Footer */}
                 <div className="flex items-center justify-between px-8 py-5 border-t border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50">
-                    <button
-                        onClick={onBack}
-                        disabled={currentStepIndex === 0}
-                        className={cn(
-                            'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
-                            currentStepIndex > 0
-                                ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                                : 'text-slate-400 cursor-not-allowed',
-                        )}
-                    >
-                        <ArrowLeft className="w-4 h-4" />
-                        Back
-                    </button>
-
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={onClose}
-                            className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
-                        >
-                            Cancel
-                        </button>
-
-                        {isLastStep ? (
+                    {footer ?? (
+                        <>
                             <button
-                                onClick={onSubmit}
-                                disabled={!canProceed || isSubmitting}
+                                onClick={onBack}
+                                disabled={currentStepIndex === 0}
                                 className={cn(
-                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
-                                    canProceed && !isSubmitting
-                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
-                                        : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                    'flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors duration-150',
+                                    currentStepIndex > 0
+                                        ? 'text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                        : 'text-slate-400 cursor-not-allowed',
                                 )}
                             >
-                                {isSubmitting ? (
-                                    <><Loader2 className="w-4 h-4 animate-spin" />Saving...</>
+                                <ArrowLeft className="w-4 h-4" />
+                                Back
+                            </button>
+
+                            <div className="flex items-center gap-3">
+                                <button
+                                    onClick={onClose}
+                                    className="px-5 py-2.5 rounded-xl font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150"
+                                >
+                                    Cancel
+                                </button>
+
+                                {isLastStep ? (
+                                    <button
+                                        onClick={onSubmit}
+                                        disabled={!canProceed || isSubmitting}
+                                        className={cn(
+                                            'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
+                                            canProceed && !isSubmitting
+                                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
+                                                : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                        )}
+                                    >
+                                        {isSubmitting ? (
+                                            <><Loader2 className="w-4 h-4 animate-spin" />Saving...</>
+                                        ) : (
+                                            <><Save className="w-4 h-4" />{mode === 'create' ? 'Create View' : 'Save Changes'}</>
+                                        )}
+                                    </button>
                                 ) : (
-                                    <><Save className="w-4 h-4" />{mode === 'create' ? 'Create View' : 'Save Changes'}</>
+                                    <button
+                                        onClick={onNext}
+                                        disabled={!canProceed}
+                                        className={cn(
+                                            'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
+                                            canProceed
+                                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
+                                                : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
+                                        )}
+                                    >
+                                        Next
+                                        <ArrowRight className="w-4 h-4" />
+                                    </button>
                                 )}
-                            </button>
-                        ) : (
-                            <button
-                                onClick={onNext}
-                                disabled={!canProceed}
-                                className={cn(
-                                    'flex items-center gap-2 px-6 py-2.5 rounded-xl font-medium transition-colors duration-150',
-                                    canProceed
-                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 shadow-md'
-                                        : 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed',
-                                )}
-                            >
-                                Next
-                                <ArrowRight className="w-4 h-4" />
-                            </button>
-                        )}
-                    </div>
+                            </div>
+                        </>
+                    )}
                 </div>
             </motion.div>
             </div>
@@ -820,6 +884,11 @@ function ViewWizardBody({
         provision: 'pending', create: 'pending', layout: 'pending',
     })
     const [submitError, setSubmitError] = useState<string | null>(null)
+    // The saved view, held until the user actually leaves the success step.
+    // `onComplete` is what CLOSES the wizard (AppLayout wires it to closeViewEditor),
+    // so calling it the moment the save lands would unmount us mid-celebration —
+    // which is exactly why the success step never appeared and nothing navigated.
+    const createdViewRef = useRef<ViewConfiguration | null>(null)
 
     const [formData, setFormData] = useState<WizardFormData>(makeCreateFormData)
 
@@ -1096,10 +1165,12 @@ function ViewWizardBody({
                     })
                     const savedView = viewToViewConfig(layoutResult)
                     useSchemaStore.getState().addOrUpdateView(savedView)
-                    onComplete?.(savedView)
                     // The view exists and is fully saved — the draft has served its
-                    // purpose. Hand over to the success card; onClose/navigate happen
-                    // when the user (or the countdown) opens it.
+                    // purpose. Hold the view and hand over to the success step;
+                    // onComplete/onClose/navigate all wait until the user leaves
+                    // (onComplete closes the wizard, so firing it here would kill
+                    // the success step and the redirect with it).
+                    createdViewRef.current = savedView
                     clearDraft()
                     setStageStates(s => ({ ...s, layout: 'done' }))
                     setPhase('success')
@@ -1186,54 +1257,83 @@ function ViewWizardBody({
         !driftDismissed &&
         hasOntologyDrifted(viewMetadata?.ontologyDigest, schema?.ontologyDigest)
 
-    // ── Creation phase (create mode only) ──
-    if (mode === 'create' && phase === 'creating') {
-        const stages: CreationStage[] = [
-            ...(isBlank ? [{
-                id: 'provision' as const,
-                label: 'Provisioning your model',
-                detail: 'Checking the connection, then creating the graph and data source',
-                state: stageStates.provision,
-            }] : []),
-            {
-                id: 'create' as const,
-                label: 'Creating the view',
-                detail: 'Saving its name, scope and settings',
-                state: stageStates.create,
-            },
-            {
-                id: 'layout' as const,
-                label: 'Applying layers and placements',
-                detail: 'Writing the layout this view opens with',
-                state: stageStates.layout,
-            },
-        ]
-        return (
-            <CreationProgress
-                stages={stages}
-                viewName={formData.name}
-                error={submitError}
-                onRetry={handleSubmit}
-                onBack={() => setPhase('steps')}
-            />
-        )
-    }
+    // ── Leaving the success step ─────────────────────────────────────────────
+    // Order matters: navigate FIRST, then hand the view to the parent. `onComplete`
+    // closes the wizard, and a close must never be able to cancel the redirect the
+    // user just asked for.
+    const handleOpenNow = useCallback(() => {
+        const id = createdViewIdRef.current
+        if (id) navigate(`/views/${id}`)
+        const saved = createdViewRef.current
+        if (saved) onComplete?.(saved)
+        onClose()
+    }, [navigate, onComplete, onClose])
 
-    if (mode === 'create' && phase === 'success') {
-        return (
-            <CreationSuccess
-                viewName={formData.name}
-                scopeLabel={scopeContext?.dataSourceLabel}
-                isBlank={isBlank}
-                onOpenNow={() => {
-                    const id = createdViewIdRef.current
-                    onClose()
-                    if (id) navigate(`/views/${id}`)
-                }}
-                onClose={onClose}
-            />
-        )
-    }
+    const handleStayHere = useCallback(() => {
+        const saved = createdViewRef.current
+        if (saved) onComplete?.(saved)
+        onClose()
+    }, [onComplete, onClose])
+
+    const isTerminal = mode === 'create' && (phase === 'creating' || phase === 'success')
+
+    // Auto-open: the view is saved and there is nowhere else to go, so open it for
+    // the user unless they're clearly still reading (hover) or they choose otherwise.
+    const countdown = useAutoOpenCountdown({
+        enabled: mode === 'create' && phase === 'success',
+        onFire: handleOpenNow,
+    })
+
+    const creationStages: CreationStage[] = useMemo(() => [
+        ...(isBlank ? [{
+            id: 'provision' as const,
+            label: 'Provisioning your model',
+            detail: 'Checking the connection, then creating the graph and data source',
+            state: stageStates.provision,
+        }] : []),
+        {
+            id: 'create' as const,
+            label: 'Creating the view',
+            detail: 'Saving its name, scope and settings',
+            state: stageStates.create,
+        },
+        {
+            id: 'layout' as const,
+            label: 'Applying layers and placements',
+            detail: 'Writing the layout this view opens with',
+            state: stageStates.layout,
+        },
+    ], [isBlank, stageStates])
+
+    /** What the user just built — shown on the success step. */
+    const successStats: CreationSummaryStat[] = useMemo(() => {
+        const stats: CreationSummaryStat[] = []
+        const layoutLabel = LAYOUT_TYPES.find(t => t.id === formData.layoutType)?.label ?? formData.layoutType
+        stats.push({ label: 'Layout', value: layoutLabel })
+        if (formData.layoutType === 'reference') {
+            stats.push({ label: formData.layers.length === 1 ? 'Layer' : 'Layers', value: formData.layers.length })
+            stats.push({ label: 'Placements', value: Object.keys(formData.assignments ?? {}).length })
+        } else {
+            stats.push({ label: 'Entity types', value: formData.visibleEntityTypes.length })
+        }
+        stats.push({ label: 'Visibility', value: formData.visibility })
+        return stats
+    }, [formData.layoutType, formData.layers.length, formData.assignments, formData.visibleEntityTypes.length, formData.visibility])
+
+    const terminalFooter = phase === 'creating'
+        ? (submitError
+            ? <CreationErrorFooter onBack={() => setPhase('steps')} onRetry={handleSubmit} />
+            : <CreationBusyFooter />)
+        : phase === 'success'
+            ? (
+                <CreationSuccessFooter
+                    remaining={countdown.remaining}
+                    paused={countdown.paused}
+                    onOpenNow={() => { countdown.cancel(); handleOpenNow() }}
+                    onStayHere={() => { countdown.cancel(); handleStayHere() }}
+                />
+            )
+            : undefined
 
     return (
         <WizardShell
@@ -1244,12 +1344,41 @@ function ViewWizardBody({
             onStepClick={handleStepClick}
             onBack={handleBack}
             onNext={handleNext}
-            onClose={onClose}
+            onClose={phase === 'success' ? handleStayHere : onClose}
             canProceed={canProceed}
             isLastStep={isLastStep}
             isSubmitting={isSubmitting}
             onSubmit={handleSubmit}
+            terminalPhase={isTerminal ? phase : undefined}
+            terminalLabel={phase === 'success' ? 'Created' : 'Create'}
+            terminalSubtitle={
+                phase === 'success'
+                    ? 'All done — opening it next'
+                    : submitError
+                        ? 'Something went wrong — nothing was lost'
+                        : 'Saving your view…'
+            }
+            hideClose={phase === 'creating' && !submitError}
+            footer={terminalFooter}
         >
+            {isTerminal ? (
+                phase === 'creating' ? (
+                    <CreationProgressBody
+                        stages={creationStages}
+                        viewName={formData.name}
+                        error={submitError}
+                    />
+                ) : (
+                    <CreationSuccessBody
+                        viewName={formData.name}
+                        scopeLabel={scopeContext?.dataSourceLabel}
+                        isBlank={isBlank}
+                        stats={successStats}
+                        onPauseChange={countdown.setPaused}
+                    />
+                )
+            ) : (
+            <>
             {showDriftBanner && (
                 <OntologyDriftBanner
                     viewDigest={viewMetadata?.ontologyDigest ?? null}
@@ -1340,10 +1469,13 @@ function ViewWizardBody({
                     formData={formData}
                     updateFormData={updateFormData}
                     dataSourceId={formData.dataSourceId}
+                    mode={mode}
                 />
             )}
             {currentStep === 'preview' && (
                 <PreviewStep formData={formData} scopeContext={scopeContext} />
+            )}
+            </>
             )}
         </WizardShell>
     )

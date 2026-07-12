@@ -27,6 +27,7 @@ type FakeEntry = {
   node: { urn: string; entityType: string; displayName: string; properties: Record<string, unknown> }
   childIds: string[]
   totalChildren: number
+  totalIsExact: boolean
   hasMore: boolean
   nextCursor: string | null
   loaded: boolean
@@ -37,6 +38,20 @@ function nodeA(overrides: Partial<FakeEntry> = {}): FakeEntry {
     node: { urn: 'urn:a', entityType: 'domain', displayName: 'Node A', properties: {} },
     childIds: [],
     totalChildren: 0,
+    totalIsExact: true,
+    hasMore: false,
+    nextCursor: null,
+    loaded: true,
+    ...overrides,
+  }
+}
+
+function child(urn: string, name: string, overrides: Partial<FakeEntry> = {}): FakeEntry {
+  return {
+    node: { urn, entityType: 'domain', displayName: name, properties: {} },
+    childIds: [],
+    totalChildren: 0,
+    totalIsExact: true,
     hasMore: false,
     nextCursor: null,
     loaded: true,
@@ -212,5 +227,80 @@ describe('WizardAssignmentTree — coverage, filtering and bulk selection', () =
     fireEvent.click(screen.getByRole('button', { name: /Select all 888 children/i }))
 
     await waitFor(() => expect(fakeBrowser.loadAllChildren).toHaveBeenCalledWith('urn:a'))
+  })
+
+  it('selects every loaded child on the FIRST click (no stale-state second click)', async () => {
+    // The regression: loadAllChildren resolves, but React hasn't re-rendered, so
+    // reading state gave the pre-load node and only the parent got selected.
+    // The loader now RETURNS the ids, so one click is enough.
+    fakeBrowser.nodes = new Map<string, FakeEntry>([
+      ['urn:a', nodeA({ totalChildren: 2, hasMore: true, nextCursor: 'c1', loaded: true })],
+    ])
+    fakeBrowser.loadAllChildren.mockImplementationOnce(async (urn: string) => {
+      // Simulate the hook: children land in the map and the ids come back.
+      fakeBrowser.nodes.set('urn:c1', child('urn:c1', 'Child One'))
+      fakeBrowser.nodes.set('urn:c2', child('urn:c2', 'Child Two'))
+      fakeBrowser.nodes.set(urn, nodeA({
+        totalChildren: 2, hasMore: false, nextCursor: null, loaded: true,
+        childIds: ['urn:c1', 'urn:c2'],
+      }))
+      return ['urn:c1', 'urn:c2']
+    })
+    const onBulkAssign = vi.fn()
+    renderTree({ onBulkAssign })
+
+    fireEvent.click(screen.getByText('Node A'))
+    fireEvent.click(screen.getByRole('button', { name: /Select all 2 children/i }))
+
+    // Parent + both children are selected after ONE click.
+    await waitFor(() => expect(screen.getByText('3 selected')).toBeInTheDocument())
+
+    // And placing that selection sends all three (the Studio collapses them).
+    fireEvent.keyDown(window, { key: '1' })
+    expect(onBulkAssign).toHaveBeenCalledWith('l1', expect.arrayContaining(['urn:a', 'urn:c1', 'urn:c2']))
+  })
+
+  it('reports a child count the server actually gave (never the paging heuristic)', () => {
+    fakeBrowser.nodes = new Map<string, FakeEntry>([
+      ['urn:a', nodeA({ totalChildren: 200, totalIsExact: true, hasMore: true, loaded: true })],
+    ])
+    renderTree()
+
+    // 200 — the real count. Before, expanding overwrote this with `offset + page + 1` = 51.
+    expect(screen.getByTitle('200 children')).toHaveTextContent('200')
+  })
+
+  it('marks an unknown total as a floor rather than inventing one', () => {
+    fakeBrowser.nodes = new Map<string, FakeEntry>([
+      ['urn:a', nodeA({ totalChildren: 50, totalIsExact: false, hasMore: true, loaded: true })],
+    ])
+    renderTree()
+
+    expect(screen.getByText('50+')).toBeInTheDocument()
+  })
+
+  it('releasing a parent releases its children too', async () => {
+    // Parent with two loaded children, all selected.
+    fakeBrowser.nodes = new Map<string, FakeEntry>([
+      ['urn:a', nodeA({ totalChildren: 2, loaded: true, childIds: ['urn:c1', 'urn:c2'] })],
+      ['urn:c1', child('urn:c1', 'Child One')],
+      ['urn:c2', child('urn:c2', 'Child Two')],
+    ])
+    fakeBrowser.loadAllChildren.mockResolvedValueOnce(['urn:c1', 'urn:c2'])
+    const onBulkAssign = vi.fn()
+    renderTree({ onBulkAssign })
+
+    fireEvent.click(screen.getByText('Node A'))
+    fireEvent.click(screen.getByRole('button', { name: /Select all 2 children/i }))
+    await waitFor(() => expect(screen.getByText('3 selected')).toBeInTheDocument())
+
+    // Cmd-click the parent to release it — the children must not be left behind
+    // silently selected, or the next placement quietly drags them along.
+    fireEvent.click(screen.getByText('Node A'), { metaKey: true })
+
+    await waitFor(() => expect(screen.queryByText('3 selected')).not.toBeInTheDocument())
+    // Nothing is selected any more, so a quick-assign key must do nothing.
+    fireEvent.keyDown(window, { key: '1' })
+    expect(onBulkAssign).not.toHaveBeenCalled()
   })
 })
