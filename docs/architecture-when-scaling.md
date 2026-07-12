@@ -78,6 +78,22 @@ registered via the `providers` table — **never** part of platform
 infrastructure. The platform makes no assumptions about which graph
 backend operators run.
 
+**Current state (2026-07) — one instance, deliberately.** In production today
+Streams + Pub/Sub + Cache share **one** MemoryStore with `maxmemory-policy
+volatile-lru`, and that is correct: Streams carry no TTL so they are never
+evicted, `MAXLEN` bounds them, and the high-volume cache (all TTL'd) is evicted
+first — a cache flood cannot evict coordination data. The `allkeys-lru` vs
+`noeviction` split above is the *end-state* for high scale, reached **deploy-only**
+by pointing `CACHE_REDIS_URL` at a second instance. Triggers and steps:
+[Redis Topology & Decoupling runbook](DATA_ARCHITECTURE.md#redis-topology--decoupling).
+
+**Landed since this plan was written:** the standalone worker tier (WS1.1), the
+control-plane **state-sync consumer group** (ADR-017, replacing the per-replica
+Pub/Sub listener), **control-plane internal auth** (ADR-019), and
+**dedicated-Redis ↔ FalkorDB decoupling** (ADR-020) are implemented. The
+`graph-service` was retired (ADR-018). The sections below describe the
+remaining/steady-state design.
+
 ## Web tier — stateless mandate
 
 Every module-level mutable state moves to Redis or is eliminated:

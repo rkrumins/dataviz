@@ -507,6 +507,87 @@ graph LR
 
 ---
 
+## ADR-017: Aggregation state-sync via a control-plane consumer group
+
+**Status:** Accepted
+**Date:** 2026-07
+**Context:** Aggregation status events (`job.completed`, `purge.completed`, `state.updated`, …) are mirrored into `public.workspace_data_sources.aggregation_status` so the viz-service's own endpoints (workspace detail, onboarding wizard) have fresh data. This ran as a **Redis Pub/Sub** listener started **inside every viz-service (web) replica**. Pub/Sub fans every message out to every subscriber, so N web replicas each received every event and independently ran the same `UPDATE workspace_data_sources` + cache invalidation — N redundant writes per event and row-lock contention that grows with replica count. It also violated the stateless-web-tier mandate (a background loop in the request process).
+
+**Decision:** Move the sync to a **Redis Stream** (`aggregation.events.stream`) consumed by a single **consumer group** (`viz-state-sync`) hosted in the **aggregation control plane**, not the web tier and not the (busy) worker.
+
+**Reasoning:**
+- A stream + consumer group delivers each event to **exactly one** consumer across the fleet, regardless of replica count — the N-redundant-writes problem disappears structurally.
+- Handlers are idempotent (`UPDATE … status='ready'`, cache `DEL`) so at-least-once delivery with `XAUTOCLAIM` PEL crash-recovery is safe.
+- The consumer lives in the control plane because it is lightweight I/O (a small `UPDATE` + cache `DEL` per event) and the control plane already owns aggregation state — co-locating it there adds **no new deployable or failure domain**. A dedicated "event-relay" process was considered and rejected as over-decomposition for a featherweight, backstopped projection.
+- The web tier's listener code is **removed** (not merely gated) so it cannot re-host the loop by config accident. Safe because whenever the listener ran (`REDIS_URL` set), execution was always on the worker fleet — no topology runs jobs in-process *and* has a bus.
+
+**Trade-offs:**
+- (+) Exactly-once projection at any replica count; web tier truly stateless.
+- (+) Streams survive a down consumer (redelivered on restart) — Pub/Sub silently dropped events a down subscriber missed.
+- (-) `workspace_data_sources.aggregation_status` is a denormalized **hint**; a rare cross-consumer reorder can leave it briefly stale. Mitigated: the authoritative source is the control-plane readiness endpoint, which self-corrects on the next read.
+
+**Alternatives considered:**
+- Keep Pub/Sub but de-dup with a lock — still every-replica delivery + a new lock; no gain.
+- Host the consumer in the aggregation-worker — rejected: heavy MERGE jobs there could starve the projection.
+- Dedicated event-relay deployment — rejected as over-decoupling (a new pod + failure domain for a trivial workload).
+
+---
+
+## ADR-018: Retire the graph-service
+
+**Status:** Accepted
+**Date:** 2026-07
+**Context:** `graph-service` (`:8001`) was a standalone process whose only job was provider connectivity/probe testing. It was built and deployed but **never invoked** — the onboarding wizard calls viz-service's own `/admin/providers/test-connection`, which is already bulkheaded.
+
+**Decision:** Delete the `graph-service` HTTP layer (`backend/graph/main.py`, `api/`, `Dockerfile.graph`) and every deployment reference (compose, nginx, vite proxy, k8s base + overlays + NetworkPolicies). **Keep** `backend/graph/adapters/` — the live Neo4j/DataHub/Spanner provider adapters viz-service imports. Also delete the dead `backend/stats_service/` skeleton (superseded by `backend/insights_service/`).
+
+**Reasoning:** A separate always-on service to move a bounded, low-volume, already-bulkheaded async probe off the web tier was not worth the operational surface + network hop. Bulkheads (provider preflight, circuit breakers, the dedicated probe DB pool) already deliver the resilience it would have provided.
+
+**Trade-offs:**
+- (+) One fewer deployable, image, and failure domain to operate.
+- (+) Removes a confusing "deployed but dead" service from the estate.
+- (-) If per-connection SSRF hardening is ever needed, a probe gateway would have to be reintroduced (bulkheads, not a gateway, are the current answer).
+
+---
+
+## ADR-019: Internal service auth on the aggregation control plane
+
+**Status:** Accepted
+**Date:** 2026-07
+**Context:** The control plane (`:8091`) exposes job trigger/cancel/**delete**/**purge**/settings with **no authentication** — the viz-service is the authenticated edge; the control plane is internal. Anything that could reach `:8091` (a compromised pod, a NetworkPolicy misconfig, lateral movement) could drive a destructive, multi-tenant API. NetworkPolicies help, but on GKE Standard they are **opt-in** (Dataplane V2 / Calico) and a common misconfiguration.
+
+**Decision:** Add a shared-secret bearer token (`AGGREGATION_INTERNAL_TOKEN`) enforced by a global FastAPI dependency on every route except `/health` + docs; the three internal callers (viz-service proxy, insights post-purge trigger, system-status probe) attach it. **Opt-in by design:** when the token is unset the dependency is a complete no-op and clients send no header, so a stack with no token configured keeps working (loud startup warning). Compose defaults it empty; k8s supplies it via `app-secrets` with `optional: true` so a missing key never blocks startup.
+
+**Reasoning:** Defense-in-depth *behind* NetworkPolicies, portable across clusters regardless of CNI enforcement, at near-zero cost (no new process). Enterprise security reviews expect service-to-service auth for a destructive API — "internal-only" is not an accepted compensating control.
+
+**Also decided (descoped):** WS2.3 originally planned to split the control plane's scheduler/reconciler/recovery/state-sync loops into a **separate process**. Investigation showed all four are clean async I/O (bounded cadence, per-item timeouts, advisory-lock / consumer-group HA) with no CPU-bound section, so co-hosting is correct and a separate process would be over-decoupling. **Not done, deliberately.**
+
+**Trade-offs:**
+- (+) Destructive control surface is authenticated, not just network-segmented.
+- (+) Zero-friction dev (unset = disabled); enforced in prod by config.
+- (-) A shared secret to manage/rotate; a token mismatch is a new (visible, fast) failure mode.
+
+---
+
+## ADR-020: Dedicated Redis decoupled from FalkorDB by construction
+
+**Status:** Accepted
+**Date:** 2026-07
+**Context:** FalkorDB is a Redis-module process. The provider's ancestor/URN/stats **cache** could be built **on the FalkorDB instance itself**: `build_cache_client`, when no dedicated `CACHE_REDIS_URL` was set, mirrored the FalkorDB topology onto the graph nodes. That coupling meant a FalkorDB outage would also wipe the cache, and cache traffic would contend with graph queries on FalkorDB's single-threaded process.
+
+**Decision:** FalkorDB hosts **only** the graph (`GRAPH.QUERY` + dedicated-mode `{graph}_proj` graphs). All operational Redis (streams, pub/sub, locks, rate-limit, revocation, caches) lives on the **dedicated Redis**. `build_cache_client` now returns `None` (cache **disabled**, best-effort) without a dedicated endpoint — it **never** co-locates on FalkorDB. Deployed roles (`web`/`worker`/`controlplane`) **fail fast at startup** if `CACHE_REDIS_URL` is unset (`ProviderManager._assert_dedicated_cache_configured`); dev degrades gracefully.
+
+**Reasoning:** Decoupling must be a code guarantee, not a convention that depends on remembering an env var. FalkorDB Cluster/Sentinel support is unaffected — only the *cache* client changed; the graph connection path (`build_graph_client` + the standalone/sentinel/cluster factory) is untouched.
+
+**Trade-offs:**
+- (+) A FalkorDB restart/OOM can never touch the operational Redis layer; the cache even survives to serve last-known-good.
+- (+) Structural guarantee + startup tripwire (no silent cache-off in prod).
+- (-) Deployed roles now *require* `CACHE_REDIS_URL` (already set across compose + k8s).
+
+See [DATA_ARCHITECTURE.md → Redis Topology & Decoupling](DATA_ARCHITECTURE.md#redis-topology--decoupling) for the full use-case map and the "when to split the cache Redis" runbook.
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -527,3 +608,7 @@ graph LR
 | 014 | Asset onboarding wizard | Accepted | Low |
 | 015 | Projection modes (in_source/dedicated) | Accepted | Medium (complexity) |
 | 016 | Ontology audit trail | Accepted | Low |
+| 017 | State-sync via control-plane consumer group (off the web tier) | Accepted | Low |
+| 018 | Retire the dead graph-service | Accepted | Low |
+| 019 | Control-plane internal auth (loop-split descoped) | Accepted | Low |
+| 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted | Low |

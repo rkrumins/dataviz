@@ -521,6 +521,108 @@ graph TB
 
 ---
 
+## Redis Topology & Decoupling
+
+There are **two distinct Redis roles**, and they must never be confused:
+
+| Role | Server | Hosts | Rule |
+|------|--------|-------|------|
+| **Graph** | FalkorDB (`falkordb:6379`) | The lineage graph (`GRAPH.QUERY`) + dedicated-mode `{graph}_proj` projection graphs | Graph data **only** |
+| **Operational** | Dedicated Redis (`redis:6379`) | Everything else (see map below) | Never on FalkorDB |
+
+FalkorDB *is* a Redis-module process, so it is physically possible to put
+application data on it. We forbid that **by construction** (ADR-020): a FalkorDB
+restart/OOM must never wipe the cache or make cache traffic contend with graph
+queries on FalkorDB's single-threaded process. `build_cache_client` returns
+`None` (cache disabled, best-effort) rather than ever building on FalkorDB
+nodes, and deployed roles fail fast at startup without a dedicated
+`CACHE_REDIS_URL`.
+
+### Use-case map (everything operational is on the dedicated Redis)
+
+| Use-case | Redis structure | Endpoint | Loss profile |
+|----------|-----------------|----------|--------------|
+| Aggregation job dispatch | **Stream** (`XREADGROUP`) | `REDIS_URL` db0 | Durable (MAXLEN-bounded) |
+| Aggregation status → state-sync | **Stream** (`viz-state-sync` group) | `REDIS_URL` db0 | Durable |
+| Versioning projection dispatch | **Stream** | `REDIS_URL` | Durable |
+| Job SSE events + live-state | **Stream + KV** | `REDIS_URL` | Durable / TTL |
+| Cancel bridge | **Pub/Sub** | `REDIS_URL` | Ephemeral |
+| Exec / advisory locks | `SET NX PX` / PG lock | `REDIS_URL` / Postgres | TTL (design-tolerant) |
+| Rate-limit (fair-share, admission) | Lua token-bucket | `REDIS_URL` | TTL (self-heals) |
+| Token revocation (auth) | KV | dedicated Redis | TTL (JWT-bounded) |
+| Aggregated-read cache (`graph_cache`) | KV cache | `REDIS_URL` db0 | TTL (recomputable) |
+| FalkorDB ancestor/URN/stats cache | KV/Hash cache | `CACHE_REDIS_URL` db1 | TTL (recomputable) |
+
+### Streams vs Cache vs Pub/Sub — why they differ
+
+- **Streams** (`XADD`/`XREADGROUP`) — a durable, ordered, replayable append-log
+  with consumer groups. Used for **work queues + event delivery**: at-least-once,
+  survives a consumer crash (Pending-Entry-List + `XAUTOCLAIM`), bounded by
+  `MAXLEN`. Must-not-lose, low volume.
+- **Cache** (`GET`/`SET EX`, hashes) — ephemeral, TTL'd, **loss-tolerant** KV
+  (recomputable from source). High volume, memory-heavy, evictable.
+- **Pub/Sub** (`PUBLISH`/`SUBSCRIBE`) — fire-and-forget fan-out with **no
+  persistence**: a down subscriber misses the message and every subscriber gets
+  every message. Fine for the cancel bridge; wrong for state-sync (which is why
+  ADR-017 moved state-sync from Pub/Sub → Streams).
+
+### One instance vs. splitting (the dedicated Redis)
+
+Today Streams + Pub/Sub + Cache share **one** dedicated Redis (one GCP
+MemoryStore in prod; one container locally). A Redis DB index (`db0` bus vs
+`db1` cache) is **namespace-only** — it does *not* isolate CPU (Redis is
+single-threaded), memory, eviction policy, connections, or the failure domain.
+
+The correctness-critical risk of sharing — cache pressure evicting durable data
+— is already handled:
+
+- **`maxmemory-policy volatile-lru`** (compose + k8s): only keys **with a TTL**
+  are evictable. Streams carry **no TTL**, so job/event streams are structurally
+  protected; the high-volume, LRU cache is evicted first.
+- **Streams are `MAXLEN`-bounded**, so they can't grow unbounded and OOM the
+  instance.
+- Everything else that's TTL'd (locks, rate-limit, revocation) is loss-tolerant
+  by design and evicted only *after* the cache.
+
+So one instance is correct at current scale. The residual coupling is
+*performance/availability* (single-threaded CPU contention; a failover blips
+everything at once), not correctness.
+
+### Runbook — when to split the cache onto a second Redis
+
+`CACHE_REDIS_URL` and `REDIS_URL` are already **two independent config values**
+that resolve to the same instance. Splitting is therefore **deploy-only, no code
+change**: point `CACHE_REDIS_URL` at a second MemoryStore and the cache gets its
+own CPU / memory / eviction / failover domain.
+
+**Split when any of these is true:**
+
+1. **CPU** on the MemoryStore is consistently high — cache reads are starving
+   stream/bus throughput on the single thread.
+2. **Memory** sits near `maxmemory` with heavy eviction churn — the cache is
+   evicting itself constantly and hit-rate is collapsing.
+3. You move the cache to a Redis **Cluster** — then the split is *forced*: the
+   bus cannot run on Cluster (Streams/consumer-groups + Pub/Sub don't shard
+   cleanly — `build_bus_redis` rejects Cluster), and `CACHE_REDIS_URL=.../1`
+   breaks because **Cluster supports DB 0 only** (use `.../0` or key-prefixing).
+
+**How to split (zero code):**
+
+1. Provision a second Redis/MemoryStore for the cache.
+2. Set `CACHE_REDIS_URL` (web/worker/controlplane) to the new instance; leave
+   `REDIS_URL` on the original bus instance.
+3. Give the **cache** instance `volatile-lru` + generous `maxmemory`; keep the
+   **bus** instance protective (`noeviction` or ample headroom — streams/locks
+   must never be evicted).
+4. Roll the deployment. No migration: the cache is recomputable, so a cold
+   cache on the new instance simply warms from source.
+
+> Note: FalkorDB running in **Cluster or Sentinel** mode is independent of all
+> of the above — that is the *graph* connection (`build_graph_client`), which is
+> unaffected by cache/bus placement.
+
+---
+
 ## 6. Stats Polling Service
 
 The Stats Polling Service (`backend/stats_service/main.py`) is a standalone async process that periodically refreshes materialized statistics for each active data source.
