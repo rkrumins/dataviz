@@ -10,6 +10,9 @@ patches:
   - path: patches/ingress-patch.yaml
   - path: patches/anti-affinity.yaml
   - path: patches/hpa-production.yaml
+  # Managed data tier: Cloud SQL + Memorystore replace in-cluster postgres/redis,
+  # and set DB_POOLER_MODE=transaction. Operator supplies endpoints via .env.deploy.
+  - path: patches/managed-data-tier.yaml
   # Override LOG_LEVEL to WARNING
   - target:
       kind: ConfigMap

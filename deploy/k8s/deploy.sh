@@ -209,12 +209,15 @@ cmd_setup() {
 
     # ── Generate Secrets ───────────────────────────────────────────
     step "Generating Secrets"
-    local POSTGRES_PASSWORD JWT_SECRET_KEY CREDENTIAL_ENCRYPTION_KEY ADMIN_PASSWORD
+    local POSTGRES_PASSWORD JWT_SECRET_KEY CREDENTIAL_ENCRYPTION_KEY ADMIN_PASSWORD AGGREGATION_INTERNAL_TOKEN
 
     POSTGRES_PASSWORD="$(rand_string 32)"
     JWT_SECRET_KEY="$(rand_string 64)"
     CREDENTIAL_ENCRYPTION_KEY="$(generate_fernet_key)"
     ADMIN_PASSWORD="$(rand_string 16)"
+    # WS2.3: shared secret for control-plane internal auth. Generated ON by
+    # default so the destructive :8091 API is authenticated in production.
+    AGGREGATION_INTERNAL_TOKEN="$(rand_string 48)"
 
     ok "Generated cryptographically random secrets"
 
@@ -242,6 +245,14 @@ JWT_SECRET_KEY=${JWT_SECRET_KEY}
 CREDENTIAL_ENCRYPTION_KEY=${CREDENTIAL_ENCRYPTION_KEY}
 ADMIN_EMAIL=${ADMIN_EMAIL}
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
+AGGREGATION_INTERNAL_TOKEN=${AGGREGATION_INTERNAL_TOKEN}
+
+# Managed data tier — PRODUCTION overlay only (Cloud SQL + Memorystore private
+# IPs). Leave as-is for dev/staging (they use the in-cluster stores). See
+# .env.deploy.example for details.
+DB_HOST=${DB_HOST:-CHANGE_ME_cloudsql_private_ip}
+REDIS_COORD_HOST=${REDIS_COORD_HOST:-CHANGE_ME_memorystore_coord_ip}
+REDIS_CACHE_HOST=${REDIS_CACHE_HOST:-CHANGE_ME_memorystore_cache_ip}
 ENVEOF
 
     chmod 600 "$ENV_FILE"
@@ -301,7 +312,7 @@ cmd_deploy() {
         --from-literal=POSTGRES_USER=synodic \
         --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
         --from-literal=POSTGRES_DB=synodic \
-        --from-literal=MANAGEMENT_DB_URL="postgresql+asyncpg://synodic:${POSTGRES_PASSWORD}@postgres:5432/synodic" \
+        --from-literal=MANAGEMENT_DB_URL="postgresql+asyncpg://synodic:${POSTGRES_PASSWORD}@${DB_HOST:-postgres}:5432/synodic" \
         --dry-run=client -o yaml | kubectl apply -f -
 
     kubectl create secret generic app-secrets \
@@ -310,6 +321,7 @@ cmd_deploy() {
         --from-literal=CREDENTIAL_ENCRYPTION_KEY="${CREDENTIAL_ENCRYPTION_KEY}" \
         --from-literal=ADMIN_EMAIL="${ADMIN_EMAIL}" \
         --from-literal=ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+        --from-literal=AGGREGATION_INTERNAL_TOKEN="${AGGREGATION_INTERNAL_TOKEN:-}" \
         --dry-run=client -o yaml | kubectl apply -f -
     ok "Secrets injected"
 
