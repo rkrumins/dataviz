@@ -1025,9 +1025,51 @@ def _apply_view_filters(
     return query
 
 
+def _view_order_by(sort: Optional[str]):
+    """Map a Explorer sort key to an ORDER BY clause list. Time-based sorts run
+    server-side (so they order across the WHOLE result, not just the loaded
+    page); name/popularity sorts fall through to the default and are refined
+    client-side. ``data_updated_at`` is TEXT ISO timestamps, so NULLs (views
+    whose data was never published) are pushed last via a coalesce sentinel."""
+    if sort == "newest":
+        return [ViewORM.created_at.desc()]
+    if sort == "oldest":
+        return [ViewORM.created_at.asc()]
+    if sort == "updated":
+        return [ViewORM.updated_at.desc()]
+    if sort == "updated-asc":
+        return [ViewORM.updated_at.asc()]
+    if sort == "data-newest":
+        # Most recently changed DATA first; never-published (NULL) → "" sorts last.
+        return [func.coalesce(ViewORM.data_updated_at, "").desc(), ViewORM.updated_at.desc()]
+    if sort == "data-oldest":
+        # Oldest changed data first; never-published (NULL) → "9999" sorts last.
+        return [func.coalesce(ViewORM.data_updated_at, "9999").asc(), ViewORM.updated_at.asc()]
+    if sort == "recently-modified":
+        # Freshest of data-publish OR settings-edit — the intuitive default.
+        return [func.coalesce(ViewORM.data_updated_at, ViewORM.updated_at).desc()]
+    if sort == "az":
+        return [ViewORM.name.asc()]
+    if sort == "za":
+        return [ViewORM.name.desc()]
+    if sort == "popular":
+        # Correlated favourite-count subquery so popularity sorts across the
+        # whole result set (not the loaded page) without reshaping the joins.
+        fav_count = (
+            select(func.count(ViewFavouriteORM.id))
+            .where(ViewFavouriteORM.view_id == ViewORM.id)
+            .scalar_subquery()
+        )
+        return [fav_count.desc(), ViewORM.updated_at.desc()]
+    # Default (also covers the list-header column sorts refined client-side):
+    # settings-updated desc.
+    return [ViewORM.updated_at.desc()]
+
+
 async def list_views_filtered(
     session: AsyncSession,
     *,
+    sort: Optional[str] = None,
     visibility: Optional[str] = None,
     visibility_in: Optional[List[str]] = None,
     workspace_id: Optional[str] = None,
@@ -1081,7 +1123,7 @@ async def list_views_filtered(
     select_query = _apply_view_filters(select(ViewORM), **filter_kwargs)
     select_query = (
         select_query
-        .order_by(ViewORM.updated_at.desc())
+        .order_by(*_view_order_by(sort))
         .limit(limit)
         .offset(offset)
     )

@@ -301,6 +301,14 @@ async def list_views(
     created_after: Optional[str] = Query(None, alias="createdAfter"),
     search: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
+    sort: Optional[str] = Query(
+        None,
+        description=(
+            "Server-side ordering key: recently-modified (default), data-newest, "
+            "data-oldest, newest, oldest, updated, popular, az, za. Ordering runs "
+            "across the whole result set so it stays correct with infinite scroll."
+        ),
+    ),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
     favourited_only: bool = Query(False, alias="favouritedOnly"),
@@ -360,6 +368,7 @@ async def list_views(
         created_after=created_after,
         search=search,
         tags=tags,
+        sort=sort,
         limit=limit,
         offset=offset,
         user_id=_user_id(user),

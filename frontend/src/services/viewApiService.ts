@@ -111,6 +111,10 @@ export interface ViewListParams {
     search?: string
     /** OR semantics: match views whose tags array contains ANY of these. */
     tags?: string[]
+    /** Server-side ordering key (recently-modified | data-newest | data-oldest |
+     *  newest | oldest | updated | popular | az | za). Ordered across the whole
+     *  result so it stays correct with infinite scroll. */
+    sort?: string
     limit?: number
     offset?: number
     /** Return only views the current user has bookmarked/favourited. */
@@ -252,6 +256,7 @@ export async function listViews(
     if (params?.createdAfter) sp.set('createdAfter', params.createdAfter)
     if (params?.search) sp.set('search', params.search)
     if (params?.tags) params.tags.forEach(t => sp.append('tags', t))
+    if (params?.sort) sp.set('sort', params.sort)
     if (params?.limit != null) sp.set('limit', String(params.limit))
     if (params?.offset != null) sp.set('offset', String(params.offset))
     if (params?.favouritedOnly) sp.set('favouritedOnly', 'true')

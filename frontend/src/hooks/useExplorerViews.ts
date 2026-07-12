@@ -39,10 +39,17 @@ function useStableKey(value: unknown): string {
  * human-readable.
  */
 export type SortOption =
+  // Freshest of data-publish or settings-edit — the default.
+  | 'recently-modified'
+  // Underlying DATA change time (publish / merge).
+  | 'data-newest'
+  | 'data-oldest'
+  // View creation time.
   | 'newest'
   | 'oldest'
-  | 'popular'
+  // Settings-edit time.
   | 'updated'
+  | 'popular'
   | 'az'
   | 'za'
   // Column-sorts (list view header clicks)
@@ -53,26 +60,24 @@ export type SortOption =
   | 'owner-az'
   | 'owner-za'
 
+// The backend now orders these across the WHOLE result set (see
+// view_repo._view_order_by), which is what makes sort correct with infinite
+// scroll — re-sorting the appended pages here would be redundant and, for the
+// data-* NULL handling, could even disagree with the server. So for these keys
+// we trust the server order. Only the list-header column power-sorts (which the
+// server doesn't handle) are still applied to the loaded page here.
+const SERVER_SORTED = new Set<SortOption>([
+  'recently-modified', 'data-newest', 'data-oldest',
+  'newest', 'oldest', 'updated', 'updated-asc', 'popular', 'az', 'za',
+])
+
 function sortViews(views: View[], sort: SortOption): View[] {
+  if (SERVER_SORTED.has(sort)) return views
   const sorted = [...views]
   const byStr = (a: string, b: string) => a.localeCompare(b)
   switch (sort) {
-    case 'newest':
-      return sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    case 'oldest':
-      return sorted.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-    case 'popular':
-      return sorted.sort((a, b) => b.favouriteCount - a.favouriteCount || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    case 'updated':
-      return sorted.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    case 'updated-asc':
-      return sorted.sort((a, b) => new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime())
     case 'likes-asc':
       return sorted.sort((a, b) => a.favouriteCount - b.favouriteCount || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-    case 'az':
-      return sorted.sort((a, b) => byStr(a.name, b.name))
-    case 'za':
-      return sorted.sort((a, b) => byStr(b.name, a.name))
     case 'type-az':
       return sorted.sort((a, b) => byStr(a.viewType ?? '', b.viewType ?? '') || byStr(a.name, b.name))
     case 'type-za':
@@ -82,7 +87,7 @@ function sortViews(views: View[], sort: SortOption): View[] {
     case 'owner-za':
       return sorted.sort((a, b) => byStr(b.createdByName ?? b.createdBy ?? '', a.createdByName ?? a.createdBy ?? '') || byStr(a.name, b.name))
     default:
-      return sorted
+      return views
   }
 }
 
@@ -198,6 +203,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   const stableCategory = filters.category
   const stableCurrentUserId = filters.currentUserId
   const stableLimit = filters.limit
+  const stableSort = filters.sort
 
   // Build the full set of API params for a given page offset. Category
   // params are merged last so they can override defaults (e.g. the
@@ -218,6 +224,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
       viewTypes: vTypes.length > 0 ? vTypes : undefined,
       tags: tagList.length > 0 ? tagList : undefined,
       createdByIn: creators.length > 0 ? creators : undefined,
+      sort: stableSort || undefined,
       limit: stableLimit,
       offset: pageOffset,
       ...categoryParams,
@@ -227,7 +234,7 @@ export function useExplorerViews(filters: ExplorerFilters): UseExplorerViewsResu
   }, [
     debouncedSearch, stableVisibility, stableFavouritedOnly,
     stableDataSourceId, workspaceIdsKey, viewTypesKey, tagsKey,
-    creatorIdsKey, stableLimit, stableCategory, stableCurrentUserId,
+    creatorIdsKey, stableSort, stableLimit, stableCategory, stableCurrentUserId,
   ])
 
   // ─── Initial fetch + filter-change reload ───────────────────────────
