@@ -24,7 +24,8 @@
  * who + when). A full activity log per view is a backend follow-up.
  */
 import { useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
+import { ExplorerPreviewDrawer } from '@/components/explorer/ExplorerPreviewDrawer'
 import {
     Eye, Search, Plus, Compass, LayoutGrid, List as ListIcon,
     Lock, Users, Globe, AlertTriangle, UserRound, Clock, X, History, ChevronDown,
@@ -64,7 +65,6 @@ interface WorkspaceViewsSectionProps {
 }
 
 export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: WorkspaceViewsSectionProps) {
-    const navigate = useNavigate()
     const currentUser = useAuthStore(s => s.user)
     const { openViewEditor } = useViewEditorModal()
     const { showToast } = useToast()
@@ -142,6 +142,8 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
     const [shareView, setShareView] = useState<{ id: string; name: string; visibility: string } | null>(null)
     const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number } | null>(null)
     const [showBulkDelete, setShowBulkDelete] = useState(false)
+    const [previewView, setPreviewView] = useState<View | null>(null)
+    const [previewEditMode, setPreviewEditMode] = useState(false)
 
     // BE rule (views.py can_delete_view): creator OR workspace:view:delete on
     // the view's workspace. Mirror it so Delete hides for users who'd 403.
@@ -215,8 +217,11 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
     const actionProps = (v: View) => ({
         onToggleFavourite: () => toggleFavourite(v.id),
         onShare: () => setShareView({ id: v.id, name: v.name, visibility: v.visibility }),
-        onPreview: () => navigate(`/views/${v.id}`),
-        onEdit: () => openViewEditor(v.id),
+        // Click a card/row → open the detail drawer to view; the pencil → open
+        // it in details-edit mode. Same surface as Explorer.
+        onPreview: () => { setPreviewEditMode(false); setPreviewView(v) },
+        onEdit: () => { setPreviewEditMode(true); setPreviewView(v) },
+        onEditLayout: () => openViewEditor(v.id),
         onDelete: canDeleteView(v)
             ? () => setDeleteView({ id: v.id, name: v.name, favouriteCount: v.favouriteCount })
             : undefined,
@@ -444,6 +449,23 @@ export default function WorkspaceViewsSection({ wsId, dataSources, allViews }: W
                 onDelete={canBulkDelete ? () => setShowBulkDelete(true) : undefined}
                 onChangeVisibility={handleBulkVisibility}
                 onClearSelection={() => setSelectedIds(new Set())}
+            />
+
+            {/* ── Detail drawer (view + edit details), reused from Explorer ── */}
+            <ExplorerPreviewDrawer
+                view={previewView}
+                isOpen={!!previewView}
+                onClose={() => setPreviewView(null)}
+                onToggleFavourite={() => previewView && toggleFavourite(previewView.id)}
+                onShare={() => previewView && setShareView({ id: previewView.id, name: previewView.name, visibility: previewView.visibility })}
+                onEdit={previewView ? () => { const id = previewView.id; setPreviewView(null); openViewEditor(id) } : undefined}
+                onDelete={previewView && canDeleteView(previewView)
+                    ? () => setDeleteView({ id: previewView!.id, name: previewView!.name, favouriteCount: previewView!.favouriteCount })
+                    : undefined}
+                healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
+                providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
+                initialEditMode={previewEditMode}
+                onSaved={() => refetch()}
             />
 
             {/* ── Dialogs (reused from Explorer) ─────────────────── */}

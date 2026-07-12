@@ -194,6 +194,8 @@ export interface ExplorerViewCardProps {
   onShare: () => void
   onPreview?: () => void
   onEdit?: () => void
+  /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
+  onEditLayout?: () => void
   /** When true, the edit button renders disabled with a tooltip. */
   editDisabled?: boolean
   onDelete?: () => void
@@ -224,6 +226,7 @@ export function ExplorerViewCard({
   onShare,
   onPreview,
   onEdit,
+  onEditLayout,
   editDisabled,
   onDelete,
   onRestore,
@@ -394,7 +397,7 @@ export function ExplorerViewCard({
                 type="button"
                 onClick={e => { e.stopPropagation(); onEdit() }}
                 className="rounded-lg p-1.5 text-ink-muted hover:text-accent-lineage hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors duration-150"
-                title="Edit view"
+                title="Edit details (name, description, tags, visibility)"
               >
                 <Pencil className="h-3.5 w-3.5" />
               </button>
@@ -410,6 +413,7 @@ export function ExplorerViewCard({
             viewName={view.name}
             visibility={view.visibility}
             onEdit={onEdit}
+            onEditLayout={onEditLayout}
             editDisabled={editDisabled}
             onDelete={() => onDelete?.()}
             onShare={onShare}

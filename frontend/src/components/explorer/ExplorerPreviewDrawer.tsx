@@ -6,8 +6,10 @@
  * last synced, favourite count, and a mini preview for hierarchy/reference.
  */
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { History } from 'lucide-react'
+import { History, Save, Settings2, Check } from 'lucide-react'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
+import { updateView, type View as ViewT } from '@/services/viewApiService'
+import { useToast } from '@/components/ui/toast'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -54,12 +56,17 @@ interface ExplorerPreviewDrawerProps {
   onClose: () => void
   onToggleFavourite: () => void
   onShare: () => void
+  /** Opens the full builder (ViewWizard) — labelled "Edit layout & scope". */
   onEdit?: () => void
   editDisabled?: boolean
   onDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
   /** Provider the view's data source is built from (shown as a scope pill). */
   providerInfo?: DataSourceProviderInfo
+  /** Open directly in details-edit mode (used when the pencil is clicked). */
+  initialEditMode?: boolean
+  /** Called after a successful details save so the host can refetch. */
+  onSaved?: () => void
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -327,8 +334,16 @@ export function ExplorerPreviewDrawer({
   onDelete,
   healthStatus,
   providerInfo,
+  initialEditMode,
+  onSaved,
 }: ExplorerPreviewDrawerProps) {
   const [activityOpen, setActivityOpen] = useState(false)
+  const [editMode, setEditMode] = useState(!!initialEditMode)
+  // Reset edit mode when the drawer opens for a (possibly different) view or the
+  // caller's intent changes — pencil opens in edit mode, a click opens in view mode.
+  useEffect(() => {
+    setEditMode(isOpen ? !!initialEditMode : false)
+  }, [view?.id, isOpen, initialEditMode])
   const content = (
     <>
       <ViewActivityDrawer
@@ -419,6 +434,10 @@ export function ExplorerPreviewDrawer({
 
             {/* ── Body ── */}
             <div className="flex-1 px-6 py-5 space-y-5">
+              {editMode && view ? (
+                <EditDetailsPanel view={view} onCancel={() => setEditMode(false)} onSaved={onSaved} />
+              ) : (
+              <>
               {/* Workspace + Visibility badges */}
               <div className="flex items-center gap-2 flex-wrap">
                 <ViewScopeBadge
@@ -667,9 +686,12 @@ export function ExplorerPreviewDrawer({
                   {view.favouriteCount === 1 ? 'favourite' : 'favourites'}
                 </span>
               </div>
+              </>
+            )}
             </div>
 
-            {/* ── Footer actions ── */}
+            {/* ── Footer actions ── (hidden while editing details) */}
+            {!editMode && (
             <div className="px-6 py-5 border-t border-glass-border/50 space-y-3">
               {/* Primary action — full width */}
               <Link
@@ -685,45 +707,39 @@ export function ExplorerPreviewDrawer({
                 <ExternalLink className="h-4 w-4" />
                 Open Full View
               </Link>
-              <button
-                onClick={() => setActivityOpen(true)}
-                className="w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 border border-glass-border text-sm font-medium text-ink-muted hover:text-ink hover:border-indigo-500/30 transition-colors"
-              >
-                <History className="h-4 w-4" /> View activity
-              </button>
+              {onEdit && (
+                <button
+                  onClick={() => { if (!editDisabled) onEdit() }}
+                  disabled={editDisabled}
+                  title={editDisabled
+                    ? "Switch to this view's workspace to edit"
+                    : 'Open the builder to change entity scope, layers, filters and layout'}
+                  className={cn(
+                    'w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold',
+                    'border border-accent-lineage/40 text-accent-lineage bg-accent-lineage/5',
+                    'hover:bg-accent-lineage/10 transition-colors duration-200',
+                    editDisabled && 'opacity-50 cursor-not-allowed',
+                  )}
+                >
+                  <Settings2 className="h-4 w-4" /> Edit layout &amp; scope
+                </button>
+              )}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setEditMode(true)}
+                  className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 border border-glass-border text-sm font-medium text-ink-muted hover:text-ink hover:border-indigo-500/30 transition-colors"
+                >
+                  <Pencil className="h-4 w-4" /> Edit details
+                </button>
+                <button
+                  onClick={() => setActivityOpen(true)}
+                  className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 border border-glass-border text-sm font-medium text-ink-muted hover:text-ink hover:border-indigo-500/30 transition-colors"
+                >
+                  <History className="h-4 w-4" /> Activity
+                </button>
+              </div>
               {/* Secondary actions row */}
               <div className="flex items-center gap-2">
-                {onEdit && (
-                  editDisabled ? (
-                    <span
-                      className={cn(
-                        'relative flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5',
-                        'border border-glass-border/50 text-sm font-medium',
-                        'text-ink-muted/40 cursor-not-allowed group/edit',
-                      )}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                      Edit
-                      <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[220px] rounded-lg bg-slate-900 dark:bg-slate-700 px-3 py-2 text-[11px] text-white leading-snug opacity-0 group-hover/edit:opacity-100 transition-opacity duration-150 z-50 shadow-lg">
-                        Switch to this view's workspace to edit
-                      </span>
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => onEdit()}
-                      className={cn(
-                        'flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-3 py-2.5',
-                        'border border-glass-border text-sm font-medium text-ink-muted',
-                        'bg-black/[0.02] dark:bg-white/[0.02]',
-                        'hover:text-accent-lineage hover:border-accent-lineage/30 transition-colors duration-200',
-                      )}
-                      title="Edit view"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                      Edit
-                    </button>
-                  )
-                )}
                 <button
                   onClick={onShare}
                   className={cn(
@@ -753,6 +769,7 @@ export function ExplorerPreviewDrawer({
                 )}
               </div>
             </div>
+            )}
           </motion.aside>
         )}
       </AnimatePresence>
@@ -761,4 +778,164 @@ export function ExplorerPreviewDrawer({
 
   // Render via portal to avoid z-index / overflow issues
   return createPortal(content, document.body)
+}
+
+/**
+ * EditDetailsPanel — lightweight in-drawer form for a view's metadata
+ * (name, description, tags, visibility). Saves via the existing PUT /views/{id}
+ * — no wizard — and the change is captured by the activity log's field diff.
+ * Structural edits (scope/layers/layout) stay in the builder ("Edit layout & scope").
+ */
+function EditDetailsPanel({ view, onCancel, onSaved }: {
+  view: ViewT
+  onCancel: () => void
+  onSaved?: () => void
+}) {
+  const { showToast } = useToast()
+  const [name, setName] = useState(view.name)
+  const [description, setDescription] = useState(view.description ?? '')
+  const [tagList, setTagList] = useState<string[]>(view.tags ?? [])
+  const [tagInput, setTagInput] = useState('')
+  const [visibility, setVisibility] = useState<string>(view.visibility)
+  const [saving, setSaving] = useState(false)
+
+  const origTags = (view.tags ?? []).join('|')
+  const dirty = name !== view.name
+    || (description || '') !== (view.description || '')
+    || tagList.join('|') !== origTags
+    || visibility !== view.visibility
+
+  const addTag = (raw: string) => {
+    const t = raw.replace(/,+$/, '').trim()
+    if (t && !tagList.includes(t)) setTagList(prev => [...prev, t])
+    setTagInput('')
+  }
+  const removeTag = (t: string) => setTagList(prev => prev.filter(x => x !== t))
+
+  const handleSave = async () => {
+    if (!name.trim()) { showToast('error', 'Name is required'); return }
+    setSaving(true)
+    try {
+      await updateView(view.id, {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        tags: tagList,
+        visibility,
+      })
+      showToast('success', 'View details updated')
+      onSaved?.()
+      onCancel()
+    } catch {
+      showToast('error', 'Couldn’t save changes')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const VIS = [
+    { value: 'private', icon: Lock, label: 'Private', desc: 'Only you can see it' },
+    { value: 'workspace', icon: Users, label: 'Workspace', desc: 'Everyone in this workspace' },
+    { value: 'enterprise', icon: Globe, label: 'Enterprise', desc: 'Everyone in the organisation' },
+  ] as const
+
+  const labelCls = 'block text-[11px] font-bold uppercase tracking-wider text-ink-muted mb-1.5'
+  const inputCls = 'w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage/40 transition-shadow'
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-sm font-bold text-ink">Edit details</h3>
+        <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
+          Name, description, tags and visibility. To change entity scope, layers or layout use{' '}
+          <span className="font-medium text-ink">Edit layout &amp; scope</span>.
+        </p>
+      </div>
+
+      <div>
+        <label className={labelCls}>Name</label>
+        <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="View name" autoFocus />
+      </div>
+
+      <div>
+        <label className={labelCls}>Description</label>
+        <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} className={cn(inputCls, 'resize-none')} placeholder="What does this view show? (optional)" />
+      </div>
+
+      <div>
+        <label className={labelCls}>Tags</label>
+        <div className={cn(inputCls, 'flex flex-wrap items-center gap-1.5 py-2 cursor-text')}>
+          {tagList.map(t => (
+            <span key={t} className="inline-flex items-center gap-1 rounded-full bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20 pl-2 pr-1 py-0.5 text-xs font-medium">
+              {t}
+              <button type="button" onClick={() => removeTag(t)} className="rounded-full hover:bg-accent-lineage/20 p-0.5" aria-label={`Remove ${t}`}>
+                <X className="h-2.5 w-2.5" />
+              </button>
+            </span>
+          ))}
+          <input
+            value={tagInput}
+            onChange={e => { const v = e.target.value; if (v.endsWith(',')) addTag(v); else setTagInput(v) }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); addTag(tagInput) }
+              else if (e.key === 'Backspace' && !tagInput && tagList.length) removeTag(tagList[tagList.length - 1])
+            }}
+            onBlur={() => tagInput && addTag(tagInput)}
+            placeholder={tagList.length ? 'Add…' : 'e.g. finance, quarterly'}
+            className="flex-1 min-w-[90px] bg-transparent text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none"
+          />
+        </div>
+        <p className="text-[10px] text-ink-muted mt-1">Press Enter or comma to add a tag.</p>
+      </div>
+
+      <div>
+        <label className={labelCls}>Visibility</label>
+        <div className="space-y-2">
+          {VIS.map(({ value, icon: Icon, label, desc }) => {
+            const active = visibility === value
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setVisibility(value)}
+                className={cn(
+                  'w-full flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors',
+                  active
+                    ? 'border-accent-lineage/50 bg-accent-lineage/[0.06]'
+                    : 'border-glass-border bg-black/[0.02] dark:bg-white/[0.02] hover:border-accent-lineage/30',
+                )}
+              >
+                <span className={cn('w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border', active ? 'bg-accent-lineage/10 border-accent-lineage/20 text-accent-lineage' : 'border-glass-border text-ink-muted')}>
+                  <Icon className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-semibold text-ink">{label}</span>
+                  <span className="block text-xs text-ink-muted">{desc}</span>
+                </span>
+                <span className={cn('w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center', active ? 'border-accent-lineage bg-accent-lineage' : 'border-ink-muted/30')}>
+                  {active && <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={handleSave}
+          disabled={saving || !dirty || !name.trim()}
+          className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold shadow-lg shadow-accent-lineage/25 hover:shadow-xl hover:-translate-y-0.5 disabled:opacity-50 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed transition-all duration-200"
+        >
+          <Save className="h-4 w-4" /> {saving ? 'Saving…' : 'Save changes'}
+        </button>
+        <button
+          onClick={onCancel}
+          disabled={saving}
+          className="px-4 py-2.5 rounded-xl border border-glass-border text-sm font-medium text-ink-muted hover:text-ink transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
 }

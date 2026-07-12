@@ -3,7 +3,7 @@
  * lifecycle actions: Delete, Change Visibility, Share.
  */
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye, History } from 'lucide-react'
+import { MoreHorizontal, Pencil, Trash2, Share2, Globe, Users, Lock, Eye, History, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -13,6 +13,8 @@ interface ViewCardOverflowMenuProps {
   viewName: string
   visibility: 'private' | 'workspace' | 'enterprise'
   onEdit?: () => void
+  /** Opens the full builder (ViewWizard) — entity scope, layers, layout. */
+  onEditLayout?: () => void
   editDisabled?: boolean
   onDelete: () => void
   onShare: () => void
@@ -24,6 +26,7 @@ export function ViewCardOverflowMenu({
   viewName,
   visibility,
   onEdit,
+  onEditLayout,
   editDisabled,
   onDelete,
   onShare,
@@ -97,7 +100,7 @@ export function ViewCardOverflowMenu({
                     style={{ width: 'calc(100% - 4px)' }}
                   >
                     <Pencil className="w-3.5 h-3.5" />
-                    <span className="flex-1 text-left">Edit</span>
+                    <span className="flex-1 text-left">Edit details</span>
                     <span className="text-[10px] text-ink-muted/50 font-normal">Switch workspace</span>
                   </span>
                 ) : (
@@ -107,9 +110,19 @@ export function ViewCardOverflowMenu({
                     style={{ width: 'calc(100% - 4px)' }}
                   >
                     <Pencil className="w-3.5 h-3.5" />
-                    <span className="flex-1 text-left">Edit</span>
+                    <span className="flex-1 text-left">Edit details</span>
                   </button>
                 )
+              )}
+              {onEditLayout && (
+                <button
+                  onClick={() => { onEditLayout(); setIsOpen(false) }}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors duration-150 rounded-xl mx-0.5"
+                  style={{ width: 'calc(100% - 4px)' }}
+                >
+                  <Settings2 className="w-3.5 h-3.5" />
+                  Edit layout &amp; scope
+                </button>
               )}
               <button
                 onClick={() => { onShare(); setIsOpen(false) }}

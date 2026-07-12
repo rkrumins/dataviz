@@ -158,7 +158,13 @@ export function ExplorerPage() {
   })
 
   const [previewView, setPreviewView] = useState<View | null>(null)
+  const [previewEditMode, setPreviewEditMode] = useState(false)
   const [shareView, setShareView] = useState<{ id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null>(null)
+
+  // Card click → open the detail drawer to view; the pencil → open it in
+  // details-edit mode. The full builder stays behind "Edit layout & scope".
+  const openViewPreview = useCallback((v: View) => { setPreviewEditMode(false); setPreviewView(v) }, [])
+  const openViewDetailsEdit = useCallback((v: View) => { setPreviewEditMode(true); setPreviewView(v) }, [])
   const [deleteView, setDeleteView] = useState<{ id: string; name: string; favouriteCount: number; permanent?: boolean } | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkDelete, setShowBulkDelete] = useState(false)
@@ -569,6 +575,8 @@ export function ExplorerPage() {
             {searchInput && (
               <button
                 onClick={() => setSearchInput('')}
+                title="Clear search"
+                aria-label="Clear search"
                 className="mr-1.5 p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.04] transition-colors duration-150"
               >
                 <X className="w-3.5 h-3.5" />
@@ -625,6 +633,8 @@ export function ExplorerPage() {
             <div className="inline-flex items-center rounded-lg border border-glass-border p-0.5">
               <button
                 onClick={() => setParam('layout', 'grid')}
+                title="Grid view"
+                aria-label="Grid view"
                 className={cn(
                   'p-1.5 rounded-md transition-colors duration-150',
                   layout === 'grid' ? 'bg-accent-lineage/12 text-accent-lineage' : 'text-ink-muted hover:text-ink'
@@ -634,6 +644,8 @@ export function ExplorerPage() {
               </button>
               <button
                 onClick={() => setParam('layout', 'list')}
+                title="List view (sortable columns)"
+                aria-label="List view"
                 className={cn(
                   'p-1.5 rounded-md transition-colors duration-150',
                   layout === 'list' ? 'bg-accent-lineage/12 text-accent-lineage' : 'text-ink-muted hover:text-ink'
@@ -657,7 +669,7 @@ export function ExplorerPage() {
 
         {/* ── Featured / Pinned ────────────────────────────────── */}
         {!hasActiveFilters && pinnedViews.length > 0 && (
-          <ExplorerHero views={pinnedViews} onToggleFavourite={toggleFavourite} onPreview={setPreviewView} />
+          <ExplorerHero views={pinnedViews} onToggleFavourite={toggleFavourite} onPreview={openViewPreview} />
         )}
 
         {/* ── Recently Viewed ──────────────────────────────────── */}
@@ -680,8 +692,9 @@ export function ExplorerPage() {
                     view={v}
                     onToggleFavourite={() => toggleFavourite(v.id)}
                     onShare={() => handleShare(v)}
-                    onPreview={() => setPreviewView(v)}
-                    onEdit={() => openViewEditor(v.id)}
+                    onPreview={() => openViewPreview(v)}
+                    onEdit={() => openViewDetailsEdit(v)}
+                    onEditLayout={() => openViewEditor(v.id)}
                     editDisabled={false}
                     onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                     onRestore={() => handleRestore(v)}
@@ -767,8 +780,9 @@ export function ExplorerPage() {
                       view={v}
                       onToggleFavourite={() => toggleFavourite(v.id)}
                       onShare={() => handleShare(v)}
-                      onPreview={() => setPreviewView(v)}
-                      onEdit={() => openViewEditor(v.id)}
+                      onPreview={() => openViewPreview(v)}
+                      onEdit={() => openViewDetailsEdit(v)}
+                      onEditLayout={() => openViewEditor(v.id)}
                       editDisabled={false}
                       onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                       onRestore={() => handleRestore(v)}
@@ -808,8 +822,9 @@ export function ExplorerPage() {
                   view={v}
                   onToggleFavourite={() => toggleFavourite(v.id)}
                   onShare={() => handleShare(v)}
-                  onPreview={() => setPreviewView(v)}
-                  onEdit={() => openViewEditor(v.id)}
+                  onPreview={() => openViewPreview(v)}
+                  onEdit={() => openViewDetailsEdit(v)}
+                  onEditLayout={() => openViewEditor(v.id)}
                   editDisabled={false}
                   onDelete={canDeleteView(v) ? () => handleDeleteRequest(v) : undefined}
                   onRestore={() => handleRestore(v)}
@@ -849,6 +864,8 @@ export function ExplorerPage() {
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
         providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
+        initialEditMode={previewEditMode}
+        onSaved={() => refetch()}
       />
       <ExplorerBulkActions
         selectedCount={selectedIds.size}
