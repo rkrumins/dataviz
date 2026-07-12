@@ -37,6 +37,14 @@ import type {
 
 const PAGE_SIZE = 50
 
+/** Bulk "load all" paging. The children endpoints have no route-level max
+ *  (graph.py children limit is only `ge=1`), so 500/page keeps payloads sane;
+ *  top-level IS capped at `le=1000` server-side. */
+const BULK_CHILD_PAGE_SIZE = 500
+const BULK_TOP_LEVEL_PAGE_SIZE = 1000
+/** Hard safety stop for "load all" loops (200 × 500 = 100k children/node). */
+const BULK_MAX_PAGES = 200
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface BrowserNode {
@@ -84,6 +92,9 @@ export interface UseEntityBrowserResult {
     topLevelTotalCount: number
     topLevelMetadata: TopLevelMetadata
     parentMap: Map<string, string>
+    /** Fresh read of a node entry (ref-backed) — safe to call after an awaited
+     *  action inside the same callback, where the `nodes` state would be stale. */
+    peekNode: (urn: string) => BrowserNode | undefined
 
     // ─── Ontology-derived ───
     canTransitivelyContain: (ancestorType: string, targetType: string) => boolean
@@ -101,6 +112,10 @@ export interface UseEntityBrowserResult {
     loadMoreTopLevel: () => Promise<void>
     expandNode: (urn: string) => Promise<void>
     loadMoreChildren: (parentUrn: string) => Promise<void>
+    /** Page through ALL remaining children of a node (500/page) until exhausted. */
+    loadAllChildren: (parentUrn: string) => Promise<void>
+    /** Page through ALL remaining top-level nodes (1000/page) until exhausted. */
+    loadAllTopLevel: () => Promise<void>
     setSearch: (query: string) => void
     setTypeFilter: (typeId: string | null) => void
     refresh: () => Promise<void>
@@ -139,6 +154,14 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
     // ref at call-time instead.
     const typeFilterRef = useRef(typeFilter)
     typeFilterRef.current = typeFilter
+    // Cursor/hasMore mirrors for the bulk loaders (must read fresh values after
+    // awaits without stale closures).
+    const topLevelCursorRef = useRef(topLevelCursor)
+    topLevelCursorRef.current = topLevelCursor
+    const topLevelHasMoreRef = useRef(topLevelHasMore)
+    topLevelHasMoreRef.current = topLevelHasMore
+    // Guards so concurrent "load all" loops never run twice for the same target.
+    const bulkInFlightRef = useRef<Set<string>>(new Set())
 
     // Reset when provider changes (workspace/datasource switch)
     useEffect(() => {
@@ -439,6 +462,122 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         }
     }, [provider, containmentEdgeTypes, addLoading, removeLoading])
 
+    // ─── loadAllChildren: page through EVERY remaining child of a node ───
+    // Resumes from the current cursor when children are partially loaded, so
+    // work already done by expand/load-more is never re-fetched. Cursor state
+    // is tracked locally from API results (React state is stale inside the loop).
+
+    const loadAllChildren = useCallback(async (parentUrn: string) => {
+        if (bulkInFlightRef.current.has(parentUrn)) return
+        const first = nodesRef.current.get(parentUrn)
+        if (first?.loaded && !first.hasMore) return
+
+        bulkInFlightRef.current.add(parentUrn)
+        addLoading(parentUrn)
+
+        try {
+            let cursor: string | null = first?.loaded ? (first.nextCursor ?? null) : null
+            for (let page = 0; page < BULK_MAX_PAGES; page++) {
+                const result = await provider.getChildrenWithEdges(parentUrn, {
+                    edgeTypes: containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
+                    limit: BULK_CHILD_PAGE_SIZE,
+                    ...(cursor ? { cursor } : { offset: 0 }),
+                    includeLineageEdges: false,
+                })
+
+                setNodes(prev => {
+                    const next = new Map(prev)
+                    const newChildIds: string[] = []
+
+                    for (const child of result.children) {
+                        newChildIds.push(child.urn)
+                        if (!next.has(child.urn)) {
+                            next.set(child.urn, {
+                                node: child,
+                                childIds: [],
+                                totalChildren: child.childCount ?? 0,
+                                hasMore: false,
+                                nextCursor: null,
+                                loaded: false,
+                            })
+                        }
+                    }
+
+                    const entry = next.get(parentUrn)
+                    if (entry) {
+                        const existingSet = new Set(entry.childIds)
+                        const appendIds = newChildIds.filter(id => !existingSet.has(id))
+                        next.set(parentUrn, {
+                            ...entry,
+                            childIds: [...entry.childIds, ...appendIds],
+                            totalChildren: result.totalChildren,
+                            hasMore: result.hasMore,
+                            nextCursor: result.nextCursor ?? null,
+                            loaded: true,
+                        })
+                    }
+                    return next
+                })
+
+                setParentMap(prev => {
+                    const next = new Map(prev)
+                    for (const edge of result.containmentEdges) {
+                        next.set(edge.targetUrn, edge.sourceUrn)
+                    }
+                    return next
+                })
+
+                if (!result.hasMore) break
+                cursor = result.nextCursor ?? null
+                if (!cursor) break // defensive: server claims more but gave no cursor
+            }
+        } catch (err) {
+            console.error(`[useEntityBrowser] Failed to load all children for ${parentUrn}:`, err)
+        } finally {
+            bulkInFlightRef.current.delete(parentUrn)
+            removeLoading(parentUrn)
+        }
+    }, [provider, containmentEdgeTypes, addLoading, removeLoading])
+
+    // ─── loadAllTopLevel: page through EVERY remaining top-level node ───
+    // Mirrors loadMoreTopLevel's context (current type filter, no search param —
+    // same as the existing load-more path) and appends until exhausted.
+
+    const loadAllTopLevel = useCallback(async () => {
+        if (!topLevelHasMoreRef.current) return
+        if (bulkInFlightRef.current.has('__top-level')) return
+
+        bulkInFlightRef.current.add('__top-level')
+        addLoading('__top-level')
+
+        try {
+            let cursor = topLevelCursorRef.current
+            for (let page = 0; page < BULK_MAX_PAGES; page++) {
+                const activeFilter = typeFilterRef.current
+                const result = await provider.getTopLevelNodes({
+                    entityTypes: activeFilter ? [activeFilter] : undefined,
+                    limit: BULK_TOP_LEVEL_PAGE_SIZE,
+                    cursor,
+                    includeChildCount: true,
+                })
+                mergeTopLevelResult(result, 'append')
+
+                if (!result.hasMore) break
+                cursor = result.nextCursor ?? null
+                if (!cursor) break
+            }
+        } catch (err) {
+            console.error('[useEntityBrowser] Failed to load all top-level nodes:', err)
+        } finally {
+            bulkInFlightRef.current.delete('__top-level')
+            removeLoading('__top-level')
+        }
+    }, [provider, mergeTopLevelResult, addLoading, removeLoading])
+
+    // ─── peekNode: ref-backed fresh read ───
+
+    const peekNode = useCallback((urn: string) => nodesRef.current.get(urn), [])
+
     // ─── setSearch: debounced server-side search ───
 
     const setSearch = useCallback((query: string) => {
@@ -514,6 +653,7 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         topLevelTotalCount,
         topLevelMetadata,
         parentMap,
+        peekNode,
         canTransitivelyContain,
         typesOnPathTo,
         isLoading,
@@ -525,6 +665,8 @@ export function useEntityBrowser(options: UseEntityBrowserOptions): UseEntityBro
         loadMoreTopLevel,
         expandNode,
         loadMoreChildren,
+        loadAllChildren,
+        loadAllTopLevel,
         setSearch,
         setTypeFilter,
         refresh,

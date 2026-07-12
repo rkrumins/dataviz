@@ -75,6 +75,10 @@ def _ensure_can_read_workspace(claims: PermissionClaims, ws_id: str) -> None:
 
 @router.get("", response_model=List[WorkspaceResponse])
 async def list_workspaces(
+    response: Response,
+    limit: Optional[int] = Query(None, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None, max_length=200),
     _user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -83,15 +87,32 @@ async def list_workspaces(
 
     System admins see every workspace; everyone else sees only the
     workspaces their role bindings (direct or via group) reach.
-    Filtering happens after the repo fetch — fine at current scale,
-    can move into a SQL JOIN if the workspace count becomes large.
+
+    Without ``limit`` this returns every permitted workspace (the shape the
+    app's workspace store depends on). With ``limit`` it returns one page —
+    filtered, RBAC-scoped and counted IN SQL — and sets ``X-Total-Count`` so a
+    pager can render the right number of pages. Callers that page never load
+    the whole estate just to show ten rows.
     """
-    workspaces = await workspace_repo.list_workspaces(session)
-    if not rbac_flag("RBAC_ENFORCE_WORKSPACES"):
-        return workspaces
-    if has_permission(claims, "system:admin"):
-        return workspaces
-    return [w for w in workspaces if claims.ws_perms.get(w.id)]
+    enforce = rbac_flag("RBAC_ENFORCE_WORKSPACES")
+    unrestricted = not enforce or has_permission(claims, "system:admin")
+
+    if limit is None:
+        workspaces = await workspace_repo.list_workspaces(session)
+        if unrestricted:
+            return workspaces
+        return [w for w in workspaces if claims.ws_perms.get(w.id)]
+
+    permitted_ids = None if unrestricted else list(claims.ws_perms.keys())
+    page, total = await workspace_repo.list_workspaces_page(
+        session,
+        limit=limit,
+        offset=offset,
+        search=search,
+        permitted_ids=permitted_ids,
+    )
+    response.headers["X-Total-Count"] = str(total)
+    return page
 
 
 @router.post("", response_model=WorkspaceResponse, status_code=201)

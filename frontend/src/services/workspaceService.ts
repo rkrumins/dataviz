@@ -48,9 +48,15 @@ export interface DataSourceResponse {
     isActive: boolean
     projectionMode?: string | null  // null = inherit from provider
     dedicatedGraphName?: string | null  // graph name when dedicated
+    /** Provenance: 'managed' = fully managed in-app graph (blank/versioned),
+     *  'federated' = external system of record. Null/absent on legacy rows —
+     *  resolve with {@link resolveSourceMode}. */
+    sourceMode?: 'managed' | 'federated' | null
+    /** Federated only: overlay edits are pushed back to the external system. */
+    writeBackEnabled?: boolean
     createdAt: string
     updatedAt: string
-    
+
     // Aggregation state
     aggregationStatus: 'none' | 'pending' | 'running' | 'ready' | 'failed' | 'skipped'
     lastAggregatedAt?: string
@@ -92,6 +98,18 @@ export interface WorkspaceDataSourceImpactResponse {
     views: { id: string; name: string; type: string }[]
 }
 
+/**
+ * Resolve a data source's provenance when `sourceMode` is null/absent
+ * (legacy rows). Mirrors the backend ORM comment: a source with no
+ * catalog item is a manual/blank in-app model → managed; anything
+ * onboarded from the catalog is federated by default.
+ */
+export function resolveSourceMode(
+    ds: Pick<DataSourceResponse, 'sourceMode' | 'catalogItemId'>,
+): 'managed' | 'federated' {
+    return ds.sourceMode ?? (ds.catalogItemId ? 'federated' : 'managed')
+}
+
 // ============================================================
 // HTTP helper
 // ============================================================
@@ -118,6 +136,37 @@ export const workspaceService = {
 
     list(): Promise<WorkspaceResponse[]> {
         return request<WorkspaceResponse[]>(ADMIN_API)
+    },
+
+    /**
+     * One page of workspaces, filtered + RBAC-scoped + counted server-side.
+     *
+     * The unpaged {@link list} still exists (the workspaces store needs the
+     * whole set), but any UI that just shows a list of rows should page instead
+     * of pulling every workspace and its data sources to render ten of them.
+     */
+    async listPage(params: { limit: number; offset?: number; search?: string }): Promise<{
+        items: WorkspaceResponse[]
+        totalCount: number
+    }> {
+        const query = new URLSearchParams({
+            limit: String(params.limit),
+            offset: String(params.offset ?? 0),
+        })
+        if (params.search?.trim()) query.set('search', params.search.trim())
+
+        const res = await fetchWithTimeout(`${ADMIN_API}?${query}`, {
+            headers: { 'Content-Type': 'application/json' },
+        })
+        if (!res.ok) {
+            const text = await res.text()
+            throw new Error(`Workspace API ${res.status}: ${text || res.statusText}`)
+        }
+        const items: WorkspaceResponse[] = await res.json()
+        // Older servers don't send the header — fall back to the page length so
+        // the pager degrades to "what we can see" instead of breaking.
+        const header = res.headers.get('X-Total-Count')
+        return { items, totalCount: header ? Number(header) : items.length }
     },
 
     get(id: string): Promise<WorkspaceResponse> {

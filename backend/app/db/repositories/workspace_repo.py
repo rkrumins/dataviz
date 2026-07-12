@@ -5,9 +5,9 @@ Workspaces are operational contexts that contain one or more data sources
 """
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-from sqlalchemy import select, delete, update
+from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -46,6 +46,8 @@ def _ds_to_response(row: WorkspaceDataSourceORM) -> DataSourceResponse:
         providerId=row.provider_id,
         graphName=row.graph_name,
         accessLevel=row.access_level,
+        sourceMode=row.source_mode,
+        writeBackEnabled=bool(row.write_back_enabled),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -78,6 +80,50 @@ async def list_workspaces(session: AsyncSession) -> List[WorkspaceResponse]:
         _ws_query().order_by(WorkspaceORM.created_at)
     )
     return [_to_response(r) for r in result.scalars().unique().all()]
+
+
+async def list_workspaces_page(
+    session: AsyncSession,
+    *,
+    limit: int,
+    offset: int = 0,
+    search: Optional[str] = None,
+    permitted_ids: Optional[List[str]] = None,
+) -> Tuple[List[WorkspaceResponse], int]:
+    """Return one page of workspaces plus the total matching the same filters.
+
+    RBAC is applied IN SQL (via ``permitted_ids``) rather than after the fetch,
+    so the total — and therefore the page count the UI renders — describes the
+    workspaces this caller can actually see. ``permitted_ids=None`` means "no
+    restriction" (system admin / enforcement disabled); an empty list means the
+    caller can see nothing, which is not the same thing.
+
+    Ordered by name so paging is stable and alphabetical (the order a person
+    scanning a list expects), with id as a tiebreaker for determinism.
+    """
+    filters = []
+    if permitted_ids is not None:
+        if not permitted_ids:
+            return [], 0
+        filters.append(WorkspaceORM.id.in_(permitted_ids))
+    if search and search.strip():
+        filters.append(WorkspaceORM.name.ilike(f"%{search.strip()}%"))
+
+    total_stmt = select(func.count()).select_from(WorkspaceORM)
+    if filters:
+        total_stmt = total_stmt.where(*filters)
+    total = int((await session.execute(total_stmt)).scalar_one())
+
+    page_stmt = _ws_query()
+    if filters:
+        page_stmt = page_stmt.where(*filters)
+    page_stmt = (
+        page_stmt.order_by(WorkspaceORM.name, WorkspaceORM.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await session.execute(page_stmt)
+    return [_to_response(r) for r in result.scalars().unique().all()], total
 
 
 async def get_workspace(

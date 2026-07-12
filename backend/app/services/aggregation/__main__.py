@@ -699,6 +699,27 @@ async def main() -> None:
     # Provider failures here CANNOT affect the web tier.
     registry = ProviderManager()
 
+    # ...which also means this process needs its OWN warmup loop. It is what
+    # drives record_probe_success on a provider's false→true transition, which
+    # force-closes the breakers and EVICTS the cached provider so its pool is
+    # rebuilt against the new pod. Without it the worker self-healed only via the
+    # 30s breaker cooldown while holding a pool of dead sockets pointing at the
+    # pre-rotation FalkorDB — every job paid a failed round-trip first.
+    warmup_shutdown = asyncio.Event()
+    warmup_tasks: list = []
+    try:
+        from backend.app.providers.warmup import start_provider_warmup
+        warmup_tasks = await start_provider_warmup(
+            registry, shutdown_event=warmup_shutdown,
+        )
+        logger.info("Provider warmup supervisor started (worker tier)")
+    except Exception as exc:
+        logger.warning(
+            "Provider warmup loop failed to start: %s — this worker will still "
+            "self-heal via the breaker cooldown, just without proactive pool "
+            "eviction on recovery", exc,
+        )
+
     # Initialize Redis client
     redis_client = get_redis()
 
@@ -770,6 +791,12 @@ async def main() -> None:
             await cancel_listener.stop()
         except Exception:
             pass
+        warmup_shutdown.set()
+        for _t in warmup_tasks:
+            if not _t.done():
+                _t.cancel()
+        if warmup_tasks:
+            await asyncio.gather(*warmup_tasks, return_exceptions=True)
         await registry.evict_all()
         await fleet.deregister()
         await close_redis()

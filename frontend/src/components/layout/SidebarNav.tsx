@@ -21,7 +21,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { useCanvasStore } from '@/store/canvas'
 import { useWorkspaceContext } from '@/hooks/useWorkspaceContext'
 import { cn } from '@/lib/utils'
-import { DynamicIcon, layoutTypeIcon, viewTypeColor } from '@/lib/viewUtils'
+import { DynamicIcon, resolveViewIcon, viewTypeColor } from '@/lib/viewUtils'
 import { useNavPermission } from '@/store/auth'
 import { useSidebarSpec } from '@/store/navCatalogue'
 
@@ -146,7 +146,7 @@ function SidebarQuickAccess({
           <div className="space-y-0.5">
             {pinnedViews.map(view => {
               const isActive = view.id === activeViewId
-              const iconName = layoutTypeIcon(view.layout?.type ?? 'graph')
+              const iconName = resolveViewIcon({ icon: view.icon, viewType: view.layout?.type ?? 'graph' })
               const colorClass = viewTypeColor(view.layout?.type ?? 'graph')
               return (
                 <div key={view.id} className="group flex items-center">
@@ -189,7 +189,7 @@ function SidebarQuickAccess({
           <div className="space-y-0.5">
             {recentNonPinned.map(entry => {
               const isActive = entry.viewId === activeViewId
-              const iconName = layoutTypeIcon(entry.viewType)
+              const iconName = resolveViewIcon({ icon: entry.icon, viewType: entry.viewType })
               const colorClass = viewTypeColor(entry.viewType)
               return (
                 <button

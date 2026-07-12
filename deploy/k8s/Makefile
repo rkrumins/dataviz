@@ -14,6 +14,16 @@ TAG          ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "latest")
 OVERLAY      ?= dev
 REPO_ROOT    := $(shell cd ../.. && pwd)
 
+# The ONLY placeholders `apply` substitutes into the rendered manifests. Scoped on
+# purpose: a bare `envsubst` also rewrites every $VAR / ${VAR} inside the shell
+# scripts embedded in manifests (the cluster-init Job, the DR backup CronJob),
+# blanking them because they are not set in the deploy environment. Naming the
+# variables leaves everything else verbatim. Add a var here when a manifest needs
+# a new deploy-time value.
+ENVSUBST_VARS := '$$DB_HOST $$REDIS_COORD_HOST $$REDIS_CACHE_HOST $$POSTGRES_PASSWORD \
+                  $$JWT_SECRET_KEY $$CREDENTIAL_ENCRYPTION_KEY $$AGGREGATION_INTERNAL_TOKEN \
+                  $$ADMIN_EMAIL $$ADMIN_PASSWORD $$FALKORDB_BACKUP_BUCKET'
+
 .PHONY: help build push deploy apply dry-run status seed \
         build-viz build-controlplane build-worker build-stats build-frontend build-falkordb build-seed \
         push-viz push-controlplane push-worker push-stats push-frontend push-falkordb push-seed
@@ -91,7 +101,7 @@ apply: ## Apply manifests to the cluster
 		sed "s|:staging-latest|:$(TAG)|g" | \
 		sed "s|:prod-latest|:$(TAG)|g" | \
 		sed "s|:v1.0.0|:$(TAG)|g" | \
-		envsubst | kubectl apply -f -
+		envsubst $(ENVSUBST_VARS) | kubectl apply -f -
 
 deploy: build push apply ## Full pipeline: build → push → apply
 

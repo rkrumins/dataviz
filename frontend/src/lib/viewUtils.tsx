@@ -39,6 +39,17 @@ export function layoutTypeIcon(viewType: string): string {
   return VIEW_TYPE_ICON_MAP[viewType] ?? 'Layout'
 }
 
+/**
+ * Resolves the icon to render for a view: the user's chosen icon wins only
+ * when it differs from the 'Layout' default — every legacy view stores
+ * 'Layout' (createView/viewToViewConfig default), so treating it as "no
+ * choice" preserves type-derived icons except where a user deliberately
+ * picked one in the wizard/editor.
+ */
+export function resolveViewIcon(opts: { icon?: string | null; viewType?: string | null }): string {
+  return opts.icon && opts.icon !== 'Layout' ? opts.icon : layoutTypeIcon(opts.viewType ?? '')
+}
+
 // ── View Type Colors (matching ExplorerViewCard.tsx) ──────────────────
 
 const VIEW_TYPE_COLORS: Record<string, string> = {

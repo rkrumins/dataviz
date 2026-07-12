@@ -3,6 +3,10 @@ kind: Kustomization
 
 resources:
   - ../../base
+  # DR: 6-hourly RDB snapshot → multi-region GCS (launch-scale §8).
+  # Needs FALKORDB_BACKUP_BUCKET in .env.deploy + Workload Identity on the
+  # synodic-backup SA; see the header of the file and docs/FALKORDB_DR_RUNBOOK.md.
+  - resources/falkordb-dr-backup.yaml
 
 patches:
   - path: patches/replicas.yaml

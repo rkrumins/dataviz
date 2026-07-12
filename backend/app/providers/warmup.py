@@ -536,3 +536,111 @@ async def supervised_warmup_loop(
             # If you want stricter backoff-on-success-too, move this reset
             # inside the inner loop's success path.
     logger.info("Provider warmup supervisor stopped (shutdown signalled)")
+
+
+async def start_provider_warmup(
+    provider_manager: Any,
+    *,
+    shutdown_event: asyncio.Event,
+    initial_pass: bool = True,
+) -> "list[asyncio.Task]":
+    """Wire the warmup state machine to a ``ProviderManager`` and start it.
+
+    Shared by EVERY process that owns a ProviderManager — the web tier and the
+    aggregation worker each hold their own (separate pools, separate breakers, so a
+    provider failure in one cannot affect the other). Both therefore need their own
+    warmup loop: it is what drives ``record_probe_success`` on a false→true
+    transition, which force-closes the breakers AND **evicts the cached provider**
+    so its ConnectionPool is rebuilt.
+
+    Without this, a process self-heals only via the 30s breaker cooldown while
+    keeping a pool full of dead sockets pointing at the pre-rotation pod — every
+    probe pays a failed round-trip before redis-py discards the socket. The worker
+    ran that way; the web tier did not.
+
+    Returns the created tasks (initial fast-pass first, then the supervisor) so the
+    caller can await/cancel them on shutdown.
+    """
+    import time as _time
+
+    from backend.app.db.engine import get_provider_probe_session
+    from backend.app.db.repositories import provider_repo as _provider_repo
+
+    async def _list_providers() -> list:
+        async with get_provider_probe_session() as session:
+            rows = await _provider_repo.list_providers(session)
+            out = []
+            for row in rows:
+                creds = await _provider_repo.get_credentials(session, row.id)
+                out.append({
+                    "id": row.id,
+                    "provider_type": (
+                        row.provider_type.value
+                        if hasattr(row.provider_type, "value")
+                        else str(row.provider_type)
+                    ),
+                    "host": row.host,
+                    "port": row.port,
+                    "tls": row.tls_enabled,
+                    "creds": creds,
+                })
+            return out
+
+    def _build_instance(cfg: ProviderConfig):
+        return provider_manager._create_provider_instance(
+            cfg["provider_type"],
+            cfg.get("host"),
+            cfg.get("port"),
+            None,
+            cfg.get("tls", False),
+            cfg.get("creds") or {},
+        )
+
+    async def _on_recovery(provider_id: str, entry: dict) -> None:
+        await provider_manager.record_probe_success(
+            provider_id,
+            source="warmup",
+            elapsed_ms=int(entry.get("elapsed_ms", 0)),
+        )
+
+    async def _on_failure(provider_id: str, entry: dict) -> None:
+        await provider_manager.record_probe_failure(
+            provider_id,
+            reason=str(entry.get("reason", "unknown"))[:200],
+            source="warmup",
+            elapsed_ms=int(entry.get("elapsed_ms", 0)),
+        )
+
+    async def _on_cycle_complete() -> None:
+        # Heartbeat for the /health/deps liveness signal.
+        provider_manager.warmup_last_cycle_at = _time.monotonic()
+
+    tasks: list = []
+    if initial_pass:
+        # Hard-deadline-bounded one-shot that populates the cache for the
+        # cold-start window. Scheduled BEFORE the supervisor so it can observe
+        # transitions from the empty cache. Never blocks the caller.
+        tasks.append(asyncio.create_task(
+            initial_fast_pass(
+                cache=provider_manager.warmup_cache,
+                list_providers=_list_providers,
+                build_instance=_build_instance,
+                on_recovery=_on_recovery,
+                on_failure=_on_failure,
+            ),
+            name="provider-warmup-initial-pass",
+        ))
+
+    tasks.append(asyncio.create_task(
+        supervised_warmup_loop(
+            cache=provider_manager.warmup_cache,
+            shutdown_event=shutdown_event,
+            list_providers=_list_providers,
+            build_instance=_build_instance,
+            on_recovery=_on_recovery,
+            on_failure=_on_failure,
+            on_cycle_complete=_on_cycle_complete,
+        ),
+        name="provider-warmup-supervisor",
+    ))
+    return tasks

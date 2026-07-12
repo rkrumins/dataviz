@@ -37,11 +37,13 @@ import {
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
-import type { WorkspaceResponse, DataSourceResponse } from '@/services/workspaceService'
+import { TablePagination } from '@/components/ui/TablePagination'
+import { resolveSourceMode, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
 import type { ProviderType } from '@/services/providerService'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
+import { useWorkspacePage } from '@/hooks/useWorkspacePage'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
@@ -299,6 +301,14 @@ function DataSourceCard({
 }) {
     const aggMeta = AGG_STATUS_META[ds.aggregationStatus] ?? AGG_STATUS_META.none
     const recommended = isRecommended(ds)
+    const sourceMode = resolveSourceMode(ds)
+    // Live provider health — providerInfo is admin-gated, but ds.providerId
+    // rides the workspaces payload for everyone, so the dot works for all
+    // roles (unknown = neutral gray, never blocks selection).
+    const health = useProviderHealth(providerInfo?.providerId ?? ds.providerId)
+    const healthMeta = PROVIDER_HEALTH_META[health.state]
+    const provMeta = providerInfo ? providerMeta(providerInfo.providerType) : null
+    const Logo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
 
     return (
         <button
@@ -320,25 +330,37 @@ function DataSourceCard({
 
             {/* Header */}
             <div className="flex items-start gap-3 mb-3">
+                {/* Branded provider tile — identifies WHICH connection this source
+                    lives on at a glance (three FalkorDB instances stop looking
+                    identical). Falls back to the neutral Database tile when the
+                    provider registry isn't readable (non-admin). */}
                 <div className={cn(
-                    'w-9 h-9 rounded-lg flex items-center justify-center shrink-0',
-                    isSelected
-                        ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
-                        : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
+                    'w-9 h-9 rounded-lg border flex items-center justify-center shrink-0',
+                    Logo && provMeta
+                        ? provMeta.color
+                        : isSelected
+                            ? 'border-transparent bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                            : 'border-transparent bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400',
                 )}>
-                    <Database className="w-4 h-4" />
+                    {Logo ? <Logo className="w-4 h-4" /> : <Database className="w-4 h-4" />}
                 </div>
                 <div className="min-w-0 flex-1 pr-6">
-                    <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 break-words">
-                        {ds.label || ds.catalogItemId || 'Unnamed'}
-                    </h4>
+                    <div className="flex items-center gap-1.5">
+                        <h4 className="min-w-0 text-sm font-bold text-slate-800 dark:text-slate-200 line-clamp-2 break-words">
+                            {ds.label || ds.catalogItemId || 'Unnamed'}
+                        </h4>
+                        <span
+                            className={cn('w-2 h-2 rounded-full shrink-0', healthMeta.dot)}
+                            title={health.error ?? healthMeta.label}
+                        />
+                    </div>
                     {providerInfo && (
-                        <div className="flex items-center gap-1 mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                            <Server className="w-3 h-3 shrink-0 text-sky-500" />
-                            <span className="break-words">
-                                {providerInfo.providerName}
-                                <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
-                            </span>
+                        <div
+                            className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 truncate"
+                            title={`${providerInfo.providerName} · ${providerInfo.providerType}`}
+                        >
+                            {providerInfo.providerName}
+                            <span className="text-slate-400 dark:text-slate-500"> · {providerInfo.providerType}</span>
                         </div>
                     )}
                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
@@ -346,6 +368,23 @@ function DataSourceCard({
                             <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
                                 <Star className="w-2.5 h-2.5" />
                                 Primary
+                            </span>
+                        )}
+                        {sourceMode === 'managed' ? (
+                            <span
+                                title="Fully managed — created and versioned in this app"
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20"
+                            >
+                                <Sparkles className="w-2.5 h-2.5" />
+                                Fully managed
+                            </span>
+                        ) : (
+                            <span
+                                title={`Federated — external source of record${ds.writeBackEnabled ? ' · write-back enabled' : ''}`}
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20"
+                            >
+                                <Server className="w-2.5 h-2.5" />
+                                Federated
                             </span>
                         )}
                         {recommended && (
@@ -358,7 +397,7 @@ function DataSourceCard({
             </div>
 
             {/* Stats row */}
-            <div className="flex items-center gap-3 mb-3">
+            <div className="flex items-center gap-3 mb-3 flex-wrap">
                 {statsLoading && !stats ? (
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                         <Loader2 className="w-3 h-3 animate-spin" />
@@ -412,9 +451,9 @@ function DataSourceCard({
 
                 {/* Last aggregated */}
                 {ds.lastAggregatedAt && (
-                    <div className="flex items-center gap-1 text-[11px] text-slate-400 ml-auto">
-                        <Clock className="w-3 h-3" />
-                        <span>{timeAgo(ds.lastAggregatedAt)}</span>
+                    <div className="flex items-center gap-1 text-[11px] text-slate-400 ml-auto min-w-0">
+                        <Clock className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{timeAgo(ds.lastAggregatedAt)}</span>
                     </div>
                 )}
             </div>
@@ -944,6 +983,11 @@ function BlankScopePickers({
 
 const NO_FILTERS = { primary: false, ontology: false, ready: false }
 
+/** 3×3 at lg inside the 1180px wizard modal — full rows in 3/2/1-col layouts. */
+const DS_PAGE_SIZE = 9
+/** Rail rows per page — one screenful, no endless scroll. */
+const WS_PAGE_SIZE = 10
+
 export function ScopeStep({
     availableWorkspaces,
     schemaAvailability,
@@ -967,6 +1011,8 @@ export function ScopeStep({
     const [dsSearch, setDsSearch] = useState('')
     const [dsSort, setDsSort] = useState<DsSort>('recommended')
     const [dsFilters, setDsFilters] = useState(NO_FILTERS)
+    const [dsPage, setDsPage] = useState(0)
+    const [wsPage, setWsPage] = useState(0)
 
     // Resolves the provider (e.g. falkordb/neo4j) each data source is built on.
     const { resolve: resolveProvider } = useDataSourceProviderMap()
@@ -977,7 +1023,13 @@ export function ScopeStep({
         setDsSearch('')
         setDsSort('recommended')
         setDsFilters(NO_FILTERS)
+        setDsPage(0)
     }, [selectedWorkspaceId])
+
+    // Any search/sort/filter change re-slices the list — jump back to page 1.
+    useEffect(() => {
+        setDsPage(0)
+    }, [dsSearch, dsSort, dsFilters])
 
     // Single-workspace fast path: auto-select if only one exists
     const singleWorkspace = availableWorkspaces.length === 1
@@ -1008,12 +1060,40 @@ export function ScopeStep({
         [dataSources, selectedDataSourceId],
     )
 
-    // Filter workspaces by search
-    const filteredWorkspaces = useMemo(() => {
-        if (!wsSearch.trim()) return availableWorkspaces
-        const q = wsSearch.toLowerCase()
-        return availableWorkspaces.filter(ws => ws.name.toLowerCase().includes(q))
-    }, [availableWorkspaces, wsSearch])
+    // ── Workspace rail: server-paginated ─────────────────────────────────────
+    // The rail only DISPLAYS workspaces; selection still resolves against the
+    // store-provided `availableWorkspaces` (the wizard's scope, auto-select and
+    // deep-link paths all read from it), so paging can never strand a selection
+    // that lives on another page.
+    const [wsSearchDebounced, setWsSearchDebounced] = useState('')
+    useEffect(() => {
+        const t = setTimeout(() => setWsSearchDebounced(wsSearch), 250)
+        return () => clearTimeout(t)
+    }, [wsSearch])
+
+    // A new query means a new result set — start at its first page.
+    useEffect(() => { setWsPage(0) }, [wsSearchDebounced])
+
+    const {
+        workspaces: pagedWorkspaces,
+        totalCount: wsTotalCount,
+        isLoading: wsPageLoading,
+        isError: wsPageError,
+        refetch: refetchWorkspacePage,
+    } = useWorkspacePage({
+        page: wsPage,
+        pageSize: WS_PAGE_SIZE,
+        search: wsSearchDebounced,
+        enabled: !singleWorkspace,
+    })
+
+    // Prefer the store's copy of each row (it's the one the rest of the wizard
+    // resolves against) but fall back to the server's — a workspace can legally
+    // appear on a page before the store's full list has refreshed.
+    const railWorkspaces = useMemo(
+        () => pagedWorkspaces.map(ws => availableWorkspaces.find(w => w.id === ws.id) ?? ws),
+        [pagedWorkspaces, availableWorkspaces],
+    )
 
     // Filter + sort the data sources for display.
     const visibleDataSources = useMemo(() => {
@@ -1056,9 +1136,21 @@ export function ScopeStep({
         })
     }, [dataSources, dsSearch, dsSort, dsFilters, resolveProvider])
 
-    // Fetch cached stats only for the visible sources of the selected workspace
+    // Clamp the page when the filtered list shrinks below the current page.
+    const dsPageCount = Math.max(1, Math.ceil(visibleDataSources.length / DS_PAGE_SIZE))
+    useEffect(() => {
+        if (dsPage > dsPageCount - 1) setDsPage(dsPageCount - 1)
+    }, [dsPage, dsPageCount])
+
+    // Current page of cards (grid renders one page at a time).
+    const pagedDataSources = useMemo(
+        () => visibleDataSources.slice(dsPage * DS_PAGE_SIZE, (dsPage + 1) * DS_PAGE_SIZE),
+        [visibleDataSources, dsPage],
+    )
+
+    // Fetch cached stats only for the current PAGE of the selected workspace
     // (not eagerly for every source across every workspace).
-    const visibleDsIds = useMemo(() => visibleDataSources.map(ds => ds.id), [visibleDataSources])
+    const visibleDsIds = useMemo(() => pagedDataSources.map(ds => ds.id), [pagedDataSources])
     const { statsMap, isLoading: statsLoading } = useDataSourceStats(selectedWorkspaceId, visibleDsIds)
 
     const hasActiveDsFilter = !!dsSearch.trim() || dsFilters.primary || dsFilters.ontology || dsFilters.ready
@@ -1118,16 +1210,17 @@ export function ScopeStep({
                     'min-h-[360px]',
                 )}
             >
-                {/* Left: Workspace List (hidden for single workspace) */}
+                {/* Left: Workspace rail — server-paginated, so it stays a short
+                    list whether the estate has 5 workspaces or 5,000. */}
                 {!singleWorkspace && (
                     <div className="w-[240px] shrink-0 border-r border-slate-200 dark:border-slate-700 flex flex-col">
-                        {/* Search */}
+                        {/* Search (server-side, debounced) */}
                         <div className="p-2.5 border-b border-slate-100 dark:border-slate-700/50">
                             <div className="relative">
                                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                                 <input
                                     type="text"
-                                    placeholder="Filter workspaces..."
+                                    placeholder="Search workspaces..."
                                     value={wsSearch}
                                     onChange={e => setWsSearch(e.target.value)}
                                     className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 placeholder:text-slate-400 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400/30 transition-colors"
@@ -1137,21 +1230,60 @@ export function ScopeStep({
 
                         {/* Workspace list */}
                         <div className="flex-1 overflow-y-auto p-2 space-y-0.5 custom-scrollbar">
-                            {filteredWorkspaces.map(ws => (
-                                <WorkspaceItem
-                                    key={ws.id}
-                                    ws={ws}
-                                    isSelected={ws.id === selectedWorkspaceId}
-                                    isActive={ws.id === activeWorkspaceId}
-                                    dsCount={ws.dataSources?.length ?? 0}
-                                    onClick={() => handleSelectWorkspace(ws.id)}
-                                />
-                            ))}
-                            {filteredWorkspaces.length === 0 && (
-                                <div className="py-6 text-center text-xs text-slate-400">
-                                    No workspaces match "{wsSearch}"
+                            {wsPageLoading ? (
+                                Array.from({ length: 5 }).map((_, i) => (
+                                    <div key={i} className="px-3.5 py-3 rounded-xl animate-pulse">
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-7 h-7 rounded-lg bg-slate-200 dark:bg-slate-700 shrink-0" />
+                                            <div className="flex-1 space-y-1.5">
+                                                <div className="h-2.5 w-2/3 bg-slate-200 dark:bg-slate-700 rounded" />
+                                                <div className="h-2 w-1/3 bg-slate-100 dark:bg-slate-800 rounded" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            ) : wsPageError ? (
+                                <div className="py-6 text-center">
+                                    <p className="text-xs text-slate-400">Couldn’t load workspaces</p>
+                                    <button
+                                        type="button"
+                                        onClick={refetchWorkspacePage}
+                                        className="mt-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                                    >
+                                        Try again
+                                    </button>
                                 </div>
+                            ) : (
+                                <>
+                                    {railWorkspaces.map(ws => (
+                                        <WorkspaceItem
+                                            key={ws.id}
+                                            ws={ws}
+                                            isSelected={ws.id === selectedWorkspaceId}
+                                            isActive={ws.id === activeWorkspaceId}
+                                            dsCount={ws.dataSources?.length ?? 0}
+                                            onClick={() => handleSelectWorkspace(ws.id)}
+                                        />
+                                    ))}
+                                    {railWorkspaces.length === 0 && (
+                                        <div className="py-6 text-center text-xs text-slate-400">
+                                            {wsSearch
+                                                ? `No workspaces match "${wsSearch}"`
+                                                : 'No workspaces available'}
+                                        </div>
+                                    )}
+                                </>
                             )}
+                        </div>
+
+                        {/* Pager (self-hides when everything fits on one page) */}
+                        <div className="border-t border-slate-100 dark:border-slate-700/50 px-2 py-1.5 flex justify-center">
+                            <TablePagination
+                                page={wsPage}
+                                pageSize={WS_PAGE_SIZE}
+                                total={wsTotalCount}
+                                onPageChange={setWsPage}
+                            />
                         </div>
                     </div>
                 )}
@@ -1211,6 +1343,14 @@ export function ScopeStep({
 
                                         {/* Sort */}
                                         <DataSourceSortControl sort={dsSort} onSortChange={setDsSort} />
+
+                                        {/* Page controls (hidden when one page fits) */}
+                                        <TablePagination
+                                            page={dsPage}
+                                            pageSize={DS_PAGE_SIZE}
+                                            total={visibleDataSources.length}
+                                            onPageChange={setDsPage}
+                                        />
                                     </div>
                                 )}
 
@@ -1245,13 +1385,13 @@ export function ScopeStep({
                                 <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
                                     <div className={cn(
                                         'grid gap-3',
-                                        visibleDataSources.length === 1
+                                        pagedDataSources.length === 1
                                             ? 'grid-cols-1 max-w-md'
-                                            : visibleDataSources.length === 2
+                                            : pagedDataSources.length === 2
                                                 ? 'grid-cols-1 sm:grid-cols-2'
                                                 : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
                                     )}>
-                                        {visibleDataSources.map((ds, i) => (
+                                        {pagedDataSources.map((ds, i) => (
                                             <motion.div
                                                 key={ds.id}
                                                 initial={{ opacity: 0, y: 8 }}

@@ -1,0 +1,26 @@
+# DR for the sharded topology: one backup pod per shard (Indexed Job), each
+# snapshotting its shard's REPLICA rather than the master.
+#
+# Why the replica: `redis-cli --rdb` issues a SYNC, which forks the server. Forking
+# a 40 GB master under live query load costs copy-on-write memory exactly when the
+# master can least afford it; the replica holds the same data and is otherwise idle.
+# If a shard's replica is down the run FAILS for that shard (and alerts) rather than
+# silently falling back to forking the master — a missed snapshot is cheap here
+# (graphs rebuild from Cloud SQL), a destabilized master is not.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: falkordb-dr-backup
+  namespace: synodic
+spec:
+  jobTemplate:
+    spec:
+      completions: 3
+      parallelism: 3
+      template:
+        spec:
+          initContainers:
+            - name: snapshot
+              env:
+                - name: FALKORDB_BACKUP_TARGETS
+                  value: "falkordb-shard-0-1.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-1.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-1.falkordb-cluster.synodic.svc.cluster.local:6379"

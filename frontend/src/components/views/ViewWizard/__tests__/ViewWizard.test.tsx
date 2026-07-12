@@ -302,10 +302,14 @@ describe('ViewWizard — submit (create path) retry', () => {
     expect(onComplete).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
 
+    // The failure is now shown as a stalled stage with a Retry, instead of a
+    // silent no-op behind the footer button.
+    const retry = await screen.findByRole('button', { name: /^retry$/i })
+
     // Retry: must NOT call createView again (would mint a second view); must
     // re-drive updateViewLayout against the SAME id captured from the first call.
     updateViewLayoutMock.mockResolvedValueOnce(makeView(baseConfig({ layers: [], assignments: {} })))
-    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+    fireEvent.click(retry)
 
     await waitFor(() => expect(updateViewLayoutMock).toHaveBeenCalledTimes(2))
     expect(createViewMock).toHaveBeenCalledTimes(1)
@@ -313,6 +317,46 @@ describe('ViewWizard — submit (create path) retry', () => {
     const [secondCallId] = updateViewLayoutMock.mock.calls[1]
     expect(secondCallId).toBe(firstCallId)
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
+
+    // The view is saved, so the wizard hands over rather than vanishing: the
+    // success card offers to open it (and closes only when the user does).
+    const openNow = await screen.findByRole('button', { name: /open view now/i })
+    expect(onClose).not.toHaveBeenCalled()
+
+    fireEvent.click(openNow)
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the autosaved draft once the view is fully saved', async () => {
+    createViewMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    updateViewLayoutMock.mockResolvedValue(makeView(baseConfig({ layers: [], assignments: {} })))
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem')
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ViewWizard
+            mode="create"
+            isOpen
+            onClose={vi.fn()}
+            onComplete={vi.fn()}
+            initialWorkspaceId="ws1"
+            initialDataSourceId="ds1"
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await screen.findByTestId('basics-step')
+    await goToPreview()
+    fireEvent.click(screen.getByRole('button', { name: /create view/i }))
+
+    await screen.findByRole('button', { name: /open view now/i })
+    expect(removeItem).toHaveBeenCalledWith(
+      expect.stringContaining('viz-view-wizard-draft:ws1:ds1'),
+    )
+    removeItem.mockRestore()
   })
 })

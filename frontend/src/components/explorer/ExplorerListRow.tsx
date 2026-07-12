@@ -23,6 +23,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { DynamicIcon, resolveViewIcon } from '@/lib/viewUtils'
 import { ViewScopeBadge } from '@/components/explorer/ViewScopeBadge'
 import { CreatorHoverCard } from '@/components/explorer/CreatorHoverCard'
 import { HeartBurstButton } from '@/components/explorer/HeartBurstButton'
@@ -135,7 +136,8 @@ export function ExplorerListRow({
   hideWorkspaceInScope,
 }: ExplorerListRowProps) {
   const typeMeta = VIEW_TYPE_META[view.viewType] ?? DEFAULT_TYPE_META
-  const TypeIcon = typeMeta.icon
+  // Glyph = user-chosen icon when set; tile colors stay type identity.
+  const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const VisIcon = VISIBILITY_ICON[view.visibility] ?? Lock
   const isDeleted = !!view.deletedAt
   const [activityOpen, setActivityOpen] = useState(false)
@@ -201,7 +203,7 @@ export function ExplorerListRow({
               typeMeta.text,
             )}
           >
-            <TypeIcon className="h-3.5 w-3.5" />
+            <DynamicIcon name={iconName} className="h-3.5 w-3.5" />
           </div>
           <div className="min-w-0">
             <span className="truncate text-sm font-medium text-ink block">

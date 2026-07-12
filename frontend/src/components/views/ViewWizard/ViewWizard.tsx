@@ -38,9 +38,19 @@ import {
     ClipboardList,
     AlertCircle,
     Database,
+    History,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { timeAgo } from '@/lib/timeAgo'
 import { Backdrop } from '@/components/ui/Backdrop'
+import {
+    CreationProgress,
+    CreationSuccess,
+    type CreationStage,
+    type CreationStageId,
+    type CreationStageState,
+} from './CreationPhase'
+import { useWizardDraft, draftKey } from './useWizardDraft'
 import { useSchemaStore } from '@/store/schema'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
@@ -135,7 +145,7 @@ export interface WizardFormData {
     layoutTemplateId?: string
 }
 
-type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
+export type WizardStep = 'scope' | 'basics' | 'layout' | 'assignment' | 'entities' | 'preview'
 
 interface StepDef {
     id: WizardStep
@@ -801,6 +811,16 @@ function ViewWizardBody({
     const [previousSteps, setPreviousSteps] = useState<WizardStep[]>([])
     const [driftDismissed, setDriftDismissed] = useState(false)
 
+    // Create mode runs a small phase machine after the form: 'creating' shows
+    // the real stages (and absorbs failures with a resumable Retry), 'success'
+    // confirms and hands over to the new view. Edit mode keeps the plain
+    // save-and-close behaviour — there's nothing to navigate to.
+    const [phase, setPhase] = useState<'steps' | 'creating' | 'success'>('steps')
+    const [stageStates, setStageStates] = useState<Record<CreationStageId, CreationStageState>>({
+        provision: 'pending', create: 'pending', layout: 'pending',
+    })
+    const [submitError, setSubmitError] = useState<string | null>(null)
+
     const [formData, setFormData] = useState<WizardFormData>(makeCreateFormData)
 
     // Hydrate form from view in edit mode. normalizeReferenceLayout up-converts
@@ -838,12 +858,33 @@ function ViewWizardBody({
         }
     }, [mode, editingView])
 
+    // ── Draft autosave (create mode only) ──
+    // Assignment work on a big graph is a long session; closing the modal used to
+    // discard all of it. Drafts are scoped to the exact target so they can never
+    // be restored into a different workspace/source.
+    const scopeKey = useMemo(() => draftKey({
+        workspaceId: resolvedWorkspaceId,
+        dataSourceId: resolvedDataSourceId,
+        providerId: blankProviderId,
+        ontologyId: blankOntologyId,
+    }), [resolvedWorkspaceId, resolvedDataSourceId, blankProviderId, blankOntologyId])
+
+    const { pendingDraft, dismissDraft, clearDraft, markDirty, tooLarge } = useWizardDraft({
+        enabled: mode === 'create' && phase === 'steps',
+        scopeKey,
+        formData,
+        currentStep,
+    })
+
     // Reset on open / close.
     useEffect(() => {
         if (isOpen) {
             setCurrentStep('basics')
             setPreviousSteps([])
             setDriftDismissed(false)
+            setPhase('steps')
+            setSubmitError(null)
+            setStageStates({ provision: 'pending', create: 'pending', layout: 'pending' })
             clearSelection()
             clearAssignments()
             if (mode === 'create') {
@@ -973,6 +1014,16 @@ function ViewWizardBody({
             const fieldFilters = buildFieldFilters(formData.advancedFilters)
 
             if (mode === 'create') {
+                // Show what's actually happening. Stages mirror the awaited calls
+                // below — one row per call, no invented sub-steps.
+                setPhase('creating')
+                setSubmitError(null)
+                setStageStates({
+                    provision: isBlank ? 'active' : 'done',
+                    create: isBlank ? 'pending' : 'active',
+                    layout: 'pending',
+                })
+
                 let dataSourceId = resolvedDataSourceId ?? undefined
                 if (isBlank) {
                     // Provision the blank model (data source + genesis graph). Reuse a
@@ -992,7 +1043,8 @@ function ViewWizardBody({
                             })
                             provisionRef.current = provisioned
                         } catch (err) {
-                            setProvisionError(err instanceof Error ? err.message : 'Could not create the blank model. Please try again.')
+                            setStageStates(s => ({ ...s, provision: 'failed' }))
+                            setSubmitError(err instanceof Error ? err.message : 'Could not create the blank model. Please try again.')
                             return
                         }
                     }
@@ -1003,6 +1055,7 @@ function ViewWizardBody({
                     // refresh it or the new view opens onto a false "data source has
                     // been deleted" overlay.
                     await useWorkspacesStore.getState().loadWorkspaces().catch(() => {})
+                    setStageStates(s => ({ ...s, provision: 'done', create: 'active' }))
                 }
                 // Reuse a successful create's id on retry — it's the layout write that's
                 // being retried here, not the view itself, so a retry must never call
@@ -1023,10 +1076,15 @@ function ViewWizardBody({
                         visibility: formData.visibility,
                         tags: formData.tags.length > 0 ? formData.tags : undefined,
                     })
-                    if (!result.success || !result.data) return
+                    if (!result.success || !result.data) {
+                        setStageStates(s => ({ ...s, create: 'failed' }))
+                        setSubmitError(result.error ?? 'The view could not be created. Please try again.')
+                        return
+                    }
                     createdViewId = result.data.id
                     createdViewIdRef.current = createdViewId
                 }
+                setStageStates(s => ({ ...s, create: 'done', layout: 'active' }))
 
                 // The layout endpoint is the single writer of referenceLayout — write
                 // the full layers+assignments (a new view has no prior layout to race).
@@ -1039,13 +1097,19 @@ function ViewWizardBody({
                     const savedView = viewToViewConfig(layoutResult)
                     useSchemaStore.getState().addOrUpdateView(savedView)
                     onComplete?.(savedView)
-                    onClose()
-                    navigate(`/views/${createdViewId}`)
+                    // The view exists and is fully saved — the draft has served its
+                    // purpose. Hand over to the success card; onClose/navigate happen
+                    // when the user (or the countdown) opens it.
+                    clearDraft()
+                    setStageStates(s => ({ ...s, layout: 'done' }))
+                    setPhase('success')
                 } catch (err) {
-                    // The view itself was created; only its layout failed to save. Leave
-                    // the modal open (isSubmitting resets below) so the user can retry —
-                    // createdViewIdRef makes that retry skip straight back to here.
+                    // The view itself was created; only its layout failed to save. Stay
+                    // in the creating phase with a Retry — createdViewIdRef makes that
+                    // retry skip straight back to here instead of minting a second view.
                     console.error('[ViewWizard] updateViewLayout failed after create', err)
+                    setStageStates(s => ({ ...s, layout: 'failed' }))
+                    setSubmitError(err instanceof Error ? err.message : 'The view was created, but its layout could not be saved.')
                 }
             } else if (viewId) {
                 // This updateView writes the published/base row (name/filters/visible-types
@@ -1095,16 +1159,81 @@ function ViewWizardBody({
         } finally {
             setIsSubmitting(false)
         }
-    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView])
+    }, [mode, viewId, formData, resolvedWorkspaceId, resolvedDataSourceId, isBlank, blankProviderId, blankOntologyId, onComplete, onClose, navigate, buildFieldFilters, fullViewQuery.data, editingView, clearDraft])
 
     const updateFormData = useCallback((updates: Partial<WizardFormData>) => {
+        markDirty()
         setFormData(prev => ({ ...prev, ...updates }))
-    }, [])
+    }, [markDirty])
+
+    /** Restore an autosaved draft, landing back on the step it was left on. */
+    const handleResumeDraft = useCallback(() => {
+        if (!pendingDraft) return
+        setFormData(prev => ({
+            ...prev,
+            ...pendingDraft.data,
+            // Re-run the live availability check rather than trusting a stale verdict.
+            graphNameAvailable: undefined,
+            isValid: true,
+        }))
+        const target = activeSteps.find(s => s.id === pendingDraft.step)
+        if (target && target.id !== 'scope') setCurrentStep(target.id)
+        dismissDraft()
+    }, [pendingDraft, activeSteps, dismissDraft])
 
     // Ontology drift: view's stored digest vs current schema digest.
     const showDriftBanner =
         !driftDismissed &&
         hasOntologyDrifted(viewMetadata?.ontologyDigest, schema?.ontologyDigest)
+
+    // ── Creation phase (create mode only) ──
+    if (mode === 'create' && phase === 'creating') {
+        const stages: CreationStage[] = [
+            ...(isBlank ? [{
+                id: 'provision' as const,
+                label: 'Provisioning your model',
+                detail: 'Checking the connection, then creating the graph and data source',
+                state: stageStates.provision,
+            }] : []),
+            {
+                id: 'create' as const,
+                label: 'Creating the view',
+                detail: 'Saving its name, scope and settings',
+                state: stageStates.create,
+            },
+            {
+                id: 'layout' as const,
+                label: 'Applying layers and placements',
+                detail: 'Writing the layout this view opens with',
+                state: stageStates.layout,
+            },
+        ]
+        return (
+            <CreationProgress
+                stages={stages}
+                viewName={formData.name}
+                error={submitError}
+                onRetry={handleSubmit}
+                onBack={() => setPhase('steps')}
+            />
+        )
+    }
+
+    if (mode === 'create' && phase === 'success') {
+        return (
+            <CreationSuccess
+                viewName={formData.name}
+                scopeLabel={scopeContext?.dataSourceLabel}
+                isBlank={isBlank}
+                onOpenNow={() => {
+                    const id = createdViewIdRef.current
+                    onClose()
+                    if (id) navigate(`/views/${id}`)
+                }}
+                onClose={onClose}
+            />
+        )
+    }
 
     return (
         <WizardShell
@@ -1137,6 +1266,45 @@ function ViewWizardBody({
                         <p className="text-sm font-medium text-red-700 dark:text-red-300">Couldn't create the blank model</p>
                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">{provisionError}</p>
                     </div>
+                </div>
+            )}
+
+            {/* Resume an autosaved draft for this exact scope. */}
+            {pendingDraft && (
+                <div className="mb-6 flex items-center gap-3 rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-3">
+                    <History className="w-4 h-4 text-blue-500 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                            You have an unfinished view here
+                        </p>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                            Saved {timeAgo(pendingDraft.savedAt)}
+                            {pendingDraft.data.name ? ` · "${pendingDraft.data.name}"` : ''}
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={handleResumeDraft}
+                        className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                    >
+                        Resume
+                    </button>
+                    <button
+                        type="button"
+                        onClick={clearDraft}
+                        className="shrink-0 px-2 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+                    >
+                        Discard
+                    </button>
+                </div>
+            )}
+
+            {tooLarge && (
+                <div className="mb-6 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+                    <AlertCircle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                    <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        This view is too large to autosave a draft — finish creating it in this session.
+                    </p>
                 </div>
             )}
 
