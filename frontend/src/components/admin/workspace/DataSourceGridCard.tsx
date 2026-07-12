@@ -24,24 +24,6 @@ interface DataSourceGridCardProps {
     onSetPrimary?: () => void
 }
 
-function AggregationStatusBadge({ status }: { status: string }) {
-    const configs: Record<string, { label: string; dot: string; text: string }> = {
-        ready: { label: 'Ready', dot: 'bg-emerald-400', text: 'text-emerald-600 dark:text-emerald-400' },
-        running: { label: 'Running', dot: 'bg-indigo-400 animate-pulse', text: 'text-indigo-600 dark:text-indigo-400' },
-        pending: { label: 'Pending', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-600 dark:text-amber-400' },
-        failed: { label: 'Failed', dot: 'bg-red-400', text: 'text-red-600 dark:text-red-400' },
-        skipped: { label: 'Skipped', dot: 'bg-gray-400', text: 'text-ink-muted' },
-        none: { label: 'Not Started', dot: 'bg-gray-400', text: 'text-ink-muted' },
-    }
-    const cfg = configs[status] || configs.none
-    return (
-        <span className={cn('flex items-center gap-1.5 text-[11px] font-medium', cfg.text)}>
-            <span className={cn('w-2 h-2 rounded-full', cfg.dot)} />
-            {cfg.label}
-        </span>
-    )
-}
-
 export function DataSourceGridCard({
     ds,
     stats,
@@ -132,9 +114,13 @@ export function DataSourceGridCard({
                     </div>
                 </div>
 
-                {/* Status + Ontology */}
+                {/* Status + Ontology — operational status (not the opt-in
+                    aggregation state, which is a per-source detail). */}
                 <div className="flex items-center justify-between mb-3">
-                    <AggregationStatusBadge status={ds.aggregationStatus} />
+                    <span className={cn('flex items-center gap-1.5 text-[11px] font-semibold', ds.isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-ink-muted')}>
+                        <span className={cn('w-2 h-2 rounded-full', ds.isActive ? 'bg-emerald-400' : 'bg-gray-400')} />
+                        {ds.isActive ? 'Active' : 'Inactive'}
+                    </span>
                     {ontologyName && (
                         <span className="flex items-center gap-1 text-[11px] text-ink-muted">
                             <GitBranch className="w-3 h-3" />

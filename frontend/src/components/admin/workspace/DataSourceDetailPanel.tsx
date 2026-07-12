@@ -74,15 +74,6 @@ interface DataSourceDetailPanelProps {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────
 
-const AGG_STATUS_META: Record<string, { label: string; dot: string; text: string }> = {
-    ready: { label: 'Ready', dot: 'bg-emerald-400', text: 'text-emerald-600 dark:text-emerald-400' },
-    running: { label: 'Running', dot: 'bg-indigo-400 animate-pulse', text: 'text-indigo-600 dark:text-indigo-400' },
-    pending: { label: 'Pending', dot: 'bg-amber-400 animate-pulse', text: 'text-amber-600 dark:text-amber-400' },
-    failed: { label: 'Failed', dot: 'bg-red-400', text: 'text-red-600 dark:text-red-400' },
-    skipped: { label: 'Skipped', dot: 'bg-gray-400', text: 'text-ink-muted' },
-    none: { label: 'Not Started', dot: 'bg-gray-400', text: 'text-ink-muted' },
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────
@@ -219,11 +210,9 @@ export function DataSourceDetailPanel({
         setPendingDedicatedName(originalDedicatedName)
     }
 
-    // Prefer the LIVE readiness status over the persisted ds.aggregationStatus
-    // so the header pill agrees with the Overview's Aggregation card.
-    const liveAggStatus = readiness?.aggregationStatus ?? ds?.aggregationStatus
+    // Last-aggregated timestamp prefers the live readiness over the persisted
+    // ds field so the header meta agrees with the Overview's Aggregation card.
     const liveLastAggregatedAt = readiness?.lastAggregatedAt ?? ds?.lastAggregatedAt
-    const aggMeta = AGG_STATUS_META[liveAggStatus || 'none'] || AGG_STATUS_META.none
 
     const content = (
         <>
@@ -237,7 +226,7 @@ export function DataSourceDetailPanel({
                     <motion.aside
                         key="data-source-detail-drawer"
                         className={cn(
-                            'fixed right-0 top-0 h-full w-[480px] max-w-[92vw] z-[61]',
+                            'fixed right-0 top-0 h-full w-full max-w-2xl z-[61]',
                             'bg-canvas border-l border-glass-border',
                             'flex flex-col shadow-lg',
                         )}
@@ -283,16 +272,13 @@ export function DataSourceDetailPanel({
 
                             {/* Status + meta badges */}
                             <div className="flex flex-wrap items-center gap-2 mb-4">
-                                <span
-                                    title="Lineage aggregation — whether this source's rolled-up lineage has been built. Trigger or manage it in the Aggregation tab."
-                                    className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border", aggMeta.text,
-                                    liveAggStatus === 'ready' ? 'bg-emerald-500/10 border-emerald-500/20' :
-                                    liveAggStatus === 'failed' ? 'bg-red-500/10 border-red-500/20' :
-                                    liveAggStatus === 'running' || liveAggStatus === 'pending' ? 'bg-amber-500/10 border-amber-500/20' :
-                                    'bg-black/5 dark:bg-white/5 border-glass-border'
+                                <span className={cn("flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold rounded-full border",
+                                    ds.isActive
+                                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                                        : 'bg-black/5 dark:bg-white/5 text-ink-muted border-glass-border'
                                 )}>
-                                    <span className={cn("w-2 h-2 rounded-full", aggMeta.dot)} />
-                                    Lineage: {aggMeta.label}
+                                    <span className={cn("w-2 h-2 rounded-full", ds.isActive ? 'bg-emerald-500' : 'bg-gray-400')} />
+                                    {ds.isActive ? 'Active' : 'Inactive'}
                                 </span>
                                 {ontologyName && (
                                     <Link
